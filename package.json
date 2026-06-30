@@ -1,0 +1,55 @@
+{
+  "name": "@gitruck/cli",
+  "version": "0.1.1",
+  "description": "同合云成片流水线 CLI —— agent 驱动云端任务、产物拉回本地、三方工程文件（客户端/剪映/PR）互通。",
+  "license": "MIT",
+  "author": "Gitruck (同合云)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gitruck/cli.git"
+  },
+  "homepage": "https://github.com/Gitruck/cli#readme",
+  "bugs": {
+    "url": "https://github.com/Gitruck/cli/issues"
+  },
+  "type": "module",
+  "bin": {
+    "gtrk": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "skills",
+    "AGENT.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.6"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "gitruck",
+    "同合云",
+    "video",
+    "oral-cut",
+    "口播剪辑",
+    "cli",
+    "jianying",
+    "剪映",
+    "agent"
+  ],
+  "scripts": {
+    "gtrk": "bun run src/index.ts",
+    "build": "bun build ./src/index.ts --target=node --outfile dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "devDependencies": {
+    "commander": "^12.1.0",
+    "bun-types": "^1.1.0",
+    "typescript": "^5.6.0"
+  }
+}
