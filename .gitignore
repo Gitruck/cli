@@ -4,3 +4,8 @@ node_modules/
 dist/
 out/
 .DS_Store
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.tgz
