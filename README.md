@@ -41,8 +41,8 @@ CLI 要调用同合云云端能力，需先拿一个 API Key（形如 `gc_xxxxxx
 
 ```bash
 # 1) 一条命令装全：命令行 gtrk + /gtrk-oralcut skill + 配置（填 API Key、自动扫剪映目录）
-npm i -g @gitruck/cli && gtrk install
-#   或免全局安装直接用：npx @gitruck/cli install
+npm i -g @gitruck/cli@latest && gtrk install
+#   或免全局安装直接用：npx @gitruck/cli@latest install
 
 # 2) 剪一条（剪完自动打开产物目录）
 gtrk oralcut "D:/素材/某选题-原始口播.mp4" --script "D:/素材/某选题-文字稿.txt"
