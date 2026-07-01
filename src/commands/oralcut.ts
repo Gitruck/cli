@@ -48,9 +48,54 @@ interface OralCutOpts {
 	out?: string;
 	formats: string;
 	jianyingDraftDir?: string;
+	lang?: string;
+	visualAssist?: boolean;
+	adaptiveRhythm?: boolean; // commander --no-adaptive-rhythm：默认 true，传了才 false
+	render?: boolean;
+	crf?: string;
+	codec?: string;
+	param: string[]; // --param k=v（可重复）
+	paramsJson?: string;
 	open?: boolean;
 	reupload?: boolean;
 	json?: boolean;
+}
+
+/** --param 收集器（重复出现即累积）。 */
+const collectParam = (v: string, acc: string[]): string[] => {
+	acc.push(v);
+	return acc;
+};
+
+/** k=v 的 value 智能转型：true/false→bool、纯数字→number、否则原样字符串。 */
+function coerceValue(v: string): unknown {
+	if (v === "true") return true;
+	if (v === "false") return false;
+	if (v.trim() !== "" && !Number.isNaN(Number(v))) return Number(v);
+	return v;
+}
+
+/** 解析 --param k=v[] + --params-json，合成透传参数对象（params-json 覆盖同名 --param）。 */
+function parseExtraParams(pairs: string[], jsonStr?: string): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const pair of pairs) {
+		const i = pair.indexOf("=");
+		if (i < 0) throw new Error(`--param 需要 key=value 格式：「${pair}」`);
+		out[pair.slice(0, i).trim()] = coerceValue(pair.slice(i + 1));
+	}
+	if (jsonStr) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(jsonStr);
+		} catch {
+			throw new Error(`--params-json 不是合法 JSON：${jsonStr}`);
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error("--params-json 必须是一个 JSON 对象");
+		}
+		Object.assign(out, parsed as Record<string, unknown>);
+	}
+	return out;
 }
 
 export function registerOralCut(program: Command): void {
@@ -62,6 +107,14 @@ export function registerOralCut(program: Command): void {
 		.option("-o, --out <dir>", "工程产物目录（缺省 = <毛片同目录>/<毛片名>-video-project-<YYMMDD-HHMMSS>）")
 		.option("-f, --formats <list>", "三方格式（逗号分隔）", "gtrk,jianying,xml")
 		.option("--jianying-draft-dir <dir>", "剪映草稿根目录；传路径或 auto（默认读 gtrk init 配置 / 自动探测）")
+		.option("--lang <code>", "语言代码（默认 zh-CN；如 en-US / ja-JP）")
+		.option("--visual-assist", "视觉兜底：ASR 漏字时用人脸/说话检测保护并重识别（剪不准/怕剪掉真内容时开）")
+		.option("--no-adaptive-rhythm", "关闭自适应节奏（默认开；关了改用固定标点停顿表）")
+		.option("--render", "额外渲染成片视频（outputs 加 video）")
+		.option("--crf <n>", "视频质量 CRF 14-28（越小越清晰/文件越大，默认 18；需配 --render）")
+		.option("--codec <c>", "视频编码（默认 h264；需配 --render）")
+		.option("--param <k=v>", "透传任意云端参数（标量、可重复；如 --param intra_gap_max=0.4 --param visual_assist=true）", collectParam, [])
+		.option("--params-json <json>", "透传任意云端参数（JSON 对象、支持嵌套；如 '{\"punctuation_breaks\":{\"。\":0.3},\"render\":{\"crf\":20}}'）")
 		.option("--reupload", "强制重新上传，忽略本地上传缓存（毛片改了但指纹意外没变时用）")
 		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开，省得你找文件去哪了）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON（给 agent/脚本解析）")
@@ -102,7 +155,10 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 		else log.warn("没找到剪映草稿目录（剪映/CapCut 未装在标准位置）→ 将只产 draft_content.json、缺 meta，剪映无法直接打开。可加 --jianying-draft-dir <你的草稿目录> 重跑。");
 	}
 
-	log.step(`▶ 智能口播剪辑：${basename(inputAbs)}（预设 ${opts.preset}，格式 ${formats.join("/")}）`);
+	log.step(`▶ 智能口播剪辑：${basename(inputAbs)}（预设 ${opts.preset}${opts.visualAssist ? " · 视觉兜底" : ""}，格式 ${formats.join("/")}）`);
+
+	// 透传参数（--param / --params-json）先解析，有错早报，别等上传后才失败
+	const extraParams = parseExtraParams(opts.param, opts.paramsJson);
 
 	// ① 上传毛片 → file_id（本地指纹缓存：同一文件命中则复用 file_id，免二次上传）
 	log.step("① 上传毛片到云端…");
@@ -113,14 +169,23 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 	const buildPayload = (fid: string): Record<string, unknown> => {
 		const p: Record<string, unknown> = {
 			file_id: fid,
-			la: "zh-CN",
-			outputs: ["project"],
+			la: opts.lang ?? "zh-CN",
+			outputs: opts.render ? ["project", "video"] : ["project"],
 			project_formats: formats,
 			source_path: inputAbs, // 本地绝对路径写进 gtrk materials[].path → 本地打开认素材
 			rhythm_preset: opts.preset,
 		};
 		if (script) p.script = script;
 		if (draftDir) p.struct_meta = { nle_draft_dir: draftDir };
+		if (opts.visualAssist) p.visual_assist = true; // 视觉兜底
+		if (opts.adaptiveRhythm === false) p.adaptive_rhythm = false; // 仅显式 --no-adaptive-rhythm 时下发
+		if (opts.render) {
+			const r: Record<string, unknown> = {};
+			if (opts.crf != null) r.crf = Number(opts.crf);
+			if (opts.codec) r.codec = opts.codec;
+			if (Object.keys(r).length) p.render = r;
+		}
+		Object.assign(p, extraParams); // 通用透传优先级最高：agent 永远能强制覆盖上面任何字段
 		return p;
 	};
 
@@ -202,6 +267,7 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 				outDir,
 				files: byFormat,
 				jianyingDraftPath: jianyingDraftPath ?? null,
+				report: result.report ?? null,
 				errors,
 				taskId,
 				fileId: up.fileId,

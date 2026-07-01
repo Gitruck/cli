@@ -107,7 +107,7 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 | `--no-open` | 完成后不自动打开产物目录 | **默认自动打开** |
 | `--json` | 机读：stdout 只输出结果 JSON（给 agent / 脚本） | 关 |
 
-`--json` 输出：`{ ok, outDir, files:{gtrk,jianying,xml}, jianyingDraftPath, errors, taskId, fileId }`。
+`--json` 输出（成功时 stdout 单行）：`{ ok, outDir, files:{gtrk,jianying,xml}, jianyingDraftPath, report, errors, taskId, fileId }`；命令失败则进程非 0 退出、报错走 stderr、stdout 无 JSON。
 
 ### 其它
 
