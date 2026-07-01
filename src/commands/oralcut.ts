@@ -185,7 +185,17 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 			if (opts.codec) r.codec = opts.codec;
 			if (Object.keys(r).length) p.render = r;
 		}
-		Object.assign(p, extraParams); // 通用透传优先级最高：agent 永远能强制覆盖上面任何字段
+		// 通用透传优先级最高：agent 永远能强制覆盖上面任何字段。
+		// 但对 render / struct_meta 这类一等 flag 也会构建的嵌套对象做「逐字段合并」，
+		// 免得 --params-json '{"render":{...}}' 把 --crf/--codec 生成的 render 整体覆盖、静默丢字段。
+		for (const [k, v] of Object.entries(extraParams)) {
+			const cur = p[k];
+			const bothObj =
+				!!cur && !!v && typeof cur === "object" && typeof v === "object" && !Array.isArray(cur) && !Array.isArray(v);
+			p[k] = bothObj
+				? { ...(cur as Record<string, unknown>), ...(v as Record<string, unknown>) }
+				: v;
+		}
 		return p;
 	};
 
