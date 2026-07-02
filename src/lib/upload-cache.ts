@@ -7,11 +7,19 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { stat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import {
+	CHUNK_THRESHOLD,
+	uploadChunked,
+	type ChunkSessionRecord,
+	type SessionStore,
+} from "./chunk-upload";
 import { uploadFile } from "./cloud";
 import type { CloudConfig } from "./config";
 
 const CACHE_DIR = join(homedir(), ".gtrk-cli");
 const CACHE_FILE = join(CACHE_DIR, "upload-cache.json");
+// 进行中的分片会话（易失状态）单独落盘，不与"已完成上传"的稳定缓存混一个文件（design D3）
+const SESSION_FILE = join(CACHE_DIR, "upload-sessions.json");
 
 interface CacheEntry {
 	fileId: string;
@@ -51,7 +59,45 @@ export async function invalidateUpload(path: string): Promise<void> {
 	}
 }
 
-/** 带缓存上传：指纹命中则复用 file_id（免二次上传），否则真上传并记缓存。 */
+// ---------------------------------------------------------------- sessions
+
+type Sessions = Record<string, ChunkSessionRecord>;
+
+async function loadSessions(): Promise<Sessions> {
+	if (!existsSync(SESSION_FILE)) return {};
+	try {
+		return JSON.parse(await readFile(SESSION_FILE, "utf8")) as Sessions;
+	} catch {
+		return {}; // 会话文件损坏不致命：丢的只是断点线索，重传即可
+	}
+}
+
+async function saveSessions(sessions: Sessions): Promise<void> {
+	await mkdir(CACHE_DIR, { recursive: true });
+	await writeFile(SESSION_FILE, JSON.stringify(sessions, null, 2));
+}
+
+/** 文件版会话存取（~/.gtrk-cli/upload-sessions.json），供分片上传断点续传。 */
+export const fileSessionStore: SessionStore = {
+	async load(fp) {
+		return (await loadSessions())[fp];
+	},
+	async save(fp, rec) {
+		const sessions = await loadSessions();
+		sessions[fp] = rec;
+		await saveSessions(sessions);
+	},
+	async clear(fp) {
+		const sessions = await loadSessions();
+		if (sessions[fp]) {
+			delete sessions[fp];
+			await saveSessions(sessions);
+		}
+	},
+};
+
+/** 带缓存上传：指纹命中则复用 file_id（免二次上传），否则真上传并记缓存。
+ * 大文件（≥256MiB）自动走分片断点续传，小文件维持单发流式 —— 对调用方透明。 */
 export async function uploadCached(
 	cfg: CloudConfig,
 	path: string,
@@ -62,7 +108,15 @@ export async function uploadCached(
 	const hit = cache[fp]?.fileId;
 	if (!opts?.force && hit) return { fileId: hit, cached: true };
 
-	const fileId = await uploadFile(cfg, path);
+	const s0 = await stat(path);
+	const fileId =
+		s0.size >= CHUNK_THRESHOLD
+			? await uploadChunked(cfg, path, {
+					fingerprint: fp,
+					store: fileSessionStore,
+					force: opts?.force,
+				})
+			: await uploadFile(cfg, path);
 	const s = await stat(path);
 	cache[fp] = {
 		fileId,
