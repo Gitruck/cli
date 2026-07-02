@@ -9,3 +9,6 @@ out/
 .idea/
 .vscode/
 *.tgz
+.test-build/
+# npm lock not used - bun.lock is canonical
+package-lock.json

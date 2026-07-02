@@ -3,11 +3,13 @@
  * 口径对齐客户端 opencut-rewrite 的 cloud-render.ts（同一 {code,msg,data} 包装、同一鉴权 Header）。
  */
 import { basename } from "node:path";
-import { writeFile } from "node:fs/promises";
-import { openAsBlob } from "node:fs";
+import { writeFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
+import { randomBytes } from "node:crypto";
 import type { CloudConfig } from "./config";
 
-interface ApiResp<T> {
+export interface ApiResp<T> {
 	code?: number;
 	msg?: string;
 	data?: T;
@@ -24,7 +26,7 @@ export class CloudError extends Error {
 	}
 }
 
-async function parseJson<T>(res: Response): Promise<ApiResp<T>> {
+export async function parseJson<T>(res: Response): Promise<ApiResp<T>> {
 	try {
 		return (await res.json()) as ApiResp<T>;
 	} catch {
@@ -32,15 +34,42 @@ async function parseJson<T>(res: Response): Promise<ApiResp<T>> {
 	}
 }
 
-/** 上传本地文件 → file_id。POST /base/file/upload（multipart，字段 file，最大 20GB）。 */
+/**
+ * 上传本地文件 → file_id。POST /base/file/upload（multipart，字段 file，最大 20GB）。
+ *
+ * 流式手拼 multipart：createReadStream + stat().size（正确 64 位）+ 精确 Content-Length。
+ * 不可用 fs.openAsBlob —— 它对 ≥4GiB 文件把 blob.size 截断到 32 位（size mod 2^32），
+ * 令 Content-Length 远小于实际 body、服务端收满即断链（"other side closed"），4GiB 以上毛片必挂。
+ * 流式亦保证内存恒定（>4GiB 单个 Buffer 本就超过 buffer.constants.MAX_LENGTH）。
+ */
 export async function uploadFile(cfg: CloudConfig, path: string): Promise<string> {
-	const form = new FormData();
-	// openAsBlob 返回惰性读盘的 Blob —— 不把整个大文件读进内存（支持 20GB 毛片）。
-	form.append("file", await openAsBlob(path), basename(path));
+	const size = (await stat(path)).size;
+	const boundary = `----gtrkFormBoundary${randomBytes(16).toString("hex")}`;
+	const head = Buffer.from(
+		`--${boundary}\r\n` +
+			`Content-Disposition: form-data; name="file"; filename="${basename(path)}"\r\n` +
+			`Content-Type: application/octet-stream\r\n\r\n`,
+		"utf8",
+	);
+	const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+
+	async function* multipart() {
+		yield head;
+		for await (const chunk of createReadStream(path)) yield chunk as Buffer;
+		yield tail;
+	}
+
 	const res = await fetch(`${cfg.base}/base/file/upload`, {
 		method: "POST",
-		headers: { Authorization: cfg.apiKey },
-		body: form,
+		headers: {
+			Authorization: cfg.apiKey,
+			"Content-Type": `multipart/form-data; boundary=${boundary}`,
+			"Content-Length": String(head.length + size + tail.length),
+		},
+		// node:stream/web 与 DOM lib 的 ReadableStream 声明打架；运行时同一实现
+		body: Readable.toWeb(Readable.from(multipart())) as unknown as BodyInit,
+		// @ts-expect-error undici 专有：流式请求体需声明半双工
+		duplex: "half",
 	});
 	const r = await parseJson<{ file_id?: string; id?: string }>(res);
 	const fid = r.data?.file_id ?? r.data?.id;
