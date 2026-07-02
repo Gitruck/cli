@@ -45,11 +45,16 @@
     "gtrk": "bun run src/index.ts",
     "build": "bun build ./src/index.ts --target=node --outfile dist/index.js",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "test": "esbuild src/lib/chunk-upload.ts --bundle --platform=node --format=esm --outfile=.test-build/chunk-upload.mjs && node --test \"test/*.test.mjs\""
   },
   "devDependencies": {
-    "commander": "^12.1.0",
     "bun-types": "^1.1.0",
+    "commander": "^12.1.0",
+    "esbuild": "^0.28.1",
     "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "hash-wasm": "^4.12.0"
   }
 }
