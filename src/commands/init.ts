@@ -29,6 +29,7 @@ interface InitOpts {
 	apiBase?: string;
 	jianyingDraftDir?: string;
 	yes?: boolean;
+	reconfigure?: boolean;
 }
 
 export function registerInit(program: Command): void {
@@ -38,6 +39,7 @@ export function registerInit(program: Command): void {
 		.option("--api-key <key>", "非交互：直接指定 API Key")
 		.option("--api-base <url>", "非交互：指定 API 根地址（缺省用默认生产地址）")
 		.option("--jianying-draft-dir <dir>", "非交互：剪映草稿目录（传 auto 则自动探测）")
+		.option("--reconfigure", "重走配置向导（默认：已配过则跳过、保留现有配置）")
 		.option("-y, --yes", "非交互：用传入值 + 自动探测，不弹任何提示")
 		.action(runInit);
 }
@@ -50,28 +52,54 @@ export async function runInit(opts: InitOpts): Promise<void> {
 		return;
 	}
 	const existing = readUserConfig();
+	const configured = !!existing.apiKey;
 
 	log.step("▶ gtrk 安装配置");
 
-	// ① API Key（支持 Ctrl+V 粘贴 / 右键粘贴；粘成功会显示等量圆点）
-	let apiKey = "";
-	while (!apiKey) {
-		apiKey = (await promptSecret("粘贴同合云 API Key（Ctrl+V 粘贴）：")).trim();
-		if (!apiKey) log.warn("API Key 不能为空，再来一次");
+	// 已配过且没要求重配 → 默认保留、跳过重填（升级/重装时的常见路径，免重复输入 Key 和剪映目录）
+	if (configured && !opts.reconfigure) {
+		log.info(
+			`检测到已有配置：API Key ${mask(existing.apiKey as string)}｜根地址 ${existing.apiBase ?? DEFAULT_API_BASE}｜剪映目录 ${existing.jianyingDraftDir ?? "未配"}`,
+		);
+		if (await promptConfirm("保留现有配置、跳过重填？（要改配置选 N）", true)) {
+			log.info("已保留现有配置（要改配置随时跑 gtrk init --reconfigure）。");
+			return afterConfigDoctor();
+		}
+		log.info("好，重新配置——各项可直接回车沿用现有值。");
 	}
 
-	// ② 根地址（回车用默认）
+	// ① API Key（支持 Ctrl+V 粘贴 / 右键粘贴；有旧值时回车沿用、不必重粘）
+	let apiKey = existing.apiKey ?? "";
+	const keyMsg = apiKey
+		? `粘贴新的 API Key，或直接回车沿用现有（${mask(apiKey)}）：`
+		: "粘贴同合云 API Key（Ctrl+V 粘贴）：";
+	for (;;) {
+		const entered = (await promptSecret(keyMsg)).trim();
+		if (entered) {
+			apiKey = entered;
+			break;
+		}
+		if (apiKey) break; // 回车沿用旧值
+		log.warn("API Key 不能为空，再来一次");
+	}
+
+	// ② 根地址（回车用现有 / 默认）
 	const apiBase = (
 		await promptText("云端 API 根地址（回车用默认）：", {
 			defaultValue: existing.apiBase ?? DEFAULT_API_BASE,
 		})
 	).trim();
 
-	// ③ 剪映草稿目录：先自动扫，扫到让用户确认；扫不到/不用 → 开指引图 + 手动粘贴
+	// ③ 剪映草稿目录：有旧值且仍在 → 先问保留；否则自动扫，扫到让确认；再不行开指引图手动粘
 	let jianyingDraftDir: string | undefined;
-	const probed = probeJianyingDraftDir();
-	if (probed) {
-		if (await promptConfirm(`自动找到剪映草稿目录：${probed}，用它吗？`, true)) {
+	if (existing.jianyingDraftDir && existsSync(existing.jianyingDraftDir)) {
+		if (await promptConfirm(`剪映草稿目录现为 ${existing.jianyingDraftDir}，保留吗？`, true)) {
+			jianyingDraftDir = existing.jianyingDraftDir;
+		}
+	}
+	if (!jianyingDraftDir) {
+		const probed = probeJianyingDraftDir();
+		if (probed && (await promptConfirm(`自动找到剪映草稿目录：${probed}，用它吗？`, true))) {
 			jianyingDraftDir = probed;
 		}
 	}
@@ -97,7 +125,17 @@ export async function runInit(opts: InitOpts): Promise<void> {
 		log.warn("未配剪映草稿目录：要剪映直接打开，之后可重跑 gtrk init，或单次加 --jianying-draft-dir");
 	}
 
-	// 自动体检：现配现验（尤其用 /user/get_user_info 验 API Key 真能上云、鉴权通过）
+	return afterConfigDoctor();
+}
+
+/** 掩码显示 Key：只留前 6 位，够认出是哪把、又不整串外露。 */
+function mask(key: string): string {
+	return `${key.slice(0, 6)}…`;
+}
+
+/** 配完自动体检 + 给用法提示（「保留现有配置」与「重新配置」两条路径共用）。 */
+async function afterConfigDoctor(): Promise<void> {
+	// 现配现验（尤其用 /user/get_user_info 验 API Key 真能上云、鉴权通过）
 	const healthy = await runDoctor();
 	if (healthy) {
 		log.step("装好了！两种用法任选：");

@@ -6,6 +6,7 @@ import { Command } from "commander";
 import { existsSync } from "node:fs";
 import { readUserConfig, configPath, DEFAULT_API_BASE } from "../lib/user-config";
 import { resolveJianyingDraftDir } from "../lib/jianying";
+import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 
 export function registerDoctor(program: Command): void {
 	program
@@ -27,6 +28,9 @@ interface Row {
 
 export async function runDoctor(): Promise<boolean> {
 	const rows: Row[] = [];
+
+	// 后台查最新版（与下面的云端连通检查并行，不额外拖慢体检）
+	const latestP = latestVersion(5000).catch(() => null);
 
 	const bunVer = (process.versions as { bun?: string }).bun;
 	rows.push({
@@ -88,6 +92,20 @@ export async function runDoctor(): Promise<boolean> {
 		name: "配置文件",
 		status: existsSync(configPath()) ? "ok" : "warn",
 		detail: existsSync(configPath()) ? configPath() : `未生成 —— 跑 gtrk init（${configPath()}）`,
+	});
+
+	// CLI 版本（best-effort，查不到就只显当前版本、不判 fail；有新版给升级提示、但不致 doctor 失败）
+	const cur = currentVersion();
+	const latest = await latestP;
+	rows.splice(1, 0, {
+		name: "CLI 版本",
+		status: latest && cmpSemver(latest, cur) > 0 ? "warn" : "ok",
+		detail:
+			latest && cmpSemver(latest, cur) > 0
+				? `v${cur} —— 有新版 v${latest}，跑 gtrk upgrade 升级`
+				: latest
+					? `v${cur}（已是最新）`
+					: `v${cur}`,
 	});
 
 	console.log("\ngtrk 体检：\n");

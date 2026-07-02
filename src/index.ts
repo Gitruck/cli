@@ -11,7 +11,8 @@
  *   gtrk install          一条命令装全（skill + 配置），对标飞书 npx @larksuite/cli install
  *   gtrk init             仅配置（API Key + 剪映草稿目录）
  *   gtrk oralcut <毛片>   智能口播剪辑最小闭环（云端剪辑 → 拉回三方工程文件 → 打开）
- *   gtrk doctor           体检（配置 / 云端连通 / 剪映目录 / 运行时）
+ *   gtrk doctor           体检（配置 / 云端连通 / 剪映目录 / 运行时 / 版本）
+ *   gtrk upgrade          升级 CLI 到最新版 + 刷新 skill（配置保留）
  *   gtrk skills install   单独把 /gtrk-oralcut skill 装进 Claude Code
  */
 import { Command } from "commander";
@@ -23,6 +24,7 @@ import { registerInit } from "./commands/init";
 import { registerOralCut } from "./commands/oralcut";
 import { registerDoctor } from "./commands/doctor";
 import { registerSkills } from "./commands/skills";
+import { registerUpgrade } from "./commands/upgrade";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gtrk-cli/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -50,6 +52,7 @@ registerInit(program);
 registerOralCut(program);
 registerDoctor(program);
 registerSkills(program);
+registerUpgrade(program);
 // registerRender(program);   // 颗粒/整片云渲
 // registerStruct(program);   // 已有 gtrk → 三方工程文件
 // registerMatrix(program);   // B-roll 检索
