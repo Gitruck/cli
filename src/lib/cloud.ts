@@ -109,7 +109,32 @@ export interface OralCutOutput {
 	errors?: Record<string, string>;
 }
 
-/** 轮询任务到 completed，返回 output_result。每 5s 一次、30min 墙钟上限。 */
+/**
+ * 单发查一次任务结果：GET /task/<taskType>/<taskId>，返回完整 {status, progress?, output}。
+ * 供 pollTask 复用，也供「按 task_id 取结果」直接取已完成任务的 output_result（含 report/files[]）。
+ * 真实错误码（异账号/不存在等）抛 CloudError；网络/解析异常按原样抛（调用方按需重试）。
+ */
+export async function getTaskResult(
+	cfg: CloudConfig,
+	taskType: string,
+	taskId: string,
+): Promise<{ status: string; progress?: number; output: OralCutOutput }> {
+	const res = await fetch(`${cfg.base}/task/${taskType}/${taskId}`, {
+		headers: { Authorization: cfg.apiKey },
+	});
+	const r = await parseJson<Record<string, unknown>>(res);
+	if (r.code != null && r.code !== 200) {
+		throw new CloudError(r.code, `任务查询失败 (code=${r.code})：${r.msg ?? ""}`);
+	}
+	const data = r.data ?? {};
+	return {
+		status: String(data.status ?? ""),
+		progress: typeof data.progress === "number" ? (data.progress as number) : undefined,
+		output: (data.output_result ?? {}) as OralCutOutput,
+	};
+}
+
+/** 轮询任务到 completed，返回 output_result。每 5s 一次、30min 墙钟上限。复用 getTaskResult。 */
 export async function pollTask(
 	cfg: CloudConfig,
 	taskType: string,
@@ -124,31 +149,19 @@ export async function pollTask(
 			throw new Error("任务超时（超过 30 分钟）。可稍后在云端查任务或重试。");
 		}
 		await new Promise((r) => setTimeout(r, INTERVAL_MS));
-		let r: ApiResp<Record<string, unknown>>;
+		let got: { status: string; progress?: number; output: OralCutOutput };
 		try {
-			const res = await fetch(`${cfg.base}/task/${taskType}/${taskId}`, {
-				headers: { Authorization: cfg.apiKey },
-			});
-			r = await parseJson(res);
-		} catch {
+			got = await getTaskResult(cfg, taskType, taskId);
+		} catch (e) {
+			if (e instanceof CloudError) throw e; // 真错误码：透传（对齐旧行为）
 			continue; // 瞬断/解析失败不致命，下次再试（有墙钟上限兜底）
 		}
-		if (r.code != null && r.code !== 200) {
-			throw new Error(`任务错误 (code=${r.code})：${r.msg ?? ""}`);
+		if (got.status === "completed") return got.output;
+		if (got.status === "failed" || got.status === "cancelled") {
+			const out = got.output as { error?: string };
+			throw new Error(out?.error ?? (got.status === "failed" ? "任务失败" : "任务已取消"));
 		}
-		const data = r.data ?? {};
-		const status = String(data.status ?? "");
-		if (status === "completed") {
-			return (data.output_result ?? {}) as OralCutOutput;
-		}
-		if (status === "failed" || status === "cancelled") {
-			const out = data.output_result as { error?: string } | undefined;
-			throw new Error(out?.error ?? (status === "failed" ? "任务失败" : "任务已取消"));
-		}
-		onTick?.(
-			status || "处理中",
-			typeof data.progress === "number" ? (data.progress as number) : undefined,
-		);
+		onTick?.(got.status || "处理中", got.progress);
 	}
 }
 

@@ -6,6 +6,7 @@ import { Command } from "commander";
 import { existsSync } from "node:fs";
 import { readUserConfig, configPath, DEFAULT_API_BASE } from "../lib/user-config";
 import { resolveJianyingDraftDir } from "../lib/jianying";
+import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 
 export function registerDoctor(program: Command): void {
@@ -93,6 +94,33 @@ export async function runDoctor(): Promise<boolean> {
 		status: existsSync(configPath()) ? "ok" : "warn",
 		detail: existsSync(configPath()) ? configPath() : `未生成 —— 跑 gtrk init（${configPath()}）`,
 	});
+
+	// 本地渲染工具（ffmpeg）：判 warn 不判 fail —— 只出工程文件、不本地渲染的用户不受阻
+	const ff = resolveFfmpeg();
+	if (ff) {
+		let hasX264 = false;
+		let ver = "";
+		try {
+			const cap = probeCapabilities(ff);
+			hasX264 = cap.hasLibx264;
+			ver = cap.version.replace(/^ffmpeg version\s*/i, "v");
+		} catch {
+			/* 探测失败按未知能力处理 */
+		}
+		rows.push({
+			name: "本地渲染 (ffmpeg)",
+			status: hasX264 ? "ok" : "warn",
+			detail: hasX264
+				? `就绪（来源 ${ff.source}${ver ? `，${ver.split(/\s/)[0]}` : ""}）`
+				: `找到 ffmpeg（${ff.source}）但缺 libx264 —— 本地渲染需换含 libx264 的构建`,
+		});
+	} else {
+		rows.push({
+			name: "本地渲染 (ffmpeg)",
+			status: "warn",
+			detail: "未找到 —— 只出工程文件可忽略；要本地渲染成片，让 agent 装 ffmpeg/ffprobe 到 ~/.gitruck/ffmpeg 或 --ffmpeg-path",
+		});
+	}
 
 	// CLI 版本（best-effort，查不到就只显当前版本、不判 fail；有新版给升级提示、但不致 doctor 失败）
 	const cur = currentVersion();
