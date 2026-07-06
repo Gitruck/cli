@@ -18,21 +18,26 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { packageRoot } from "./lib/paths";
+import { migrateLegacyHome, packageRoot } from "./lib/paths";
 import { registerInstall } from "./commands/install";
 import { registerInit } from "./commands/init";
 import { registerOralCut } from "./commands/oralcut";
+import { registerOralCutResult } from "./commands/oralcut-result";
 import { registerDoctor } from "./commands/doctor";
 import { registerSkills } from "./commands/skills";
 import { registerUpgrade } from "./commands/upgrade";
+import { registerRender } from "./commands/render";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
-// 配置主源是 ~/.gtrk-cli/config.json（gtrk init 写），.env 仅作可选覆盖。
+// 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
 try {
 	(process as { loadEnvFile?: () => void }).loadEnvFile?.();
 } catch {
 	/* 没有 .env 文件，忽略 */
 }
+
+// 用户目录归一：一次性把旧 ~/.gtrk-cli 迁到 ~/.gitruck（幂等、不删旧目录、失败不阻断）
+migrateLegacyHome();
 
 // 版本读 package.json（package.json 必随包发布），避免和 --version 硬编码漂移
 const { version } = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")) as {
@@ -50,10 +55,11 @@ program
 registerInstall(program);
 registerInit(program);
 registerOralCut(program);
+registerOralCutResult(program); // 按 task_id 取回已完成任务的报告/产物（不重跑云端）
 registerDoctor(program);
 registerSkills(program);
 registerUpgrade(program);
-// registerRender(program);   // 颗粒/整片云渲
+registerRender(program); // 本地渲染 gtrk 工程（EDL）→ 成片 mp4
 // registerStruct(program);   // 已有 gtrk → 三方工程文件
 // registerMatrix(program);   // B-roll 检索
 

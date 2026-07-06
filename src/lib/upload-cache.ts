@@ -1,10 +1,10 @@
 /**
  * 本地上传缓存：文件指纹 → 云端 file_id，避免同一文件二次上传（大毛片重传一次十几秒）。
  * 指纹 = size:mtimeMs（stat-only、不读内容，对大视频毫秒级）；编辑视频必改 size 或 mtime，足够稳。
- * 缓存落 ~/.gtrk-cli/upload-cache.json（用户级、跨工程共享）。供任何要上传的命令复用。
+ * 缓存落 ~/.gitruck/upload-cache.json（用户级、跨工程共享）。供任何要上传的命令复用。
  */
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { gitruckHome } from "./paths";
 import { stat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import {
@@ -16,7 +16,7 @@ import {
 import { uploadFile } from "./cloud";
 import type { CloudConfig } from "./config";
 
-const CACHE_DIR = join(homedir(), ".gtrk-cli");
+const CACHE_DIR = gitruckHome();
 const CACHE_FILE = join(CACHE_DIR, "upload-cache.json");
 // 进行中的分片会话（易失状态）单独落盘，不与"已完成上传"的稳定缓存混一个文件（design D3）
 const SESSION_FILE = join(CACHE_DIR, "upload-sessions.json");

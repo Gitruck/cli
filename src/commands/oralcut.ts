@@ -1,22 +1,26 @@
 /**
- * gtrk oralcut —— 智能口播剪辑最小闭环：
- *   agent 发起 → CLI 自主执行（上传毛片 → 云端 video_oral_cut → 轮询 → 拉回三方工程文件）→ 客户端/剪映/PR 打开。
+ * gtrk oralcut —— 智能口播剪辑闭环（CLI 特例 video_oral_cut_for_cli）：
+ *   agent 发起 → CLI 本地预处理（探几何 + 抽 16k 单声道 mp3 / 压 720p）→ 只传抽出物（毛片永不上传）
+ *   → 云端 cli/video_oral_cut_for_cli 出 gtrk EDL + 三方工程文件 → 拉回 →（可选）本地 ffmpeg 渲染成片。
  *
- * 云端零改动：全用现成 video_oral_cut，一次任务产 gtrk(客户端)+jianying(剪映)+xml(PR/FCP) 三方工程文件。
- * source_path 把毛片本地绝对路径写进 gtrk materials[].path → 本地打开直接认素材（本地素材不出本地）。
+ * 毛片永不出本地：只传几十 MB 抽出物；source_path 把毛片本地绝对路径写进 gtrk materials[].path，
+ * 本地打开/渲染直接认素材。几何三件套（video_size/video_rate/video_duration）由客户端探得回传，
+ * 保证云端工程画布/帧率正确并做计费宽松校验。成片由本地 ffmpeg 按 gtrk EDL 渲染，云端不产成片。
  */
 import { Command } from "commander";
 import { resolve, join, dirname, basename, extname } from "node:path";
-import { mkdir, cp, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../lib/config";
-import { submitTask, pollTask, download, CloudError } from "../lib/cloud";
+import { submitTask, pollTask, CloudError } from "../lib/cloud";
 import { uploadCached, invalidateUpload } from "../lib/upload-cache";
 import { resolveJianyingDraftDir } from "../lib/jianying";
-import { openFolder } from "../lib/open";
+import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
+import { materializeResult } from "../lib/materialize";
 import { log, routeLogsToStderr } from "../lib/log";
 
-const TASK_TYPE = "video_oral_cut";
+// cli 域特例：taskType 含 /cli 前缀，cloud.ts 的 /task/${taskType} 模板天然拼出 /task/cli/video_oral_cut_for_cli
+const TASK_TYPE = "cli/video_oral_cut_for_cli";
 
 /** 本地时间戳 YYMMDD-HHMMSS（如 260629-191530），用于产物目录名区分每一次剪辑。 */
 function timestamp(): string {
@@ -24,23 +28,6 @@ function timestamp(): string {
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
-
-/** 把云端返回的细分格式名归一化到基础格式（jianying_draft/jianying_meta → jianying）。 */
-function baseFormat(fmt: string): string {
-	if (fmt.startsWith("jianying")) return "jianying";
-	if (fmt.startsWith("capcut")) return "capcut";
-	return fmt;
-}
-
-/** 基础格式 → 标签 + 打开提示。 */
-const FORMAT_META: Record<string, { label: string; openHint: (p: string) => string }> = {
-	gtrk: { label: "客户端 (gtrk)", openHint: (p) => `客户端里「打开工程」选 ${p}` },
-	jianying: { label: "剪映 (jianying)", openHint: (p) => `剪映里打开即见草稿（目录 ${p}）` },
-	capcut: { label: "CapCut", openHint: (p) => `CapCut 里打开即见草稿（目录 ${p}）` },
-	xml: { label: "PR/FCP (Premiere XML)", openHint: (p) => `Premiere Pro：文件 > 导入 ${p}` },
-	fcpxml: { label: "Final Cut (fcpxml)", openHint: (p) => `Final Cut Pro：导入 ${p}` },
-	otio: { label: "OpenTimelineIO", openHint: (p) => `用支持 OTIO 的工具打开 ${p}` },
-};
 
 interface OralCutOpts {
 	script?: string;
@@ -51,9 +38,10 @@ interface OralCutOpts {
 	lang?: string;
 	visualAssist?: boolean;
 	adaptiveRhythm?: boolean; // commander --no-adaptive-rhythm：默认 true，传了才 false
-	render?: boolean;
+	render?: boolean; // 本地渲染成片（ffmpeg，按 gtrk EDL）
 	crf?: string;
 	codec?: string;
+	ffmpegPath?: string;
 	param: string[]; // --param k=v（可重复）
 	paramsJson?: string;
 	open?: boolean;
@@ -101,22 +89,23 @@ function parseExtraParams(pairs: string[], jsonStr?: string): Record<string, unk
 export function registerOralCut(program: Command): void {
 	program
 		.command("oralcut <input>")
-		.description("智能口播剪辑闭环：上传毛片 → 云端剪辑 → 拉回 gtrk/剪映/PR 工程文件 → 打开")
+		.description("智能口播剪辑闭环：本地抽音频/720p → 只传抽出物 → 云端剪辑 → 拉回 gtrk/剪映/PR →（可选）本地渲染")
 		.option("-s, --script <file>", "文稿 txt 路径（缺省走无稿智能重建）")
 		.option("-p, --preset <preset>", "节奏预设 steady|concise|compact", "concise")
 		.option("-o, --out <dir>", "工程产物目录（缺省 = <毛片同目录>/<毛片名>-video-project-<YYMMDD-HHMMSS>）")
 		.option("-f, --formats <list>", "三方格式（逗号分隔）", "gtrk,jianying,xml")
 		.option("--jianying-draft-dir <dir>", "剪映草稿根目录；传路径或 auto（默认读 gtrk init 配置 / 自动探测）")
 		.option("--lang <code>", "语言代码（默认 zh-CN；如 en-US / ja-JP）")
-		.option("--visual-assist", "视觉兜底：ASR 漏字时用人脸/说话检测保护并重识别（剪不准/怕剪掉真内容时开）")
+		.option("--visual-assist", "视觉兜底：本地改传 720p 代理，云端用人脸/说话检测保护并重识别（剪不准/怕剪掉真内容时开）")
 		.option("--no-adaptive-rhythm", "关闭自适应节奏（默认开；关了改用固定标点停顿表）")
-		.option("--render", "额外渲染成片视频（outputs 加 video）")
-		.option("--crf <n>", "视频质量 CRF 14-28（越小越清晰/文件越大，默认 18；需配 --render）")
-		.option("--codec <c>", "视频编码（默认 h264；需配 --render）")
-		.option("--param <k=v>", "透传任意云端参数（标量、可重复；如 --param intra_gap_max=0.4 --param visual_assist=true）", collectParam, [])
-		.option("--params-json <json>", "透传任意云端参数（JSON 对象、支持嵌套；如 '{\"punctuation_breaks\":{\"。\":0.3},\"render\":{\"crf\":20}}'）")
-		.option("--reupload", "强制重新上传，忽略本地上传缓存（毛片改了但指纹意外没变时用）")
-		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开，省得你找文件去哪了）")
+		.option("--render", "额外本地渲染成片（ffmpeg 按 gtrk EDL 出 mp4；毛片仍不出本地）")
+		.option("--crf <n>", "本地渲染视频质量 CRF 14-28（越小越清晰/文件越大，默认 18；需配 --render）")
+		.option("--codec <c>", "本地渲染视频编码（默认 h264；需配 --render）")
+		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统 PATH）")
+		.option("--param <k=v>", "透传任意云端参数（标量、可重复；如 --param intra_gap_max=0.4）", collectParam, [])
+		.option("--params-json <json>", "透传任意云端参数（JSON 对象、支持嵌套；如 '{\"punctuation_breaks\":{\"。\":0.3}}'）")
+		.option("--reupload", "强制重新上传，忽略本地上传缓存")
+		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON（给 agent/脚本解析）")
 		.action(async (input: string, opts: OralCutOpts) => {
 			await runOralCut(input, opts);
@@ -131,12 +120,14 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 
 	const projName = basename(inputAbs, extname(inputAbs));
 	const formats = opts.formats.split(",").map((s) => s.trim()).filter(Boolean);
+	// 本地渲染需要 gtrk EDL；用户没显式要 gtrk 也补上（否则无从渲染）
+	if (opts.render && !formats.includes("gtrk")) formats.push("gtrk");
 	const wantJianying = formats.some((f) => f === "jianying" || f === "capcut");
-	// 缺省产物目录与毛片同目录，名为 <毛片名>-video-project-<时间戳>：靠文件名+时间一眼认出是哪一次剪辑
+	// 缺省产物目录与毛片同目录，名为 <毛片名>-video-project-<时间戳>
+	// 目录延后到首次真正写入（task.json / 产物 / result.json）才建，提交前失败不留空壳
 	const outDir = resolve(opts.out ?? join(dirname(inputAbs), `${projName}-video-project-${timestamp()}`));
-	await mkdir(outDir, { recursive: true });
 
-	// 文稿：显式 --script 优先；没给则探毛片同目录同名 .txt，有就当文稿（按有稿剪、更准）
+	// 文稿：显式 --script 优先；没给则探毛片同目录同名 .txt
 	let scriptPath = opts.script ? resolve(opts.script) : undefined;
 	if (!scriptPath) {
 		const sibling = join(dirname(inputAbs), `${projName}.txt`);
@@ -147,22 +138,35 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 	}
 	const script = scriptPath ? await readFile(scriptPath, "utf8") : undefined;
 
-	// 剪映草稿目录：提交前先解析（draft_meta_info.json 必须由云端在提交时按此目录产）。
+	// 剪映草稿目录：提交前先解析
 	let draftDir: string | undefined;
 	if (wantJianying) {
 		draftDir = resolveJianyingDraftDir(opts.jianyingDraftDir);
 		if (draftDir) log.info(`剪映草稿目录：${draftDir}`);
-		else log.warn("没找到剪映草稿目录（剪映/CapCut 未装在标准位置）→ 将只产 draft_content.json、缺 meta，剪映无法直接打开。可加 --jianying-draft-dir <你的草稿目录> 重跑。");
+		else log.warn("没找到剪映草稿目录 → 将只产 draft_content.json、缺 meta。可加 --jianying-draft-dir <你的草稿目录> 重跑。");
 	}
 
-	log.step(`▶ 智能口播剪辑：${basename(inputAbs)}（预设 ${opts.preset}${opts.visualAssist ? " · 视觉兜底" : ""}，格式 ${formats.join("/")}）`);
+	log.step(
+		`▶ 智能口播剪辑：${basename(inputAbs)}（预设 ${opts.preset}${opts.visualAssist ? " · 视觉兜底(720p)" : ""}，格式 ${formats.join("/")}${opts.render ? " · 本地渲染" : ""}）`,
+	);
 
-	// 透传参数（--param / --params-json）先解析，有错早报，别等上传后才失败
 	const extraParams = parseExtraParams(opts.param, opts.paramsJson);
 
-	// ① 上传毛片 → file_id（本地指纹缓存：同一文件命中则复用 file_id，免二次上传）
-	log.step("① 上传毛片到云端…");
-	let up = await uploadCached(cfg, inputAbs, { force: opts.reupload });
+	// ① 本地预处理：探原片几何 + 抽音频(默认) / 压 720p(视觉兜底)。毛片永不上传。
+	log.step("① 本地预处理（探几何 + 抽音频/720p）…");
+	const geo = probeGeometry(inputAbs, opts.ffmpegPath);
+	log.info(`原片几何 ${geo.width}x${geo.height} @ ${geo.fps.toFixed(2)}fps · ${geo.duration.toFixed(1)}s`);
+	const artifact = opts.visualAssist
+		? await compress720p(inputAbs, opts.ffmpegPath)
+		: await extractAudio(inputAbs, opts.ffmpegPath);
+	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
+	log.info(
+		opts.visualAssist ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`,
+	);
+
+	// ② 上传抽出物 → file_id（毛片不出本地；指纹缓存复用免二次上传）
+	log.step("② 上传抽出物到云端…");
+	let up = await uploadCached(cfg, artifact, { force: opts.reupload });
 	log.info(up.cached ? `命中上传缓存，复用 file_id = ${up.fileId}（免二次上传）` : `file_id = ${up.fileId}`);
 
 	// 用当前 file_id 拼提交体（缓存失效要重拼，故抽成函数）
@@ -170,24 +174,18 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 		const p: Record<string, unknown> = {
 			file_id: fid,
 			la: opts.lang ?? "zh-CN",
-			outputs: opts.render ? ["project", "video"] : ["project"],
 			project_formats: formats,
-			source_path: inputAbs, // 本地绝对路径写进 gtrk materials[].path → 本地打开认素材
+			source_path: inputAbs, // 毛片本地绝对路径 → gtrk materials[].path，本地渲染/打开认素材
+			video_size: [geo.width, geo.height], // 原片真实几何（客户端探得），云端工程画布 + 计费校验
+			video_rate: geo.fps,
+			video_duration: geo.duration,
 			rhythm_preset: opts.preset,
 		};
 		if (script) p.script = script;
 		if (draftDir) p.struct_meta = { nle_draft_dir: draftDir };
-		if (opts.visualAssist) p.visual_assist = true; // 视觉兜底
-		if (opts.adaptiveRhythm === false) p.adaptive_rhythm = false; // 仅显式 --no-adaptive-rhythm 时下发
-		if (opts.render) {
-			const r: Record<string, unknown> = {};
-			if (opts.crf != null) r.crf = Number(opts.crf);
-			if (opts.codec) r.codec = opts.codec;
-			if (Object.keys(r).length) p.render = r;
-		}
-		// 通用透传优先级最高：agent 永远能强制覆盖上面任何字段。
-		// 但对 render / struct_meta 这类一等 flag 也会构建的嵌套对象做「逐字段合并」，
-		// 免得 --params-json '{"render":{...}}' 把 --crf/--codec 生成的 render 整体覆盖、静默丢字段。
+		if (opts.visualAssist) p.visual_assist = true; // 720p 输入下云端做说话检测
+		if (opts.adaptiveRhythm === false) p.adaptive_rhythm = false;
+		// 通用透传优先级最高：agent 永远能强制覆盖上面任何字段（对象字段做逐字段合并，免整体覆盖丢字段）
 		for (const [k, v] of Object.entries(extraParams)) {
 			const cur = p[k];
 			const bothObj =
@@ -199,89 +197,53 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 		return p;
 	};
 
-	// ② 提交 video_oral_cut（一次出三方工程文件）；缓存的 file_id 若在云端已失效（6004），重传重试一次
-	log.step("② 提交智能口播剪辑任务…");
+	// ③ 提交 cli/video_oral_cut_for_cli；缓存的 file_id 若在云端失效（6004），重传重试一次
+	log.step("③ 提交智能口播剪辑任务…");
 	let taskId: string;
 	try {
 		taskId = await submitTask(cfg, TASK_TYPE, buildPayload(up.fileId));
 	} catch (e) {
 		if (up.cached && e instanceof CloudError && e.code === 6004) {
 			log.warn("缓存的 file_id 在云端已失效，重新上传后重试…");
-			await invalidateUpload(inputAbs);
-			up = await uploadCached(cfg, inputAbs, { force: true });
+			await invalidateUpload(artifact);
+			up = await uploadCached(cfg, artifact, { force: true });
 			taskId = await submitTask(cfg, TASK_TYPE, buildPayload(up.fileId));
 		} else throw e;
 	}
 	log.info(`task_id = ${taskId}`);
+	// 面包屑：submit 一成功就落盘 task.json（按需建 outDir），任何后续崩溃都能据此按 task_id 恢复
+	await mkdir(outDir, { recursive: true });
+	await writeFile(
+		join(outDir, "task.json"),
+		JSON.stringify(
+			{ taskId, taskType: TASK_TYPE, fileId: up.fileId, source: inputAbs, formats, createdAt: new Date().toISOString() },
+			null,
+			2,
+		),
+	);
 
-	// ③ 轮询到完成
-	log.step("③ 云端处理中（每 5s 轮询）…");
+	// ④ 轮询到完成
+	log.step("④ 云端处理中（每 5s 轮询）…");
 	const result = await pollTask(cfg, TASK_TYPE, taskId, (status, progress) => {
 		log.tick(`${status}${progress != null ? ` ${Math.round(progress)}%` : ""}`);
 	});
 	log.tickEnd();
 
-	// ④ 拉回三方工程文件（按基础格式分组到 <out>/<基础格式>/）
-	const files = result.files ?? [];
-	if (!files.length) throw new Error("任务完成但无工程文件产物（检查 project_formats）");
-	log.step(`④ 拉回 ${files.length} 个产物到本地…`);
-	const byFormat: Record<string, string[]> = {};
-	for (const f of files) {
-		const base = baseFormat(f.format);
-		const fmtDir = join(outDir, base);
-		await mkdir(fmtDir, { recursive: true });
-		const dest = join(fmtDir, f.filename);
-		await download(f.download_url, dest);
-		(byFormat[base] ??= []).push(dest);
-		log.info(`${FORMAT_META[base]?.label ?? f.format} ← ${f.filename}`);
-	}
-	if (result.errors && Object.keys(result.errors).length) {
-		log.warn(`部分产物失败：${JSON.stringify(result.errors)}`);
-	}
-
-	// 剪映：把草稿（draft_content.json + draft_meta_info.json）拷进 <草稿目录>/<产物目录同名>/
-	// 与产物目录同名（含时间戳）→ 剪映项目列表里每次剪辑各为独立条目、认得出哪一次，不互相覆盖
-	let jianyingDraftPath: string | undefined;
-	if (byFormat.jianying && draftDir) {
-		jianyingDraftPath = join(draftDir, basename(outDir));
-		await mkdir(jianyingDraftPath, { recursive: true });
-		await cp(join(outDir, "jianying"), jianyingDraftPath, { recursive: true });
-		log.info(`剪映草稿已落到：${jianyingDraftPath}`);
-	}
-
-	// ⑤ 三方打开提示（人读；--json 模式整段跳过，避免这些 console.log 污染 stdout 的机读 JSON）
-	if (!opts.json) {
-		log.step("⑤ 三方打开（产物已就位，按需自取）：");
-		for (const base of Object.keys(byFormat)) {
-			const meta = FORMAT_META[base];
-			const target =
-				base === "jianying" ? (jianyingDraftPath ?? join(outDir, "jianying")) : byFormat[base][0];
-			console.log(`   • ${meta?.label ?? base}：${meta?.openHint(target) ?? target}`);
-		}
-	}
-
-	// 默认自动打开产物目录（--no-open 关）：用户常不知道文件落哪了，直接帮他打开、自己决定后续
-	if (opts.open) {
-		openFolder(outDir);
-		log.info("已打开产物目录文件夹");
-	}
+	// ⑤⑥⑦ 拉回产物 / 剪映草稿 / 可选渲染 / result.json 两段写 / 输出（共享落地逻辑）
+	await materializeResult({
+		outDir,
+		output: result,
+		taskId,
+		fileId: up.fileId,
+		draftDir,
+		render: opts.render,
+		crf: opts.crf,
+		codec: opts.codec,
+		ffmpegPath: opts.ffmpegPath,
+		projName,
+		json: opts.json,
+		open: opts.open,
+	});
 
 	log.ok(`闭环完成。产物目录：${outDir}`);
-
-	// 机读输出：stdout 只此一行 JSON，供 agent/脚本解析（人读日志已转 stderr）
-	if (opts.json) {
-		const errors = result.errors ?? {};
-		console.log(
-			JSON.stringify({
-				ok: Object.keys(errors).length === 0,
-				outDir,
-				files: byFormat,
-				jianyingDraftPath: jianyingDraftPath ?? null,
-				report: result.report ?? null,
-				errors,
-				taskId,
-				fileId: up.fileId,
-			}),
-		);
-	}
 }
