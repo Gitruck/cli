@@ -120,6 +120,39 @@ gtrk oralcut-result 88269671080189958 --render --out "D:/回收/某条"
 
 ---
 
+## 2.2 视觉拆分派单器：`gtrk split`（成片 → 分镜派单）
+
+`oralcut` 出的是「剪好的口播成片」；`split` 把它拆成 **beat 级视觉分镜**并派单给下游四车道（真人 A-roll / RRV_MG 动态图 / AI_DRAMA 再现 / FILM_BROLL 影视素材）。**纯本地、同步、无云端任务**。上游依赖 `transcript.json`（oralcut 家族恒出的句级词表，源时基）。
+
+编排顺序（脑=`gtrk-splitter` skill / 手=本命令）：
+
+```
+gtrk oralcut <毛片>                              # ① 出成片工程（gtrk + transcript）
+（用户可在客户端手调切点后保存）                  # ② 时间线随时可改，所见即所得
+gtrk split --project <产物目录> --json           # ③ 导出「发起那一刻」的投影视图 split/view.json（skill 创作输入）
+（skill 按视图句级 id 拆 beat、选 lane、写 handoff） # ④ 产机器 JSON 拆分稿（零时码、只引用 utterance id）
+gtrk split <拆分稿.json> --project <目录> --md --json  # ⑤ 校验落地：写回 struct_meta.split + 产 dispatch.json
+```
+
+| 用法 | 作用 |
+|---|---|
+| `gtrk split --project <dir>` | **投影视图导出**：transcript × 当刻 `.gtrk` 的 clips → `split/view.json`（句级轨道时基视图，含 dropped 标注） |
+| `gtrk split <拆分稿.json> --project <dir>` | **校验落地**：v1 门 → 结构/枚举/id/hash 校验 → 现场投影 → ① `.gtrk` 的 `struct_meta.split` 原子写回（只改这一个键、mtime 冲突拒写）② `split/dispatch.json` 派单清单（`composition_id`=`<工程slug>-<beatId>`）③ `--md` 人读稿 |
+| `--gtrk` / `--transcript` | 非标准布局兜底：显式指定工程/词表路径（缺省从 `--project` 自动定位 `gtrk/project.gtrk` 与 `transcript/transcript.json`） |
+| `--words` | 视图模式附字级明细（缺省只出句级） |
+
+**关键行为（agent 需知）：**
+- **时码恒挂源时基、每次发起现场投影**：用户手调切点后重导视图即跟随；此前被剪、现落回 clip 的句子自动复活，无需重跑转写。「拖入已剪好成片」= 恒等投影，同一套逻辑。
+- **拆分稿零时码、id 区间引用**：beat 的文稿范围 = `span:{from:"u0007",to:"u0011"}`（utterance id 区间），**绝不抄原句文字、绝不自造时码**（防 LLM 幻觉）。幻觉 id / 区间倒序 / 跨 beat 重叠 / `transcript_hash` 错版 → **硬拒、非 0 退出、零副作用**。
+- **dropped 处理**：beat 的 span 内 utterance 全被剪 → 跳过该 beat 并入报告；部分被剪 → 按存活句包络收缩、标 `shrunk`。均不使命令失败。
+- **transcript 缺失**（旧任务）→ 明确报错引导「用新版本重跑 oralcut（恒出 transcript）或 transcribe（规划中）」，不做降级猜测。
+- **只动 `struct_meta.split`**：写回不碰 materials/tracks，配合客户端「保存 → 发起 → 写回 → 重载」闭环（opencut 联动）。
+- **下游消费**：`dispatch.json` 的 `film_broll` 队列 → `gtrk matrix`（B-roll 检索，另立项）；`rrv_mg` 槽位表 → real-roam-viz 产颗粒；`ai_drama` 队列 → ai-drama-prompter。
+
+> **skill 分工**：拆 beat / 选 lane / 写 handoff 是脑（`gtrk-splitter` skill）的活；投影 / 校验 / 落地 / 写时码是手（本命令）的活。skill 铁律：只引用视图存在的 utterance id、不抄原文定位、不碰时码。
+
+---
+
 ## 3. 产物结构 + 三端打开
 
 ```
@@ -205,4 +238,4 @@ gtrk oralcut "D:/素材/某条.mp4" --params-json '{"punctuation_breaks":{"。":
 ## 7. 扩展（给改 CLI 的 agent）
 
 新增命令 = 写 `src/commands/<name>.ts` 的 `register<Name>(program)` + 在 `src/index.ts` 注册一行。
-云端调用走 `src/lib/cloud.ts`（`{code,msg,data}` 包装、鉴权 Header `Authorization:<裸key>`；单发取结果 `getTaskResult`、`pollTask` 复用之）；上传一律走 `src/lib/upload-cache.ts` 的 `uploadCached`（白嫖指纹缓存；≥256MiB 自动分片断点续传，见 `src/lib/chunk-upload.ts`）。本地预处理（探几何 / 抽音频 / 压 720p）在 `src/lib/media.ts`；本地渲染（gtrk EDL → ffmpeg filter_complex）在 `src/lib/render.ts`；三方产物落地 + `result.json` 两段写在 `src/lib/materialize.ts`（`oralcut` 与 `oralcut-result` 共用）。已上线：`oralcut`（云剪）、`oralcut-result`（按 task_id 取回）、`render`（本地渲染 gtrk）。规划中：`struct`（已有 gtrk → 三方工程）、`matrix`（B-roll 检索）。
+云端调用走 `src/lib/cloud.ts`（`{code,msg,data}` 包装、鉴权 Header `Authorization:<裸key>`；单发取结果 `getTaskResult`、`pollTask` 复用之）；上传一律走 `src/lib/upload-cache.ts` 的 `uploadCached`（白嫖指纹缓存；≥256MiB 自动分片断点续传，见 `src/lib/chunk-upload.ts`）。本地预处理（探几何 / 抽音频 / 压 720p）在 `src/lib/media.ts`；本地渲染（gtrk EDL → ffmpeg filter_complex）在 `src/lib/render.ts`；三方产物落地 + `result.json` 两段写在 `src/lib/materialize.ts`（`oralcut` 与 `oralcut-result` 共用）。已上线：`oralcut`（云剪）、`oralcut-result`（按 task_id 取回）、`render`（本地渲染 gtrk）、`split`（视觉拆分派单器：`src/lib/projection.ts` 投影纯函数 + `src/lib/splitdoc.ts` 拆分稿校验/落地 + `src/lib/gtrk-writeback.ts` 原子写回 `struct_meta.split`，随包分发 `skills/gtrk-splitter/`）。规划中：`struct`（已有 gtrk → 三方工程）、`matrix`（B-roll 检索，读 split 的 `dispatch.json`）。
