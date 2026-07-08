@@ -1,0 +1,62 @@
+{
+  "version": "v1",
+  "video_size": [
+    1920,
+    1080
+  ],
+  "video_rate": 30,
+  "duration": 196,
+  "materials": [
+    {
+      "id": "F-overfitting-fixture",
+      "path": "C:/fixture/overfitting.mp4",
+      "duration": 196,
+      "video_size": [
+        1920,
+        1080
+      ],
+      "video_rate": 30,
+      "audio_channel": "stereo"
+    }
+  ],
+  "video_track": [
+    {
+      "track_index": 0,
+      "track_size": [
+        1920,
+        1080
+      ],
+      "track_timeline": [
+        {
+          "clip_id": "c1",
+          "material": "F-overfitting-fixture",
+          "clip_st": 0,
+          "clip_ed": 196,
+          "track_st": 0,
+          "track_ed": 196,
+          "duration": 196
+        }
+      ]
+    }
+  ],
+  "audio_track": [
+    {
+      "track_index": 0,
+      "track_timeline": [
+        {
+          "clip_id": "a1",
+          "material": "F-overfitting-fixture",
+          "clip_st": 0,
+          "clip_ed": 196,
+          "track_st": 0,
+          "track_ed": 196,
+          "duration": 196
+        }
+      ]
+    }
+  ],
+  "beat_track": [],
+  "struct_meta": {
+    "nle_draft_dir": "C:/fixture/draft"
+  }
+}

@@ -1,0 +1,638 @@
+{
+  "contract_version": "v1",
+  "transcript_hash": "a1e6e6c8be4eade86807974ed10a0c37bf793bfa5d2034ecb201645c641380ac",
+  "beats": [
+    {
+      "id": "B01",
+      "span": {
+        "from": "u0001",
+        "to": "u0003"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "mirror-hook",
+      "container_stage": "none",
+      "rhythm": "平稳 -> 停顿",
+      "visual_task": "主持人直视镜头带观众做掐虎口实验，让观众从旁观者变成参与者",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "quote-card",
+          "mount": {
+            "from": "u0001",
+            "to": "u0002"
+          },
+          "role": "金句提炼",
+          "note": "先把反常识理论钉住，再进入身体实验",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B02",
+      "span": {
+        "from": "u0004",
+        "to": "u0006"
+      },
+      "base_track": "口播继续",
+      "lane": "FILM_BROLL",
+      "narrative": "mirror-hook",
+      "container_stage": "none",
+      "rhythm": "快剪",
+      "visual_task": "用亲人离去、职场背刺、关系破裂、都市独处等现实碎片建立普遍痛感",
+      "irreplaceability": "可被 B-roll 替代",
+      "handoff": {
+        "queries": [
+          "都市独处 夜晚",
+          "地铁 疲惫 通勤",
+          "关系破裂 争吵"
+        ],
+        "shots": 6,
+        "per_shot_sec": 2,
+        "exclude": [
+          "卡通",
+          "明显水印"
+        ]
+      }
+    },
+    {
+      "id": "B03",
+      "span": {
+        "from": "u0007",
+        "to": "u0008"
+      },
+      "base_track": "口播继续",
+      "lane": "FILM_BROLL",
+      "narrative": "demolition",
+      "container_stage": "none",
+      "rhythm": "快剪 -> 停顿",
+      "visual_task": "从深夜闪回、地铁失神、伴侣争吵中压出痛苦在被自己重复生产",
+      "irreplaceability": "可被 B-roll 替代",
+      "handoff": {
+        "queries": [
+          "深夜 失眠 闪回",
+          "伴侣 争吵 冷战"
+        ],
+        "shots": 4,
+        "per_shot_sec": 2.5
+      },
+      "aux_layers": [
+        {
+          "type": "quote-card",
+          "mount": "same_beat",
+          "role": "情绪聚焦",
+          "note": "把身体实验回扣成一句能留下来的判断",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B04",
+      "span": {
+        "from": "u0009",
+        "to": "u0010"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "demolition",
+      "container_stage": "seed",
+      "rhythm": "悬停",
+      "visual_task": "主持人正面抛出从心理学跨越到人工智能的桥，完成容器首次登场",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "term-callout",
+          "mount": {
+            "trigger": "u0009"
+          },
+          "role": "术语解释",
+          "note": "首次给英文名和中文名，便于后文反复调用",
+          "necessity": "必须"
+        }
+      ]
+    },
+    {
+      "id": "B05",
+      "span": {
+        "from": "u0011",
+        "to": "u0013"
+      },
+      "base_track": "旁白主导",
+      "lane": "RRV_MG",
+      "narrative": "container-translation",
+      "container_stage": "expand",
+      "rhythm": "平稳",
+      "visual_task": "用训练集、噪音、测试集、错误预测的动态图把过拟合先讲清楚",
+      "irreplaceability": "优先 MG",
+      "handoff": {
+        "slug_hint": "neural-overfit",
+        "theme": "overfitting",
+        "bg": "paper",
+        "duration_hint": 12
+      },
+      "fallback": "若 MG 档期不足，可降级为 A_ROLL + 简单图表动效"
+    },
+    {
+      "id": "B06",
+      "span": {
+        "from": "u0014",
+        "to": "u0016"
+      },
+      "base_track": "旁白主导",
+      "lane": "RRV_MG",
+      "narrative": "container-translation",
+      "container_stage": "translate",
+      "rhythm": "渐升",
+      "visual_task": "把 AI 过拟合映射到创伤、自动化防御、现实崩溃，完成 AI 到人类的翻译",
+      "irreplaceability": "优先 MG",
+      "handoff": {
+        "slug_hint": "dual-pane-map",
+        "theme": "overfitting",
+        "bg": "paper",
+        "duration_hint": 14
+      },
+      "aux_layers": [
+        {
+          "type": "network-diagram",
+          "mount": "same_beat",
+          "role": "关系表达",
+          "note": "左右映射把噪音、答对过去、失去未来翻译成心理结构",
+          "necessity": "必须"
+        }
+      ]
+    },
+    {
+      "id": "B07",
+      "span": {
+        "from": "u0017",
+        "to": "u0020"
+      },
+      "base_track": "旁白主导",
+      "lane": "AI_DRAMA",
+      "narrative": "container-translation",
+      "container_stage": "translate",
+      "rhythm": "平稳 -> 渐升",
+      "visual_task": "演绎弗洛伊德、创伤退伍士兵、Fort-Da 游戏，建立主动重复痛苦是为了争夺控制感",
+      "irreplaceability": "可降级处理",
+      "handoff": {
+        "narrative": "trauma-repetition",
+        "theme": "freud-fort-da",
+        "emotion_stage": "abyssal",
+        "platform": "kling",
+        "shot_count": 5
+      },
+      "aux_layers": [
+        {
+          "type": "archive-caption",
+          "mount": {
+            "from": "u0016",
+            "to": "u0017"
+          },
+          "role": "证据标注",
+          "note": "补足年份、人物、著作名，让历史再现不只是氛围画面",
+          "necessity": "强建议"
+        }
+      ],
+      "fallback": "若 AI 演绎不稳，可改为 A_ROLL + 档案照片 + 文字动画"
+    },
+    {
+      "id": "B08",
+      "span": {
+        "from": "u0021",
+        "to": "u0023"
+      },
+      "base_track": "口播继续",
+      "lane": "FILM_BROLL",
+      "narrative": "container-translation",
+      "container_stage": "translate",
+      "rhythm": "快剪",
+      "visual_task": "用评论区对骂、戾气、猫梗、羞辱感把过拟合落到当代网络环境",
+      "irreplaceability": "可被 B-roll 替代",
+      "handoff": {
+        "queries": [
+          "社交媒体 评论区 对骂",
+          "手机屏幕 戾气 弹幕"
+        ],
+        "shots": 5,
+        "per_shot_sec": 1.8,
+        "exclude": [
+          "真实人脸特写"
+        ]
+      },
+      "aux_layers": [
+        {
+          "type": "network-diagram",
+          "mount": "same_beat",
+          "role": "关系表达",
+          "note": "羞辱到恐惧到抢先惩罚到愤怒到剩余享乐的连锁图",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B09",
+      "span": {
+        "from": "u0024",
+        "to": "u0025"
+      },
+      "base_track": "口播继续",
+      "lane": "FILM_BROLL",
+      "narrative": "abyssal-fall",
+      "container_stage": "rupture",
+      "rhythm": "悬停",
+      "visual_task": "从草丛惊动、捕食风险切到现代都市失配，做出旧生存策略变成顽疾的冷落差",
+      "irreplaceability": "可被 B-roll 替代",
+      "handoff": {
+        "queries": [
+          "荒野 草丛 风声",
+          "都市 人群 疏离"
+        ],
+        "shots": 4,
+        "per_shot_sec": 2.2
+      }
+    },
+    {
+      "id": "B10",
+      "span": {
+        "from": "u0026",
+        "to": "u0027"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "abyssal-fall",
+      "container_stage": "rupture",
+      "rhythm": "停顿",
+      "visual_task": "主持人重新出镜，直问看见过拟合之后能否脱离循环，把观众锁进悬崖边",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "pause-card",
+          "mount": {
+            "trigger": "u0027"
+          },
+          "role": "停顿加压",
+          "note": "让答案暂时缺席，制造真空感",
+          "necessity": "必须"
+        }
+      ]
+    },
+    {
+      "id": "B11",
+      "span": {
+        "from": "u0028",
+        "to": "u0029"
+      },
+      "base_track": "口播继续",
+      "lane": "FILM_BROLL",
+      "narrative": "demolition",
+      "container_stage": "rupture",
+      "rhythm": "快剪",
+      "visual_task": "把脱敏、和解、发泄、打枕头做成一组被逐个击穿的商品化镜头",
+      "irreplaceability": "可被 B-roll 替代",
+      "handoff": {
+        "queries": [
+          "心理疗愈 商品 广告感",
+          "打枕头 发泄 房间"
+        ],
+        "shots": 5,
+        "per_shot_sec": 1.8,
+        "exclude": [
+          "真实诊疗记录"
+        ]
+      },
+      "aux_layers": [
+        {
+          "type": "quote-card",
+          "mount": "same_beat",
+          "role": "金句提炼",
+          "note": "把批判压成一句容易传播的判断",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B12",
+      "span": {
+        "from": "u0030",
+        "to": "u0031"
+      },
+      "base_track": "口播继续",
+      "lane": "FILM_BROLL",
+      "narrative": "abyssal-fall",
+      "container_stage": "rupture",
+      "rhythm": "平稳 -> 渐升",
+      "visual_task": "用关系案例把潜意识雷达和重复跳进火坑演成不断复写的亲密关系模式",
+      "irreplaceability": "可被 B-roll 替代",
+      "handoff": {
+        "queries": [
+          "亲密关系 反复 争执",
+          "童年 阴影 家庭"
+        ],
+        "shots": 4,
+        "per_shot_sec": 2.5
+      },
+      "aux_layers": [
+        {
+          "type": "quote-card",
+          "mount": "same_beat",
+          "role": "金句提炼",
+          "note": "把案例的底层动力压缩成一张标题卡",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B13",
+      "span": {
+        "from": "u0032",
+        "to": "u0033"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "abyssal-fall",
+      "container_stage": "rupture",
+      "rhythm": "悬停",
+      "visual_task": "主持人用更低更稳的语气说出你找到的只是重温旧梦的恶鬼，把实在界压到观众面前",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "term-callout",
+          "mount": "same_beat",
+          "role": "术语解释",
+          "note": "给实在界一个明确落点，防止术语空转",
+          "necessity": "建议"
+        }
+      ]
+    },
+    {
+      "id": "B14",
+      "span": {
+        "from": "u0034",
+        "to": "u0036"
+      },
+      "base_track": "旁白主导",
+      "lane": "RRV_MG",
+      "narrative": "abyssal-fall",
+      "container_stage": "rupture",
+      "rhythm": "渐升",
+      "visual_task": "把神经递质、创伤印痕、代际传递、大他者压成一张逐步收紧的因果网",
+      "irreplaceability": "优先 MG",
+      "handoff": {
+        "slug_hint": "grid-captured",
+        "theme": "overfitting",
+        "bg": "paper",
+        "duration_hint": 16
+      },
+      "aux_layers": [
+        {
+          "type": "network-diagram",
+          "mount": "same_beat",
+          "role": "关系表达",
+          "note": "把神经元、童年、代际传递、大他者串成压迫主体的结构网络",
+          "necessity": "必须"
+        }
+      ]
+    },
+    {
+      "id": "B15",
+      "span": {
+        "from": "u0037",
+        "to": "u0038"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "holding",
+      "container_stage": "flip",
+      "rhythm": "停顿",
+      "visual_task": "主持人先接住观众的绝望，不急着讲希望，先让被理解成立",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "pause-card",
+          "mount": "same_beat",
+          "role": "停顿加压",
+          "note": "把绝望明确说透，才有后面的反转重量",
+          "necessity": "必须"
+        }
+      ]
+    },
+    {
+      "id": "B16",
+      "span": {
+        "from": "u0039",
+        "to": "u0041"
+      },
+      "base_track": "旁白主导",
+      "lane": "RRV_MG",
+      "narrative": "reversal-elevation",
+      "container_stage": "flip",
+      "rhythm": "渐升",
+      "visual_task": "用偏差-方差权衡、插值阈值、双重下降曲线完成过拟合到泛化的结构反转",
+      "irreplaceability": "优先 MG",
+      "handoff": {
+        "slug_hint": "overfit-to-double-descent",
+        "theme": "overfitting",
+        "bg": "paper",
+        "duration_hint": 15
+      },
+      "aux_layers": [
+        {
+          "type": "data-annotation",
+          "mount": "same_beat",
+          "role": "术语解释",
+          "note": "把几个高密度术语压成可看懂的几个标注点",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B17",
+      "span": {
+        "from": "u0042",
+        "to": "u0043"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "holding",
+      "container_stage": "flip",
+      "rhythm": "平稳",
+      "visual_task": "主持人把双重下降翻译回人的生命经验，让观众感到我不是死循环而是螺旋上升",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "quote-card",
+          "mount": "same_beat",
+          "role": "金句提炼",
+          "note": "把第三幕的第一波希望感提炼成一个可记忆句子",
+          "necessity": "强建议"
+        }
+      ]
+    },
+    {
+      "id": "B18",
+      "span": {
+        "from": "u0044",
+        "to": "u0045"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "reversal-elevation",
+      "container_stage": "flip",
+      "rhythm": "平稳 -> 悬停",
+      "visual_task": "主持人完成认同你的症状这次真正的主体性重构，只给重新理解自身的入口",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "term-callout",
+          "mount": "same_beat",
+          "role": "术语解释",
+          "note": "给拉康晚期的核心提法一个清晰入口",
+          "necessity": "必须"
+        }
+      ]
+    },
+    {
+      "id": "B19",
+      "span": {
+        "from": "u0046",
+        "to": "u0048"
+      },
+      "base_track": "旁白主导",
+      "lane": "RRV_MG",
+      "narrative": "callback-closure",
+      "container_stage": "callback",
+      "rhythm": "回扣",
+      "visual_task": "把前文幽灵堵车回调出来，用自动驾驶车辆吸收刹车波浪的系统动画做出解法",
+      "irreplaceability": "优先 MG",
+      "handoff": {
+        "slug_hint": "recall-image-question",
+        "theme": "overfitting",
+        "bg": "paper",
+        "duration_hint": 13
+      },
+      "aux_layers": [
+        {
+          "type": "network-diagram",
+          "mount": "same_beat",
+          "role": "关系表达",
+          "note": "把缓冲、吸收冲击波、整体起速呈现成一个系统过程",
+          "necessity": "强建议"
+        }
+      ],
+      "callback_of": "B07"
+    },
+    {
+      "id": "B20",
+      "span": {
+        "from": "u0049",
+        "to": "u0049"
+      },
+      "base_track": "真人出镜",
+      "lane": "A_ROLL",
+      "narrative": "callback-closure",
+      "container_stage": "callback",
+      "rhythm": "悬停",
+      "visual_task": "回到主持人，让问题停在观众心里，而不是替观众收尾",
+      "irreplaceability": "必须真人出镜",
+      "aux_layers": [
+        {
+          "type": "quote-card",
+          "mount": "same_beat",
+          "role": "回扣提示",
+          "note": "保留一个极简的结尾文字层，让问题在黑场里继续回荡",
+          "necessity": "建议"
+        }
+      ]
+    }
+  ],
+  "queues": {
+    "a_roll": [
+      {
+        "beat": "B01",
+        "note": "主持人直视镜头带观众做掐虎口实验，让观众从旁观者变成参与者"
+      },
+      {
+        "beat": "B04",
+        "note": "主持人正面抛出从心理学跨越到人工智能的桥，完成容器首次登场"
+      },
+      {
+        "beat": "B10",
+        "note": "主持人重新出镜，直问看见过拟合之后能否脱离循环，把观众锁进悬崖边"
+      },
+      {
+        "beat": "B13",
+        "note": "主持人用更低更稳的语气说出你找到的只是重温旧梦的恶鬼，把实在界压到观众面前"
+      },
+      {
+        "beat": "B15",
+        "note": "主持人先接住观众的绝望，不急着讲希望，先让被理解成立"
+      },
+      {
+        "beat": "B17",
+        "note": "主持人把双重下降翻译回人的生命经验，让观众感到我不是死循环而是螺旋上升"
+      },
+      {
+        "beat": "B18",
+        "note": "主持人完成认同你的症状这次真正的主体性重构，只给重新理解自身的入口"
+      },
+      {
+        "beat": "B20",
+        "note": "回到主持人，让问题停在观众心里，而不是替观众收尾"
+      }
+    ],
+    "rrv_mg": [
+      {
+        "beat": "B05",
+        "note": "用训练集、噪音、测试集、错误预测的动态图把过拟合先讲清楚"
+      },
+      {
+        "beat": "B06",
+        "note": "把 AI 过拟合映射到创伤、自动化防御、现实崩溃，完成 AI 到人类的翻译"
+      },
+      {
+        "beat": "B14",
+        "note": "把神经递质、创伤印痕、代际传递、大他者压成一张逐步收紧的因果网"
+      },
+      {
+        "beat": "B16",
+        "note": "用偏差-方差权衡、插值阈值、双重下降曲线完成过拟合到泛化的结构反转"
+      },
+      {
+        "beat": "B19",
+        "note": "把前文幽灵堵车回调出来，用自动驾驶车辆吸收刹车波浪的系统动画做出解法"
+      }
+    ],
+    "ai_drama": [
+      {
+        "beat": "B07",
+        "note": "演绎弗洛伊德、创伤退伍士兵、Fort-Da 游戏，建立主动重复痛苦是为了争夺控制感"
+      }
+    ],
+    "film_broll": [
+      {
+        "beat": "B02",
+        "note": "用亲人离去、职场背刺、关系破裂、都市独处等现实碎片建立普遍痛感"
+      },
+      {
+        "beat": "B03",
+        "note": "从深夜闪回、地铁失神、伴侣争吵中压出痛苦在被自己重复生产"
+      },
+      {
+        "beat": "B08",
+        "note": "用评论区对骂、戾气、猫梗、羞辱感把过拟合落到当代网络环境"
+      },
+      {
+        "beat": "B09",
+        "note": "从草丛惊动、捕食风险切到现代都市失配，做出旧生存策略变成顽疾的冷落差"
+      },
+      {
+        "beat": "B11",
+        "note": "把脱敏、和解、发泄、打枕头做成一组被逐个击穿的商品化镜头"
+      },
+      {
+        "beat": "B12",
+        "note": "用关系案例把潜意识雷达和重复跳进火坑演成不断复写的亲密关系模式"
+      }
+    ]
+  }
+}

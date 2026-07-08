@@ -18,11 +18,12 @@
 | | 命令 | 做什么 |
 |---|---|---|
 | 🎬 | `gtrk oralcut <毛片>` | 智能口播剪辑闭环：一次出 gtrk + 剪映 + PR 三方工程，自动打开 |
+| ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单 |
 | ⚙️ | `gtrk init` | 引导式一次性配置（API Key + 剪映草稿目录），之后免管 |
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
-| 🤖 | `gtrk skills install` | 把 `/gtrk-oralcut` skill 装进 Claude Code |
+| 🤖 | `gtrk skills install` | 把 `/gtrk-oralcut`、`/gtrk-splitter` skill 装进 Claude Code |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
-| 🚧 | `render` / `struct` / `matrix` | （规划中）云渲染 / 已有 gtrk 转三方工程 / B-roll 检索 |
+| 🚧 | `render` / `struct` / `matrix` | 本地渲染 gtrk 成片 /（规划中）已有 gtrk 转三方工程 / B-roll 检索 |
 
 ---
 
