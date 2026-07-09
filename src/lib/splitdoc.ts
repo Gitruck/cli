@@ -344,6 +344,11 @@ export interface Landing {
 	dispatch: Dispatch;
 	skipped: SkipReport[];
 	shrunk: ShrinkReport[];
+	/**
+	 * 校验通过却无派单分支的 lane（footgun 防御）：A_ROLL 故意无派单，此处只收未来扩展
+	 * LANES 却漏改 dispatch 分派的遗漏 lane——落地不再静默，交由命令层告警。
+	 */
+	unhandledLanes: string[];
 }
 
 /**
@@ -390,6 +395,7 @@ export function buildLanding(
 	const dispatch: Dispatch = { rrv_mg: [], film_broll: [], ai_drama: [] };
 	const skipped: SkipReport[] = [];
 	const shrunk: ShrinkReport[] = [];
+	const unhandledLanes = new Set<string>();
 
 	for (const beat of doc.beats) {
 		const fromIdx = idIndex.get(beat.span.from)!;
@@ -452,11 +458,14 @@ export function buildLanding(
 			});
 		} else if (beat.lane === "AI_DRAMA") {
 			dispatch.ai_drama.push({ beat: beat.id, ...h, track_st, track_ed });
+		} else if (beat.lane !== "A_ROLL") {
+			// A_ROLL 故意无派单；其余 lane 过了校验却无 dispatch 分支
+			// = 未来扩展 LANES 漏改此处 → 收集告警，不静默丢队列（footgun 防御）
+			unhandledLanes.add(beat.lane);
 		}
-		// A_ROLL：真人底轨直出，无下游派单
 	}
 
-	return { split, dispatch, skipped, shrunk };
+	return { split, dispatch, skipped, shrunk, unhandledLanes: [...unhandledLanes] };
 }
 
 // ── 人读稿渲染（单向，不回读）─────────────────────────────────────────────
