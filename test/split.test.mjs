@@ -14,6 +14,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readGtrk, assertGtrkV1, writeStructMetaSplit } from "../.test-build/gtrk-writeback.mjs";
 import { runSplit } from "../.test-build/split.mjs";
+import { buildLanding } from "../.test-build/splitdoc.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = join(HERE, "fixtures", "splitter");
@@ -129,6 +130,10 @@ test("金样端到端 dry-run：20-beat 落地 → struct_meta.split + dispatch 
 		// A_ROLL beat 不带 handoff；RRV_MG 带
 		assert.equal(b01.handoff, undefined);
 		assert.ok(split.beats.find((b) => b.id === "B05").handoff.duration_hint === 12);
+		// source_ranges/material_id（add-split-source-ranges）：.gtrk 自包含源时基；恒等投影下 span 源包络 == 轨道包络
+		assert.equal(split.material_id, transcript.material_id);
+		assert.deepEqual(b01.source_ranges, [{ st: 0, ed: 12 }]);
+		assert.deepEqual(b20.source_ranges, [{ st: 192, ed: 196 }]);
 
 		// dispatch.json：RRV_MG 5 / FILM_BROLL 6 / AI_DRAMA 1
 		const dispatch = JSON.parse(await readFile(join(proj, "split", "dispatch.json"), "utf8"));
@@ -178,4 +183,39 @@ test("transcript 缺失明确报错（引导重跑 oralcut / transcribe）", asy
 	} finally {
 		await rm(base, { recursive: true, force: true });
 	}
+});
+
+test("buildLanding：不传 sourceIndex 不写新字段（向后兼容）；传则写 span 源包络 + material_id（r3 取整）", () => {
+	const doc = {
+		contract_version: "v1",
+		transcript_hash: "h",
+		beats: [{
+			id: "B01", span: { from: "u1", to: "u2" }, base_track: "真人出镜", lane: "A_ROLL",
+			narrative: "mirror-hook", container_stage: "none", rhythm: "-", visual_task: "-", irreplaceability: "-",
+		}],
+		queues: {},
+	};
+	const view = {
+		transcript_hash: "h", projected_at: "t",
+		utterances: [
+			{ id: "u1", text: "a", track_st: 5, track_ed: 6, dropped: false, kept_words: 1, total_words: 1 },
+			{ id: "u2", text: "b", track_st: 6, track_ed: 8, dropped: false, kept_words: 1, total_words: 1 },
+		],
+	};
+	const base = { utteranceIds: ["u1", "u2"], projectSlug: "s", projectedAt: "t" };
+
+	const plain = buildLanding(doc, view, base);
+	assert.equal(plain.split.material_id, undefined);
+	assert.equal(plain.split.beats[0].source_ranges, undefined);
+
+	const withSrc = buildLanding(doc, view, {
+		...base,
+		sourceIndex: {
+			materialId: "M1",
+			utterances: new Map([["u1", { st: 3.1234, ed: 4.5 }], ["u2", { st: 4.8, ed: 7.8919 }]]),
+		},
+	});
+	assert.equal(withSrc.split.material_id, "M1");
+	assert.deepEqual(withSrc.split.beats[0].source_ranges, [{ st: 3.123, ed: 7.892 }]);
+	// shrunk 语义不受影响：包络恒为全 span（含被剪部分），由消费方求交自然收窄
 });

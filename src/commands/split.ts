@@ -185,7 +185,16 @@ async function runLand(
 	const projectedAt = new Date().toISOString();
 	const view: ProjectionView = projectTranscript(transcript, gtrk, { projectedAt });
 	const projectSlug = slugify(basename(baseDir));
-	const landing = buildLanding(doc, view, { utteranceIds: ctx.utteranceIds, projectSlug, projectedAt });
+	const landing = buildLanding(doc, view, {
+		utteranceIds: ctx.utteranceIds,
+		projectSlug,
+		projectedAt,
+		// 源时基索引（add-split-source-ranges）：.gtrk 自包含 source_ranges/material_id，客户端跟随投影免读 transcript
+		sourceIndex: {
+			materialId: String(transcript.material_id),
+			utterances: new Map(transcript.utterances.map((u) => [u.id, { st: u.st, ed: u.ed }])),
+		},
+	});
 
 	// ④ 三件产物：struct_meta.split 原子写回（mtime 冲突拒写）→ dispatch.json → --md
 	writeStructMetaSplit(gtrkPath, gtrk, landing.split, mtimeMs);
