@@ -8,6 +8,7 @@
 
 - `gtrk split` 落地产物 `struct_meta.split.beats[]` 新增 `source_ranges: {st, ed}[]`（源时基秒）——取值为 **beat span 的源时基包络**（`[from.st, to.ed]`，与客户端 A′ 反解语义完全一致：含句间静默与被剪词，客户端 ∩ 当刻颗粒自然削掉、用户恢复被剪词即点亮）；v1 恒单元素，数组形状为将来按实例精化预留
 - `struct_meta.split` 顶层新增 `material_id`（= transcript.material_id）——客户端脱离 transcript 后仍能经 bindings 定位口播素材
+- `struct_meta.split.beats[]` 透传拆分稿语义字段 `narrative`/`container_stage`/`visual_task`——客户端色带 hover 详情卡「这段对应什么」直取自 .gtrk
 - 拆分稿**输入契约零变化**：均为落地输出字段，校验器不涉及；`contract_version` 不 bump（"v1" 门管拆分稿输入格式）
 - 投影层（projection.ts）与 `view.json` **零改动**（包络直接取自 transcript span，落地层现算）
 - `dispatch.json` 暂不加源区间（下游 matrix/rrv/ai-drama 无消费需求，留观察）

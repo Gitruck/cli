@@ -6,6 +6,7 @@
 
 - [x] 1.1 `src/lib/splitdoc.ts`：`SplitMetaBeat` 增 `source_ranges?: { st: number; ed: number }[]`；`StructMetaSplit` 增 `material_id?: string`
 - [x] 1.2 `buildLanding` opts 增 `sourceIndex?: { materialId, utterances: Map<id, {st, ed}> }`（可选，不传不写新字段）；落轨 beat 组装处按 span 包络写 `source_ranges`（r3 取整，`ed ≤ st` 防御跳过），split 顶层写 `material_id`
+- [x] 1.4 `buildLanding` metaBeat 透传拆分稿 `narrative`/`container_stage`/`visual_task`（空值省略）
 - [x] 1.3 `src/commands/split.ts` `runLand`：从已加载 transcript 组装 sourceIndex 传入 buildLanding
 
 ## 2. 测试

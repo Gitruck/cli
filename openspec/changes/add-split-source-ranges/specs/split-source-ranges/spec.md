@@ -22,6 +22,14 @@
 - **WHEN** 客户端读入含 material_id 与 source_ranges 的 struct_meta.split
 - **THEN** 无需读取 transcript.json 即可经素材绑定定位口播颗粒并做实时跟随投影
 
+### Requirement: 落地产物透传 beat 语义字段
+
+`gtrk split` 落地时 SHALL 把拆分稿的 `narrative`（叙事功能）/`container_stage`（容器阶段）/`visual_task`（视觉任务描述）原样透传进 `struct_meta.split.beats[]`，供客户端色带 hover 详情卡展示「这段对应什么」。空值 SHALL 省略。
+
+#### Scenario: hover 即知这段对应什么
+- **WHEN** 客户端 hover 某 beat 色块
+- **THEN** 详情卡展示该 beat 的 visual_task 与 narrative/container_stage（数据直取自 .gtrk，无需读 transcript 或拆分稿）
+
 ### Requirement: 向后兼容纯追加
 
 新增字段 SHALL 为纯追加：`view.json`、`dispatch.json`、拆分稿校验器、写回层行为均 MUST NOT 变化；不识别新字段的旧消费方 MUST NOT 受影响。

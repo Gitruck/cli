@@ -278,6 +278,13 @@ export interface SplitMetaBeat {
 	 * 恢复被剪词（变长）即点亮。数组形状为将来按投影实例精化预留。
 	 */
 	source_ranges?: { st: number; ed: number }[];
+	/**
+	 * 语义字段透传（add-split-source-ranges）：客户端色带 hover 详情卡展示「这段对应什么」。
+	 * 原样透传拆分稿 narrative（叙事功能）/container_stage（容器阶段）/visual_task（视觉任务描述）。
+	 */
+	narrative?: string;
+	container_stage?: string;
+	visual_task?: string;
 }
 
 export interface StructMetaSplit {
@@ -409,6 +416,10 @@ export function buildLanding(
 			}
 		}
 		if (isShrunk) metaBeat.shrunk = true;
+		// 语义透传（add-split-source-ranges）：客户端 hover 详情卡「这段对应什么」
+		if (beat.narrative) metaBeat.narrative = beat.narrative;
+		if (beat.container_stage) metaBeat.container_stage = beat.container_stage;
+		if (beat.visual_task) metaBeat.visual_task = beat.visual_task;
 		if (beat.lane !== "A_ROLL" && beat.handoff) metaBeat.handoff = beat.handoff;
 		split.beats.push(metaBeat);
 

@@ -134,6 +134,11 @@ test("金样端到端 dry-run：20-beat 落地 → struct_meta.split + dispatch 
 		assert.equal(split.material_id, transcript.material_id);
 		assert.deepEqual(b01.source_ranges, [{ st: 0, ed: 12 }]);
 		assert.deepEqual(b20.source_ranges, [{ st: 192, ed: 196 }]);
+		// 语义字段透传（客户端 hover 详情卡「这段对应什么」）
+		assert.equal(typeof b01.visual_task, "string");
+		assert.ok(b01.visual_task.length > 0);
+		assert.equal(typeof b01.narrative, "string");
+		assert.equal(typeof b01.container_stage, "string");
 
 		// dispatch.json：RRV_MG 5 / FILM_BROLL 6 / AI_DRAMA 1
 		const dispatch = JSON.parse(await readFile(join(proj, "split", "dispatch.json"), "utf8"));
