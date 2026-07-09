@@ -33,7 +33,7 @@
 - [x] 5.1 AGENT.md 补 splitter 编排章节（oralcut → 保存 → split 视图 → 拆分 → split 落地 → 各车道派单）；README 命令表补 split
 - [x] 5.2 金样端到端 dry-run：fixture transcript + 20-beat 金样拆分稿 → split 落地 → 断言 struct_meta.split/dispatch.json 与预期一致
 - [x] 5.3 真机联调（依赖 infra transcript 上生产）：真口播毛片 oralcut → 客户端手调切点保存 → split 视图确认投影跟随 → 拆分落地 → 客户端双击打开确认 struct_meta 存活
-- [ ] 5.4 发版（npm publish + 版本号）；上线后 24–48h 观察：skill 修正循环触发率（>1 轮占比高 = 契约/提示词需调）
+- [x] 5.4 发版（0.2.3/0.2.4 已 publish）；dogfood 观察结论：回声定位 e2e 7 步全过、27/27 落地 **0 retry**（修正循环触发率 0）→ 契约/提示词无需调，观察达标
 
 ## 6. 规范自检
 
