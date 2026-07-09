@@ -272,12 +272,20 @@ export interface SplitMetaBeat {
 	track_ed: number;
 	shrunk?: boolean;
 	handoff?: Record<string, unknown>;
+	/**
+	 * 源时基区间（add-split-source-ranges）：v1 恒单元素 = span 源包络 [from.st, to.ed]，
+	 * 含句间静默与被剪词——消费方以「源区间 ∩ 当刻颗粒源窗口」投影即得实际覆盖，
+	 * 恢复被剪词（变长）即点亮。数组形状为将来按投影实例精化预留。
+	 */
+	source_ranges?: { st: number; ed: number }[];
 }
 
 export interface StructMetaSplit {
 	contract_version: string;
 	transcript_hash: string;
 	projected_at: string;
+	/** 口播素材 id（= transcript.material_id）——消费方脱离 transcript 文件定位素材绑定。 */
+	material_id?: string;
 	beats: SplitMetaBeat[];
 }
 
@@ -335,10 +343,24 @@ export interface Landing {
  * 落地：把（已校验通过的）拆分稿 × 投影视图 → struct_meta.split 快照 + dispatch 派单清单 + 收缩/跳过报告。
  * 纯函数，不写文件。整 beat 全 dropped 跳过；部分 dropped 按存活包络收缩。
  */
+/** 3 位小数（对齐 transcript / gtrk 秒值精度，与投影层 r3 同式）。 */
+function r3(n: number): number {
+	return Math.round(n * 1000) / 1000;
+}
+
 export function buildLanding(
 	doc: SplitDoc,
 	view: ProjectionView,
-	opts: { utteranceIds: string[]; projectSlug: string; projectedAt: string },
+	opts: {
+		utteranceIds: string[];
+		projectSlug: string;
+		projectedAt: string;
+		/** 源时基索引（add-split-source-ranges）：传则落地写 source_ranges/material_id，不传不写（向后兼容）。 */
+		sourceIndex?: {
+			materialId: string;
+			utterances: Map<string, { st: number; ed: number }>;
+		};
+	},
 ): Landing {
 	// id → 存活投影实例（可多实例）；无实例即该 id 被全剪
 	const byId = new Map<string, { track_st: number; track_ed: number }[]>();
@@ -355,6 +377,7 @@ export function buildLanding(
 		contract_version: doc.contract_version,
 		transcript_hash: doc.transcript_hash,
 		projected_at: opts.projectedAt,
+		...(opts.sourceIndex ? { material_id: opts.sourceIndex.materialId } : {}),
 		beats: [],
 	};
 	const dispatch: Dispatch = { rrv_mg: [], film_broll: [], ai_drama: [] };
@@ -377,6 +400,14 @@ export function buildLanding(
 		const isShrunk = droppedCount > 0;
 
 		const metaBeat: SplitMetaBeat = { id: beat.id, lane: beat.lane, span: beat.span, track_st, track_ed };
+		if (opts.sourceIndex) {
+			const from = opts.sourceIndex.utterances.get(beat.span.from);
+			const to = opts.sourceIndex.utterances.get(beat.span.to);
+			// span 源包络（design D1）；端点异常防御跳过，不阻断落地
+			if (from && to && to.ed > from.st) {
+				metaBeat.source_ranges = [{ st: r3(from.st), ed: r3(to.ed) }];
+			}
+		}
 		if (isShrunk) metaBeat.shrunk = true;
 		if (beat.lane !== "A_ROLL" && beat.handoff) metaBeat.handoff = beat.handoff;
 		split.beats.push(metaBeat);
