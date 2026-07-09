@@ -21,4 +21,4 @@
 
 ## 4. 跨仓联动（范围外记录，opencut 侧另行提交）
 
-- [ ] 4.1 opencut `add-split-beat-lane` 追加任务：loadSplitFromGtrk 优先消费 `source_ranges`+`material_id`（免 transcript/hash 门槛），transcript 读取降为兜底链路
+- [x] 4.1 opencut `add-split-beat-lane` 追加任务：loadSplitFromGtrk 优先消费 `source_ranges`+`material_id`（免 transcript/hash 门槛），transcript 读取降为兜底链路
