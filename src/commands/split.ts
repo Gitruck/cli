@@ -215,6 +215,9 @@ async function runLand(
 	);
 	for (const s of landing.skipped) log.warn(`跳过 ${s.beat}：${s.reason}`);
 	for (const s of landing.shrunk) log.warn(`收缩 ${s.beat}：${s.dropped} 句被剪，按存活 ${s.kept} 句包络 → ${s.track_st}s…${s.track_ed}s（建议人工复核）`);
+	if (landing.unhandledLanes.length > 0) {
+		log.warn(`未派单 lane：${landing.unhandledLanes.join("、")}——通过校验却无 dispatch 分支，落地静默丢队列（新增 lane 时请同步 buildLanding 分派）`);
+	}
 
 	const result: SplitResult = {
 		ok: true,
