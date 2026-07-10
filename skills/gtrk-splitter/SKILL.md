@@ -73,7 +73,7 @@ gtrk split --project "<oralcut产物目录>" --json
 - `lane` 四选一 `A_ROLL | RRV_MG | AI_DRAMA | FILM_BROLL`；`base_track` 三选一 `真人出镜 | 口播继续 | 旁白主导`。
 - **handoff 按 lane 分型**（校验器会硬查）：
   - `RRV_MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**。
-  - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?}`，**`queries` 非空必填**。
+  - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?}`，**`queries` 非空必填**；queries 写**英文长句场景描述**（一条一个意象，避多义动词），**exclude 保持中文**（细则见 field-schema）。
   - `AI_DRAMA` → `handoff:{narrative?, theme?, emotion_stage?, platform?, shot_count?}`，全可选（下游 ai-drama-prompter 有推断默认）。
   - `A_ROLL` → **无 handoff**（写了会被警告忽略）。
 
@@ -145,6 +145,6 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 - 有没有把本该真人承接的段落全交给 b-roll？
 - span 里有没有混进 `dropped:true` 的句子？（会被跳过/收缩）
 - beat 之间有没有重叠？id 区间有没有倒序？
-- FILM_BROLL 有没有 queries？RRV_MG 有没有 duration_hint？
+- FILM_BROLL 有没有 queries？是不是英文长句场景描述（不是中文/关键词堆叠）？exclude 是不是中文？RRV_MG 有没有 duration_hint？
 - `transcript_hash` 是不是原样透传自视图？
 - 拆分稿里有没有混进任何秒级时码字段？（必须零时码）

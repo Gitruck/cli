@@ -43,9 +43,9 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "都市独处 夜晚",
-          "地铁 疲惫 通勤",
-          "关系破裂 争吵"
+          "lonely person in a city apartment at night",
+          "exhausted commuter on a crowded subway train",
+          "couple arguing as their relationship falls apart"
         ],
         "shots": 6,
         "per_shot_sec": 2,
@@ -70,8 +70,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "深夜 失眠 闪回",
-          "伴侣 争吵 冷战"
+          "sleepless person lying awake in bed late at night",
+          "couple giving each other the silent treatment after a fight"
         ],
         "shots": 4,
         "per_shot_sec": 2.5
@@ -210,8 +210,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "社交媒体 评论区 对骂",
-          "手机屏幕 戾气 弹幕"
+          "hostile social media comment threads on a phone screen",
+          "aggressive messages flooding a glowing phone screen in the dark"
         ],
         "shots": 5,
         "per_shot_sec": 1.8,
@@ -244,8 +244,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "荒野 草丛 风声",
-          "都市 人群 疏离"
+          "tall grass swaying in the wind on an empty plain",
+          "anonymous crowd walking past each other in a city street"
         ],
         "shots": 4,
         "per_shot_sec": 2.2
@@ -291,8 +291,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "心理疗愈 商品 广告感",
-          "打枕头 发泄 房间"
+          "glossy commercial for self-help therapy products",
+          "person venting anger by hitting a pillow in a bedroom"
         ],
         "shots": 5,
         "per_shot_sec": 1.8,
@@ -325,8 +325,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "亲密关系 反复 争执",
-          "童年 阴影 家庭"
+          "couple stuck in the same recurring argument at home",
+          "child overshadowed by tension in a family living room"
         ],
         "shots": 4,
         "per_shot_sec": 2.5

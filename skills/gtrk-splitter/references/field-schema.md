@@ -53,8 +53,13 @@
 //   duration_hint（秒）必填；slug_hint / theme / bg 可选（bg 底色可由底轨态推导）
 
 // lane === "FILM_BROLL"
-"handoff": { "queries": ["都市独处 夜晚", "地铁 疲惫"], "shots": 6, "per_shot_sec": 2, "exclude": ["卡通", "水印"] }
+"handoff": { "queries": ["lonely person in a city apartment at night", "exhausted commuter on a crowded subway train"], "shots": 6, "per_shot_sec": 2, "exclude": ["卡通", "水印"] }
 //   queries（非空字符串数组）必填；shots / per_shot_sec / exclude 可选
+//   queries 语言规范（经真机中英 A/B 校准）：
+//   - 用**英文长句场景描述**（5-12 词，谁+在哪+做什么），不是关键词堆叠——检索后端向量模型英文场景级命中明显更准
+//   - 每条 query 只装一个场景意象，多意象拆成多条
+//   - **避多义/字面义强的动词**（"pointing" 会召回手指特写、"hunting" 召回猎人——改用 "giving suggestions in a meeting" 这类场景语义）
+//   - **exclude 保持中文**：负向过滤匹配的是服务端返回的中文 note，写英文会失效
 
 // lane === "AI_DRAMA"  —— 全可选（下游 ai-drama-prompter 有推断默认）
 "handoff": { "narrative": "trauma-repetition", "theme": "freud-fort-da", "emotion_stage": "abyssal", "platform": "video-gen", "shot_count": 5 }
