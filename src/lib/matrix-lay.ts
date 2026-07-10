@@ -162,6 +162,9 @@ export function fillBeatTrack(opts: {
 			: shots
 				? Math.min(Math.max(span / shots, 1.5), 6)
 				: SHOT_TARGET_DEFAULT;
+	// 均分定长:碎尾在源头消掉(n 槽等分 span),shotTarget 只是节奏建议(实际槽长偏差 ≤ 半槽)
+	const nTarget = Math.max(1, Math.min(MAX_SLOTS_PER_BEAT, Math.round(span / shotTarget)));
+	const slotDur = Math.max(MIN_SHOT_SEC, span / nTarget);
 
 	const pools = buildQueryPools(beat, scoreFloor);
 	if (!pools.length) return [];
@@ -169,11 +172,12 @@ export function fillBeatTrack(opts: {
 	const slots: FillSlot[] = [];
 	let cursor = beat.track_st;
 	let prevClip: string | null = null;
+	let lastPick: Pair | null = null;
 	let gapRun = 0;
 
 	for (let slotIdx = 0; slotIdx < MAX_SLOTS_PER_BEAT; slotIdx++) {
 		const remaining = beat.track_ed - cursor;
-		if (remaining < MIN_SHOT_SEC) break; // 碎尾留空（露 A-roll）
+		if (remaining < MIN_SHOT_SEC) break; // 碎尾停铺（残量由下方吸收兜底）
 
 		const minLen = Math.min(MIN_SHOT_SEC, remaining);
 		// query 叙事序轮转：本槽位从 slotIdx 对应的 query 起，池干涸/无合格对则轮下一条
@@ -189,13 +193,13 @@ export function fillBeatTrack(opts: {
 			// 本槽位无合格对（可能仅因紧邻去重被挡）：留空一个镜头位继续，隔空后同 clip 可再用；连空两次视为干涸
 			gapRun++;
 			if (gapRun >= 2) break;
-			cursor += Math.min(shotTarget, remaining);
+			cursor += Math.min(slotDur, remaining);
 			prevClip = null;
 			continue;
 		}
 		gapRun = 0;
 
-		const d = Math.min(shotTarget, pairAvail(pick), remaining);
+		const d = Math.min(slotDur, pairAvail(pick), remaining);
 		// 源窗：best 居中截 d；有素材时长则钳 [0, dur]（允许出段），否则钳段界
 		const dur = typeof pick.cand.duration === "number" && pick.cand.duration > 0 ? pick.cand.duration : undefined;
 		const lo = dur !== undefined ? 0 : pick.seg.start;
@@ -214,7 +218,25 @@ export function fillBeatTrack(opts: {
 		});
 		consumed.add(pick.key);
 		prevClip = pick.cand.clip_id;
+		lastPick = pick;
 		cursor += d;
+	}
+
+	// 碎尾吸收:残量 < MIN_SHOT(素材短截/浮点残渣)且最后一颗粒紧贴残量时,由它顺延吃掉(素材界内,
+	// 双时基同步);gap 造成的大段留空(≥ MIN_SHOT)是有意露 A-roll,不吸。
+	const last = slots[slots.length - 1];
+	if (last && lastPick) {
+		const tail = beat.track_ed - last.track_ed;
+		if (tail > 1e-6 && tail < MIN_SHOT_SEC) {
+			const dur =
+				typeof lastPick.cand.duration === "number" && lastPick.cand.duration > 0 ? lastPick.cand.duration : undefined;
+			const hi = dur ?? lastPick.seg.end;
+			const ext = Math.min(tail, Math.max(0, hi - last.clip_ed));
+			if (ext > 1e-6) {
+				last.clip_ed = r3(last.clip_ed + ext);
+				last.track_ed = r3(last.track_ed + ext);
+			}
+		}
 	}
 	return slots;
 }
