@@ -288,6 +288,16 @@ test("e2e：preview 404 回落 raw(source=raw);工程缺失只出 plan 不失败
 		assert.deepEqual(res.lay.downloads, { preview: 0, raw: 1, reused: 0, failed: 0 });
 		const g = JSON.parse(readFileSync(join(dir, "gtrk", "project.gtrk"), "utf8"));
 		assert.equal(g.struct_meta.broll.beats[0].candidates[0].source, "raw");
+		// backfill 后重跑:raw 回落态自动重试 preview 并换回(不被本地缓存复用挡住)
+		globalThis.fetch = mockCloudAndCdn(
+			{ "城市 夜景": () => ({ recalled: 3, results: [mkResult(101, 0.9)] }) },
+			(u) => (u.includes("/preview/101.mp4") ? Buffer.from("proxy-now") : null),
+		);
+		const res2 = await runMatrix(undefined, { project: dir, column: "ghost-col", json: false });
+		assert.equal(res2.lay.downloads.preview, 1); // 换回代理
+		const g2 = JSON.parse(readFileSync(join(dir, "gtrk", "project.gtrk"), "utf8"));
+		assert.equal(g2.struct_meta.broll.beats[0].candidates[0].source, "preview");
+		assert.equal(readFileSync(join(dir, "gtrk", "assets", "broll-preview", "101.mp4"), "utf8"), "proxy-now");
 		// 工程缺失:plan 照产,退出正常
 		const dir2 = mkdtempSync(join(tmpdir(), "gtrk-lay-e2e-"));
 		try {

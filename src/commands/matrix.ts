@@ -277,8 +277,22 @@ async function layIntoProject(baseDir: string, plan: BrollPlan, layN: number): P
 			const rel = `${BROLL_PREVIEW_DIR}/${cand.clip_id}.mp4`;
 			const abs = join(gtrkDir, ...rel.split("/"));
 			if (existsSync(abs)) {
-				downloads.set(cand.clip_id, { rel, source: prevSource.get(cand.clip_id) ?? "preview" });
-				dlStats.reused++;
+				const prev = prevSource.get(cand.clip_id);
+				if (prev !== "raw") {
+					downloads.set(cand.clip_id, { rel, source: prev ?? "preview" });
+					dlStats.reused++;
+					continue;
+				}
+				// 上次是 raw 回落:重试 preview(backfill 可能已补产),成功即覆盖换代理;失败沿用本地 raw
+				const retried = await downloadProxy(cand, abs, { previewOnly: true });
+				if (retried === "preview") {
+					downloads.set(cand.clip_id, { rel, source: "preview" });
+					dlStats.preview++;
+					log.info(`clip ${cand.clip_id} 代理已补产,已从原片回落态换回 preview`);
+				} else {
+					downloads.set(cand.clip_id, { rel, source: "raw" });
+					dlStats.reused++;
+				}
 				continue;
 			}
 			const got = await downloadProxy(cand, abs);
@@ -311,8 +325,13 @@ async function layIntoProject(baseDir: string, plan: BrollPlan, layN: number): P
 	return { laidTracks: summary.laidTracks, laidClips: summary.laidClips, downloads: dlStats };
 }
 
-/** 下载代理：preview（直连或推导）→ 404/失败回落 raw → 都失败返回 null（调用方丢槽位）。 */
-async function downloadProxy(cand: import("../lib/matrix").PlanResult, absPath: string): Promise<"preview" | "raw" | null> {
+/** 下载代理：preview（直连或推导）→ 404/失败回落 raw → 都失败返回 null（调用方丢槽位）。
+ * previewOnly=true 时不回落 raw（raw 回落态的代理重试用,失败即返回 null 沿用旧文件）。 */
+async function downloadProxy(
+	cand: import("../lib/matrix").PlanResult,
+	absPath: string,
+	opts: { previewOnly?: boolean } = {},
+): Promise<"preview" | "raw" | null> {
 	const tryFetch = async (url: string): Promise<Buffer | null> => {
 		try {
 			const res = await fetch(url, { signal: AbortSignal.timeout(180_000) });
@@ -330,6 +349,7 @@ async function downloadProxy(cand: import("../lib/matrix").PlanResult, absPath: 
 			return "preview";
 		}
 	}
+	if (opts.previewOnly) return null;
 	const raw = await tryFetch(cand.url);
 	if (raw) {
 		await writeFile(absPath, raw);
