@@ -12,3 +12,6 @@ out/
 .test-build/
 # npm lock not used - bun.lock is canonical
 package-lock.json
+
+# OpenSpec 工件仅本地（开源仓不外泄开发信息，主理人 2026-07-10 定）
+openspec/
