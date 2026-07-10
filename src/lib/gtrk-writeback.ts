@@ -69,3 +69,33 @@ export function writeStructMetaSplit(
 		throw e;
 	}
 }
+
+/**
+ * 原子整文件写回（matrix 铺轨专用，add-matrix-lay-tracks）：与 `writeStructMetaSplit` 并存不混用。
+ * 调用方自行保证「只动自产物」（broll- 素材 + struct_meta.broll.lay_tracks 登记的轨）；
+ * 本函数只负责原子性（临时文件+rename）与 mtime 冲突守卫。
+ */
+export function writeGtrkAtomic(
+	path: string,
+	next: Record<string, unknown>,
+	expectedMtimeMs: number,
+): void {
+	const cur = statSync(path).mtimeMs;
+	if (cur !== expectedMtimeMs) {
+		throw new Error(
+			"工程文件在 matrix 运行期间被外部修改（保存冲突），已拒绝写入；请关闭客户端未保存的工程或重跑（plan 与已下载代理均保留）",
+		);
+	}
+	const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
+	try {
+		writeFileSync(tmp, JSON.stringify(next, null, 2));
+		renameSync(tmp, path);
+	} catch (e) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* 临时文件清理失败无害 */
+		}
+		throw e;
+	}
+}

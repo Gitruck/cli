@@ -15,6 +15,14 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
 import { resolveColumnConfig } from "../lib/column-config";
+import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
+import {
+	BROLL_PREVIEW_DIR,
+	layBrollTracks,
+	mergedCandidates,
+	previewUrlFor,
+	type DownloadedProxy,
+} from "../lib/matrix-lay";
 import type { Dispatch, FilmDispatch } from "../lib/splitdoc";
 import {
 	buildPlan,
@@ -23,10 +31,10 @@ import {
 	probeMemberType,
 	searchOnce,
 	type BrollPlan,
-	type PlanResult,
 	type QueryOutcome,
 	type Tier,
 } from "../lib/matrix";
+import type { PlanResult } from "../lib/matrix";
 import { log, routeLogsToStderr } from "../lib/log";
 
 interface MatrixOpts {
@@ -35,6 +43,7 @@ interface MatrixOpts {
 	column?: string;
 	topK?: string;
 	materialClass?: string;
+	lay?: string;
 	out?: string;
 	json?: boolean;
 }
@@ -50,6 +59,7 @@ export function registerMatrix(program: Command): void {
 		.option("--column <id>", "栏目配置 id（缺省取 config defaultColumn，再缺省内置默认栏目）")
 		.option("--top-k <n>", "每 query 候选数上限（覆盖派单 shots 翻译；服务端上限 50）")
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
+		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
@@ -189,7 +199,15 @@ async function runPlanMode(
 	const planPath = join(splitDir, "broll-plan.json");
 	await writeFile(planPath, JSON.stringify(plan, null, 2));
 	log.ok(`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query 成功 · ${resultCount} 条候选）`);
-	log.info("v1 只出清单不下载：cover_url 可直接预览；url 带签名默认 24h 过期，过期重跑本命令即重签。");
+	log.info("清单只含引用不含素材：cover_url 可直接预览；url 带签名默认 24h 过期，过期重跑本命令即重签。");
+
+	// ⑤ 候选铺轨（add-matrix-lay-tracks）：下载 preview 代理落地 → 幂等替换自产轨 → 原子写回。
+	//    工程缺失/非 v1 = 告警跳过（plan 已产，铺轨是增值不是门槛）。
+	const layN = parseLay(opts.lay);
+	let laySummary: Record<string, unknown> | undefined;
+	if (layN > 0) {
+		laySummary = await layIntoProject(baseDir, plan, layN);
+	}
 
 	const result: MatrixResult = {
 		ok: true,
@@ -197,10 +215,129 @@ async function runPlanMode(
 		memberType: tier,
 		...(columnId ? { columnId } : {}),
 		planPath,
+		...(laySummary ? { lay: laySummary } : {}),
 		counts: { beats: beats.length, queries: totalQueries, results: resultCount, errors: errCount },
 	};
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
+}
+
+/** --lay 解析：非负整数，非法值按默认 1（告警）。 */
+function parseLay(raw: string | undefined): number {
+	if (raw === undefined) return 1;
+	const n = Number(raw);
+	if (Number.isInteger(n) && n >= 0) return n;
+	log.warn(`--lay 取值非法（${raw}），按默认 1 处理`);
+	return 1;
+}
+
+/** 定位工程文件（沿 split 候选链）。 */
+function locateGtrk(baseDir: string): string | undefined {
+	const cands = [join(baseDir, "gtrk", "project.gtrk"), join(baseDir, "project.gtrk")];
+	return cands.find((p) => existsSync(p));
+}
+
+/**
+ * 候选铺轨：对每个 beat 的 top-N 候选下载代理（preview 优先 → 推导 → 404 回落 raw）→ layBrollTracks → 原子写回。
+ * 任何整体性失败（工程缺失/非 v1/mtime 冲突）都不影响已产出的 plan。
+ */
+async function layIntoProject(baseDir: string, plan: BrollPlan, layN: number): Promise<Record<string, unknown> | undefined> {
+	const gtrkPath = locateGtrk(baseDir);
+	if (!gtrkPath) {
+		log.warn(`未找到工程文件（${join(baseDir, "gtrk", "project.gtrk")}），跳过铺轨——plan 已产出，可后续在有工程的目录重跑`);
+		return undefined;
+	}
+	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
+	assertGtrkV1(gtrk);
+
+	log.step(`▶ 候选铺轨（${layN} 轨，preview 代理）…`);
+	const gtrkDir = dirname(gtrkPath);
+	const previewDir = join(gtrkDir, ...BROLL_PREVIEW_DIR.split("/"));
+	await mkdir(previewDir, { recursive: true });
+
+	// 复用时的 source 继承：旧 broll 记录里该 clip 是 raw 回落的,复用后仍标 raw(内容来源不因复用改变)
+	const prevSource = new Map<string, "preview" | "raw">();
+	const prevBroll = (gtrk.struct_meta as Record<string, unknown> | undefined)?.broll as
+		| { beats?: { candidates?: { clip_id?: unknown; source?: unknown; preview_path?: unknown }[] }[] }
+		| undefined;
+	for (const b of prevBroll?.beats ?? []) {
+		for (const c of b.candidates ?? []) {
+			if (typeof c.clip_id === "string" && c.preview_path && (c.source === "preview" || c.source === "raw")) {
+				prevSource.set(c.clip_id, c.source);
+			}
+		}
+	}
+
+	// 下载 laid 候选的代理（每 beat top-N；按 clip_id 幂等复用）
+	const downloads = new Map<string, DownloadedProxy>();
+	const dlStats = { preview: 0, raw: 0, reused: 0, failed: 0 };
+	for (const beat of plan.beats) {
+		for (const cand of mergedCandidates(beat).slice(0, layN)) {
+			if (downloads.has(cand.clip_id)) continue;
+			const rel = `${BROLL_PREVIEW_DIR}/${cand.clip_id}.mp4`;
+			const abs = join(gtrkDir, ...rel.split("/"));
+			if (existsSync(abs)) {
+				downloads.set(cand.clip_id, { rel, source: prevSource.get(cand.clip_id) ?? "preview" });
+				dlStats.reused++;
+				continue;
+			}
+			const got = await downloadProxy(cand, abs);
+			if (got) {
+				downloads.set(cand.clip_id, { rel, source: got });
+				dlStats[got]++;
+			} else {
+				dlStats.failed++;
+			}
+		}
+	}
+
+	const { next, summary } = layBrollTracks({
+		gtrk,
+		plan,
+		lay: layN,
+		downloads,
+		generatedAt: new Date().toISOString(),
+		planPath: "split/broll-plan.json",
+	});
+	writeGtrkAtomic(gtrkPath, next, mtimeMs);
+	log.ok(
+		`铺轨完成：${summary.laidTracks.length} 条候选轨（track_index ${summary.laidTracks.join("/") || "-"}）· ${summary.laidClips} 个候选颗粒` +
+			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）`,
+	);
+	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
+	if (dlStats.raw > 0) {
+		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
+	}
+	return { laidTracks: summary.laidTracks, laidClips: summary.laidClips, downloads: dlStats };
+}
+
+/** 下载代理：preview（直连或推导）→ 404/失败回落 raw → 都失败返回 null（调用方丢槽位）。 */
+async function downloadProxy(cand: import("../lib/matrix").PlanResult, absPath: string): Promise<"preview" | "raw" | null> {
+	const tryFetch = async (url: string): Promise<Buffer | null> => {
+		try {
+			const res = await fetch(url, { signal: AbortSignal.timeout(180_000) });
+			if (!res.ok) return null;
+			return Buffer.from(await res.arrayBuffer());
+		} catch {
+			return null;
+		}
+	};
+	const previewUrl = previewUrlFor(cand);
+	if (previewUrl) {
+		const bytes = await tryFetch(previewUrl);
+		if (bytes) {
+			await writeFile(absPath, bytes);
+			return "preview";
+		}
+	}
+	const raw = await tryFetch(cand.url);
+	if (raw) {
+		await writeFile(absPath, raw);
+		log.warn(`clip ${cand.clip_id} 无 preview 代理，已回落原片（${(raw.length / 1048576).toFixed(1)}MB）`);
+		return "raw";
+	}
+	log.warn(`clip ${cand.clip_id} 代理与原片均下载失败，该候选槽位跳过`);
+	return null;
 }
 
 /** ad-hoc 模式：单 query，--out 落文件 / 缺省 stdout。 */

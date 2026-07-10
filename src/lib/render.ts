@@ -219,10 +219,24 @@ export function buildFilterGraph(
 	return { inputs, graph: chains.join(";"), total };
 }
 
-/** 从 gtrk.materials 建 {id: 本地绝对路径}；缺 path 或文件不存在即报错指明缺失素材。 */
-function materialPathsFromGtrk(gtrk: GtrkV1): Record<string, string> {
+/** 从 gtrk.materials 建 {id: 本地绝对路径}。
+ * 校验范围收窄为**被渲染实际消费的素材**（主视频轨 + 全部音频轨引用；add-matrix-lay-tracks）：
+ * 本地渲染不合成 overlay，未被消费的素材（如 B-roll 候选代理）缺失不应阻断与它无关的渲染。
+ * 被消费素材缺 path/文件缺失仍硬拒（行为不变）。导出供单测。 */
+export function materialPathsFromGtrk(gtrk: GtrkV1): Record<string, string> {
+	const used = new Set<string>();
+	const sortedV = sortedTracks(gtrk.video_track || []);
+	const consumers = [sortedV[0], ...(gtrk.audio_track || [])];
+	for (const t of consumers) {
+		if (!t) continue;
+		for (const c of t.track_timeline || []) {
+			const m = (c as { material?: unknown }).material;
+			if (m != null) used.add(String(m));
+		}
+	}
 	const map: Record<string, string> = {};
 	for (const m of gtrk.materials || []) {
+		if (!used.has(String(m.id))) continue; // 未被主轨/音轨消费：不校验不入表
 		if (!m.path) throw new Error(`gtrk 素材 ${m.id} 缺 path（source_path），无法本地渲染`);
 		if (!existsSync(m.path)) throw new Error(`gtrk 素材文件不存在：${m.path}`);
 		map[String(m.id)] = m.path;
