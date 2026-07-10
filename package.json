@@ -48,7 +48,7 @@
     "build": "bun build ./src/index.ts --target=node --outfile dist/index.js",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build",
-    "test": "esbuild src/lib/chunk-upload.ts src/lib/render.ts src/lib/cloud.ts src/lib/materialize.ts src/lib/projection.ts src/lib/splitdoc.ts src/lib/gtrk-writeback.ts src/lib/column-config.ts src/lib/matrix.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/split.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/matrix.ts --bundle --platform=node --format=esm --outfile=.test-build/matrix-cmd.mjs && node --test \"test/*.test.mjs\""
+    "test": "esbuild src/lib/chunk-upload.ts src/lib/render.ts src/lib/cloud.ts src/lib/materialize.ts src/lib/projection.ts src/lib/splitdoc.ts src/lib/gtrk-writeback.ts src/lib/column-config.ts src/lib/matrix.ts src/lib/matrix-lay.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/split.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/matrix.ts --bundle --platform=node --format=esm --outfile=.test-build/matrix-cmd.mjs && node --test \"test/*.test.mjs\""
   },
   "devDependencies": {
     "bun-types": "^1.1.0",
