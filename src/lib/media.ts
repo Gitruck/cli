@@ -63,7 +63,7 @@ async function artifactPath(inputAbs: string, ext: string): Promise<string> {
 	return join(audioCacheDir(), `${base}.${s.size}_${Math.round(s.mtimeMs)}.${ext}`);
 }
 
-/** 本地抽 16k 单声道 mp3（豆包 AUC 2.0 目标格式，ASR.core 直通、体积最小）。命中缓存则复用。 */
+/** 本地抽 16k 单声道 mp3（云端转写目标格式，ASR.core 直通、体积最小）。命中缓存则复用。 */
 export async function extractAudio(inputAbs: string, ffmpegPath?: string): Promise<string> {
 	const { ffmpeg } = requireFfmpeg(ffmpegPath);
 	const out = await artifactPath(inputAbs, "mp3");

@@ -83,10 +83,21 @@ export interface SplitDoc {
 	queues?: Record<string, unknown>;
 }
 
+/** splitdoc 校验用词表（来自有效栏目配置，column-config spec）。 */
+export interface VocabCtx {
+	narrative: readonly string[];
+	container_stage: readonly string[];
+	base_track: readonly string[];
+	/** "allow" 时 narrative/container_stage/base_track 三项不做枚举校验（纯自由串，完全异构栏目）。 */
+	unknown_narrative?: "allow" | "reject";
+}
+
 /** 校验上下文：utterance id 的**权威源序**（用于区间/重叠判定）+ 当前 transcript 的 text_hash。 */
 export interface ValidationCtx {
 	utteranceIds: string[];
 	transcriptHash: string;
+	/** 有效栏目配置的 vocab；缺省 = 内置默认（现枚举），校验行为与词表化前一致。 */
+	vocab?: VocabCtx;
 }
 
 export interface ValidationResult {
@@ -113,6 +124,14 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 		return { errors: ["拆分稿必须是一个 JSON 对象"], warnings };
 	}
 	const d = doc as Record<string, unknown>;
+
+	// 校验源 = 有效栏目 vocab；缺省 = 内置枚举（默认栏目行为不变）。unknown_narrative=allow 时该三项放行自由串。
+	const vocab: VocabCtx = ctx.vocab ?? {
+		narrative: NARRATIVES,
+		container_stage: CONTAINER_STAGES,
+		base_track: BASE_TRACKS,
+	};
+	const freeVocab = vocab.unknown_narrative === "allow";
 
 	if (d.contract_version !== "v1") {
 		errors.push(`contract_version 必须为 "v1"（实际：${JSON.stringify(d.contract_version)}）`);
@@ -153,10 +172,17 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 		else if (seenBeatIds.has(b.id)) errors.push(`${b.id}：beat id 重复`);
 		else seenBeatIds.add(b.id);
 
-		if (!enumOk(b.base_track, BASE_TRACKS)) errors.push(`${tag}：base_track 非法（三选一：${BASE_TRACKS.join(" | ")}）`);
+		// base_track/narrative/container_stage 校验源 = 栏目 vocab（默认=内置枚举）；allow 时放行自由串（仍须非空）
+		if (freeVocab) {
+			if (!isNonEmptyStr(b.base_track)) errors.push(`${tag}：缺 base_track`);
+			if (!isNonEmptyStr(b.narrative)) errors.push(`${tag}：缺 narrative`);
+			if (!isNonEmptyStr(b.container_stage)) errors.push(`${tag}：缺 container_stage`);
+		} else {
+			if (!enumOk(b.base_track, vocab.base_track)) errors.push(`${tag}：base_track 非法（栏目词表：${vocab.base_track.join(" | ")}）`);
+			if (!enumOk(b.narrative, vocab.narrative)) errors.push(`${tag}：narrative 非法（不在栏目词表内）`);
+			if (!enumOk(b.container_stage, vocab.container_stage)) errors.push(`${tag}：container_stage 非法（不在栏目词表内）`);
+		}
 		if (!enumOk(b.lane, LANES)) errors.push(`${tag}：lane 非法（四选一：${LANES.join(" | ")}）`);
-		if (!enumOk(b.narrative, NARRATIVES)) errors.push(`${tag}：narrative 非法（八枚举之一）`);
-		if (!enumOk(b.container_stage, CONTAINER_STAGES)) errors.push(`${tag}：container_stage 非法（七枚举之一）`);
 		if (!enumOk(b.irreplaceability, IRREPLACEABILITY)) errors.push(`${tag}：irreplaceability 非法（四枚举之一）`);
 		if (!isNonEmptyStr(b.rhythm)) errors.push(`${tag}：缺 rhythm（人读节奏标签）`);
 		if (!isNonEmptyStr(b.visual_task)) errors.push(`${tag}：缺 visual_task（一句话视觉任务）`);

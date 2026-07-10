@@ -1,6 +1,6 @@
 ## Context
 
-`splitdoc.ts` 硬编码四组《实在界漫游指南》专属枚举:`BASE_TRACKS`(:10 真人出镜/口播继续/旁白主导)、`LANES`(:11 A_ROLL/RRV_MG/AI_DRAMA/FILM_BROLL)、`NARRATIVES`(:12 八功能)、`CONTAINER_STAGES`(:22 七阶段),并在 `validateSplitDoc`(:158-159)硬校验 narrative/container_stage 必须是八/七枚举。审计确认:客户端(opencut)对 narrative/container/visual_task **纯字符串展示、不校验值**(beat 色带 hover 详情卡直取);机器侧这几个字段**惰性**(不参与派单/时码/召回路由),只喂人读 markdown + 客户端展示。CLI 现有配置范式:`readUserConfig`(`~/.gtrk-cli/config.json`,env > config > default)。
+`splitdoc.ts` 硬编码四组《实在界漫游指南》专属枚举:`BASE_TRACKS`(:10 真人出镜/口播继续/旁白主导)、`LANES`(:11 A_ROLL/RRV_MG/AI_DRAMA/FILM_BROLL)、`NARRATIVES`(:12 八功能)、`CONTAINER_STAGES`(:22 七阶段),并在 `validateSplitDoc`(:158-159)硬校验 narrative/container_stage 必须是八/七枚举。审计确认:客户端(opencut)对 narrative/container/visual_task **纯字符串展示、不校验值**(beat 色带 hover 详情卡直取);机器侧这几个字段**惰性**(不参与派单/时码/召回路由),只喂人读 markdown + 客户端展示。CLI 现有配置范式:`readUserConfig`(`~/.gitruck/config.json`,env > config > default;`~/.gtrk-cli` 已被 paths.ts 定为 LEGACY_HOME 仅迁移用)。
 
 ## Goals / Non-Goals
 
@@ -23,7 +23,7 @@
     vocab:  { narrative[], container_stage[], base_track[] }   # 词表(放宽校验的来源)
     lanes:  { enabled[], appearance: { <lane>: {code,label,color,pattern} } }  # P0 只读, appearance 供 opencut 后续
     broll:  { column_tag_ids[], material_class_policy, facet_defaults, facet_allowed[] }  # 供 Change C(matrix)
-    style:  { palette, aspect_ratio }   # 骨架, 本期不驱动渲染
+    style:  {}   # 空占位;内部形态由后续 change add-column-style-meta-skill 定形为不透明引用清单。不设 palette/aspect_ratio 等框架可读视觉字段(那是框架预设视觉维度)
     fallback: { unknown_narrative: allow|reject }
   }
   ```
@@ -37,7 +37,7 @@
   | broll.facet_allowed | **INTERSECTION** | 栏目收窄可用 facet |
   | lanes.appearance / broll.material_class_policy / facet_defaults / style | **OVERRIDE** | 栏目换装 |
 
-  P0 只落地 **L0(内置默认)+ L2(本地 `~/.gtrk-cli/columns/<id>.json`)**;L1/L3 后续。一句话概括:**默认给地板,栏目做加(并)/减(交)/换装(覆盖)三种动作**。
+  P0 只落地 **L0(内置默认)+ L2(本地 `~/.gitruck/columns/<id>.json`,经 paths.ts 统一目录)**;L1/L3 后续。一句话概括:**默认给地板,栏目做加(并)/减(交)/换装(覆盖)三种动作**。
 - **D3 校验放宽:硬枚举 → 有效 vocab 词表**
   `validateSplitDoc` 收一个 `vocab`(来自有效栏目配置);narrative/container_stage/base_track 校验从 `enumOk(x, NARRATIVES)` 改 `enumOk(x, vocab.narrative)`。默认栏目的内置 vocab = 现有 `NARRATIVES`/`CONTAINER_STAGES`/`BASE_TRACKS`(常量不删,作默认词表),故默认行为不变。`fallback.unknown_narrative=allow` 时甚至不校验(纯自由串,给完全异构栏目)。
 - **D4 默认兜底(小白零配置)**
@@ -56,9 +56,9 @@
 
 ## Migration Plan
 
-纯新增 schema + loader + 校验源切换,默认兜底保现状。无配置零感知;要定制栏目建 `~/.gtrk-cli/columns/<id>.json` + `--column`。回滚 = 校验源切回常量。
+纯新增 schema + loader + 校验源切换,默认兜底保现状。无配置零感知;要定制栏目建 `~/.gitruck/columns/<id>.json` + `--column`。回滚 = 校验源切回常量。
 
 ## Open Questions
 
-- 本地配置目录 `~/.gtrk-cli/columns/` vs 单文件多栏目——倾向目录(一栏目一文件,清晰);待主理人定。
+- 本地配置目录 `~/.gitruck/columns/` vs 单文件多栏目——倾向目录(一栏目一文件,清晰);待主理人定。
 - `--column` 缺省栏目:config.json 加 `defaultColumn` 字段,还是恒内置默认?倾向 config 可配、缺省内置默认。

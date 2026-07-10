@@ -57,7 +57,7 @@
 //   queries（非空字符串数组）必填；shots / per_shot_sec / exclude 可选
 
 // lane === "AI_DRAMA"  —— 全可选（下游 ai-drama-prompter 有推断默认）
-"handoff": { "narrative": "trauma-repetition", "theme": "freud-fort-da", "emotion_stage": "abyssal", "platform": "kling", "shot_count": 5 }
+"handoff": { "narrative": "trauma-repetition", "theme": "freud-fort-da", "emotion_stage": "abyssal", "platform": "video-gen", "shot_count": 5 }
 
 // lane === "A_ROLL"  —— 无 handoff
 ```

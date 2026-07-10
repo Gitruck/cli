@@ -125,3 +125,42 @@ test("辅助层 mount 三型：same_beat / 区间 / trigger，幻觉 id 报错",
 test("非数组 / 空 beats 报错", () => {
 	assert.ok(validateSplitDoc(doc([]), CTX).errors.some((e) => /beats 必须是非空数组/.test(e)));
 });
+
+// ── 栏目 vocab 校验放宽（change add-column-config-schema §2）──────────────
+
+test("自定义栏目 vocab：命中词表通过，不因非八枚举被拒（spec Scenario 科普栏目）", () => {
+	const vocab = {
+		narrative: ["论点", "论据", "结论"],
+		container_stage: ["none", "开场", "收尾"],
+		base_track: ["真人出镜", "旁白主导"],
+	};
+	const b = beat({ narrative: "论据", container_stage: "开场" });
+	const r = validateSplitDoc(doc([b]), { ...CTX, vocab });
+	assert.deepEqual(r.errors, []);
+});
+
+test("自定义 vocab 下，不在词表的值被拒（unknown=reject 缺省）", () => {
+	const vocab = { narrative: ["论点"], container_stage: ["none"], base_track: ["真人出镜"] };
+	const r = validateSplitDoc(doc([beat({ narrative: "mirror-hook" })]), { ...CTX, vocab });
+	assert.ok(hasErr(r, /narrative 非法/));
+});
+
+test("unknown_narrative=allow：三项放行自由串（异构栏目），空串仍拒", () => {
+	const vocab = { narrative: [], container_stage: [], base_track: [], unknown_narrative: "allow" };
+	const free = beat({ narrative: "痛点直击", container_stage: "促单", base_track: "口播带货" });
+	assert.deepEqual(validateSplitDoc(doc([free]), { ...CTX, vocab }).errors, []);
+	const empty = beat({ narrative: "", container_stage: "促单", base_track: "口播带货" });
+	assert.ok(hasErr(validateSplitDoc(doc([empty]), { ...CTX, vocab }), /缺 narrative/));
+});
+
+test("allow 不放宽 lane：lane 仍硬四枚举（P0 不动）", () => {
+	const vocab = { narrative: [], container_stage: [], base_track: [], unknown_narrative: "allow" };
+	const r = validateSplitDoc(doc([beat({ narrative: "x", container_stage: "y", base_track: "z", lane: "HAND_DRAWN" })]), { ...CTX, vocab });
+	assert.ok(hasErr(r, /lane 非法/));
+});
+
+test("不传 vocab = 内置默认：行为与词表化前一致（默认兜底铁律）", () => {
+	// 与文件头部既有用例同口径：合法稿通过、越界被拒——这里显式对照两条
+	assert.deepEqual(validateSplitDoc(doc([beat()]), CTX).errors, []);
+	assert.ok(hasErr(validateSplitDoc(doc([beat({ narrative: "nope" })]), CTX), /narrative 非法/));
+});
