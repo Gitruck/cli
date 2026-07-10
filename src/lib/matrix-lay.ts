@@ -142,29 +142,60 @@ function pairAvail(p: Pair): number {
 	return dur ?? Math.max(0, p.seg.end - p.seg.start);
 }
 
-/**
- * 单 beat 单轨平铺：游标从 track_st 贪心铺到 track_ed。
- * consumed 跨轨共享（(clip,seg) 对不复用 → 轨间方案差异化）。
- */
-export function fillBeatTrack(opts: {
-	beat: PlanBeat;
-	consumed: Set<string>;
-	scoreFloor: number;
-}): FillSlot[] {
-	const { beat, consumed, scoreFloor } = opts;
-	const span = beat.track_ed - beat.track_st;
-	if (!(span > 0)) return [];
+/** 字符串哈希（FNV-1a）→ 种子。 */
+function hashStr(s: string): number {
+	let h = 2166136261;
+	for (let i = 0; i < s.length; i++) {
+		h ^= s.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}
+	return h >>> 0;
+}
+
+/** mulberry32 种子化伪随机：观感随机、同 plan 重跑逐字节同结果（幂等/可测铁律）。 */
+function mulberry32(seed: number): () => number {
+	let a = seed >>> 0;
+	return () => {
+		a = (a + 0x6d2b79f5) >>> 0;
+		let t = a;
+		t = Math.imul(t ^ (t >>> 15), t | 1);
+		t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+/** 节奏区间（主理人 2026-07-11：固定槽长太死板）：派单锚 ×[0.8,1.6]（钳 [1.5,8]），缺省 [2,4]s。 */
+function shotRange(beat: PlanBeat, span: number): [number, number] {
 	const shots =
 		typeof beat.requested_shots === "number" && beat.requested_shots > 0 ? beat.requested_shots : undefined;
-	const shotTarget =
+	const anchor =
 		typeof beat.per_shot_sec === "number" && beat.per_shot_sec > 0
 			? beat.per_shot_sec
 			: shots
 				? Math.min(Math.max(span / shots, 1.5), 6)
-				: SHOT_TARGET_DEFAULT;
-	// 均分定长:碎尾在源头消掉(n 槽等分 span),shotTarget 只是节奏建议(实际槽长偏差 ≤ 半槽)
-	const nTarget = Math.max(1, Math.min(MAX_SLOTS_PER_BEAT, Math.round(span / shotTarget)));
-	const slotDur = Math.max(MIN_SHOT_SEC, span / nTarget);
+				: undefined;
+	if (anchor === undefined) return [2, 4];
+	const lo = Math.max(1.5, anchor * 0.8);
+	const hi = Math.max(lo + 0.5, Math.min(8, anchor * 1.6));
+	return [lo, hi];
+}
+
+/**
+ * 单 beat 单轨平铺：游标从 track_st 贪心铺到 track_ed，槽长节奏随机（区间抽取）+ 尾部整形。
+ * consumed 跨轨共享（(clip,seg) 对不复用 → 轨间方案差异化）。
+ */
+export function fillBeatTrack(opts: {
+	beat: PlanBeat;
+	/** 轨序（0 起）——入种子：同 beat 两条轨节奏各异，重跑可复现。 */
+	trackOrder: number;
+	consumed: Set<string>;
+	scoreFloor: number;
+}): FillSlot[] {
+	const { beat, trackOrder, consumed, scoreFloor } = opts;
+	const span = beat.track_ed - beat.track_st;
+	if (!(span > 0)) return [];
+	const [shotMin, shotMax] = shotRange(beat, span);
+	const rand = mulberry32(hashStr(`${beat.beat}#${trackOrder}`));
 
 	const pools = buildQueryPools(beat, scoreFloor);
 	if (!pools.length) return [];
@@ -178,6 +209,12 @@ export function fillBeatTrack(opts: {
 	for (let slotIdx = 0; slotIdx < MAX_SLOTS_PER_BEAT; slotIdx++) {
 		const remaining = beat.track_ed - cursor;
 		if (remaining < MIN_SHOT_SEC) break; // 碎尾停铺（残量由下方吸收兜底）
+
+		// 槽长抽取 + 尾部整形：剩余 ≤ 上限尾槽吃满；(上限, 上限+下限) 劈两半——正常路径零碎尾
+		let dTarget: number;
+		if (remaining <= shotMax) dTarget = remaining;
+		else if (remaining < shotMax + shotMin) dTarget = remaining / 2;
+		else dTarget = shotMin + rand() * (shotMax - shotMin);
 
 		const minLen = Math.min(MIN_SHOT_SEC, remaining);
 		// query 叙事序轮转：本槽位从 slotIdx 对应的 query 起，池干涸/无合格对则轮下一条
@@ -193,13 +230,13 @@ export function fillBeatTrack(opts: {
 			// 本槽位无合格对（可能仅因紧邻去重被挡）：留空一个镜头位继续，隔空后同 clip 可再用；连空两次视为干涸
 			gapRun++;
 			if (gapRun >= 2) break;
-			cursor += Math.min(slotDur, remaining);
+			cursor += Math.min(dTarget, remaining);
 			prevClip = null;
 			continue;
 		}
 		gapRun = 0;
 
-		const d = Math.min(slotDur, pairAvail(pick), remaining);
+		const d = Math.min(dTarget, pairAvail(pick), remaining);
 		// 源窗：best 居中截 d；有素材时长则钳 [0, dur]（允许出段），否则钳段界
 		const dur = typeof pick.cand.duration === "number" && pick.cand.duration > 0 ? pick.cand.duration : undefined;
 		const lo = dur !== undefined ? 0 : pick.seg.start;
@@ -253,7 +290,7 @@ export function planBeatFills(
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
 		for (let k = 0; k < Math.max(0, lay); k++) {
-			const slots = fillBeatTrack({ beat, consumed, scoreFloor });
+			const slots = fillBeatTrack({ beat, trackOrder: k, consumed, scoreFloor });
 			perTrack.push(slots);
 			for (const s of slots) clipIds.add(s.clip_id);
 		}
