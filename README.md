@@ -18,10 +18,10 @@
 | | 命令 | 做什么 |
 |---|---|---|
 | 🎬 | `gtrk oralcut <毛片>` | 智能口播剪辑闭环：一次出 gtrk + 剪映 + PR 三方工程，自动打开 |
-| ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单 |
+| ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单；`--column <id>` 按栏目词表校验 |
 | ⚙️ | `gtrk init` | 引导式一次性配置（API Key + 剪映草稿目录），之后免管 |
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
-| 🤖 | `gtrk skills install` | 把 `/gtrk-oralcut`、`/gtrk-splitter` skill 装进 Claude Code |
+| 🤖 | `gtrk skills install` | 把 `/gtrk-oralcut`、`/gtrk-splitter`、`/gtrk-style-maker` skill 装进 Claude Code |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
 | 🚧 | `render` / `struct` / `matrix` | 本地渲染 gtrk 成片 /（规划中）已有 gtrk 转三方工程 / B-roll 检索 |
 
@@ -84,18 +84,44 @@ irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex
 | Skill | 触发 | 做什么 |
 |---|---|---|
 | `/gtrk-oralcut` | 斜杠，或「剪口播 / 智能剪辑 / 去掉废话停顿 / 出剪映草稿」 | 驱动 `oralcut` 闭环：云端剪辑 → 拉回三方工程 → 验证 → 回报三端打开方式 |
+| `/gtrk-splitter` | 「文稿视觉化拆分 / 派分镜 / beat 时间线」 | 产视觉拆分稿，交给 `gtrk split` 校验落地（时码永远归 CLI） |
+| `/gtrk-style-maker` | 「建我栏目的风格体系 / 把审美沉淀成 skill / 栏目配置怎么填」 | **能生产 skill 的 meta skill**：启发式访谈帮你把自己的视觉语法落成你自己的 skill 家族 + 栏目配置（见下节） |
+
+---
+
+## 栏目与风格：两层结构
+
+> **栏目配置是装修厨房，成片是每天做菜。你不会每做一道菜先重新装修一遍厨房，但每道菜确实都在你装修好的厨房里做。**
+
+整个体系分两层，时间尺度完全不同：
+
+**【栏目层 · 一次性/低频】= 建栏目（装修厨房）**
+跑 `/gtrk-style-maker`（meta skill），它通过启发式访谈帮你想清楚**你自己的**视觉语法——不预设任何维度：不假设你有叙事结构、有主题系统、视觉分动画/实拍，你的维度和取值全部由你自己定义。产出：
+
+- 你自己的可执行 skill 家族（落 `~/.claude/skills`，黑盒、留本地）
+- 栏目内共享词表（家族各 skill 引用，防多处定义漂移）
+- 栏目配置 `~/.gitruck/columns/<id>.json`（词表 vocab + B-roll 检索偏好 + style 引用清单）
+
+**【成片层 · 每片跑】= 做菜（流程形状不变）**
+剪口播 → 拆文稿 → 派单（B-roll 检索 / 动效 / 再现）→ 装配 → 渲染。每一步显式消费当前栏目配置：拆文稿按你的词表校验（`--column <id>` 或 config `defaultColumn`），各车道走你自己的生产 skill。
+
+**不建栏目？直接用默认"厨房"。** 零配置 = 内置默认栏目，端到端照常跑通，行为与配置化之前逐字节一致——栏目层是可选资产，不是必经关卡。
+
+**管线契约**：框架对审美零预设、对管线接口全权威。产物要进渲染管线的 skill 须满足对应契约（见 [`contracts/`](./contracts/README.md)，如 HTML 动画颗粒的 `gsap-emit v1`）；契约只约束机器可判定的管线属性，画面长什么样永远归你。
 
 ---
 
 ## 配置
 
-`gtrk init` 把配置写到 `~/.gtrk-cli/config.json`。读取优先级：**环境变量 / `.env` > `init` 持久配置 > 默认根地址**。
+`gtrk init` 把配置写到 `~/.gitruck/config.json`（用户级统一目录，config / 缓存 / ffmpeg / 栏目配置全在 `~/.gitruck/`）。读取优先级：**环境变量 / `.env` > `init` 持久配置 > 默认根地址**。
 
 | 项 | 来源 | 说明 |
 |---|---|---|
 | `GITRUCK_API_KEY` | env / init | 鉴权 Header `Authorization` 的**裸值**（非 Bearer） |
 | `GITRUCK_API_BASE` | env / init | API 根地址，默认 `https://api.ai-mcn.tv:10000` |
 | 剪映草稿目录 | init / 自动探测 / `--jianying-draft-dir` | 决定剪映草稿落哪、能否直接打开 |
+| `defaultColumn` | config.json 手填 | 缺省栏目配置 id（`gtrk split` 未传 `--column` 时用它；再缺省 = 内置默认栏目） |
+| 栏目配置 | `~/.gitruck/columns/<id>.json` | 一栏目一文件；由 `/gtrk-style-maker` 生成登记，也可手写 |
 
 非交互配置（脚本 / CI）：
 
@@ -173,7 +199,7 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 ## 注意
 
 - 剪映 / CapCut 草稿需 `draft_content.json` + `draft_meta_info.json` **成对**才被软件识别——要么 `gtrk init` 配好草稿目录、要么 `--jianying-draft-dir` 指定，否则只产 content、需手动导入。
-- 多台机器盘符不同时，配置走 `~/.gtrk-cli/`（用户级），产物默认落毛片同目录。
+- 多台机器盘符不同时，配置走 `~/.gitruck/`（用户级；旧 `~/.gtrk-cli` 首次启动自动迁移），产物默认落毛片同目录。
 - 节奏预设强度以云端为准；`--preset` 只选预设、不改源裁剪。
 
 ---
@@ -183,9 +209,10 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 ```
 gtrk-cli/
 ├── src/index.ts              # commander 入口
-├── src/commands/             # 子命令：install / init / oralcut / doctor / upgrade / skills
-├── src/lib/                  # cloud / config / user-config / jianying / open / upload-cache / log
-├── skills/gtrk-oralcut/      # 打包的 agent skill（skills install 装它）
+├── src/commands/             # 子命令：install / init / oralcut / split / doctor / upgrade / skills
+├── src/lib/                  # cloud / column-config / splitdoc / projection / user-config / jianying / …
+├── skills/                   # 打包的 agent skills：gtrk-oralcut / gtrk-splitter / gtrk-style-maker
+├── contracts/                # 框架契约库正本（gsap-emit v1 + handoff→契约映射表）
 ├── assets/                   # 剪映草稿目录指引图
 └── AGENT.md                  # 可移植 agent playbook（skill 底座）
 ```

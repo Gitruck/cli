@@ -4,7 +4,9 @@
  */
 import { Command } from "commander";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { readUserConfig, configPath, DEFAULT_API_BASE } from "../lib/user-config";
+import { columnsDir } from "../lib/column-config";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
@@ -93,6 +95,17 @@ export async function runDoctor(): Promise<boolean> {
 		name: "配置文件",
 		status: existsSync(configPath()) ? "ok" : "warn",
 		detail: existsSync(configPath()) ? configPath() : `未生成 —— 跑 gtrk init（${configPath()}）`,
+	});
+
+	// 栏目（轻引导，恒 ok 不挡路）：不建栏目就用默认"厨房"，建了显示当前生效栏目
+	const col = uc.defaultColumn;
+	const colFile = col ? join(columnsDir(), `${col}.json`) : undefined;
+	rows.push({
+		name: "当前栏目",
+		status: "ok",
+		detail: col
+			? `${col}${colFile && existsSync(colFile) ? `（${colFile}）` : `（⚠ 配置文件缺失：${colFile}，将回落内置默认）`}`
+			: "内置默认 —— 想建自己栏目的风格体系，跑 /gtrk-style-maker（不建也能直接用默认）",
 	});
 
 	// 本地渲染工具（ffmpeg）：判 warn 不判 fail —— 只出工程文件、不本地渲染的用户不受阻
