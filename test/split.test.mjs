@@ -154,7 +154,7 @@ test("金样端到端 dry-run：20-beat 落地 → struct_meta.split + dispatch 
 		assert.ok(typeof film.track_st === "number" && typeof film.track_ed === "number");
 		// AI_DRAMA 透传 handoff
 		assert.equal(dispatch.ai_drama[0].beat, "B07");
-		assert.equal(dispatch.ai_drama[0].platform, "kling");
+		assert.equal(dispatch.ai_drama[0].platform, "video-gen");
 
 		// --md 人读稿落盘
 		assert.ok(existsSync(join(proj, "split", "visual-split.md")));

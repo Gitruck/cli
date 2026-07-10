@@ -109,6 +109,8 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 
 ## 拆分方法论（沿《实在界漫游指南》视觉语法精华）
 
+> **词表随栏目配置**：下文的叙事功能（narrative）与容器阶段（container_stage）枚举、底轨三态，是**默认栏目《实在界漫游指南》的词表**，不是固定枚举。`gtrk split` 的校验源 = 有效栏目配置的 vocab（`--column <id>` 或 config `defaultColumn` 选取，配置文件在 `~/.gitruck/columns/<id>.json`）；别的栏目可自定义自己的叙事语法（科普=论点/论据/结论、带货=痛点/卖点/促单……），配置 `fallback.unknown_narrative="allow"` 时甚至可用纯自由串。零配置 = 默认栏目，行为与下文完全一致。lane 四车道仍是硬枚举（管线承重面），不随 vocab 放宽。
+
 ### 四车道语义（lane 四选一）
 
 - **`A_ROLL`（真人出镜）**：信任感来自「观众看见真人正在说」。优先给：体验式钩子、立场转换、关键悬念、情绪抱持、理论升华、结尾发问。
