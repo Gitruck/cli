@@ -18,6 +18,8 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { projectTranscript, type Transcript, type ProjectionView } from "../lib/projection";
 import { validateSplitDoc, buildLanding, renderSplitMarkdown, type SplitDoc } from "../lib/splitdoc";
+import { resolveColumnConfig, effectiveVocab } from "../lib/column-config";
+import { readUserConfig } from "../lib/user-config";
 import { readGtrk, assertGtrkV1, writeStructMetaSplit } from "../lib/gtrk-writeback";
 import { log, routeLogsToStderr } from "../lib/log";
 
@@ -25,6 +27,7 @@ interface SplitOpts {
 	project?: string;
 	gtrk?: string;
 	transcript?: string;
+	column?: string;
 	md?: boolean;
 	words?: boolean;
 	json?: boolean;
@@ -42,6 +45,7 @@ export function registerSplit(program: Command): void {
 		.option("--project <dir>", "oralcut 产物目录（自动定位 gtrk/project.gtrk 与 transcript/transcript.json）")
 		.option("--gtrk <path>", "显式指定 .gtrk 工程文件（非标准布局兜底）")
 		.option("--transcript <path>", "显式指定 transcript.json（非标准布局兜底）")
+		.option("--column <id>", "栏目配置 id（~/.gitruck/columns/<id>.json；缺省取 config defaultColumn，再缺省内置默认栏目）")
 		.option("--md", "落地时额外渲染人读稿 split/visual-split.md")
 		.option("--words", "视图模式附字级明细（缺省只出句级）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
@@ -172,7 +176,15 @@ async function runLand(
 	assertGtrkV1(gtrk);
 
 	// ② 校验链（结构/枚举 → id 合法 → hash 硬拒），失败零副作用
-	const ctx = { utteranceIds: transcript.utterances.map((u) => u.id), transcriptHash: transcript.text_hash };
+	// 校验源 = 有效栏目配置 vocab（column-config）：--column > config.defaultColumn > 内置默认（零配置逐字节等价现状）
+	const columnId = opts.column ?? readUserConfig().defaultColumn;
+	const resolved = resolveColumnConfig({ columnId });
+	for (const w of resolved.warnings) log.warn(w);
+	const ctx = {
+		utteranceIds: transcript.utterances.map((u) => u.id),
+		transcriptHash: transcript.text_hash,
+		vocab: effectiveVocab(resolved.config),
+	};
 	const { errors, warnings } = validateSplitDoc(doc, ctx);
 	for (const w of warnings) log.warn(w);
 	if (errors.length) {

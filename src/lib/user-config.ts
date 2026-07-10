@@ -17,6 +17,8 @@ export interface UserConfig {
 	apiBase?: string;
 	apiKey?: string;
 	jianyingDraftDir?: string;
+	/** 缺省栏目配置 id（gtrk split --column 未传时取此；再缺省 = 内置默认栏目）。 */
+	defaultColumn?: string;
 }
 
 export function configPath(): string {

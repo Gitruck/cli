@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "comment": "handoff 类型 → 契约映射表（handoff-contract-library spec）。消费方（含 gtrk-style-maker）查此表，不得硬编码映射。null = 暂无契约（产线可用，无合规绑定要求）。注册集当前 = 现行四车道（P2 注册表化前的过渡事实）。",
+  "mappings": {
+    "A_ROLL": null,
+    "RRV_MG": { "contract": "gsap-emit", "version": "v1", "doc": "gsap-emit-v1.md" },
+    "AI_DRAMA": null,
+    "FILM_BROLL": null
+  }
+}
