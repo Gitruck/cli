@@ -23,7 +23,9 @@
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
 | 🤖 | `gtrk skills install` | 把 `/gtrk-oralcut`、`/gtrk-splitter`、`/gtrk-style-maker` skill 装进 Claude Code |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
-| 🚧 | `render` / `struct` / `matrix` | 本地渲染 gtrk 成片 /（规划中）已有 gtrk 转三方工程 / B-roll 检索 |
+| 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg） |
+| 🔎 | `gtrk matrix` | B-roll 检索：消费 `split/dispatch.json` 的 FILM_BROLL 派单 → 产 `split/broll-plan.json` 候选清单（按栏目偏好检索）；`matrix search "<词>"` 单条 ad-hoc |
+| 🚧 | `struct` | （规划中）已有 gtrk 转三方工程 |
 
 ---
 
@@ -103,7 +105,7 @@ irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex
 - 栏目配置 `~/.gitruck/columns/<id>.json`（词表 vocab + B-roll 检索偏好 + style 引用清单）
 
 **【成片层 · 每片跑】= 做菜（流程形状不变）**
-剪口播 → 拆文稿 → 派单（B-roll 检索 / 动效 / 再现）→ 装配 → 渲染。每一步显式消费当前栏目配置：拆文稿按你的词表校验（`--column <id>` 或 config `defaultColumn`），各车道走你自己的生产 skill。
+剪口播 → 拆文稿 → 派单（B-roll 检索 / 动效 / 再现）→ 装配 → 渲染。每一步显式消费当前栏目配置：拆文稿按你的词表校验（`--column <id>` 或 config `defaultColumn`），B-roll 检索按你栏目的检索偏好（`broll.column_tag_ids` 栏目标签 / `material_class_policy` / facets），各车道走你自己的生产 skill。
 
 **不建栏目？直接用默认"厨房"。** 零配置 = 内置默认栏目，端到端照常跑通，行为与配置化之前逐字节一致——栏目层是可选资产，不是必经关卡。
 
