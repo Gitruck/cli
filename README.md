@@ -24,7 +24,7 @@
 | 🤖 | `gtrk skills install` | 把 `/gtrk-oralcut`、`/gtrk-splitter`、`/gtrk-style-maker` skill 装进 Claude Code |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
 | 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg） |
-| 🔎 | `gtrk matrix` | B-roll 检索：消费 `split/dispatch.json` 的 FILM_BROLL 派单 → 产 `split/broll-plan.json` 候选清单（按栏目偏好检索）；`matrix search "<词>"` 单条 ad-hoc |
+| 🔎 | `gtrk matrix` | B-roll 检索+**候选铺轨**：消费 FILM_BROLL 派单 → 产候选清单 + 下载 preview 代理铺 N 条候选轨（`--lay N` 默认 1，opencut 打开即可用轨道小眼睛对比；`--lay 0` 只出清单）；`matrix search "<词>"` 单条 ad-hoc |
 | 🚧 | `struct` | （规划中）已有 gtrk 转三方工程 |
 
 ---
