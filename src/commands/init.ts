@@ -2,7 +2,7 @@
  * gtrk init —— 一次性安装配置（对标飞书 lark-cli install 的引导式体验）：
  *   ① 填 API Key（支持 Ctrl+V 粘贴）
  *   ② 自动扫描剪映草稿目录；扫不到则打开指引图 + 让用户手动粘贴
- * 写入 ~/.gtrk-cli/config.json，之后所有命令免重复配置。
+ * 写入 ~/.gitruck/config.json，之后所有命令免重复配置。
  */
 import { Command } from "commander";
 import { join, resolve } from "node:path";
@@ -142,6 +142,9 @@ async function afterConfigDoctor(): Promise<void> {
 		log.info('① 命令行直接剪：gtrk oralcut "<毛片.mp4>" --script "<文字稿.txt>"（无稿就别加 --script）');
 		log.info(
 			"② 重启你常用的 AI agent（Claude / Codex / Trae / WorkBuddy 等），用 /gtrk-oralcut <你的口播剪辑需求>，一句话交给它，体验更智能的剪辑~",
+		);
+		log.info(
+			"想有自己栏目的风格体系？在 agent 里跑 /gtrk-style-maker 建一次「你的厨房」（skill 家族 + 栏目配置）；不建就直接用默认，照常开剪。",
 		);
 	} else {
 		log.warn("上面体检有项没通，按提示处理好再开剪（多半是 API Key 或剪映目录）。");
