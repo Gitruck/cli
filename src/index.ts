@@ -30,6 +30,7 @@ import { registerUpgrade } from "./commands/upgrade";
 import { registerRender } from "./commands/render";
 import { registerSplit } from "./commands/split";
 import { registerMatrix } from "./commands/matrix";
+import { registerRrv } from "./commands/rrv";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -66,6 +67,7 @@ registerRender(program); // 本地渲染 gtrk 工程（EDL）→ 成片 mp4
 registerSplit(program); // 视觉拆分派单器：transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch
 // registerStruct(program);   // 已有 gtrk → 三方工程文件
 registerMatrix(program); // B-roll 检索：dispatch.film_broll → split/broll-plan.json 候选清单（双口路由）
+registerRrv(program); // RRV_MG 颗粒铺轨：dispatch.rrv_mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track
 
 program.parseAsync(process.argv).catch((e: unknown) => {
 	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);
