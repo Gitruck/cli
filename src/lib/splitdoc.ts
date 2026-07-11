@@ -243,6 +243,10 @@ function validateHandoff(
 		if (!handoff || typeof handoff.duration_hint !== "number") {
 			errors.push(`${tag}：RRV_MG 的 handoff.duration_hint 必填（秒，数值）`);
 		}
+		// category 可选软校验（裁决⑩，lane 不新增故宽松：非法只告警不拒）
+		if (handoff && handoff.category !== undefined && !isRrvCategory(handoff.category)) {
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${RRV_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+		}
 		return;
 	}
 	if (lane === "FILM_BROLL") {
@@ -311,6 +315,8 @@ export interface SplitMetaBeat {
 	narrative?: string;
 	container_stage?: string;
 	visual_task?: string;
+	/** RRV_MG 品类子类型透传（裁决⑩）：供 opencut 色带按 category 分层（RRV 透明/MG 不透明）。 */
+	category?: string;
 }
 
 export interface StructMetaSplit {
@@ -322,10 +328,26 @@ export interface StructMetaSplit {
 	beats: SplitMetaBeat[];
 }
 
+/** RRV_MG 颗粒品类子类型（裁决⑩，不新增 lane）。一期 rrv-overlay/mg-fullscreen；二期扩后两枚。 */
+export const RRV_CATEGORIES = ["rrv-overlay", "mg-fullscreen", "explain-subtitle", "op-ed-title"] as const;
+export type RrvCategory = (typeof RRV_CATEGORIES)[number];
+/** 一期透明/不透明默认映射（category → 期望 opaque）。透明品类→false，满屏品类→true。 */
+export const CATEGORY_EXPECTED_OPAQUE: Record<string, boolean> = {
+	"rrv-overlay": false,
+	"mg-fullscreen": true,
+	"explain-subtitle": false,
+	"op-ed-title": true,
+};
+export function isRrvCategory(v: unknown): v is RrvCategory {
+	return typeof v === "string" && (RRV_CATEGORIES as readonly string[]).includes(v);
+}
+
 export interface RrvDispatch {
 	beat: string;
 	composition_id: string;
 	duration: number | null;
+	/** 品类子类型（可选；缺省=向后兼容，下游回落颗粒 HTML 反推 opaque）。 */
+	category?: unknown;
 	theme?: unknown;
 	bg?: unknown;
 	slug_hint?: unknown;
@@ -452,6 +474,8 @@ export function buildLanding(
 		if (beat.narrative) metaBeat.narrative = beat.narrative;
 		if (beat.container_stage) metaBeat.container_stage = beat.container_stage;
 		if (beat.visual_task) metaBeat.visual_task = beat.visual_task;
+		// RRV_MG 品类透传（裁决⑩）：供 opencut 色带按 category 分层
+		if (beat.lane === "RRV_MG" && typeof beat.handoff?.category === "string") metaBeat.category = beat.handoff.category;
 		if (beat.lane !== "A_ROLL" && beat.handoff) metaBeat.handoff = beat.handoff;
 		split.beats.push(metaBeat);
 
@@ -466,6 +490,7 @@ export function buildLanding(
 				beat: beat.id,
 				composition_id: compositionId,
 				duration: typeof h.duration_hint === "number" ? h.duration_hint : null,
+				...(h.category !== undefined ? { category: h.category } : {}),
 				theme: h.theme,
 				bg: h.bg,
 				slug_hint: h.slug_hint,

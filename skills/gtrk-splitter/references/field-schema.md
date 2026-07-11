@@ -49,8 +49,11 @@
 
 ```jsonc
 // lane === "RRV_MG"
-"handoff": { "slug_hint": "neural-overfit", "theme": "overfitting", "bg": "paper", "duration_hint": 12 }
-//   duration_hint（秒）必填；slug_hint / theme / bg 可选（bg 底色可由底轨态推导）
+"handoff": { "category": "rrv-overlay", "slug_hint": "neural-overfit", "theme": "overfitting", "bg": "paper", "duration_hint": 12 }
+//   duration_hint（秒）必填；slug_hint / theme / bg / category 可选（bg 底色可由底轨态推导）
+//   category（颗粒品类子类型，裁决⑩）：rrv-overlay（透明叠加,叠在 A-roll/B-roll 上,不挡主体）
+//     | mg-fullscreen（不透明满屏,旁白主导整帧）；缺省=下游按颗粒 HTML 根 background 反推透明度。
+//     二期扩 explain-subtitle/op-ed-title。供剪辑器色带按品类分层(RRV/MG 各一行)。
 
 // lane === "FILM_BROLL"
 "handoff": { "queries": ["lonely person in a city apartment at night", "exhausted commuter on a crowded subway train"], "shots": 6, "per_shot_sec": 2, "exclude": ["卡通", "水印"] }
@@ -90,7 +93,7 @@
 - **`.gtrk` 的 `struct_meta.split`**：`{contract_version, transcript_hash, projected_at, material_id, beats:[{id, lane, span, track_st, track_ed, source_ranges, narrative, container_stage, visual_task, shrunk?, handoff}]}`——投影时刻快照。**消费方要新鲜时码就重新投影**（`gtrk split --project`）。
   - `material_id`：口播素材 id（= transcript.material_id），消费方脱离 transcript 文件即可定位素材。
   - `beats[].source_ranges`：`[{st, ed}]` 源时基秒（v1 恒单元素 = span 源包络，含句间静默与被剪词）——**源时基不随时间线编辑漂移**，消费方以「源区间 ∩ 当刻颗粒源窗口」投影可得实时覆盖（客户端色带跟随模式即此）。
-- **`split/dispatch.json`**：`{rrv_mg:[{beat, composition_id, duration, theme, bg, slug_hint, track_st, track_ed}], film_broll:[{beat, queries, shots, per_shot_sec, exclude, track_st, track_ed}], ai_drama:[{beat, ...handoff, track_st, track_ed}]}`。`composition_id` = `<工程slug>-<beatId>`（rrv 颗粒 `data-composition-id` 直接用它，打通 beat↔颗粒命名）。
+- **`split/dispatch.json`**：`{rrv_mg:[{beat, composition_id, duration, category?, theme, bg, slug_hint, track_st, track_ed}], film_broll:[{beat, queries, shots, per_shot_sec, exclude, track_st, track_ed}], ai_drama:[{beat, ...handoff, track_st, track_ed}]}`。`composition_id` = `<工程slug>-<beatId>`（rrv 颗粒 `data-composition-id` 直接用它，打通 beat↔颗粒命名）。
 - **`split/visual-split.md`**（`--md`）：由机器 JSON 单向渲染的人读稿，不回读。
 
 ## 落地时的 dropped 处理（你要知道）

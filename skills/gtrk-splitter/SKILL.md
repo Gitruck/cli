@@ -72,7 +72,7 @@ gtrk split --project "<oralcut产物目录>" --json
 关键：
 - `lane` 四选一 `A_ROLL | RRV_MG | AI_DRAMA | FILM_BROLL`；`base_track` 三选一 `真人出镜 | 口播继续 | 旁白主导`。
 - **handoff 按 lane 分型**（校验器会硬查）：
-  - `RRV_MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**。
+  - `RRV_MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**；可选 `category`（rrv-overlay 透明/mg-fullscreen 不透明,裁决⑩,供色带分层,详见 field-schema）。
   - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?}`，**`queries` 非空必填**；queries 写**英文长句场景描述**（一条一个意象，避多义动词），**exclude 保持中文**（细则见 field-schema）。
   - `AI_DRAMA` → `handoff:{narrative?, theme?, emotion_stage?, platform?, shot_count?}`，全可选（下游 ai-drama-prompter 有推断默认）。
   - `A_ROLL` → **无 handoff**（写了会被警告忽略）。

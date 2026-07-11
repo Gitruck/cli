@@ -47,9 +47,17 @@ function deriveOpaque(rootTagStr: string | null): { opaque: boolean; declared: b
 	return { opaque: !transparent, declared: true };
 }
 
+/** 一期品类→期望透明度（与 splitdoc CATEGORY_EXPECTED_OPAQUE 同源，此处独立避跨包依赖）。 */
+const CATEGORY_EXPECTED_OPAQUE: Record<string, boolean> = {
+	"rrv-overlay": false,
+	"mg-fullscreen": true,
+	"explain-subtitle": false,
+	"op-ed-title": true,
+};
+
 export function lintParticle(
 	html: string,
-	opts: { compositionId?: string; dispatchIds?: string[] } = {},
+	opts: { compositionId?: string; dispatchIds?: string[]; category?: string } = {},
 ): LintResult {
 	const v: LintViolation[] = [];
 	const push = (law: string, fatal: boolean, msg: string) => v.push({ law, fatal, msg });
@@ -117,6 +125,13 @@ export function lintParticle(
 	const effectiveCid = opts.compositionId ?? cid;
 	if (opts.dispatchIds && effectiveCid && !opts.dispatchIds.includes(effectiveCid))
 		push("x-dispatch", false, `composition_id "${effectiveCid}" 不在 dispatch.rrv_mg 派单中`);
+
+	// 品类↔opaque 对账（裁决⑩，声明+校验；以 HTML 反推 opaque 为准，不符只告警）
+	if (opts.category && opts.category in CATEGORY_EXPECTED_OPAQUE) {
+		const expect = CATEGORY_EXPECTED_OPAQUE[opts.category];
+		if (expect !== opaque)
+			push("x-category-opaque", false, `category「${opts.category}」期望${expect ? "不透明满屏" : "透明叠加"}，但颗粒 HTML 反推为${opaque ? "不透明满屏" : "透明叠加"}（以 HTML 为准落 clip.opaque=${opaque}）`);
+	}
 
 	return { ok: !v.some((x) => x.fatal), violations: v, opaque, compositionId: cid };
 }
