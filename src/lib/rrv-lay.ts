@@ -23,6 +23,8 @@ export interface RrvLayItem {
 	opaque: boolean;
 	/** 相对 gtrk 目录的 .html 路径（assets/rrv/<composition_id>.html） */
 	html_rel: string;
+	/** 品类子类型（裁决⑩，可选）：rrv-overlay/mg-fullscreen…；供 opencut 色带分层 */
+	category?: string;
 }
 
 export interface RrvMetaBeat {
@@ -32,6 +34,7 @@ export interface RrvMetaBeat {
 	track_ed: number;
 	duration: number;
 	html_path: string;
+	category?: string;
 	laid: { track_index: number } | null;
 }
 export interface StructMetaRrv {
@@ -156,5 +159,6 @@ function toMetaBeat(it: RrvLayItem): Omit<RrvMetaBeat, "laid"> {
 		track_ed: r3(it.track_ed),
 		duration: it.duration,
 		html_path: it.html_rel,
+		...(it.category ? { category: it.category } : {}),
 	};
 }
