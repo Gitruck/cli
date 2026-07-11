@@ -105,7 +105,8 @@ async function runLay(opts: RrvOpts): Promise<RrvResult> {
 			continue;
 		}
 		const html = await readFile(srcPath, "utf8");
-		const lint = lintParticle(html, { compositionId: q.composition_id, dispatchIds });
+		const category = typeof q.category === "string" ? q.category : undefined;
+		const lint = lintParticle(html, { compositionId: q.composition_id, dispatchIds, category });
 		for (const vv of lint.violations) (vv.fatal ? log.warn : log.info)(`${q.beat} lint ${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
 		if (!lint.ok) {
 			skipped.push({ beat: q.beat, reason: "lint 未过" });
@@ -125,6 +126,7 @@ async function runLay(opts: RrvOpts): Promise<RrvResult> {
 			duration: q.duration,
 			opaque: lint.opaque,
 			html_rel: `${RRV_ASSET_DIR}/${q.composition_id}.html`,
+			...(category ? { category } : {}),
 		});
 	}
 

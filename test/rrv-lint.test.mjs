@@ -96,6 +96,21 @@ test("script src 相对路径致命", () => {
 	assert.ok(r.violations.some((v) => v.law === "4-script-rel" && v.fatal));
 });
 
+test("category↔opaque 对账：自洽无告警 / 冲突告警非致命（裁决⑩）", () => {
+	// mg-fullscreen 期望不透明，颗粒有 background(opaque=true) → 自洽
+	const okMg = lintParticle(good("proj-B06", "background:#0A1420;"), { category: "mg-fullscreen" });
+	assert.ok(!okMg.violations.some((v) => v.law === "x-category-opaque"));
+	assert.equal(okMg.ok, true);
+	// rrv-overlay 期望透明，颗粒无 background(opaque=false) → 自洽
+	const okRrv = lintParticle(good("proj-B07", ""), { category: "rrv-overlay" });
+	assert.ok(!okRrv.violations.some((v) => v.law === "x-category-opaque"));
+	// 冲突：mg-fullscreen 期望不透明但颗粒透明 → 告警非致命，opaque 以 HTML 为准
+	const conflict = lintParticle(good("proj-B07", "background:transparent;"), { category: "mg-fullscreen" });
+	assert.ok(conflict.violations.some((v) => v.law === "x-category-opaque" && !v.fatal));
+	assert.equal(conflict.ok, true);
+	assert.equal(conflict.opaque, false); // HTML 反推为准
+});
+
 test("composition_id 不在 dispatch → 告警非致命", () => {
 	const r = lintParticle(good("proj-B06"), { dispatchIds: ["proj-B02", "proj-B05"] });
 	assert.ok(r.violations.some((v) => v.law === "x-dispatch" && !v.fatal));
