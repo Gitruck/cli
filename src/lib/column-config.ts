@@ -215,6 +215,16 @@ export function resolveColumnConfig(
 
 /** handoff 注册集：P2 注册表化前的过渡事实 = 现行四车道。取值与演进归 lane/handoff 侧，此处只引用。 */
 const HANDOFF_REGISTRY: readonly string[] = LANES;
+/** 遗留 handoff 别名（去品牌化读旧）：produces 声明的旧品牌值归一后再对注册集判定，认旧不误报拼写。 */
+const LEGACY_HANDOFF_ALIASES: Record<string, string> = { RRV_MG: "MG" };
+/** produces 值归一：命中遗留别名即换中性名，否则原样。 */
+function normalizeHandoffType(v: string): string {
+	return LEGACY_HANDOFF_ALIASES[v] ?? v;
+}
+/** 是否命中注册集（归一后判定，双名认旧）。 */
+function isRegisteredHandoff(v: string): boolean {
+	return HANDOFF_REGISTRY.includes(normalizeHandoffType(v));
+}
 
 function normalizeEntries<T extends { id?: unknown; ref?: unknown }>(
 	list: unknown,
@@ -283,10 +293,11 @@ function producesValues(e: StyleSkillEntry): string[] {
 	return [];
 }
 
-/** 该 skill 条目是否命中某 handoff 类型（用于派单消费方按类型检索产能登记）。 */
+/** 该 skill 条目是否命中某 handoff 类型（用于派单消费方按类型检索产能登记）。双名认旧：查询与声明均归一后比对。 */
 export function skillsProducing(style: ColumnStyle | undefined, handoffType: string): StyleSkillEntry[] {
 	if (!style?.skills) return [];
-	return style.skills.filter((e) => producesValues(e).includes(handoffType));
+	const target = normalizeHandoffType(handoffType);
+	return style.skills.filter((e) => producesValues(e).some((v) => normalizeHandoffType(v) === target));
 }
 
 /**
@@ -300,7 +311,8 @@ export function producesNotices(style: ColumnStyle | undefined): string[] {
 	for (const e of style.skills) {
 		if (e.routing === "none") continue;
 		for (const v of producesValues(e)) {
-			if (HANDOFF_REGISTRY.includes(v) || seen.has(v)) continue;
+			// 归一后命中注册集（含遗留别名 RRV_MG→MG）即认旧、不误报为拼写
+			if (isRegisteredHandoff(v) || seen.has(v)) continue;
 			const near = HANDOFF_REGISTRY.find(
 				(r) => r.toLowerCase() === v.toLowerCase() || editDistance(r.toUpperCase(), v.toUpperCase()) <= 2,
 			);

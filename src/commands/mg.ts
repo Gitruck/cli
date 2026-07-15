@@ -1,28 +1,32 @@
 /**
- * gtrk rrv —— RRV_MG 颗粒生产铺轨（add-rrv-lay）。
+ * gtrk mg —— MG 颗粒生产铺轨（add-rrv-lay，去品牌化前 gtrk rrv）。
  *
  * 脑手分工：real-roam-viz skill=脑（产 GSAP 颗粒 HTML），本命令=手（lint / 铺轨 / 看板）。
  * **不云渲、不下载 webm**——渲染是客户端出片期的事（客户端有内容 key 缓存）。
  *
  * 三模式（沿 matrix/split 的「顶层命令 + 可选 positional」范式）：
- *   gtrk rrv --project <dir>        消费 dispatch.rrv_mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track
- *   gtrk rrv lint <particle.html>   单文件纯本地静态 lint（六铁律静态子集）
- *   gtrk rrv status --project <dir> 编排看板（几 beat / 几已产 / 几已铺）
+ *   gtrk mg --project <dir>        消费 dispatch.mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track
+ *   gtrk mg lint <particle.html>   单文件纯本地静态 lint（六铁律静态子集）
+ *   gtrk mg status --project <dir> 编排看板（几 beat / 几已产 / 几已铺）
+ *
+ * 去品牌化双名认旧：命令保留弃用别名 `gtrk rrv`；dispatch 读 `mg ?? rrv_mg`；源目录双探 `mg/ ∪ rrv/`；
+ * struct_meta 读 `mg ?? rrv`。写侧一律新名（assets/mg、mg- 前缀、struct_meta.mg）。
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { readFile, mkdir, copyFile } from "node:fs/promises";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
-import { lintParticle } from "../lib/rrv-lint";
-import { layRrvTracks, type RrvLayItem, type StructMetaRrv } from "../lib/rrv-lay";
-import type { Dispatch, RrvDispatch } from "../lib/splitdoc";
+import { lintParticle } from "../lib/mg-lint";
+import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
+import type { Dispatch, MgDispatch } from "../lib/splitdoc";
 import { log, routeLogsToStderr } from "../lib/log";
 
-const RRV_SRC_DIR = "rrv"; // <project>/rrv/<composition_id>.html （agent 产出源）
-const RRV_ASSET_DIR = "assets/rrv"; // <gtrk-dir>/assets/rrv/<composition_id>.html （工程自包含落地）
+const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
+// 源目录双探（读旧兼容）：写侧 mg/，读侧并集 mg/ ∪ rrv/（既有工程零迁移）
+const MG_SRC_DIRS = ["mg", "rrv"] as const;
 
-interface RrvOpts {
+interface MgOpts {
 	project?: string;
 	dispatch?: string;
 	only?: string;
@@ -30,34 +34,36 @@ interface RrvOpts {
 	json?: boolean;
 }
 
-export function registerRrv(program: Command): void {
+export function registerMg(program: Command): void {
 	program
-		.command("rrv [words...]")
+		.command("mg [words...]")
+		.alias("rrv") // 去品牌化弃用别名：`gtrk rrv` 旧脚本/skill 不断（打 deprecation 提示）
 		.description(
-			"RRV_MG 颗粒铺轨：无 positional=消费 dispatch.rrv_mg 铺 html-particle；`rrv lint <file>`=单文件 lint；`rrv status`=看板",
+			"MG 颗粒铺轨：无 positional=消费 dispatch.mg 铺 html-particle；`mg lint <file>`=单文件 lint；`mg status`=看板",
 		)
 		.option("--project <dir>", "oralcut 产物目录（定位 split/dispatch.json 与工程）")
 		.option("--dispatch <path>", "显式指定 dispatch.json（非标准布局兜底）")
 		.option("--only <beat>", "只跑单 beat")
 		.option("--lint-only", "只 lint 校验，不铺轨不写回")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
-		.action(async (words: string[] | undefined, opts: RrvOpts) => {
-			await runRrv(words ?? [], opts);
+		.action(async (words: string[] | undefined, opts: MgOpts) => {
+			if (process.argv[2] === "rrv") log.warn("`gtrk rrv` 已更名为 `gtrk mg`（去品牌化），别名仍可用但建议改用 `gtrk mg`。");
+			await runMg(words ?? [], opts);
 		});
 }
 
 /** 命令分派（导出供测试直调）：空=铺轨 / `lint <file>` / `status`。 */
-export async function runRrv(words: string[], opts: RrvOpts): Promise<RrvResult> {
+export async function runMg(words: string[], opts: MgOpts): Promise<MgResult> {
 	if (opts.json) routeLogsToStderr();
 	const sub = words[0];
 	if (sub === "lint") return runLint(words.slice(1), opts);
 	if (sub === "status") return runStatus(opts);
-	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk rrv --project <dir>；lint：gtrk rrv lint <file>；看板：gtrk rrv status`);
+	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status`);
 	return runLay(opts);
 }
 
 /** 定位 dispatch + baseDir（同 matrix）。 */
-function resolveDispatch(opts: RrvOpts): { dispatchPath: string; baseDir: string } {
+function resolveDispatch(opts: MgOpts): { dispatchPath: string; baseDir: string } {
 	if (opts.dispatch) {
 		const dispatchPath = resolve(opts.dispatch);
 		return { dispatchPath, baseDir: dirname(dirname(dispatchPath)) };
@@ -73,35 +79,46 @@ function locateGtrk(baseDir: string): string | undefined {
 	return [join(baseDir, "gtrk", "project.gtrk"), join(baseDir, "project.gtrk")].find((p) => existsSync(p));
 }
 
-async function readRrvQueue(dispatchPath: string): Promise<RrvDispatch[]> {
-	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split 落地派单）`);
-	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch;
-	return Array.isArray(dispatch.rrv_mg) ? dispatch.rrv_mg : [];
+/** 定位颗粒源 HTML：双探源目录（mg/ 写侧、rrv/ 读旧），命中即返回绝对路径。 */
+function locateSrcHtml(baseDir: string, compositionId: string): string | undefined {
+	for (const d of MG_SRC_DIRS) {
+		const p = join(baseDir, d, `${compositionId}.html`);
+		if (existsSync(p)) return p;
+	}
+	return undefined;
 }
 
-interface RrvResult {
+async function readMgQueue(dispatchPath: string): Promise<MgDispatch[]> {
+	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split 落地派单）`);
+	// dispatch 桶读旧兼容：新键 mg，遗留键 rrv_mg（既有 dispatch.json 零迁移）
+	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch & { rrv_mg?: MgDispatch[] };
+	const queue = dispatch.mg ?? dispatch.rrv_mg;
+	return Array.isArray(queue) ? queue : [];
+}
+
+interface MgResult {
 	ok: boolean;
 	mode: "lay" | "lint" | "status";
 	[k: string]: unknown;
 }
 
 /** 铺轨模式。 */
-async function runLay(opts: RrvOpts): Promise<RrvResult> {
+async function runLay(opts: MgOpts): Promise<MgResult> {
 	const { dispatchPath, baseDir } = resolveDispatch(opts);
-	let queue = await readRrvQueue(dispatchPath);
+	let queue = await readMgQueue(dispatchPath);
 	if (opts.only) queue = queue.filter((q) => q.beat === opts.only);
-	log.step(`▶ RRV 颗粒铺轨：${queue.length} 个 beat…`);
+	log.step(`▶ MG 颗粒铺轨：${queue.length} 个 beat…`);
 
 	const dispatchIds = queue.map((q) => q.composition_id);
-	const items: RrvLayItem[] = [];
+	const items: MgLayItem[] = [];
 	const srcByComp = new Map<string, string>(); // composition_id → 源 HTML 绝对路径（供复制）
 	const skipped: { beat: string; reason: string }[] = [];
 
 	for (const q of queue) {
-		const srcPath = join(baseDir, RRV_SRC_DIR, `${q.composition_id}.html`);
-		if (!existsSync(srcPath)) {
+		const srcPath = locateSrcHtml(baseDir, q.composition_id);
+		if (!srcPath) {
 			skipped.push({ beat: q.beat, reason: "缺颗粒 HTML（未产出）" });
-			log.warn(`${q.beat}：缺 ${srcPath}，跳过`);
+			log.warn(`${q.beat}：缺 ${join(baseDir, MG_SRC_DIRS[0], `${q.composition_id}.html`)}，跳过`);
 			continue;
 		}
 		const html = await readFile(srcPath, "utf8");
@@ -125,7 +142,7 @@ async function runLay(opts: RrvOpts): Promise<RrvResult> {
 			track_ed: q.track_ed,
 			duration: q.duration,
 			opaque: lint.opaque,
-			html_rel: `${RRV_ASSET_DIR}/${q.composition_id}.html`,
+			html_rel: `${MG_ASSET_DIR}/${q.composition_id}.html`,
 			...(category ? { category } : {}),
 		});
 	}
@@ -145,19 +162,19 @@ async function runLay(opts: RrvOpts): Promise<RrvResult> {
 	assertGtrkV1(gtrk);
 	const gtrkDir = dirname(gtrkPath);
 
-	// 复制颗粒 HTML 进工程 assets/rrv/（自包含）
-	await mkdir(join(gtrkDir, ...RRV_ASSET_DIR.split("/")), { recursive: true });
+	// 复制颗粒 HTML 进工程 assets/mg/（自包含）
+	await mkdir(join(gtrkDir, ...MG_ASSET_DIR.split("/")), { recursive: true });
 	for (const it of items) {
 		await copyFile(srcByComp.get(it.composition_id)!, join(gtrkDir, ...it.html_rel.split("/")));
 	}
 
-	const { next, summary } = layRrvTracks({ gtrk, items, generatedAt: new Date().toISOString() });
+	const { next, summary } = layMgTracks({ gtrk, items, generatedAt: new Date().toISOString() });
 	writeGtrkAtomic(gtrkPath, next, mtimeMs);
 	log.ok(
 		`铺轨完成：${summary.laidParticles} 颗粒 → beat_track ${summary.laidTrack ?? "-"}` +
 			`${skipped.length ? `（${skipped.length} beat 跳过）` : ""}`,
 	);
-	log.info("opencut 打开工程即见 RRV overlay 轨（预览需 add-particle-project-folder-preview 上线）；出片时客户端云渲。");
+	log.info("opencut 打开工程即见 MG overlay 轨（预览需 add-particle-project-folder-preview 上线）；出片时客户端云渲。");
 	return done(opts, {
 		ok: true,
 		mode: "lay",
@@ -168,48 +185,50 @@ async function runLay(opts: RrvOpts): Promise<RrvResult> {
 }
 
 /** 单文件 lint 模式。 */
-async function runLint(args: string[], opts: RrvOpts): Promise<RrvResult> {
+async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	const file = args[0];
-	if (!file) throw new Error('用法：gtrk rrv lint <particle.html> [--dispatch <path>]');
+	if (!file) throw new Error('用法：gtrk mg lint <particle.html> [--dispatch <path>]');
 	const html = await readFile(resolve(file), "utf8");
 	let dispatchIds: string[] | undefined;
 	if (opts.dispatch && existsSync(resolve(opts.dispatch))) {
-		dispatchIds = (await readRrvQueue(resolve(opts.dispatch))).map((q) => q.composition_id);
+		dispatchIds = (await readMgQueue(resolve(opts.dispatch))).map((q) => q.composition_id);
 	}
 	const lint = lintParticle(html, { dispatchIds });
 	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
 	if (lint.ok) log.ok(`lint 通过（${basename(file)}；opaque=${lint.opaque}）`);
 	else log.err(`lint 未过（${lint.violations.filter((v) => v.fatal).length} 项致命）`);
-	const result: RrvResult = { mode: "lint", ...lint, ok: lint.ok };
+	const result: MgResult = { mode: "lint", ...lint, ok: lint.ok };
 	if (opts.json) console.log(JSON.stringify(result));
 	if (!lint.ok) process.exitCode = 1;
 	return result;
 }
 
 /** 编排看板模式。 */
-async function runStatus(opts: RrvOpts): Promise<RrvResult> {
+async function runStatus(opts: MgOpts): Promise<MgResult> {
 	const { dispatchPath, baseDir } = resolveDispatch(opts);
-	const queue = await readRrvQueue(dispatchPath);
+	const queue = await readMgQueue(dispatchPath);
 	const gtrkPath = locateGtrk(baseDir);
 	let laidIds = new Set<string>();
 	if (gtrkPath) {
 		const { gtrk } = readGtrk(gtrkPath);
-		const rrv = (gtrk.struct_meta as { rrv?: StructMetaRrv } | undefined)?.rrv;
-		laidIds = new Set((rrv?.beats ?? []).filter((b) => b.laid).map((b) => b.composition_id));
+		// struct_meta 登记键读旧兼容：新键 mg，遗留键 rrv
+		const structMeta = gtrk.struct_meta as { mg?: StructMetaMg; rrv?: StructMetaMg } | undefined;
+		const meta = structMeta?.mg ?? structMeta?.rrv;
+		laidIds = new Set((meta?.beats ?? []).filter((b) => b.laid).map((b) => b.composition_id));
 	}
 	const rows = queue.map((q) => {
-		const authored = existsSync(join(baseDir, RRV_SRC_DIR, `${q.composition_id}.html`));
+		const authored = locateSrcHtml(baseDir, q.composition_id) !== undefined;
 		const laid = laidIds.has(q.composition_id);
 		return { beat: q.beat, composition_id: q.composition_id, authored, laid, state: laid ? "已铺" : authored ? "已产未铺" : "缺 HTML" };
 	});
 	const authored = rows.filter((r) => r.authored).length;
 	const laid = rows.filter((r) => r.laid).length;
-	log.step(`▶ RRV 看板：${queue.length} beat · ${authored} 已产 · ${laid} 已铺`);
+	log.step(`▶ MG 看板：${queue.length} beat · ${authored} 已产 · ${laid} 已铺`);
 	for (const r of rows) log.info(`${r.beat}（${r.composition_id}）→ ${r.state}`);
 	return done(opts, { ok: true, mode: "status", total: queue.length, authored, laid, rows });
 }
 
-function done(opts: RrvOpts, result: RrvResult): RrvResult {
+function done(opts: MgOpts, result: MgResult): MgResult {
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }

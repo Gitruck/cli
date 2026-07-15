@@ -1,6 +1,6 @@
 ---
 name: gtrk-splitter
-description: 视觉拆分派单器——把一条已剪好的口播工程（gtrk + transcript）拆成 beat 级「视觉拆分稿」，为每个连续文稿段指定唯一主层（A_ROLL 真人出镜 / RRV_MG 动态图 / AI_DRAMA 再现 / FILM_BROLL 影视素材）+ 辅助层，产机器可消费的派单清单（RRV 槽位 / B-roll 检索队列 / AI 动画队列）驱动后续铺轨。当用户想「文稿视觉化拆分 / 视觉拆分稿 / beat 时间线 / 派分镜 / A-roll B-roll 分配 / 哪些段做动态图·哪些做 AI 再现·哪些用影视素材 / 给这条口播派单」时使用本 skill。凡涉及把口播成片拆成分镜派工，优先用本 skill 驱动 gtrk CLI 的 `split` 命令，绝不手写时码、绝不抄原文定位。
+description: 视觉拆分派单器——把一条已剪好的口播工程（gtrk + transcript）拆成 beat 级「视觉拆分稿」，为每个连续文稿段指定唯一主层（A_ROLL 真人出镜 / MG 动态图 / AI_DRAMA 再现 / FILM_BROLL 影视素材）+ 辅助层，产机器可消费的派单清单（MG 槽位 / B-roll 检索队列 / AI 动画队列）驱动后续铺轨。当用户想「文稿视觉化拆分 / 视觉拆分稿 / beat 时间线 / 派分镜 / A-roll B-roll 分配 / 哪些段做动态图·哪些做 AI 再现·哪些用影视素材 / 给这条口播派单」时使用本 skill。凡涉及把口播成片拆成分镜派工，优先用本 skill 驱动 gtrk CLI 的 `split` 命令，绝不手写时码、绝不抄原文定位。
 ---
 
 # 视觉拆分派单器（gtrk-splitter）
@@ -65,14 +65,14 @@ gtrk split --project "<oralcut产物目录>" --json
       ]
     }
   ],
-  "queues": { "a_roll": [], "rrv_mg": [], "ai_drama": [], "film_broll": [] }
+  "queues": { "a_roll": [], "mg": [], "ai_drama": [], "film_broll": [] }
 }
 ```
 
 关键：
-- `lane` 四选一 `A_ROLL | RRV_MG | AI_DRAMA | FILM_BROLL`；`base_track` 三选一 `真人出镜 | 口播继续 | 旁白主导`。
+- `lane` 四选一 `A_ROLL | MG | AI_DRAMA | FILM_BROLL`；`base_track` 三选一 `真人出镜 | 口播继续 | 旁白主导`。
 - **handoff 按 lane 分型**（校验器会硬查）：
-  - `RRV_MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**；可选 `category`（rrv-overlay 透明/mg-fullscreen 不透明,裁决⑩,供色带分层,详见 field-schema）。
+  - `MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**；可选 `category`（overlay 透明叠加/fullscreen 不透明满屏,裁决⑩,供色带分层,详见 field-schema）。
   - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?}`，**`queries` 非空必填**；queries 写**英文长句场景描述**（一条一个意象，避多义动词），**exclude 保持中文**（细则见 field-schema）。
   - `AI_DRAMA` → `handoff:{narrative?, theme?, emotion_stage?, platform?, shot_count?}`，全可选（下游 ai-drama-prompter 有推断默认）。
   - `A_ROLL` → **无 handoff**（写了会被警告忽略）。
@@ -93,17 +93,33 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 - `区间倒序` → `from` 的 id 序晚于 `to`，对调或修正。
 - `B02 与 B03 区间重叠` → 收窄其中一个 beat 的 span，让区间不相交。
 - `transcript_hash 不匹配` → 转写已变更：**重新跑第 1 步导出视图**，用新 hash 重拆（别硬改 hash 蒙混）。
-- `FILM_BROLL 缺检索 query` / `RRV_MG 缺 duration_hint` → 补齐对应 handoff 必填字段。
+- `FILM_BROLL 缺检索 query` / `MG 缺 duration_hint` → 补齐对应 handoff 必填字段。
 
 **3 轮仍失败 → 把错误原样呈给用户**，不静默降级、不绕过校验。
 
 ### 6. 回报 dispatch 摘要
 
 落地成功后，读 `split/dispatch.json` + 结果 JSON 的 `beats`，向用户交代：
-- 各车道 beat 数（A_ROLL / RRV_MG / AI_DRAMA / FILM_BROLL）。
+- 各车道 beat 数（A_ROLL / MG / AI_DRAMA / FILM_BROLL）。
 - **被跳过的 beat**（span 内 utterance 全被剪，`beats.skipped[]`）及原因。
 - **被收缩的 beat**（部分被剪、按存活句包络收窄，`beats.shrunk[]`）——提示人工复核。
-- 下游各拿各的：`dispatch.rrv_mg`（RRV 槽位表，`composition_id` 已按 `<工程slug>-<beatId>` 命名）/ `dispatch.film_broll`（B-roll 检索队列）/ `dispatch.ai_drama`（AI 动画队列）。
+- 下游各拿各的：`dispatch.mg`（MG 槽位表，`composition_id` 已按 `<工程slug>-<beatId>` 命名）/ `dispatch.film_broll`（B-roll 检索队列）/ `dispatch.ai_drama`（AI 动画队列）。
+
+### 7. 交棒下游 SOP（有序，别停在派单）
+
+dispatch 落地后**不要收工**——但下游各车道是**有先后的 SOP、每步用户可介入**，**不是并行一次铺完**。次序（有理由：MG 叠在 B-roll 之上，要先把底层定下来）：
+
+> **③ 先铺 B-roll（定底层）→ 用户调整确认 → ④ 再铺 MG（叠在 B-roll 上）→ ⑤ 最后上 AI 再现 → `gtrk render` 收口**
+
+按序推进、每步替用户跑命令，**关键处（尤其 B-roll 铺完）停下等用户确认**再进下一步；哪条车道 dispatch 队列为空就跳过。
+
+- **③ B-roll**（`dispatch.film_broll` 非空）：跑 `gtrk matrix --project <目录>`（检索 + 候选铺轨）→ **提示用户 opencut 里挑选/调整 B-roll**（小眼睛切换对比），确认后再进 ④。
+- **④ MG**（`dispatch.mg` 非空）：先由**栏目 MG 生产 skill** 按各槽位 `handoff`（theme/duration_hint/category）产 html-particle 颗粒，再跑 `gtrk mg --project <目录>`（lint + 铺轨，叠在 B-roll 上）。
+- **⑤ AI 再现**（`dispatch.ai_drama` 非空）：触发 `/gtrk-ai-drama` skill（持通用分镜 craft + 读栏目 style-lock）产风格化分镜提示词 → 用户去 Sora / Veo / 可灵 等外部平台出片、回铺（**此车道产物即提示词、无机械尾巴 → 只 skill、无 gtrk 命令**，同 `/gtrk-style-maker`）。
+
+**各车道的生产 skill 由栏目配置解析（业务分离）**：读 `style.skills[]`，取 `produces` 归一（旧 `RRV_MG`→`MG`）== 该车道 的条目 → 触发其 `ref` 指向的 skill；`routing:"none"` 跳过；无匹配 = 无生产 skill（B-roll 无需、A_ROLL 就是口播本身）。生产 skill 是栏目资产、留纯净、不知 gtrk 命令。
+
+> 每车道有专属**驱动 skill**（懂 SOP 位置 + 管用户检查点）：拆分派单后**直接交棒 ③ `/gtrk-matrix`**（先铺 B-roll），它再按 SOP 交棒 ④ `/gtrk-mg`、⑤ `/gtrk-ai-drama`。你（agent）触发 `/gtrk-matrix` 起步即可。**agent 替用户跑 CLI，用户只对话。**
 
 ---
 
@@ -114,7 +130,7 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 ### 四车道语义（lane 四选一）
 
 - **`A_ROLL`（真人出镜）**：信任感来自「观众看见真人正在说」。优先给：体验式钩子、立场转换、关键悬念、情绪抱持、理论升华、结尾发问。
-- **`RRV_MG`（Real Roam Viz 动态图）**：主要任务是「让观众看懂结构」。优先给：容器概念展开、抽象结构翻译、多概念映射、网络/流程/关系图、容器反转、回扣时的系统动态图。
+- **`MG`（动态图 / motion graphics）**：主要任务是「让观众看懂结构」。优先给：容器概念展开、抽象结构翻译、多概念映射、网络/流程/关系图、容器反转、回扣时的系统动态图。
 - **`AI_DRAMA`（AI 再现）**：靠「演绎一个具体历史瞬间」成立。优先给：历史事件再现、理论家/名人/时代场景的动作演绎、有明确年代·人物·地点暗示的桥段。
 - **`FILM_BROLL`（影视素材）**：靠「沉浸感、情绪、现实质感」成立。优先给：日常痛感、都市情绪、社会事件氛围、关系案例沉浸——不适合 MG 讲解、也不需要历史 reenactment 的段落。
 
@@ -130,9 +146,13 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 
 遇任一即考虑切：**主层改变** / **叙事功能改变** / **容器阶段改变** / 出现停顿·静音·金句·发问 / 解释职责从「讲感受」变「讲结构」 / 某辅助层升级为主要理解入口。**不要因一个逗号句号就切——只在视觉职责变化时切。**
 
-### 辅助层七类（aux_layers）
+### 辅助层八类（aux_layers）
 
-`quote-card`（金句卡）· `term-callout`（术语解释）· `network-diagram`（关系图）· `archive-caption`（档案标注）· `pause-card`（停顿卡）· `data-annotation`（数据标注）· `timeline-tag`（年份/时间标注）。辅助层不是装饰，是补充理解职责。挂载范围三型：`"same_beat"`（同 beat）/ `{from,to}`（id 区间）/ `{trigger:"uNNNN"}`（触发点）。
+`quote-card`（金句卡）· `term-callout`（术语解释）· `network-diagram`（关系图）· `archive-caption`（档案标注）· `pause-card`（停顿卡）· `data-annotation`（数据标注）· `timeline-tag`（年份/时间标注）· `overlay`（叠层颗粒）。辅助层不是装饰，是补充理解职责。挂载范围三型：`"same_beat"`（同 beat）/ `{from,to}`（id 区间）/ `{trigger:"uNNNN"}`（触发点）。
+
+**前七类纯建议性**（只进人读稿一行摘要，不承接派单）；**第八类 `overlay` 承接颗粒派单**——底轨主视觉（如 `FILM_BROLL` 电影感 B-roll）之上叠一层 MG 透明概念颗粒时用它，必带 `handoff:{duration_hint（正数秒,必填）, category?, slug_hint?, theme?, bg?}`，`gtrk split` 落地时投影成派生颗粒（`composition_id=<slug>-<beatId>-aux<n>`，进 `dispatch.mg`，后续 `gtrk mg` 铺透明颗粒）。脑手分工：**你（脑）判断该不该叠 overlay、写 handoff 语义；CLI（手）投影落轨写时码**。`overlay` mount 只用 `same_beat` / `{from,to}`（`{trigger}` 一期不支持，会被 skip 告警）。细则见 `references/field-schema.md`。
+
+**何时叠 overlay（通用原则，别只想着「底轨之上叠概念图」）**：另一条高频触发是**重点词 / 点题强调**——文稿出现「**这就是 X**」「**这正是 X**」「**X，其实就是 Y**」「**说白了就是 X**」这类**点题、下定义、指认关键概念**的短语时，在该 beat 叠一层 `overlay` 透明颗粒，把**关键词/关键概念视觉「点」出来**（浮在主视觉之上、不挡主体），让重点被强调、而非随口播平铺过去。这是给透明叠层的一条**系统性来源**：每条口播里的点题/定义句，都是 overlay 候选——常能显著提升叠层密度。判断权仍在你（脑）：**不是每个「这就是」都叠**，挑真正的点题、关键定义、概念指认、金句收束处；**overlay 稀缺才有力，滥用则失焦**。（叠层长什么样、用什么强调色/动效，归栏目的 MG 生产 skill，不在拆分层定。）
 
 ### 升级规则（辅助层 → 主层）
 
@@ -145,6 +165,6 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 - 有没有把本该真人承接的段落全交给 b-roll？
 - span 里有没有混进 `dropped:true` 的句子？（会被跳过/收缩）
 - beat 之间有没有重叠？id 区间有没有倒序？
-- FILM_BROLL 有没有 queries？是不是英文长句场景描述（不是中文/关键词堆叠）？exclude 是不是中文？RRV_MG 有没有 duration_hint？
+- FILM_BROLL 有没有 queries？是不是英文长句场景描述（不是中文/关键词堆叠）？exclude 是不是中文？MG 有没有 duration_hint？
 - `transcript_hash` 是不是原样透传自视图？
 - 拆分稿里有没有混进任何秒级时码字段？（必须零时码）

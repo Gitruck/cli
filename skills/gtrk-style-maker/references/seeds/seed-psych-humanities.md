@@ -20,7 +20,7 @@
 | skill | 产什么 | produces | 契约 |
 |---|---|---|---|
 | 拆分派单器 | 全片 beat 派单文档 | —（管线文档生产者，不登记） | — |
-| 动态图生成 | HTML 动画颗粒 | RRV_MG | gsap-emit v1（合规项进自检） |
+| 动态图生成 | HTML 动画颗粒 | MG | gsap-emit v1（合规项进自检） |
 | AI 再现分镜 | 双语分镜提示词文本 | AI_DRAMA | 暂无契约 |
 | 封面设计 | 文生图 prompt + 排字工作台 | cover + routing:"none" | 管线外 |
 

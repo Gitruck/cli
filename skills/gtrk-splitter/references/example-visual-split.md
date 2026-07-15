@@ -97,14 +97,14 @@ default_base_track: 真人口播打底
 ## B05
 - 文稿范围：`什么是“过拟合”？……给出一个极其离谱的错误答案`
 - 底轨：`旁白主导`
-- 主层：`RRV_MG`
+- 主层：`MG`
 - 叙事功能：`container-translation`
 - 容器阶段：`expand`
 - 节奏标签：`平稳`
 - 视觉任务：`用训练集、噪音、测试集、错误预测的动态图把“过拟合”先讲清楚`
 - 拆分理由：`这里主要任务是讲结构，不是讲情绪，最适合进入 MG`
 - 不可替代性：`优先 MG`
-- RRV 提示：`container-translation/neural-overfit`
+- MG 提示：`container-translation/neural-overfit`
 - 替代方案：`若 MG 档期不足，可降级为 A_ROLL + 简单图表动效`
 
 ### 辅助层 B05.A1
@@ -117,14 +117,14 @@ default_base_track: 真人口播打底
 ## B06
 - 文稿范围：`它太想答对过去的题……你的潜意识依然乐此不疲`
 - 底轨：`旁白主导`
-- 主层：`RRV_MG`
+- 主层：`MG`
 - 叙事功能：`container-translation`
 - 容器阶段：`translate`
 - 节奏标签：`渐升`
 - 视觉任务：`把 AI 过拟合一一映射到创伤、自动化防御、现实崩溃，完成“AI -> 人类”的翻译`
 - 拆分理由：`容器从自我解释转为心理学翻译器，职责明显升级`
 - 不可替代性：`优先 MG`
-- RRV 提示：`container-translation/dual-pane-map`
+- MG 提示：`container-translation/dual-pane-map`
 
 ### 辅助层 B06.A1
 - 类型：`network-diagram`
@@ -263,14 +263,14 @@ default_base_track: 真人口播打底
 ## B14
 - 文稿范围：`斯坦福大学神经生物学教授罗伯特·萨波斯基……规则与匮乏`
 - 底轨：`旁白主导`
-- 主层：`RRV_MG`
+- 主层：`MG`
 - 叙事功能：`abyssal-fall`
 - 容器阶段：`rupture`
 - 节奏标签：`渐升`
 - 视觉任务：`把神经递质、创伤印痕、代际传递、大他者压成一张逐步收紧的因果网`
 - 拆分理由：`这里信息链条密度很高，MG 比真人或纯素材更能把结构讲明白`
 - 不可替代性：`优先 MG`
-- RRV 提示：`abyssal-fall/grid-captured`
+- MG 提示：`abyssal-fall/grid-captured`
 
 ### 辅助层 B14.A1
 - 类型：`archive-caption`
@@ -307,14 +307,14 @@ default_base_track: 真人口播打底
 ## B16
 - 文稿范围：`在传统的机器学习理论中……展现出了不可思议的泛化能力和“涌现”出的智能`
 - 底轨：`旁白主导`
-- 主层：`RRV_MG`
+- 主层：`MG`
 - 叙事功能：`reversal-elevation`
 - 容器阶段：`flip`
 - 节奏标签：`渐升`
 - 视觉任务：`用偏差-方差权衡、插值阈值、双重下降曲线完成“过拟合 -> 泛化”的结构反转`
 - 拆分理由：`容器的希望面在这里正式出现，最适合由动态图完成说服`
 - 不可替代性：`优先 MG`
-- RRV 提示：`reversal-elevation/overfit-to-double-descent`
+- MG 提示：`reversal-elevation/overfit-to-double-descent`
 
 ### 辅助层 B16.A1
 - 类型：`data-annotation`
@@ -369,7 +369,7 @@ default_base_track: 真人口播打底
 ## B19
 - 文稿范围：`回到之前的话题，我们该如何解决幽灵堵车？……最后所有的车流都能够慢慢起速`
 - 底轨：`旁白主导`
-- 主层：`RRV_MG`
+- 主层：`MG`
 - 叙事功能：`callback-closure`
 - 容器阶段：`callback`
 - 节奏标签：`回扣`
@@ -377,7 +377,7 @@ default_base_track: 真人口播打底
 - 拆分理由：`结尾回扣不只是情绪重复，而是要把前文意象结构性地翻新一次`
 - 不可替代性：`优先 MG`
 - 回扣对象：`B07`
-- RRV 提示：`callback-closure/recall-image-question`
+- MG 提示：`callback-closure/recall-image-question`
 
 ### 辅助层 B19.A1
 - 类型：`network-diagram`
@@ -417,7 +417,7 @@ default_base_track: 真人口播打底
 - `B18` “认同你的症状”的主体性重构
 - `B20` 结尾回扣式发问
 
-## RRV_MG Queue
+## MG Queue
 
 - `B05` 过拟合概念展开
 - `B06` AI 结构映射到心理结构

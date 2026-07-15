@@ -223,7 +223,7 @@ async function runLand(
 	// 摘要回报
 	log.ok(
 		`落地完成：${landing.split.beats.length}/${doc.beats.length} beat 落轨` +
-			`（RRV_MG ${landing.dispatch.rrv_mg.length} · FILM_BROLL ${landing.dispatch.film_broll.length} · AI_DRAMA ${landing.dispatch.ai_drama.length}）`,
+			`（MG ${landing.dispatch.mg.length} · FILM_BROLL ${landing.dispatch.film_broll.length} · AI_DRAMA ${landing.dispatch.ai_drama.length}）`,
 	);
 	for (const s of landing.skipped) log.warn(`跳过 ${s.beat}：${s.reason}`);
 	for (const s of landing.shrunk) log.warn(`收缩 ${s.beat}：${s.dropped} 句被剪，按存活 ${s.kept} 句包络 → ${s.track_st}s…${s.track_ed}s（建议人工复核）`);
@@ -241,7 +241,7 @@ async function runLand(
 		projected_at: projectedAt,
 		beats: { total: doc.beats.length, landed: landing.split.beats.length, skipped: landing.skipped, shrunk: landing.shrunk },
 		queues: {
-			rrv_mg: landing.dispatch.rrv_mg.length,
+			mg: landing.dispatch.mg.length,
 			film_broll: landing.dispatch.film_broll.length,
 			ai_drama: landing.dispatch.ai_drama.length,
 		},

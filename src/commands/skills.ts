@@ -1,6 +1,6 @@
 /**
  * gtrk skills —— 把 agent skill 安装进 Claude Code（对标飞书 lark-cli 装 skills 那步）。
- *   gtrk skills install   把 /gtrk-oralcut 与 /gtrk-splitter 复制到 ~/.claude/skills/，装完即可斜杠触发。
+ *   gtrk skills install   把 gtrk 全家框架 skill（见 SKILL_NAMES）复制到 ~/.claude/skills/，装完即可斜杠触发。
  * 核心 installSkill 也被 `gtrk install` 复用。
  */
 import { Command } from "commander";
@@ -11,7 +11,14 @@ import { packageRoot } from "../lib/paths";
 import { log } from "../lib/log";
 
 // 仓库内打包分发的 skill 名（各含 SKILL.md，gtrk-splitter/gtrk-style-maker 另带 references/）
-const SKILL_NAMES = ["gtrk-oralcut", "gtrk-splitter", "gtrk-style-maker"];
+const SKILL_NAMES = [
+	"gtrk-oralcut",
+	"gtrk-splitter",
+	"gtrk-matrix",
+	"gtrk-mg",
+	"gtrk-ai-drama",
+	"gtrk-style-maker",
+];
 
 /**
  * 把打包的 skill 目录整体复制到 skills 目录（缺省 ~/.claude/skills）——含 SKILL.md 与 references/。
@@ -46,7 +53,7 @@ export function registerSkills(program: Command): void {
 
 	skills
 		.command("install")
-		.description("把 /gtrk-oralcut 与 /gtrk-splitter 安装到 ~/.claude/skills（对标飞书 skills add）")
+		.description("把 gtrk 全家框架 skill 安装到 ~/.claude/skills（对标飞书 skills add）")
 		.option("--dir <dir>", "自定义 skills 目录（缺省 ~/.claude/skills）")
 		.action((opts: { dir?: string }) => {
 			installSkill({ dir: opts.dir });
