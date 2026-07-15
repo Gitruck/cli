@@ -127,7 +127,7 @@ test("金样端到端 dry-run：20-beat 落地 → struct_meta.split + dispatch 
 		assert.deepEqual([b01.track_st, b01.track_ed], [0, 12]);
 		const b20 = split.beats.find((b) => b.id === "B20");
 		assert.deepEqual([b20.track_st, b20.track_ed], [192, 196]);
-		// A_ROLL beat 不带 handoff；RRV_MG 带
+		// A_ROLL beat 不带 handoff；MG 带
 		assert.equal(b01.handoff, undefined);
 		assert.ok(split.beats.find((b) => b.id === "B05").handoff.duration_hint === 12);
 		// source_ranges/material_id（add-split-source-ranges）：.gtrk 自包含源时基；恒等投影下 span 源包络 == 轨道包络
@@ -140,21 +140,22 @@ test("金样端到端 dry-run：20-beat 落地 → struct_meta.split + dispatch 
 		assert.equal(typeof b01.narrative, "string");
 		assert.equal(typeof b01.container_stage, "string");
 
-		// dispatch.json：RRV_MG 5 / FILM_BROLL 6 / AI_DRAMA 1
+		// dispatch.json：MG 5 / FILM_BROLL 6 / AI_DRAMA 1（去品牌化后桶键 mg）
 		const dispatch = JSON.parse(await readFile(join(proj, "split", "dispatch.json"), "utf8"));
-		assert.equal(dispatch.rrv_mg.length, 5);
+		assert.equal(dispatch.mg.length, 5);
 		assert.equal(dispatch.film_broll.length, 6);
 		assert.equal(dispatch.ai_drama.length, 1);
+		assert.ok(!("rrv_mg" in dispatch), "写侧不留遗留桶键 rrv_mg");
 		// composition_id = <工程slug>-<beatId>（slug 取目录名）
-		assert.equal(dispatch.rrv_mg.find((r) => r.beat === "B05").composition_id, "overfitting-fixture-B05");
-		assert.equal(dispatch.rrv_mg.find((r) => r.beat === "B05").duration, 12);
+		assert.equal(dispatch.mg.find((r) => r.beat === "B05").composition_id, "overfitting-fixture-B05");
+		assert.equal(dispatch.mg.find((r) => r.beat === "B05").duration, 12);
 		// FILM_BROLL 携 queries 与轨道区间
 		const film = dispatch.film_broll.find((f) => f.beat === "B02");
 		assert.ok(Array.isArray(film.queries) && film.queries.length >= 1);
 		assert.ok(typeof film.track_st === "number" && typeof film.track_ed === "number");
-		// AI_DRAMA 透传 handoff
+		// AI_DRAMA 透传 handoff（platform 取自 build-fixtures 金样源）
 		assert.equal(dispatch.ai_drama[0].beat, "B07");
-		assert.equal(dispatch.ai_drama[0].platform, "video-gen");
+		assert.equal(dispatch.ai_drama[0].platform, "kling");
 
 		// --md 人读稿落盘
 		assert.ok(existsSync(join(proj, "split", "visual-split.md")));

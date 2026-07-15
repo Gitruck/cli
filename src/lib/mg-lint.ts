@@ -1,5 +1,5 @@
 /**
- * RRV 颗粒静态 lint（add-rrv-lay）——六铁律的**机器可判定静态子集**，纯本地零云端。
+ * MG 颗粒静态 lint（add-rrv-lay，去品牌化前 rrv-lint）——六铁律的**机器可判定静态子集**，纯本地零云端。
  *
  * 契约正本 contracts/gsap-emit-v1.md。**只查静态可判定项**——tl 总长≥duration、逐帧非冻结
  * 只有真 Hyperframes 能判（契约明令禁本地无头模拟），留客户端出片期，不在此。
@@ -47,8 +47,16 @@ function deriveOpaque(rootTagStr: string | null): { opaque: boolean; declared: b
 	return { opaque: !transparent, declared: true };
 }
 
-/** 一期品类→期望透明度（与 splitdoc CATEGORY_EXPECTED_OPAQUE 同源，此处独立避跨包依赖）。 */
+/**
+ * 品类→期望透明度（与 splitdoc CATEGORY_EXPECTED_OPAQUE 同源，此处独立避跨包依赖）。
+ * 双名认旧：同时含中性新键（overlay/fullscreen/subtitle/title）与遗留品牌键，既有颗粒零迁移仍命中。
+ */
 const CATEGORY_EXPECTED_OPAQUE: Record<string, boolean> = {
+	overlay: false,
+	fullscreen: true,
+	subtitle: false,
+	title: true,
+	// 遗留品牌键（读旧兼容）
 	"rrv-overlay": false,
 	"mg-fullscreen": true,
 	"explain-subtitle": false,
@@ -124,7 +132,7 @@ export function lintParticle(
 	// 派生：composition_id 对齐 dispatch
 	const effectiveCid = opts.compositionId ?? cid;
 	if (opts.dispatchIds && effectiveCid && !opts.dispatchIds.includes(effectiveCid))
-		push("x-dispatch", false, `composition_id "${effectiveCid}" 不在 dispatch.rrv_mg 派单中`);
+		push("x-dispatch", false, `composition_id "${effectiveCid}" 不在 dispatch.mg 派单中`);
 
 	// 品类↔opaque 对账（裁决⑩，声明+校验；以 HTML 反推 opaque 为准，不符只告警）
 	if (opts.category && opts.category in CATEGORY_EXPECTED_OPAQUE) {

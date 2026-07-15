@@ -49,14 +49,14 @@ const BEATS = [
 		utterances: ["在精神分析学家拉康眼中，事情没那么简单。", "你的痛苦，不过是一场荒诞的过拟合。"],
 	},
 	{
-		id: "B05", base_track: "旁白主导", lane: "RRV_MG", narrative: "container-translation", container_stage: "expand",
+		id: "B05", base_track: "旁白主导", lane: "MG", narrative: "container-translation", container_stage: "expand",
 		rhythm: "平稳", visual_task: "用训练集、噪音、测试集、错误预测的动态图把过拟合先讲清楚",
 		irreplaceability: "优先 MG", fallback: "若 MG 档期不足，可降级为 A_ROLL + 简单图表动效",
 		handoff: { slug_hint: "neural-overfit", theme: "overfitting", bg: "paper", duration_hint: 12 },
 		utterances: ["什么是过拟合？", "模型把训练数据里的噪音也当成不可动摇的真理。", "面对没见过的新题，它给出一个极其离谱的错误答案。"],
 	},
 	{
-		id: "B06", base_track: "旁白主导", lane: "RRV_MG", narrative: "container-translation", container_stage: "translate",
+		id: "B06", base_track: "旁白主导", lane: "MG", narrative: "container-translation", container_stage: "translate",
 		rhythm: "渐升", visual_task: "把 AI 过拟合映射到创伤、自动化防御、现实崩溃，完成 AI 到人类的翻译",
 		irreplaceability: "优先 MG",
 		handoff: { slug_hint: "dual-pane-map", theme: "overfitting", bg: "paper", duration_hint: 14 },
@@ -117,7 +117,7 @@ const BEATS = [
 		utterances: ["你的潜意识，是一台精准的雷达。", "你找到的只是重温旧梦的那个恶鬼，而它，正是你自己。"],
 	},
 	{
-		id: "B14", base_track: "旁白主导", lane: "RRV_MG", narrative: "abyssal-fall", container_stage: "rupture",
+		id: "B14", base_track: "旁白主导", lane: "MG", narrative: "abyssal-fall", container_stage: "rupture",
 		rhythm: "渐升", visual_task: "把神经递质、创伤印痕、代际传递、大他者压成一张逐步收紧的因果网",
 		irreplaceability: "优先 MG",
 		handoff: { slug_hint: "grid-captured", theme: "overfitting", bg: "paper", duration_hint: 16 },
@@ -132,7 +132,7 @@ const BEATS = [
 		utterances: ["听到这里，你可能会觉得绝望。", "如果这一切，都只是潜意识写好的剧本呢？"],
 	},
 	{
-		id: "B16", base_track: "旁白主导", lane: "RRV_MG", narrative: "reversal-elevation", container_stage: "flip",
+		id: "B16", base_track: "旁白主导", lane: "MG", narrative: "reversal-elevation", container_stage: "flip",
 		rhythm: "渐升", visual_task: "用偏差-方差权衡、插值阈值、双重下降曲线完成过拟合到泛化的结构反转",
 		irreplaceability: "优先 MG",
 		handoff: { slug_hint: "overfit-to-double-descent", theme: "overfitting", bg: "paper", duration_hint: 15 },
@@ -154,7 +154,7 @@ const BEATS = [
 		utterances: ["在法国精神分析宗师拉康晚期的理论中。", "认同你的症状，你才能获得一点点真正的自由。"],
 	},
 	{
-		id: "B19", base_track: "旁白主导", lane: "RRV_MG", narrative: "callback-closure", container_stage: "callback",
+		id: "B19", base_track: "旁白主导", lane: "MG", narrative: "callback-closure", container_stage: "callback",
 		rhythm: "回扣", visual_task: "把前文幽灵堵车回调出来，用自动驾驶车辆吸收刹车波浪的系统动画做出解法",
 		irreplaceability: "优先 MG", callback_of: "B07",
 		handoff: { slug_hint: "recall-image-question", theme: "overfitting", bg: "paper", duration_hint: 13 },
@@ -253,7 +253,7 @@ const exampleBeats = BEATS.map((b) => {
 
 const queues = {
 	a_roll: exampleBeats.filter((b) => b.lane === "A_ROLL").map((b) => ({ beat: b.id, note: b.visual_task })),
-	rrv_mg: exampleBeats.filter((b) => b.lane === "RRV_MG").map((b) => ({ beat: b.id, note: b.visual_task })),
+	mg: exampleBeats.filter((b) => b.lane === "MG").map((b) => ({ beat: b.id, note: b.visual_task })),
 	ai_drama: exampleBeats.filter((b) => b.lane === "AI_DRAMA").map((b) => ({ beat: b.id, note: b.visual_task })),
 	film_broll: exampleBeats.filter((b) => b.lane === "FILM_BROLL").map((b) => ({ beat: b.id, note: b.visual_task })),
 };
