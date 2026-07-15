@@ -11,4 +11,4 @@
 
 | 契约 | 版本 | 适用 handoff | 文档 |
 |---|---|---|---|
-| gsap-emit（HTML 动画颗粒逐帧 seek 合规） | v1 | RRV_MG | [gsap-emit-v1.md](gsap-emit-v1.md) |
+| gsap-emit（HTML 动画颗粒逐帧 seek 合规） | v1 | MG（去品牌化前 RRV_MG，消费方查表前归一） | [gsap-emit-v1.md](gsap-emit-v1.md) |

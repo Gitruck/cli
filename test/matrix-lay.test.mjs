@@ -345,7 +345,7 @@ function setupProject(dir) {
 	mkdirSync(join(dir, "gtrk"), { recursive: true });
 	writeFileSync(join(dir, "gtrk", "project.gtrk"), JSON.stringify(baseGtrk()));
 	writeFileSync(join(dir, "split", "dispatch.json"), JSON.stringify({
-		rrv_mg: [], ai_drama: [],
+		mg: [], ai_drama: [],
 		film_broll: [{ beat: "B05", queries: ["城市 夜景"], shots: 1, per_shot_sec: 4, track_st: 10, track_ed: 18 }],
 	}));
 }
@@ -420,7 +420,7 @@ test("e2e：preview 404 回落 raw(source=raw);工程缺失只出 plan 不失败
 		const dir2 = mkdtempSync(join(tmpdir(), "gtrk-lay-e2e-"));
 		try {
 			mkdirSync(join(dir2, "split"), { recursive: true });
-			writeFileSync(join(dir2, "split", "dispatch.json"), JSON.stringify({ rrv_mg: [], ai_drama: [], film_broll: [] }));
+			writeFileSync(join(dir2, "split", "dispatch.json"), JSON.stringify({ mg: [], ai_drama: [], film_broll: [] }));
 			const res3 = await runMatrix(undefined, { project: dir2, column: "ghost-col", json: false });
 			assert.equal(res3.ok, true);
 			assert.equal(res3.lay, undefined);

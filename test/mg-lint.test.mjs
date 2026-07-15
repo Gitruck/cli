@@ -1,9 +1,9 @@
 /**
- * RRV 颗粒 lint 单测（add-rrv-lay §3.1）：六铁律静态子集 + opaque 推导 + composition_id 对齐。
+ * MG 颗粒 lint 单测（add-rrv-lay §3.1，去品牌化后 mg-lint）：六铁律静态子集 + opaque 推导 + composition_id 对齐。
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lintParticle } from "../.test-build/rrv-lint.mjs";
+import { lintParticle } from "../.test-build/mg-lint.mjs";
 
 /** 合规颗粒骨架（opaque 满屏底）。 */
 const good = (id = "proj-B06", bg = "background:#0A1420;") => `
@@ -96,19 +96,31 @@ test("script src 相对路径致命", () => {
 	assert.ok(r.violations.some((v) => v.law === "4-script-rel" && v.fatal));
 });
 
-test("category↔opaque 对账：自洽无告警 / 冲突告警非致命（裁决⑩）", () => {
-	// mg-fullscreen 期望不透明，颗粒有 background(opaque=true) → 自洽
-	const okMg = lintParticle(good("proj-B06", "background:#0A1420;"), { category: "mg-fullscreen" });
-	assert.ok(!okMg.violations.some((v) => v.law === "x-category-opaque"));
-	assert.equal(okMg.ok, true);
-	// rrv-overlay 期望透明，颗粒无 background(opaque=false) → 自洽
-	const okRrv = lintParticle(good("proj-B07", ""), { category: "rrv-overlay" });
-	assert.ok(!okRrv.violations.some((v) => v.law === "x-category-opaque"));
-	// 冲突：mg-fullscreen 期望不透明但颗粒透明 → 告警非致命，opaque 以 HTML 为准
-	const conflict = lintParticle(good("proj-B07", "background:transparent;"), { category: "mg-fullscreen" });
+test("category↔opaque 对账：自洽无告警 / 冲突告警非致命（裁决⑩，中性新名）", () => {
+	// fullscreen 期望不透明，颗粒有 background(opaque=true) → 自洽
+	const okFull = lintParticle(good("proj-B06", "background:#0A1420;"), { category: "fullscreen" });
+	assert.ok(!okFull.violations.some((v) => v.law === "x-category-opaque"));
+	assert.equal(okFull.ok, true);
+	// overlay 期望透明，颗粒无 background(opaque=false) → 自洽
+	const okOverlay = lintParticle(good("proj-B07", ""), { category: "overlay" });
+	assert.ok(!okOverlay.violations.some((v) => v.law === "x-category-opaque"));
+	// 冲突：fullscreen 期望不透明但颗粒透明 → 告警非致命，opaque 以 HTML 为准
+	const conflict = lintParticle(good("proj-B07", "background:transparent;"), { category: "fullscreen" });
 	assert.ok(conflict.violations.some((v) => v.law === "x-category-opaque" && !v.fatal));
 	assert.equal(conflict.ok, true);
 	assert.equal(conflict.opaque, false); // HTML 反推为准
+});
+
+test("[读旧] category↔opaque 对账认遗留品牌键：mg-fullscreen/rrv-overlay 仍命中映射", () => {
+	// 遗留 mg-fullscreen 期望不透明，颗粒有 background → 自洽（旧工程零迁移）
+	const okMg = lintParticle(good("proj-B06", "background:#0A1420;"), { category: "mg-fullscreen" });
+	assert.ok(!okMg.violations.some((v) => v.law === "x-category-opaque"));
+	// 遗留 rrv-overlay 期望透明，颗粒无 background → 自洽
+	const okRrv = lintParticle(good("proj-B07", ""), { category: "rrv-overlay" });
+	assert.ok(!okRrv.violations.some((v) => v.law === "x-category-opaque"));
+	// 遗留键冲突仍能对账告警（映射命中）：mg-fullscreen 期望不透明但颗粒透明
+	const conflict = lintParticle(good("proj-B07", "background:transparent;"), { category: "mg-fullscreen" });
+	assert.ok(conflict.violations.some((v) => v.law === "x-category-opaque" && !v.fatal));
 });
 
 test("composition_id 不在 dispatch → 告警非致命", () => {

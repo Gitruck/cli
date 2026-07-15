@@ -121,3 +121,9 @@ gtrk oralcut "<毛片绝对路径>" [--script "<txt路径>"] [--preset steady|co
 - **PR/FCP**：Premiere 里「文件 > 导入」`files.xml[0]`（…/xml/premiere.xml）。
 
 产物目录名形如 `<毛片名>-video-project-<时间戳>`，靠文件名 + 时间认出是哪一次剪辑、互不覆盖。
+
+## 下一步（自动接力，别停在交工）
+
+口播工程剪好只是成片一条龙的第一站。确认 `ok=true`、`files.gtrk[0]` 与 transcript 就绪后，**别停下等用户开口**——顺势接力到视觉拆分：触发 `/gtrk-splitter`（把这条工程 + transcript 拆成 beat 级分镜派单，agent 再跑 `gtrk split` 产 `dispatch.json`），驱动后续各车道生产+铺轨。一句话交代即推进：「口播工程已就绪，我接着把它拆成分镜派单」，除非用户表示只要这版剪辑工程、暂不往下。
+
+> 原则：**agent 替用户跑 CLI / 接力 skill，用户只对话**——别让用户自己去终端敲下一条 gtrk 命令。

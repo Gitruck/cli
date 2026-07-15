@@ -43,9 +43,9 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "lonely person in a city apartment at night",
-          "exhausted commuter on a crowded subway train",
-          "couple arguing as their relationship falls apart"
+          "都市独处 夜晚",
+          "地铁 疲惫 通勤",
+          "关系破裂 争吵"
         ],
         "shots": 6,
         "per_shot_sec": 2,
@@ -70,8 +70,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "sleepless person lying awake in bed late at night",
-          "couple giving each other the silent treatment after a fight"
+          "深夜 失眠 闪回",
+          "伴侣 争吵 冷战"
         ],
         "shots": 4,
         "per_shot_sec": 2.5
@@ -118,7 +118,7 @@
         "to": "u0013"
       },
       "base_track": "旁白主导",
-      "lane": "RRV_MG",
+      "lane": "MG",
       "narrative": "container-translation",
       "container_stage": "expand",
       "rhythm": "平稳",
@@ -139,7 +139,7 @@
         "to": "u0016"
       },
       "base_track": "旁白主导",
-      "lane": "RRV_MG",
+      "lane": "MG",
       "narrative": "container-translation",
       "container_stage": "translate",
       "rhythm": "渐升",
@@ -178,7 +178,7 @@
         "narrative": "trauma-repetition",
         "theme": "freud-fort-da",
         "emotion_stage": "abyssal",
-        "platform": "video-gen",
+        "platform": "kling",
         "shot_count": 5
       },
       "aux_layers": [
@@ -210,8 +210,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "hostile social media comment threads on a phone screen",
-          "aggressive messages flooding a glowing phone screen in the dark"
+          "社交媒体 评论区 对骂",
+          "手机屏幕 戾气 弹幕"
         ],
         "shots": 5,
         "per_shot_sec": 1.8,
@@ -244,8 +244,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "tall grass swaying in the wind on an empty plain",
-          "anonymous crowd walking past each other in a city street"
+          "荒野 草丛 风声",
+          "都市 人群 疏离"
         ],
         "shots": 4,
         "per_shot_sec": 2.2
@@ -291,8 +291,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "glossy commercial for self-help therapy products",
-          "person venting anger by hitting a pillow in a bedroom"
+          "心理疗愈 商品 广告感",
+          "打枕头 发泄 房间"
         ],
         "shots": 5,
         "per_shot_sec": 1.8,
@@ -325,8 +325,8 @@
       "irreplaceability": "可被 B-roll 替代",
       "handoff": {
         "queries": [
-          "couple stuck in the same recurring argument at home",
-          "child overshadowed by tension in a family living room"
+          "亲密关系 反复 争执",
+          "童年 阴影 家庭"
         ],
         "shots": 4,
         "per_shot_sec": 2.5
@@ -371,7 +371,7 @@
         "to": "u0036"
       },
       "base_track": "旁白主导",
-      "lane": "RRV_MG",
+      "lane": "MG",
       "narrative": "abyssal-fall",
       "container_stage": "rupture",
       "rhythm": "渐升",
@@ -423,7 +423,7 @@
         "to": "u0041"
       },
       "base_track": "旁白主导",
-      "lane": "RRV_MG",
+      "lane": "MG",
       "narrative": "reversal-elevation",
       "container_stage": "flip",
       "rhythm": "渐升",
@@ -498,7 +498,7 @@
         "to": "u0048"
       },
       "base_track": "旁白主导",
-      "lane": "RRV_MG",
+      "lane": "MG",
       "narrative": "callback-closure",
       "container_stage": "callback",
       "rhythm": "回扣",
@@ -580,7 +580,7 @@
         "note": "回到主持人，让问题停在观众心里，而不是替观众收尾"
       }
     ],
-    "rrv_mg": [
+    "mg": [
       {
         "beat": "B05",
         "note": "用训练集、噪音、测试集、错误预测的动态图把过拟合先讲清楚"

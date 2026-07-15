@@ -8,7 +8,7 @@
 import type { ProjectionView } from "./projection";
 
 export const BASE_TRACKS = ["真人出镜", "口播继续", "旁白主导"] as const;
-export const LANES = ["A_ROLL", "RRV_MG", "AI_DRAMA", "FILM_BROLL"] as const;
+export const LANES = ["A_ROLL", "MG", "AI_DRAMA", "FILM_BROLL"] as const;
 export const NARRATIVES = [
 	"mirror-hook",
 	"demolition",
@@ -37,9 +37,26 @@ export const AUX_TYPES = [
 	"pause-card",
 	"data-annotation",
 	"timeline-tag",
+	// 第八枚（add-aux-rrv-overlay-particle）：承接透明叠层颗粒派单的 aux 类型——
+	// 与前七枚纯建议性不同，overlay aux 必带 handoff（duration_hint 正数）、由 buildLanding
+	// 投影进 dispatch.mg + 合成 struct_meta.split.beats（lane=MG），铺出叠在底轨主视觉上的透明颗粒。
+	"overlay",
 ] as const;
 
 export type Lane = (typeof LANES)[number];
+
+/**
+ * 遗留 lane 别名（去品牌化读旧兼容）：既有工程/拆分稿的品牌名读入即归一为中性名。
+ * 写侧一律新名（buildLanding/struct_meta/dispatch）；此表只服务读侧双名认旧。
+ */
+const LEGACY_LANE_ALIASES: Record<string, Lane> = { RRV_MG: "MG" };
+
+/** lane 归一：命中中性枚举或遗留别名即返回中性 Lane；否则 undefined（非法）。 */
+export function normalizeLane(v: unknown): Lane | undefined {
+	if (typeof v !== "string") return undefined;
+	if ((LANES as readonly string[]).includes(v)) return v as Lane;
+	return LEGACY_LANE_ALIASES[v];
+}
 
 export interface SplitSpan {
 	from: string;
@@ -57,6 +74,11 @@ export interface SplitAuxLayer {
 	necessity?: string;
 	promote_condition?: string;
 	fallback?: string;
+	/**
+	 * 颗粒派单入参（add-aux-rrv-overlay-particle）：仅 `type==="overlay"` 的 aux 承接——
+	 * 镜像 MG lane 的 handoff。`duration_hint`（正数秒）必填，其余可选透传给派生颗粒。
+	 */
+	handoff?: { duration_hint: number; category?: string; slug_hint?: string; theme?: string; bg?: string };
 }
 
 export interface SplitBeat {
@@ -182,7 +204,8 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 			if (!enumOk(b.narrative, vocab.narrative)) errors.push(`${tag}：narrative 非法（不在栏目词表内）`);
 			if (!enumOk(b.container_stage, vocab.container_stage)) errors.push(`${tag}：container_stage 非法（不在栏目词表内）`);
 		}
-		if (!enumOk(b.lane, LANES)) errors.push(`${tag}：lane 非法（四选一：${LANES.join(" | ")}）`);
+		// lane 双名认旧：遗留品牌值（如 RRV_MG）归一后放行，不判非法（既有工程零迁移）
+		if (!normalizeLane(b.lane)) errors.push(`${tag}：lane 非法（四选一：${LANES.join(" | ")}）`);
 		if (!enumOk(b.irreplaceability, IRREPLACEABILITY)) errors.push(`${tag}：irreplaceability 非法（四枚举之一）`);
 		if (!isNonEmptyStr(b.rhythm)) errors.push(`${tag}：缺 rhythm（人读节奏标签）`);
 		if (!isNonEmptyStr(b.visual_task)) errors.push(`${tag}：缺 visual_task（一句话视觉任务）`);
@@ -210,7 +233,7 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 		// 辅助层
 		if (b.aux_layers != null) {
 			if (!Array.isArray(b.aux_layers)) errors.push(`${tag}：aux_layers 必须是数组`);
-			else (b.aux_layers as unknown[]).forEach((a, ai) => validateAux(`${tag}.aux[${ai}]`, a, idIndex, errors));
+			else (b.aux_layers as unknown[]).forEach((a, ai) => validateAux(`${tag}.aux[${ai}]`, a, idIndex, errors, warnings));
 		}
 	});
 
@@ -239,13 +262,14 @@ function validateHandoff(
 		if (handoff != null) warnings.push(`${tag}：A_ROLL 不应带 handoff，已忽略`);
 		return;
 	}
-	if (lane === "RRV_MG") {
+	// MG（去品牌化前 RRV_MG）：双名认旧，遗留 lane 值同走此分支
+	if (lane === "MG" || lane === "RRV_MG") {
 		if (!handoff || typeof handoff.duration_hint !== "number") {
-			errors.push(`${tag}：RRV_MG 的 handoff.duration_hint 必填（秒，数值）`);
+			errors.push(`${tag}：MG 的 handoff.duration_hint 必填（秒，数值）`);
 		}
-		// category 可选软校验（裁决⑩，lane 不新增故宽松：非法只告警不拒）
-		if (handoff && handoff.category !== undefined && !isRrvCategory(handoff.category)) {
-			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${RRV_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+		// category 可选软校验（裁决⑩，lane 不新增故宽松：非法只告警不拒）；已知集含新旧品类键，遗留值不告警
+		if (handoff && handoff.category !== undefined && !isKnownCategory(handoff.category)) {
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${MG_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
 		}
 		return;
 	}
@@ -264,14 +288,26 @@ function validateAux(
 	raw: unknown,
 	idIndex: Map<string, number>,
 	errors: string[],
+	warnings: string[],
 ): void {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
 		errors.push(`${tag}：辅助层必须是对象`);
 		return;
 	}
 	const a = raw as Record<string, unknown>;
-	if (!enumOk(a.type, AUX_TYPES)) errors.push(`${tag}：type 非法（七类之一）`);
+	if (!enumOk(a.type, AUX_TYPES)) errors.push(`${tag}：type 非法（八类之一）`);
 	if (!isNonEmptyStr(a.role)) errors.push(`${tag}：缺 role（职责）`);
+	// overlay 叠层颗粒类型（add-aux-rrv-overlay-particle）：强校验 handoff.duration_hint 正数
+	// （该 aux 要生成颗粒，无时长不成立）；category 走软校验（非法告警不拒，同 lane 分型纪律）。
+	if (a.type === "overlay") {
+		const handoff = a.handoff as Record<string, unknown> | undefined;
+		if (!handoff || typeof handoff.duration_hint !== "number" || !(handoff.duration_hint > 0)) {
+			errors.push(`${tag}：overlay aux 缺颗粒时长（handoff.duration_hint 必填且须为正数）`);
+		}
+		if (handoff && handoff.category !== undefined && !isKnownCategory(handoff.category)) {
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${MG_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+		}
+	}
 	const m = a.mount;
 	if (m === "same_beat") return;
 	if (typeof m === "object" && m !== null) {
@@ -315,7 +351,7 @@ export interface SplitMetaBeat {
 	narrative?: string;
 	container_stage?: string;
 	visual_task?: string;
-	/** RRV_MG 品类子类型透传（裁决⑩）：供 opencut 色带按 category 分层（RRV 透明/MG 不透明）。 */
+	/** MG 品类子类型透传（裁决⑩）：供 opencut 色带按 category 分层（overlay 透明叠加/fullscreen 不透明满屏）。 */
 	category?: string;
 }
 
@@ -328,21 +364,34 @@ export interface StructMetaSplit {
 	beats: SplitMetaBeat[];
 }
 
-/** RRV_MG 颗粒品类子类型（裁决⑩，不新增 lane）。一期 rrv-overlay/mg-fullscreen；二期扩后两枚。 */
-export const RRV_CATEGORIES = ["rrv-overlay", "mg-fullscreen", "explain-subtitle", "op-ed-title"] as const;
-export type RrvCategory = (typeof RRV_CATEGORIES)[number];
-/** 一期透明/不透明默认映射（category → 期望 opaque）。透明品类→false，满屏品类→true。 */
+/** MG 颗粒品类子类型（裁决⑩，不新增 lane）。一期 overlay/fullscreen；二期扩 subtitle/title。 */
+export const MG_CATEGORIES = ["overlay", "fullscreen", "subtitle", "title"] as const;
+export type MgCategory = (typeof MG_CATEGORIES)[number];
+/**
+ * 透明/不透明默认映射（category → 期望 opaque）。透明叠加品类→false，满屏底层品类→true。
+ * 双名认旧：同时含中性新键（overlay/fullscreen/subtitle/title）与遗留品牌键
+ * （rrv-overlay/mg-fullscreen/explain-subtitle/op-ed-title），既有工程/颗粒零迁移仍命中。
+ */
 export const CATEGORY_EXPECTED_OPAQUE: Record<string, boolean> = {
+	overlay: false,
+	fullscreen: true,
+	subtitle: false,
+	title: true,
+	// 遗留品牌键（读旧兼容）
 	"rrv-overlay": false,
 	"mg-fullscreen": true,
 	"explain-subtitle": false,
 	"op-ed-title": true,
 };
-export function isRrvCategory(v: unknown): v is RrvCategory {
-	return typeof v === "string" && (RRV_CATEGORIES as readonly string[]).includes(v);
+export function isMgCategory(v: unknown): v is MgCategory {
+	return typeof v === "string" && (MG_CATEGORIES as readonly string[]).includes(v);
+}
+/** 已知品类（含遗留品牌键）：命中即视为已知、软校验不告警。 */
+function isKnownCategory(v: unknown): boolean {
+	return typeof v === "string" && Object.prototype.hasOwnProperty.call(CATEGORY_EXPECTED_OPAQUE, v);
 }
 
-export interface RrvDispatch {
+export interface MgDispatch {
 	beat: string;
 	composition_id: string;
 	duration: number | null;
@@ -370,7 +419,7 @@ export interface AiDramaDispatch {
 	[k: string]: unknown;
 }
 export interface Dispatch {
-	rrv_mg: RrvDispatch[];
+	mg: MgDispatch[];
 	film_broll: FilmDispatch[];
 	ai_drama: AiDramaDispatch[];
 }
@@ -440,7 +489,7 @@ export function buildLanding(
 		...(opts.sourceIndex ? { material_id: opts.sourceIndex.materialId } : {}),
 		beats: [],
 	};
-	const dispatch: Dispatch = { rrv_mg: [], film_broll: [], ai_drama: [] };
+	const dispatch: Dispatch = { mg: [], film_broll: [], ai_drama: [] };
 	const skipped: SkipReport[] = [];
 	const shrunk: ShrinkReport[] = [];
 	const unhandledLanes = new Set<string>();
@@ -460,7 +509,9 @@ export function buildLanding(
 		const track_ed = Math.max(...instances.map((x) => x.track_ed));
 		const isShrunk = droppedCount > 0;
 
-		const metaBeat: SplitMetaBeat = { id: beat.id, lane: beat.lane, span: beat.span, track_st, track_ed };
+		// 读旧写新：遗留 lane 值（RRV_MG）归一为中性名 MG 后落地/派单（既有工程零迁移）
+		const lane = normalizeLane(beat.lane) ?? beat.lane;
+		const metaBeat: SplitMetaBeat = { id: beat.id, lane, span: beat.span, track_st, track_ed };
 		if (opts.sourceIndex) {
 			const from = opts.sourceIndex.utterances.get(beat.span.from);
 			const to = opts.sourceIndex.utterances.get(beat.span.to);
@@ -474,9 +525,9 @@ export function buildLanding(
 		if (beat.narrative) metaBeat.narrative = beat.narrative;
 		if (beat.container_stage) metaBeat.container_stage = beat.container_stage;
 		if (beat.visual_task) metaBeat.visual_task = beat.visual_task;
-		// RRV_MG 品类透传（裁决⑩）：供 opencut 色带按 category 分层
-		if (beat.lane === "RRV_MG" && typeof beat.handoff?.category === "string") metaBeat.category = beat.handoff.category;
-		if (beat.lane !== "A_ROLL" && beat.handoff) metaBeat.handoff = beat.handoff;
+		// MG 品类透传（裁决⑩）：category 原样透传（含遗留品牌值，opaque passthrough），供 opencut 色带按 category 分层
+		if (lane === "MG" && typeof beat.handoff?.category === "string") metaBeat.category = beat.handoff.category;
+		if (lane !== "A_ROLL" && beat.handoff) metaBeat.handoff = beat.handoff;
 		split.beats.push(metaBeat);
 
 		if (isShrunk) {
@@ -485,8 +536,8 @@ export function buildLanding(
 
 		const h = beat.handoff ?? {};
 		const compositionId = `${opts.projectSlug}-${beat.id}`;
-		if (beat.lane === "RRV_MG") {
-			dispatch.rrv_mg.push({
+		if (lane === "MG") {
+			dispatch.mg.push({
 				beat: beat.id,
 				composition_id: compositionId,
 				duration: typeof h.duration_hint === "number" ? h.duration_hint : null,
@@ -497,7 +548,7 @@ export function buildLanding(
 				track_st,
 				track_ed,
 			});
-		} else if (beat.lane === "FILM_BROLL") {
+		} else if (lane === "FILM_BROLL") {
 			dispatch.film_broll.push({
 				beat: beat.id,
 				queries: Array.isArray(h.queries) ? (h.queries as string[]) : [],
@@ -507,12 +558,82 @@ export function buildLanding(
 				track_st,
 				track_ed,
 			});
-		} else if (beat.lane === "AI_DRAMA") {
+		} else if (lane === "AI_DRAMA") {
 			dispatch.ai_drama.push({ beat: beat.id, ...h, track_st, track_ed });
-		} else if (beat.lane !== "A_ROLL") {
+		} else if (lane !== "A_ROLL") {
 			// A_ROLL 故意无派单；其余 lane 过了校验却无 dispatch 分支
 			// = 未来扩展 LANES 漏改此处 → 收集告警，不静默丢队列（footgun 防御）
-			unhandledLanes.add(beat.lane);
+			unhandledLanes.add(lane);
+		}
+
+		// ── aux 叠层颗粒投影（add-aux-rrv-overlay-particle）─────────────────────
+		// 主 beat 派单后，把每条 type="overlay" 的 aux 投影为派生颗粒：进 dispatch.mg +
+		// 追加合成 struct_meta.split.beats（lane=MG、category=overlay），铺出叠在底轨主视觉上的透明颗粒。
+		// composition_id=<slug>-<beatId>-aux<n>（n 从 1，位置计数保证全局唯一 + 幂等）。
+		// 注意：此处到达时主 beat 必有存活实例（上方 instances.length===0 已 continue），故 same_beat 恒有效落轨。
+		let auxN = 0;
+		for (const aux of beat.aux_layers ?? []) {
+			if (aux.type !== "overlay") continue;
+			auxN += 1;
+			const auxTag = `${beat.id}-aux${auxN}`;
+			const mount = aux.mount;
+			// mount 投影：same_beat 复用主 beat span；{from,to} 取该子区间存活实例包络；{trigger} 一期不支持
+			let auxFromId: string;
+			let auxToId: string;
+			if (mount === "same_beat") {
+				auxFromId = beat.span.from;
+				auxToId = beat.span.to;
+			} else if ("from" in mount && "to" in mount) {
+				auxFromId = mount.from;
+				auxToId = mount.to;
+			} else {
+				// {trigger} 点挂载无干净源区间（duration_hint 是时间线秒非源秒 → 跟随会不准），一期 skip + 告警，二期补合成窗口
+				skipped.push({ beat: auxTag, reason: "overlay aux 使用 {trigger} 点挂载，一期不支持（二期补合成窗口）" });
+				continue;
+			}
+			const auxFromIdx = idIndex.get(auxFromId)!;
+			const auxToIdx = idIndex.get(auxToId)!;
+			const auxSpanIds = opts.utteranceIds.slice(auxFromIdx, auxToIdx + 1);
+			const auxInstances = auxSpanIds.flatMap((id) => byId.get(id) ?? []);
+			if (auxInstances.length === 0) {
+				// 全 dropped：与主 beat 全剪同纪律，计入 skipped 不静默丢
+				skipped.push({ beat: auxTag, reason: "overlay aux 源区间 utterance 全被剪，未落轨" });
+				continue;
+			}
+			const auxTrackSt = Math.min(...auxInstances.map((x) => x.track_st));
+			const auxTrackEd = Math.max(...auxInstances.map((x) => x.track_ed));
+			const auxCompositionId = `${opts.projectSlug}-${beat.id}-aux${auxN}`;
+			const ah = aux.handoff;
+
+			dispatch.mg.push({
+				beat: beat.id,
+				composition_id: auxCompositionId,
+				duration: ah && typeof ah.duration_hint === "number" ? ah.duration_hint : null,
+				category: "overlay",
+				theme: ah?.theme,
+				bg: ah?.bg,
+				slug_hint: ah?.slug_hint,
+				track_st: auxTrackSt,
+				track_ed: auxTrackEd,
+			});
+
+			const auxMetaBeat: SplitMetaBeat = {
+				id: auxTag,
+				lane: "MG",
+				span: { from: auxFromId, to: auxToId },
+				track_st: auxTrackSt,
+				track_ed: auxTrackEd,
+				category: "overlay",
+			};
+			// 源包络（同主 beat：传 sourceIndex 才写）——满足客户端 beats.every(source_ranges) 跟随门槛
+			if (opts.sourceIndex) {
+				const sfrom = opts.sourceIndex.utterances.get(auxFromId);
+				const sto = opts.sourceIndex.utterances.get(auxToId);
+				if (sfrom && sto && sto.ed > sfrom.st) {
+					auxMetaBeat.source_ranges = [{ st: r3(sfrom.st), ed: r3(sto.ed) }];
+				}
+			}
+			split.beats.push(auxMetaBeat);
 		}
 	}
 
@@ -567,8 +688,8 @@ export function renderSplitMarkdown(
 		L.push(`- \`${b.id}\` ${b.visual_task}`);
 	}
 	L.push("");
-	L.push("## RRV_MG Queue");
-	for (const r of landing.dispatch.rrv_mg) {
+	L.push("## MG Queue");
+	for (const r of landing.dispatch.mg) {
 		L.push(`- \`${r.beat}\` composition_id=\`${r.composition_id}\`${r.duration != null ? ` · ${r.duration}s` : ""}`);
 	}
 	L.push("");
