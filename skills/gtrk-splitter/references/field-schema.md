@@ -65,7 +65,7 @@
 //   - **避多义/字面义强的动词**（"pointing" 会召回手指特写、"hunting" 召回猎人——改用 "giving suggestions in a meeting" 这类场景语义）
 //   - **exclude 保持中文**：负向过滤匹配的是服务端返回的中文 note，写英文会失效
 
-// lane === "AI_DRAMA"  —— 全可选（下游 ai-drama-prompter 有推断默认）
+// lane === "AI_DRAMA"  —— 全可选（下游框架 skill /gtrk-ai-drama 有推断默认）
 "handoff": { "narrative": "trauma-repetition", "theme": "freud-fort-da", "emotion_stage": "abyssal", "platform": "video-gen", "shot_count": 5 }
 
 // lane === "A_ROLL"  —— 无 handoff

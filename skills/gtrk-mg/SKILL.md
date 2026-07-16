@@ -28,12 +28,12 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ④ 步，在 B-rol
 
 **本框架 skill 不硬编任何栏目的视觉风格/生产内容。** MG 颗粒长什么样、用什么视觉语法，全由**栏目的 MG 生产 skill** 决定；本 skill 只负责「在对的时候、按派单、驱动它产，然后把成品铺进工程」。
 
-**车道 → 栏目生产 skill 的解析（照此，别猜）**：读**有效栏目配置**的 `style.skills[]`（配置文件 `~/.gitruck/columns/<id>.json`；栏目 id 由 `--column <id>` 或 config `defaultColumn` 选取，零配置 = 内置默认栏目 **real-roam-viz**）。在 `style.skills[]` 里取 **`produces` 归一后（旧 `RRV_MG` → `MG`）等于 `MG`** 的条目 → 触发它 `ref` 指向的 skill 产颗粒。
+**车道 → 栏目生产 skill 的解析（照此，别猜）**：读**有效栏目配置**的 `style.skills[]`（配置文件 `~/.gitruck/columns/<id>.json`；栏目 id 由 `--column <id>` 或 config `defaultColumn` 选取；零配置 = L0 内置默认栏目，**不携带 style 清单** → 必然走下方「无匹配」分支）。在 `style.skills[]` 里取 **`produces` 归一后（旧 `RRV_MG` → `MG`）等于 `MG`** 的条目 → 触发它 `ref` 指向的 skill 产颗粒。
 - 命中多条 → 按栏目约定取其一（一般栏目只登记一个 MG 生产 skill）。
 - 条目带 `routing:"none"`（管线外产物，如封面）→ 跳过，不当 MG 生产 skill。
 - **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺；告诉用户「本栏目还没有 MG 生产 skill，先用 `/gtrk-style-maker` 建一个，或换个已配置的栏目（`--column`）」。
 
-> **生产 skill 是栏目的纯净资产**：它只懂本栏目的视觉语法、只产 html-particle 颗粒，**不知道 gtrk 命令、不知道产物落哪**。由本 skill 驱动它、并**由本 skill 负责把它产出的颗粒存到 `gtrk mg` 要读的路径**：`<产物目录>/mg/<composition_id>.html`。默认栏目 real-roam-viz 的生产 skill 即 `real-roam-viz`（produces=MG）。
+> **生产 skill 是栏目的纯净资产**：它只懂本栏目的视觉语法、只产 html-particle 颗粒，**不知道 gtrk 命令、不知道产物落哪**。由本 skill 驱动它、并**由本 skill 负责把它产出的颗粒存到 `gtrk mg` 要读的路径**：`<产物目录>/mg/<composition_id>.html`。举例（仅示意解析机制，非硬编）：`real-roam-guide` 栏目配置里 `style.skills` 有一条 `{produces:"MG", ref:"…/real-roam-viz"}` → 驱动它产颗粒；换个栏目、换个 ref，产颗粒的就是另一个生产 skill。**本 skill 正文里不绑死任何栏目的生产 skill。**
 
 ## 逐槽位工作流（产 → lint → 铺，循环到铺满）
 
@@ -89,7 +89,7 @@ gtrk mg --project "<split产物目录>" --json
 ## 交棒 ⑤（别停在铺完）
 
 `dispatch.mg` 全铺满、`gtrk mg status` 全绿后**别收工**——按 SOP 顺势接力到第 ⑤ 步 **AI 再现**：
-- `dispatch.ai_drama` 非空 → 触发 `/gtrk-ai-drama`（持通用分镜 craft + 读栏目 style-lock 产风格化分镜提示词，用户去 Sora / Veo / 可灵等外部平台出片回铺；**此车道产物即提示词、无 gtrk 命令**）。一句话交代即推进：「MG 颗粒已叠铺完，我接着安排最后一步 AI 再现」。
+- `dispatch.ai_drama` 非空 → 触发 `/gtrk-ai-drama`（持通用分镜 craft + 读栏目 style-lock，产 AI 再现分镜稿——四段描述 + 独立视觉基调 + 时长预算；用户去可灵 / Vidu 等外部平台出片回铺；**此车道产物即分镜稿、无 gtrk 命令**）。一句话交代即推进：「MG 颗粒已叠铺完，我接着安排最后一步 AI 再现」。
 - `dispatch.ai_drama` 为空 → 本片没有 AI 车道，可直接 `gtrk render` 收口成片。
 
 除非用户表示只铺这一版 MG、暂不往下。
