@@ -1,8 +1,8 @@
 /**
  * gtrk tool 工具族 —— 共享 runner（add-tool-command-family D3/D4/D5/D10）。
  *
- * cloud 型统一流水线：输入校验 → (10min 硬上限前置) → 可选 preprocess → uploadCached →
- * 提交前打印 billingHint（stderr）→ submitTask（6004 收编重传一次）→ 自循环轮询（复用 getTaskResult，
+ * cloud 型统一流水线：输入校验 → (10min 硬上限前置) → 可选 preprocess →
+ * 匿名查询并打印实时价格（stderr）→ uploadCached → submitTask（6004 收编重传一次）→ 自循环轮询（复用 getTaskResult，
  * 墙钟 per-tool 可覆盖）→ mapOutputs 流式下载落地 → task.json/result.json 面包屑。
  *
  * runner 只依赖 descriptor 契约字段，无任何工具名特判。沉淀 lib 零改动：
@@ -20,6 +20,7 @@ import type { CloudConfig } from "./config";
 import { submitTask, getTaskResult, type OralCutOutput } from "./cloud";
 import { uploadCached, invalidateUpload } from "./upload-cache";
 import { probeDuration } from "./media";
+import { resolveToolPricing, type PriceResolver } from "./tool-pricing";
 import {
 	type ToolDescriptor,
 	type ToolContext,
@@ -59,6 +60,8 @@ export interface CloudToolDeps {
 	pollIntervalMs?: number;
 	sleep?: (ms: number) => Promise<void>;
 	now?: () => number;
+	/** 实时价格解析；默认匿名请求官网价格表，测试可注入。 */
+	resolvePricing?: PriceResolver;
 }
 
 // ---------------------------------------------------------------- 透传参数（--param / --params-json）
@@ -290,13 +293,19 @@ export async function runCloudTool(
 	};
 	const outDir = resolveOutDir(descriptor, inputAbs, opts.out);
 
-	// ② 可选本地预处理（首批三工具均缺省=原文件直传）
+	// ② 可选本地预处理（缺省=原文件直传）
 	let uploadPath = inputAbs;
 	if (descriptor.preprocess) uploadPath = await descriptor.preprocess(ctx);
 	if (!uploadPath) throw new Error(`${descriptor.name} 缺上传物（input=none 的 cloud 型工具需 preprocess 产上传物）`);
 
-	// ③ 提交前打印计费提示 → 上传（指纹缓存复用免二次上传；≥256MiB 自动分片）
-	emitBilling(descriptor.billingHint);
+	// ③ 提交前匿名查询实时价格并提示 → 上传（失败仅提示 unavailable，不阻断能力）
+	let billingHint: string;
+	try {
+		billingHint = (await (deps.resolvePricing ?? resolveToolPricing)(descriptor.priceKey!, descriptor.pricingContext)).billingHint;
+	} catch {
+		billingHint = "实时价格暂不可用，以服务端结算为准";
+	}
+	emitBilling(billingHint);
 	let up = await deps.uploadCached(deps.cfg, uploadPath, { force: opts.reupload });
 
 	const buildPayload = (fid: string): Record<string, unknown> => {

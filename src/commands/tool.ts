@@ -3,7 +3,7 @@
  *
  * 命令形态铁律（oralcut-result D2 教训、split.ts 头注释）：顶层命令 + 首个 positional 词内部分派，
  * **不用 commander 父子命令**（防吞选项）。`gtrk tool <name> [input]` 分派到注册表 descriptor 跑共享 runner；
- * `gtrk tool list` 为发现子模式（人读表格 + --json 机读，无 Key 也能跑、零网络）。
+ * `gtrk tool list` 为发现子模式（人读表格 + --json 机读，无 Key 也能匿名查实时价格）。
  *
  * 各 descriptor 的工具专属 options 在注册时统一挂 commander（去重按 flag）。
  * gated 工具（enabled=false）直调即报错「能力未开放」+ disabledReason、进程非 0、零上传零提交。
@@ -23,6 +23,11 @@ import {
 import { runCloudTool, downloadStream, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
 import { runMad, type MadOpts } from "../lib/mad/mad";
 import { currentVersion } from "../lib/version";
+import {
+	fetchToolPrices,
+	resolveToolPricingFromMap,
+	type ToolPriceMap,
+} from "../lib/tool-pricing";
 
 interface ToolOpts {
 	out?: string;
@@ -84,7 +89,7 @@ export async function runToolCommand(
 		throw new Error("用法：`gtrk tool <name> [input]` 跑工具；`gtrk tool list` 查全部工具");
 	}
 	if (name === "list") {
-		runList(opts, registry);
+		await runList(opts, registry);
 		return undefined;
 	}
 	const descriptor = findTool(name, registry);
@@ -95,17 +100,31 @@ export async function runToolCommand(
 	return runTool(descriptor, words[1], opts, deps);
 }
 
-/** list 发现子模式：人读表格 + --json 单行机读数组（无 Key 照常可用、零网络）。 */
-export function runList(opts: ToolOpts, registry: ToolDescriptor[] = TOOL_REGISTRY): void {
-	const rows = registry.map((d) => ({
+/** list 发现子模式：无 Key可用；每次最多匿名查一次实时价格，失败仍列完整清单。 */
+export async function runList(
+	opts: ToolOpts,
+	registry: ToolDescriptor[] = TOOL_REGISTRY,
+	loadPrices: () => Promise<ToolPriceMap> = fetchToolPrices,
+): Promise<void> {
+	let prices: ToolPriceMap | undefined;
+	try {
+		prices = await loadPrices();
+	} catch {
+		prices = undefined;
+	}
+	const rows = registry.map((d) => {
+		const resolved = resolveToolPricingFromMap(d.priceKey ?? d.name, prices, d.pricingContext);
+		return {
 		name: d.name,
 		title: d.title,
 		input: d.input.kind,
 		output: d.outputHint,
-		billingHint: d.billingHint,
+		billingHint: resolved.billingHint,
+		pricing: resolved.pricing,
 		enabled: d.enabled,
 		...(d.disabledReason ? { disabledReason: d.disabledReason } : {}),
-	}));
+		};
+	});
 	if (opts.json) {
 		console.log(JSON.stringify(rows));
 		return;
