@@ -9,6 +9,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import type { CloudConfig } from "../config";
+import { resolveToolPricing, type PriceResolver } from "../tool-pricing";
 import { loadConfig as realLoadConfig } from "../config";
 import { submitTask } from "../cloud";
 import { uploadCached, invalidateUpload } from "../upload-cache";
@@ -70,6 +71,7 @@ export interface RunMadDeps {
 	cliVersion?: string;
 	warn?: (m: string) => void;
 	emitBilling?: (hint: string) => void;
+	resolvePricing?: PriceResolver;
 }
 
 export interface MadResult {
@@ -178,7 +180,8 @@ export async function runMad(inputArg: string | undefined, opts: MadOpts, deps: 
 				level = 2;
 				bgmForTrack = bgmAbs;
 			} else {
-				emitBilling("BGM 卡点将调用一次云端节拍分析（audio_music_analyze），按现行价计费。");
+				const pricing = await (deps.resolvePricing ?? resolveToolPricing)("audio_music_analyze", "仅 --bgm 卡点时");
+				emitBilling(pricing.billingHint);
 				const beatCloud: BeatCloudDeps =
 					deps.beatCloud ?? { uploadCached, invalidateUpload, submitTask, pollToolTask };
 				try {

@@ -5,9 +5,7 @@
  * 工具专属选项/计费/可用门），骨架全归 tool-runner。runner 只认契约、不认工具名（无任何工具特判）。
  * 注册表是编译期 TS 数组、随包分发、不做动态加载；接新工具只加一个 descriptor，不写编排。
  *
- * 首批三成员全为 cloud 型，直调公共域 API（image_move / image_matting / video_matting），infra 零改动。
- * local 型（无 Key 可跑、可选云端加料，如后续的 mad）的字段（runLocal/fallbackChain）已在契约里占位，
- * 本 change 不含 local 实例。
+ * cloud 型直调公共域 API，local 型可复用同一注册表与发现入口；infra 零改动。
  */
 import { existsSync } from "node:fs";
 import { extname } from "node:path";
@@ -68,8 +66,10 @@ export interface ToolDescriptor {
 	description: string;
 	kind: ToolKind;
 	input: ToolInputSpec;
-	/** 人读计费提示（如「2 积分/个」「免费」）——提交前打印、skill 转述给用户。 */
-	billingHint: string;
+	/** 官网实时价格表 key；cloud 型必填，不从 name/taskType 猜别名。 */
+	priceKey?: string;
+	/** 稳定的计费条件说明（不得含价格数字），如 MAD「仅 --bgm 卡点时」。 */
+	pricingContext?: string;
 	/** 人读产物形态（list 的「产物形态」列，如「运镜视频」「透明 png」）。 */
 	outputHint: string;
 	/** 可用门：false 时 MUST 带 disabledReason（list 标「未开放」、直调报错、进程非 0）。 */
@@ -81,7 +81,7 @@ export interface ToolDescriptor {
 	// —— cloud 型 ——
 	/** 云端任务类型，可含 cli/ 域前缀（cloud.ts 的 /task/${taskType} 模板天然通吃两域）。 */
 	taskType?: string;
-	/** 本地预处理钩子：返回实际上传物路径；缺省=原文件直传。首批三工具均缺省（预留低带宽工具）。 */
+	/** 本地预处理钩子：返回实际上传物路径；缺省=原文件直传（预留低带宽工具）。 */
 	preprocess?: (ctx: ToolContext) => Promise<string> | string;
 	/** 拼云端 payload；--param/--params-json 由 runner 在其结果上逐字段合并覆盖。 */
 	buildPayload?: (fileId: string, ctx: ToolContext) => Record<string, unknown>;
@@ -164,16 +164,16 @@ export function probeImageDims(
 	return undefined;
 }
 
-// ---------------------------------------------------------------- 首批三 descriptor
+// ---------------------------------------------------------------- 图片/视频首批 descriptor
 
-/** image_move —— 图转运镜（公共域 /task/image_move，2 积分/个）。 */
+/** image_move —— 图转运镜（公共域 /task/image_move，价格运行时查公开价格表）。 */
 const imageMove: ToolDescriptor = {
 	name: "image_move",
 	title: "图转运镜",
 	description: "把一张静态图生成带运镜的短视频。",
 	kind: "cloud",
 	input: { kind: "image" },
-	billingHint: "2 积分/个",
+	priceKey: "image_move_local",
 	outputHint: "运镜视频",
 	enabled: true,
 	taskType: "image_move",
@@ -204,14 +204,14 @@ const imageMove: ToolDescriptor = {
 	},
 };
 
-/** image_matting —— 图片抠像（公共域 /task/image_matting，免费）。 */
+/** image_matting —— 图片抠像（公共域 /task/image_matting，价格运行时查公开价格表）。 */
 const imageMatting: ToolDescriptor = {
 	name: "image_matting",
 	title: "图片抠像",
 	description: "把图片主体从背景抠出，产透明背景 png（可经 --param 请求额外背景底板输出）。",
 	kind: "cloud",
 	input: { kind: "image" },
-	billingHint: "免费",
+	priceKey: "image_matting",
 	outputHint: "透明 png",
 	enabled: true,
 	taskType: "image_matting",
@@ -229,15 +229,15 @@ const imageMatting: ToolDescriptor = {
 	},
 };
 
-/** video_matting —— 视频抠像（公共域 /task/video_matting，免费，10min 硬上限、原片直传禁代理）。 */
+/** video_matting —— 视频抠像（公共域 /task/video_matting，10min 硬上限、原片直传禁代理）。 */
 const videoMatting: ToolDescriptor = {
 	name: "video_matting",
 	title: "视频抠像",
 	description: "把视频主体从背景抠出，产透明背景 webm（像素级、原片直传不压代理；单片 ≤10 分钟）。",
 	kind: "cloud",
-	// 10min 硬上限：上传前 ffprobe 探测时长，超限直接拒绝（封免费能力的带宽/GPU 成本敞口）。
+	// 10min 硬上限：上传前 ffprobe 探测时长，超限直接拒绝（封带宽/GPU 成本敞口）。
 	input: { kind: "video", maxDurationSec: 600 },
-	billingHint: "免费",
+	priceKey: "video_matting",
 	outputHint: "透明 webm",
 	enabled: true,
 	taskType: "video_matting",
@@ -255,6 +255,102 @@ const videoMatting: ToolDescriptor = {
 	},
 };
 
+// ---------------------------------------------------------------- 音频首批 descriptor
+
+/** audio_separation —— 单条音频分离为人声与伴奏，按 files[].type 映射可选双产物。 */
+const audioSeparation: ToolDescriptor = {
+	name: "audio_separation",
+	title: "人声伴奏分离",
+	description: "把单条音频分离为人声与伴奏，可返回其中一项或两项。",
+	kind: "cloud",
+	input: { kind: "audio" },
+	priceKey: "audio_separation",
+	outputHint: "人声与伴奏音频",
+	enabled: true,
+	taskType: "audio_separation",
+	options: [{ flag: "--mode <fast|turbo>", desc: "处理档位（默认 fast，可选 turbo）" }],
+	buildPayload(fileId, ctx) {
+		const raw = ctx.opts.mode;
+		const mode = raw == null ? "fast" : String(raw);
+		if (mode !== "fast" && mode !== "turbo") throw new Error("--mode 只支持 fast 或 turbo");
+		return { file_id: fileId, mode };
+	},
+	mapOutputs(out, ctx) {
+		if (!Array.isArray(out.files)) return [];
+		const items: DownloadItem[] = [];
+		for (const raw of out.files) {
+			if (!raw || typeof raw !== "object") continue;
+			const file = raw as Record<string, unknown>;
+			const type = file.type;
+			const url = file.download_url;
+			if ((type !== "vocals" && type !== "instrumental") || typeof url !== "string" || !url.trim()) continue;
+			items.push({ url, filename: `${ctx.baseName}-${type}${extFromUrl(url, ".wav")}` });
+		}
+		return items;
+	},
+};
+
+/** audio_noise_reduce —— API 同时接受音频与视频输入，但能力模态及产物均为音频。 */
+const audioNoiseReduce: ToolDescriptor = {
+	name: "audio_noise_reduce",
+	title: "音频降噪",
+	description: "对音频或视频中的声音降噪，输出降噪后的音频。",
+	kind: "cloud",
+	input: { kind: "audio", exts: [...AUDIO_EXTS, ...VIDEO_EXTS] },
+	priceKey: "audio_noise_reduce",
+	outputHint: "降噪音频",
+	enabled: true,
+	taskType: "audio_noise_reduce",
+	options: [{ flag: "--prop-decrease <0..1>", desc: "降噪强度（0 到 1；未传则使用服务端默认）" }],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.propDecrease != null) {
+			const value = Number(ctx.opts.propDecrease);
+			if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error("--prop-decrease 必须是 0 到 1 的数字");
+			payload.prop_decrease = value;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-denoise${extFromUrl(url, ".wav")}` }] : [];
+	},
+};
+
+/** audio_silence_remove —— 仅音频输入，移除过长静音并只落处理后的音频。 */
+const audioSilenceRemove: ToolDescriptor = {
+	name: "audio_silence_remove",
+	title: "静音片段移除",
+	description: "移除音频中过长的静音片段，输出压缩停顿后的音频。",
+	kind: "cloud",
+	input: { kind: "audio" },
+	priceKey: "audio_silence_remove",
+	outputHint: "去静音音频",
+	enabled: true,
+	taskType: "audio_silence_remove",
+	options: [
+		{ flag: "--min-silence-len <ms>", desc: "被视为静音片段的最短毫秒数（未传则使用服务端默认）" },
+		{ flag: "--desired-silence-len <ms>", desc: "处理后保留的静音毫秒数（未传则使用服务端默认）" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		for (const [optKey, payloadKey, flag] of [
+			["minSilenceLen", "min_silence_len", "--min-silence-len"],
+			["desiredSilenceLen", "desired_silence_len", "--desired-silence-len"],
+		] as const) {
+			if (ctx.opts[optKey] == null) continue;
+			const value = Number(ctx.opts[optKey]);
+			if (!Number.isFinite(value) || value < 0) throw new Error(`${flag} 必须是非负毫秒数`);
+			payload[payloadKey] = value;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-desilence${extFromUrl(url, ".wav")}` }] : [];
+	},
+};
+
 /**
  * mad —— 一键剪 MAD（local 型「纯本地工具、可选云端加料」形态首个成员，add-tool-mad）。
  * 素材文件夹（+可选 BGM）→ 自动选技法 → 生成 AE 母合成成片工程 .jsx。
@@ -268,8 +364,9 @@ const mad: ToolDescriptor = {
 		"素材文件夹（3~10 条视频）+ 可选 BGM → 自动选技法 → 单一 .jsx，AE 2020+ 跑一遍出 15~30s 卡点成片工程。仅支持 AE。",
 	kind: "local",
 	input: { kind: "directory" },
-	// 无 Key 可跑（首拉联网下载数据、缓存后离线可跑）；仅 --bgm 卡点调一次云端节拍分析才计费
-	billingHint: "免费（--bgm 卡点时计费一次云端节拍分析 audio_music_analyze）",
+	// 无 Key 可跑；仅 --bgm 卡点调一次云端节拍分析，价格运行时查公开价格表。
+	priceKey: "audio_music_analyze",
+	pricingContext: "仅 --bgm 卡点时",
 	outputHint: "AE 母合成工程 .jsx",
 	enabled: true,
 	options: [
@@ -286,7 +383,15 @@ const mad: ToolDescriptor = {
 export const RESERVED_NAMES = new Set(["list"]);
 
 /** 工具族注册表（编译期数组）。接新工具在此追加一个 descriptor。 */
-export const TOOL_REGISTRY: ToolDescriptor[] = [imageMove, imageMatting, videoMatting, mad];
+export const TOOL_REGISTRY: ToolDescriptor[] = [
+	imageMove,
+	imageMatting,
+	videoMatting,
+	audioSeparation,
+	audioNoiseReduce,
+	audioSilenceRemove,
+	mad,
+];
 
 /** 按名字取 descriptor。 */
 export function findTool(name: string, registry: ToolDescriptor[] = TOOL_REGISTRY): ToolDescriptor | undefined {
@@ -306,5 +411,6 @@ export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): vo
 		seen.add(d.name);
 		if (!d.enabled && !d.disabledReason) throw new Error(`未启用工具缺 disabledReason：「${d.name}」`);
 		if (d.kind === "cloud" && !d.taskType) throw new Error(`cloud 型工具缺 taskType：「${d.name}」`);
+		if (d.kind === "cloud" && !d.priceKey) throw new Error(`cloud 型工具缺 priceKey：「${d.name}」`);
 	}
 }
