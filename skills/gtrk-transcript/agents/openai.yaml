@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频转文字稿"
+  short_description: "将本地视频整理为带总结与时间戳的单一 Markdown"
+  default_prompt: "Use $gtrk-transcript to turn my local video into one Markdown transcript with an Agent-written summary."
