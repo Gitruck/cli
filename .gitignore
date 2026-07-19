@@ -4,6 +4,7 @@ node_modules/
 dist/
 out/
 test/
+.plans/
 .DS_Store
 
 # IDE / 编辑器
