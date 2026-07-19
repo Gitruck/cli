@@ -473,6 +473,172 @@ const videoVaporwave: ToolDescriptor = {
 	},
 };
 
+type NormalizedRoi = { x: number; y: number; w: number; h: number };
+
+/** Parse and validate the public video_purify normalized ROI contract. */
+export function parseNormalizedRoi(value: unknown): NormalizedRoi {
+	let rawValues: unknown[];
+	let acceptNumericStrings = false;
+	if (typeof value === "string") {
+		acceptNumericStrings = true;
+		const parts = value.split(",");
+		if (parts.length !== 4 || parts.some((part) => !part.trim())) {
+			throw new Error("--purify-roi 必须是 x,y,w,h 四个归一化数字");
+		}
+		rawValues = parts;
+	} else if (value && typeof value === "object" && !Array.isArray(value)) {
+		const roi = value as Record<string, unknown>;
+		rawValues = [roi.x, roi.y, roi.w, roi.h];
+	} else {
+		throw new Error("ROI 必须包含归一化数字 x、y、w、h");
+	}
+
+	const numbers = rawValues.map((item) => {
+		if (typeof item === "number") return item;
+		if (acceptNumericStrings && typeof item === "string") return Number(item);
+		return Number.NaN;
+	});
+	if (numbers.some((item) => !Number.isFinite(item))) {
+		throw new Error("ROI 的 x、y、w、h 必须是有限数字");
+	}
+	const [x, y, w, h] = numbers as [number, number, number, number];
+	if (x < 0 || x > 1 || y < 0 || y > 1 || w <= 0 || w > 1 || h <= 0 || h > 1 || x + w > 1 || y + h > 1) {
+		throw new Error("ROI 必须满足 0≤x,y≤1、0<w,h≤1、x+w≤1、y+h≤1");
+	}
+	return { x, y, w, h };
+}
+
+/** video_purify —— 净化用户有权处理的视频中的水印、字幕或指定区域。 */
+const videoPurify: ToolDescriptor = {
+	name: "video_purify",
+	title: "视频净化",
+	description: "清理你有权处理的视频中的水印、字幕或指定区域；不承诺还原被遮挡的原始内容。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_purify",
+	outputHint: "净化视频",
+	enabled: true,
+	taskType: "video_purify",
+	pollTimeoutMs: 4 * 60 * 60 * 1000,
+	options: [
+		{
+			flag: "--purify-scope <full_screen|subtitle|custom>",
+			desc: "净化范围；未传时使用服务端 full_screen 默认值",
+		},
+		{
+			flag: "--purify-method <ffmpeg|raft>",
+			desc: "净化方式；未传时使用服务端 ffmpeg 默认值，raft 仅支持 20 分钟以内视频",
+		},
+		{ flag: "--purify-roi <x,y,w,h>", desc: "custom 模式的归一化矩形区域" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		const scopeRaw = ctx.opts.purifyScope;
+		const scope = scopeRaw == null ? undefined : String(scopeRaw);
+		if (scope != null && scope !== "full_screen" && scope !== "subtitle" && scope !== "custom") {
+			throw new Error("--purify-scope 只支持 full_screen、subtitle 或 custom");
+		}
+		if (scope != null) payload.purify_scope = scope;
+
+		const methodRaw = ctx.opts.purifyMethod;
+		const method = methodRaw == null ? undefined : String(methodRaw);
+		if (method != null && method !== "ffmpeg" && method !== "raft") {
+			throw new Error("--purify-method 只支持 ffmpeg 或 raft");
+		}
+		if (method != null) payload.purify_func_type = method;
+
+		const roiRaw = ctx.opts.purifyRoi;
+		if (roiRaw != null) {
+			if (scope !== "custom") {
+				throw new Error("--purify-roi 只能与 --purify-scope custom 一起使用");
+			}
+			payload.roi = parseNormalizedRoi(roiRaw);
+		} else if (scope === "custom") {
+			if (ctx.extraParams.roi == null) {
+				throw new Error("--purify-scope custom 必须同时提供 --purify-roi 或 params-json.roi");
+			}
+			parseNormalizedRoi(ctx.extraParams.roi);
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-purified${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
+/** video_upscale —— 实验性 GPU 视频超分辨率。 */
+const videoUpscale: ToolDescriptor = {
+	name: "video_upscale",
+	title: "视频超分",
+	description: "对一分钟以内的低分辨率视频做实验性 GPU 超分；效果需自行检查。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS, maxDurationSec: 60 },
+	priceKey: "video_upscale",
+	outputHint: "超分视频",
+	enabled: true,
+	taskType: "video_upscale",
+	pollTimeoutMs: 4 * 60 * 60 * 1000,
+	options: [
+		{ flag: "--upscale-times <2|3|4>", desc: "超分倍数；未传时使用服务端 2 倍默认值" },
+		{ flag: "--upscale-type <Reality|Anime>", desc: "写实或动漫类型；未传时使用服务端 Reality 默认值" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.upscaleTimes != null) {
+			const times = Number(ctx.opts.upscaleTimes);
+			if (!Number.isInteger(times) || (times !== 2 && times !== 3 && times !== 4)) {
+				throw new Error("--upscale-times 只支持 2、3 或 4");
+			}
+			payload.times = times;
+		}
+		if (ctx.opts.upscaleType != null) {
+			const upscaleType = String(ctx.opts.upscaleType);
+			if (upscaleType !== "Reality" && upscaleType !== "Anime") {
+				throw new Error("--upscale-type 只支持 Reality 或 Anime");
+			}
+			payload.upscale_type = upscaleType;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-upscaled${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
+/** video_interpolate —— 以 2/3/4 倍插帧提升视频流畅度。 */
+const videoInterpolate: ToolDescriptor = {
+	name: "video_interpolate",
+	title: "视频插帧",
+	description: "以 GPU 帧插值提升视频流畅度；不附加未经服务端声明的时长限制。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_interpolate",
+	outputHint: "插帧视频",
+	enabled: true,
+	taskType: "video_interpolate",
+	pollTimeoutMs: 4 * 60 * 60 * 1000,
+	options: [
+		{ flag: "--interpolate-multiplier <2|3|4>", desc: "插帧倍数；未传时使用服务端 2 倍默认值" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.interpolateMultiplier != null) {
+			const multiplier = Number(ctx.opts.interpolateMultiplier);
+			if (!Number.isInteger(multiplier) || (multiplier !== 2 && multiplier !== 3 && multiplier !== 4)) {
+				throw new Error("--interpolate-multiplier 只支持 2、3 或 4");
+			}
+			payload.multiplier = multiplier;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-interpolated${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
 /** video_matting —— 视频抠像（公共域 /task/video_matting，10min 硬上限、原片直传禁代理）。 */
 const videoMatting: ToolDescriptor = {
 	name: "video_matting",
@@ -638,6 +804,9 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	videoCanvasAdapt,
 	videoStabilizer,
 	videoVaporwave,
+	videoPurify,
+	videoUpscale,
+	videoInterpolate,
 	audioSeparation,
 	audioNoiseReduce,
 	audioSilenceRemove,

@@ -1,6 +1,6 @@
 ---
 name: gtrk-tools
-description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtrk tool` 家族。当用户想“让图动起来 / 抠像去背景 / 图片或视频去黑边 / 图片或视频比例转换 / 视频防抖 / 添加蒸汽波滤镜 / 清理有权处理图片中的水印或叠加元素 / 分离人声和伴奏 / 提取伴奏 / 给音频或视频降噪 / 去掉音频静音停顿 / 一键剪 MAD / 用某个 gtrk 单点工具 / gtrk 工具族里有什么”时使用本 Skill。凡涉及这些能力，优先驱动 CLI，不让用户自己去终端敲，也不手搓 ffmpeg。
+description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtrk tool` 家族。当用户想“让图动起来 / 抠像去背景 / 图片或视频去黑边 / 图片或视频比例转换 / 视频防抖 / 添加蒸汽波滤镜 / 清理有权处理的图片或视频中的水印、字幕或叠加元素 / 视频超分变清晰 / 视频补帧变流畅 / 分离人声和伴奏 / 提取伴奏 / 给音频或视频降噪 / 去掉音频静音停顿 / 一键剪 MAD / 用某个 gtrk 单点工具 / gtrk 工具族里有什么”时使用本 Skill。凡涉及这些能力，优先驱动 CLI，不让用户自己去终端敲，也不手搓 ffmpeg。
 ---
 
 # gtrk 工具族（gtrk-tools）
@@ -25,6 +25,9 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `video_canvas_adapt` | 「视频比例转换 / 横竖屏适配 / 截取片段并转换画布」 | 单条本地视频；模式只支持 `normal` / `rectangle` / `square` | 比例适配视频 | 运行前实时查询 | 已上线 |
 | `video_stabilizer` | 「视频防抖 / 稳定手持画面 / 去抖」 | 单条本地视频；方式 `fast` / `exp` / `turbo` | 防抖视频 | 运行前实时查询 | 已上线 |
 | `video_vaporwave` | 「给视频加蒸汽波滤镜 / 复古滤镜 / 使用某个滤镜预设」 | 单条本地视频；滤镜名需精确 | 蒸汽波滤镜视频 | 运行前实时查询 | 已上线 |
+| `video_purify` | 「清理我有权处理的视频水印 / 去字幕 / 只净化指定区域」 | 单条本地视频（仅处理你有权处理的素材）；可选范围、方式和归一化 ROI | 一条净化视频 | 运行前实时查询 | 已上线 |
+| `video_upscale` | 「视频超分 / 低清视频放大 / 动漫视频变清晰」 | 单条本地视频（≤1 分钟）；倍数 `2` / `3` / `4`，类型 `Reality` / `Anime` | 一条超分视频 | 运行前实时查询 | 已上线 |
+| `video_interpolate` | 「视频补帧 / 提高帧率 / 让画面更流畅」 | 单条本地视频；倍数 `2` / `3` / `4`，不附加 1 分钟限制 | 一条插帧视频 | 运行前实时查询 | 已上线 |
 | `audio_separation` | 「分离人声和伴奏 / 提取人声 / 提取伴奏」 | 单条音频 | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_noise_reduce` | 「音频降噪 / 视频声音降噪 / 去底噪」 | 单条音频或视频 | 降噪后的音频 | 运行前实时查询 | 已上线 |
 | `audio_silence_remove` | 「去静音 / 删掉过长停顿 / 压缩音频空白」 | 单条音频 | 去静音音频 | 运行前实时查询 | 已上线 |
@@ -54,11 +57,16 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 图片比例转换常用形态：`gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --json`。`--canvas-type` 只接受实际运行时契约 `normal`、`rectangle`、`square`；不要传旧文档中的 `fit`。省略画布参数时不替服务端写死默认值。
 
-四个公共视频工具都只接本地文件，允许扩展名为 `.mp4/.avi/.mpg/.mov/.flv/.mxf/.mpeg/.ogg/.3gp/.wmv/.h264/.m4v/.ts`；不要把 `.mkv`、`.webm` 或 URL 交给它们。
+这七个公共视频工具（去黑边、比例转换、防抖、蒸汽波、净化、超分、插帧）都只接本地文件，允许扩展名为 `.mp4/.avi/.mpg/.mov/.flv/.mxf/.mpeg/.ogg/.3gp/.wmv/.h264/.m4v/.ts`；不要把 `.mkv`、`.webm` 或 URL 交给它们。
 
 - 视频比例转换：`gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 12 --clip-end 60 --without-audio --json`。`--clip-start/--clip-end` 传起止帧序号；省略选项就沿用服务端默认，需要保留音轨时不要传 `--without-audio`。
 - 视频防抖：`gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo --json`。支持 `fast`、`exp`、`turbo`；未传时由服务端使用 `turbo`，`exp` 只按实验方式转述，不承诺观感。
 - 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
+- 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method ffmpeg --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
+- 视频超分：`gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime --json`。输入最多 60 秒，放大后任一边超过 4000 px 会由服务端拒绝；这是实验性增强，不能承诺主观画质一定提升。
+- 视频插帧：`gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 --json`。支持 `2`、`3`、`4`，不套用旧总览里的 1 分钟限制；原视频任一边超过 4000 px 时由服务端拒绝。
+
+净化、超分、插帧属于长耗时 GPU 任务，CLI 最多持续轮询 4 小时。超时只表示本次等待结束，不等于云端任务已取消；保留输出目录中的 `task.json` / `result.json`，按 `taskId` 查询或恢复，避免直接重跑造成重复计费。
 
 ### 某工具显示「未开放」时怎么回应
 
