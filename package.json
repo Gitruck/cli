@@ -1,6 +1,6 @@
 {
   "name": "@gitruck/cli",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "同合云成片流水线 CLI —— agent 驱动云端任务、产物拉回本地、三方工程文件（客户端/剪映/PR）互通。",
   "license": "MIT",
   "author": "Gitruck (同合云)",
@@ -48,15 +48,17 @@
     "build": "bun build ./src/index.ts --target=node --outfile dist/index.js",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build",
-    "test": "esbuild src/lib/chunk-upload.ts src/lib/render.ts src/lib/cloud.ts src/lib/materialize.ts src/lib/projection.ts src/lib/splitdoc.ts src/lib/gtrk-writeback.ts src/lib/column-config.ts src/lib/matrix.ts src/lib/matrix-lay.ts src/lib/mg-lint.ts src/lib/mg-lay.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/split.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/matrix.ts --bundle --platform=node --format=esm --outfile=.test-build/matrix-cmd.mjs && esbuild src/commands/mg.ts --bundle --platform=node --format=esm --outfile=.test-build/mg-cmd.mjs && node --test \"test/*.test.mjs\""
+    "test": "esbuild src/lib/chunk-upload.ts src/lib/render.ts src/lib/cloud.ts src/lib/materialize.ts src/lib/projection.ts src/lib/splitdoc.ts src/lib/gtrk-writeback.ts src/lib/column-config.ts src/lib/matrix.ts src/lib/matrix-lay.ts src/lib/mg-lint.ts src/lib/mg-lay.ts src/lib/tool-descriptors.ts src/lib/tool-runner.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/split.ts --bundle --platform=node --format=esm --outdir=.test-build --out-extension:.js=.mjs && esbuild src/commands/matrix.ts --bundle --platform=node --format=esm --outfile=.test-build/matrix-cmd.mjs && esbuild src/commands/mg.ts --bundle --platform=node --format=esm --outfile=.test-build/mg-cmd.mjs && esbuild src/commands/tool.ts --bundle --platform=node --format=esm --outfile=.test-build/tool-cmd.mjs && esbuild src/lib/convert/ir_to_jsx.ts src/lib/convert/ir_to_am.ts src/lib/convert/ir_to_nv.ts src/lib/convert/am_parse.ts src/lib/convert/nv_parse.ts src/lib/convert/parse.ts src/lib/convert/download.ts src/lib/convert/bake_ops.ts --bundle --platform=node --format=esm --outdir=.test-build/convert --out-extension:.js=.mjs && esbuild src/lib/mad/selector.ts src/lib/mad/beat.ts src/lib/mad/scan.ts src/lib/mad/data.ts src/lib/mad/pool.ts src/lib/mad/cloud-beat.ts src/lib/mad/mad.ts --bundle --platform=node --format=esm --outdir=.test-build/mad --out-extension:.js=.mjs && node --test \"test/*.test.mjs\""
   },
   "devDependencies": {
+    "@xmldom/xmldom": "^0.9.6",
     "bun-types": "^1.1.0",
     "commander": "^12.1.0",
     "esbuild": "^0.28.1",
     "typescript": "^5.6.0"
   },
   "dependencies": {
-    "hash-wasm": "^4.12.0"
+    "hash-wasm": "^4.12.0",
+    "jszip": "^3.10.1"
   }
 }
