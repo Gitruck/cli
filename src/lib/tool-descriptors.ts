@@ -229,6 +229,95 @@ const imageMatting: ToolDescriptor = {
 	},
 };
 
+/** image_blackborder_remove —— 自动裁去单张图片四周黑边。 */
+const imageBlackborderRemove: ToolDescriptor = {
+	name: "image_blackborder_remove",
+	title: "图片去黑边",
+	description: "自动检测并裁去单张图片四周的黑边，保留有效画面。",
+	kind: "cloud",
+	input: { kind: "image" },
+	priceKey: "image_blackborder_remove",
+	outputHint: "去黑边图片",
+	enabled: true,
+	taskType: "image_blackborder_remove",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url
+			? [{ url, filename: `${ctx.baseName}-blackborder-removed${extFromUrl(url, ".jpg")}` }]
+			: [];
+	},
+};
+
+/** image_canvas_adapt —— 按实际 Handler 的三种画布模式适配单张图片。 */
+const imageCanvasAdapt: ToolDescriptor = {
+	name: "image_canvas_adapt",
+	title: "图片比例转换",
+	description: "把单张图片适配到目标画布尺寸，可选适配、矩形裁剪或方形裁剪。",
+	kind: "cloud",
+	input: { kind: "image" },
+	priceKey: "image_canvas_adapt",
+	outputHint: "比例适配图片",
+	enabled: true,
+	taskType: "image_canvas_adapt",
+	options: [
+		{ flag: "--canvas-width <px>", desc: "目标画布宽度（像素；未传则使用服务端默认）" },
+		{ flag: "--canvas-height <px>", desc: "目标画布高度（像素；未传则使用服务端默认）" },
+		{
+			flag: "--canvas-type <normal|rectangle|square>",
+			desc: "画布模式：normal、rectangle 或 square（未传则使用服务端默认）",
+		},
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		for (const [optKey, payloadKey, flag] of [
+			["canvasWidth", "canvas_width", "--canvas-width"],
+			["canvasHeight", "canvas_height", "--canvas-height"],
+		] as const) {
+			if (ctx.opts[optKey] == null) continue;
+			const value = Number(ctx.opts[optKey]);
+			if (!Number.isFinite(value)) throw new Error(`${flag} 必须是数字`);
+			payload[payloadKey] = value;
+		}
+		if (ctx.opts.canvasType != null) {
+			const value = String(ctx.opts.canvasType);
+			if (value !== "normal" && value !== "rectangle" && value !== "square") {
+				throw new Error("--canvas-type 只支持 normal、rectangle 或 square");
+			}
+			payload.canvas_type = value;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url
+			? [{ url, filename: `${ctx.baseName}-canvas-adapted${extFromUrl(url, ".jpg")}` }]
+			: [];
+	},
+};
+
+/** image_purify —— 清理用户有权处理素材中的水印、Logo 或叠加元素。 */
+const imagePurify: ToolDescriptor = {
+	name: "image_purify",
+	title: "图片净化",
+	description: "清理你有权处理的图片中的水印、Logo 或叠加元素。",
+	kind: "cloud",
+	input: { kind: "image" },
+	priceKey: "image_purify",
+	outputHint: "净化图片",
+	enabled: true,
+	taskType: "image_purify",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-purified${extFromUrl(url, ".jpg")}` }] : [];
+	},
+};
+
 /** video_matting —— 视频抠像（公共域 /task/video_matting，10min 硬上限、原片直传禁代理）。 */
 const videoMatting: ToolDescriptor = {
 	name: "video_matting",
@@ -386,6 +475,9 @@ export const RESERVED_NAMES = new Set(["list"]);
 export const TOOL_REGISTRY: ToolDescriptor[] = [
 	imageMove,
 	imageMatting,
+	imageBlackborderRemove,
+	imageCanvasAdapt,
+	imagePurify,
 	videoMatting,
 	audioSeparation,
 	audioNoiseReduce,
