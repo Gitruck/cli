@@ -4,7 +4,7 @@
 >
 > 一条命令，把口播毛片变成可二次精修的剪辑工程。云端做重活，本地只装配，源视频不出本地。
 
-**🔗 [官网](https://cloud.ai-mcn.tv/zh-CN/cli) · [使用教程](https://hocassian.feishu.cn/docx/A6v0dCKT8oWMdAxI1qQcKzmJnIf) · [快速开始](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [客户端下载](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli)**
+**🔗 [官网](https://cloud.ai-mcn.tv/zh-CN/cli) · [使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [快速开始](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [客户端下载](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli)**
 
 ---
 
@@ -20,15 +20,16 @@
 | | 命令 | 做什么 |
 |---|---|---|
 | 🎬 | `gtrk oralcut <毛片>` | 智能口播剪辑闭环：一次出 gtrk + 剪映 + PR 三方工程，自动打开 |
+| 📝 | `gtrk transcript <本地视频>` | 视频转文字稿：原视频不上传，只传本地抽取音频，生成一个含总结、时码记录和纯文本的 Markdown |
 | ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单；`--column <id>` 按栏目词表校验 |
 | ⚙️ | `gtrk init` | 引导式一次性配置（API Key + 剪映草稿目录），之后免管 |
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
-| 🤖 | `gtrk skills install` | 把 7 个 CLI 自带 skill（`/gtrk-oralcut`·`/gtrk-splitter`·`/gtrk-matrix`·`/gtrk-mg`·`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-tools`）装进 Claude Code |
+| 🤖 | `gtrk skills install` | 把 8 个 CLI 自带 skill（`/gtrk-oralcut`·`/gtrk-splitter`·`/gtrk-matrix`·`/gtrk-mg`·`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-transcript`·`/gtrk-tools`）装进 Claude Code |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
 | 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg） |
 | 🔎 | `gtrk matrix` | B-roll 检索+**候选铺轨**：消费 FILM_BROLL 派单 → 产候选清单 + 下载 preview 代理铺 N 条候选轨（`--lay N` 默认 1，opencut 打开即可用轨道小眼睛对比；`--lay 0` 只出清单）；`matrix search "<词>"` 单条 ad-hoc |
 | 🎨 | `gtrk mg` | MG 动态图颗粒铺轨：消费 MG 派单 → 把 html-particle 颗粒（透明叠加 / 满屏底层，由你栏目的 MG 生产 skill 所产）铺进 `.gtrk` 的 beat_track；`mg lint <颗粒.html>` 六铁律静态校验、`mg status --project <dir>` 编排看板（缺 HTML / 已产未铺 / 已铺）；aux 叠层颗粒同段多铺（一 beat 派生主 + `-aux<n>`）。旧名 `gtrk rrv` 保留为弃用别名 |
-| 🧰 | `gtrk tool <name>` | 单点工具族：`gtrk tool image_move <图>`（图转运镜，2 积分/个）、`image_matting <图>` / `video_matting <视频>`（图片/视频抠像，**免费**）、`mad <素材文件夹>`（一键剪 MAD → AE 成片工程 `.jsx`，无 Key 可跑、`--bgm` 卡点计费）；`gtrk tool list` 查全部（输入/产物/计费/状态）。单发单收、共享 runner，接新工具只加一个 descriptor |
+| 🧰 | `gtrk tool <name>` | 单点工具族：图转运镜、图片/视频抠像、人声伴奏分离、音视频降噪、静音移除、MAD 等；`gtrk tool list` 查全部输入/产物/实时价格/状态。单发单收、共享 runner，接新工具只加一个 descriptor |
 | 🚧 | `struct` | （规划中）已有 gtrk 转三方工程 |
 
 ---
@@ -54,6 +55,9 @@ npm i -g @gitruck/cli@latest && gtrk install
 
 # 2) 剪一条（剪完自动打开产物目录）
 gtrk oralcut "D:/素材/某选题-原始口播.mp4" --script "D:/素材/某选题-文字稿.txt"
+
+# 或把本地视频转成一个 Markdown 文字稿
+gtrk transcript "D:/素材/采访视频.mp4"
 ```
 
 > 只想配置、不装 skill：用 `gtrk init`。本地开发：`cd gtrk-cli && bun install && bun run src/index.ts <命令>`。
@@ -146,7 +150,7 @@ irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex
 
 ## 给 AI Agent 用
 
-`gtrk install` 已经把 7 个 CLI 自带 skill（`/gtrk-oralcut`·`/gtrk-splitter`·`/gtrk-matrix`·`/gtrk-mg`·`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-tools`）装进 `~/.claude/skills`（单独装用 `gtrk skills install`）。
+`gtrk install` 已经把 8 个 CLI 自带 skill（`/gtrk-oralcut`·`/gtrk-splitter`·`/gtrk-matrix`·`/gtrk-mg`·`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-transcript`·`/gtrk-tools`）装进 `~/.claude/skills`（单独装用 `gtrk skills install`）。
 
 然后在 Claude Code 里直接说「**帮我把这条口播剪一版**」或打 `/gtrk-oralcut`，agent 会问清毛片 / 文稿 / 节奏，调 `gtrk oralcut --json` 跑通闭环、验证产物、把三端打开方式回给你。完整可移植 playbook 见 [`AGENT.md`](./AGENT.md)。
 
@@ -165,12 +169,11 @@ irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex
 | ⑤ | `/gtrk-ai-drama` | （无命令，纯创作） | **最后上 AI 再现**：产四段描述稿（故事背景/角色/分镜/原文，中英分块）→ 任意外部平台出片、手动回铺（产物即描述文本、无机械尾巴，同 `/gtrk-style-maker` 只 skill 无命令） |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
 | — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4 |
+| 📝 | `/gtrk-transcript` | `gtrk transcript` | 本地视频 → 一个含 Agent 总结、时码记录和纯文本的 Markdown，**不在成片 SOP 序列内** |
 | 🧰 | `/gtrk-tools` | `gtrk tool <name>` | 单点工具族（图转运镜 / 图片·视频抠像…）——单发单收，**不在成片 SOP 序列内**、随时可独立用 |
 
 > **skill 与命令的区别**：`/gtrk-mg` 是**脑**——懂它在 SOP 第 ④ 步（B-roll 定了才铺 MG）、带用户确认、按栏目配置解析该产哪种颗粒；`gtrk mg` 是**手**——纯确定性 lint + 铺轨。你对话触发 skill，skill 替你跑命令。
-> 上面 7 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装）——`/gtrk-matrix`·`/gtrk-mg`·`/gtrk-tools` 各驱动 gtrk 命令，`/gtrk-ai-drama`·`/gtrk-style-maker` 是纯创作 skill（无命令）。`/gtrk-tools` 是单点工具族的向导，不属成片 SOP 序列。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
-
-上面三个是 **CLI 自带的框架 skill**（`gtrk skills install` 装，业务无关）。
+> 上面 8 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装）——`/gtrk-transcript` 独立驱动视频转文字稿，`/gtrk-tools` 只负责单点工具族，二者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
 
 **各车道的具体视觉/内容怎么产**——MG 动态图长什么样、AI 再现什么调性——不写死在 CLI 里，而由**你自己栏目的生产 skill** 提供（用 `/gtrk-style-maker` 访谈式产出、留本地）。它们经**栏目配置 `style.skills[].produces`**（值 = 车道名）绑定，`gtrk mg` / `gtrk matrix` 等**通用驱动器**据此消费。**驱动方向 = CLI 驱动栏目 skill**：栏目 skill 只供风格/内容、不含任何「跑哪条命令」的编排职责；框架只认车道与管线接口，画面风格永远归你的栏目。不建栏目就用内置默认，端到端照常跑。
 
@@ -229,6 +232,23 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 ---
 
 ## 命令参考
+
+### `gtrk transcript <本地视频>`
+
+把本地视频转为一个多层级的 Markdown 文字稿。只接受本地视频路径：CLI 在本机抽取 16 kHz 单声道音频，只上传音频衍生物，原视频不会上传，也不支持 URL 或平台视频下载。
+
+```bash
+gtrk transcript "D:/素材/采访视频.mp4"
+gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/采访.md" --json
+```
+
+缺省只生成 `D:/素材/采访视频-transcript.md`，内容固定为：
+
+1. `## 总结`：CLI 先标记为待完成，由 `/gtrk-transcript` 驱动 Agent 阅读全文后生成并写回；
+2. `## 文字记录`：以 `[00:01:23]` 开头的可读段落；
+3. `## 纯文本`：完整识别正文，便于整段复制。
+
+实时计费在运行前从官网价格表按 `asr` 查询，CLI 与文档不保存价格数字。`--json` 的 stdout 只输出 `{ok,taskId,fileId,output,summaryPending}`，其中 `output` 指向这一个 Markdown；`summaryPending:true` 表示 `/gtrk-transcript` 驱动 Agent 还需生成语义总结、原地替换待总结标记，完成后仍只交付同一个文件。
 
 ### `gtrk oralcut <毛片>`
 
@@ -320,17 +340,23 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 
 | 工具 | 输入 | 产物 | 计费 | 状态 |
 |---|---|---|---|---|
-| `image_move` | 单张图片 | 运镜视频（几何按原图朝向推导：横 1920×1080 / 竖 1080×1920） | 2 积分/个 | 已上线 |
-| `image_matting` | 单张图片 | 透明背景 png（可 `--param` 请求背景底板） | **免费** | 已上线 |
-| `video_matting` | 单条视频（**≤10 分钟**，原片直传不压代理） | 透明背景 webm | **免费** | 已上线 |
-| `mad` | 一个素材文件夹（3~10 条视频）+ 可选 `--bgm` | AE 母合成成片工程 `.jsx`（仅支持 AE） | **免费**（`--bgm` 卡点计费一次） | 已上线 |
+| `image_move` | 单张图片 | 运镜视频（几何按原图朝向推导：横 1920×1080 / 竖 1080×1920） | 运行前实时查询 | 已上线 |
+| `image_matting` | 单张图片 | 透明背景 png（可 `--param` 请求背景底板） | 运行前实时查询 | 已上线 |
+| `video_matting` | 单条视频（**≤10 分钟**，原片直传不压代理） | 透明背景 webm | 运行前实时查询 | 已上线 |
+| `audio_separation` | 单条音频；可选 `--mode fast|turbo` | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
+| `audio_noise_reduce` | 单条音频或视频；可选 `--prop-decrease 0..1` | 降噪后的音频 | 运行前实时查询 | 已上线 |
+| `audio_silence_remove` | 单条音频；可选静音阈值与保留时长 | 去静音音频 | 运行前实时查询 | 已上线 |
+| `mad` | 一个素材文件夹（3~10 条视频）+ 可选 `--bgm` | AE 母合成成片工程 `.jsx`（仅支持 AE） | 仅 `--bgm` 触发实时查价 | 已上线 |
 
-> 抠像面向用户**免费**（license 合规，白标售卖是红线）。`video_matting` 上传前 ffprobe 探时长，> 10 分钟直接拒绝（不上传不提交、请先裁剪）。
-> `mad` 是族内首个 **local 型「纯本地工具、可选云端加料」**：无 Key 可跑零费用（技法数据经云端 manifest 下发 + `~/.gitruck/mad-cache` 缓存，**首拉联网、缓存后离线可跑**），`--bgm` 卡点才需 Key 并计费一次云端节拍分析；三级降级（有 Key 卡点 / 无 Key 或坏 BGM 固定节奏 / 云端失败降级）全程不崩。仅产 `.jsx`／仅支持 AE。
+> 价格以 `gtrk tool list --json` 和执行前 stderr 的匿名实时查询为准，README 不保存价格快照。`video_matting` 上传前 ffprobe 探时长，> 10 分钟直接拒绝（不上传不提交、请先裁剪）。
+> `mad` 是族内首个 **local 型「纯本地工具、可选云端加料」**：无 Key 可跑且不触发计费任务（技法数据经云端 manifest 下发 + `~/.gitruck/mad-cache` 缓存，**首拉联网、缓存后离线可跑**），`--bgm` 卡点才需 Key 并触发一次云端节拍分析；三级降级（有 Key 卡点 / 无 Key 或坏 BGM 固定节奏 / 云端失败降级）全程不崩。仅产 `.jsx`／仅支持 AE。
 
-- `gtrk tool list [--json]` — 列全部工具（名称/说明/输入/产物/计费/状态）；`--json` 出单行机读数组。**无 API Key 也能跑**（纯本地读注册表、零网络）。
+- `gtrk tool list [--json]` — 列全部工具（名称/说明/输入/产物/实时价格/状态）；`--json` 出单行机读数组（含动态 `billingHint`/`pricing`）。**无 API Key 也能跑**；价格通过公开接口匿名查询，失败仍列完整清单并标记暂不可用。
 - `gtrk tool image_move ./photo.jpg [--json]` — 图转运镜；产物落 `photo-image_move/`。`--param width=1080 --param height=1920` 覆盖推导几何。
 - `gtrk tool image_matting ./portrait.jpg` / `gtrk tool video_matting ./clip.mp4` — 图片/视频抠像。
+- `gtrk tool audio_separation ./song.mp3 [--mode turbo]` — 人声伴奏分离；`--param need_vocals=false` 等低频字段仍可透传。
+- `gtrk tool audio_noise_reduce ./interview.mp4 [--prop-decrease 0.5]` — 音频或视频均可输入，统一输出降噪音频。
+- `gtrk tool audio_silence_remove ./talk.mp3 [--min-silence-len 800] [--desired-silence-len 200]` — 移除过长静音，只落处理后的音频。
 - `gtrk tool mad ./素材 [--bgm 歌.mp3] [--duration 20] [--seed 42] [--refresh] [--json]` — 一键剪 MAD：扫素材文件夹 → 自动选技法 → 单一 `.jsx`（AE 2020+ 跑一遍出母合成成片工程）。`--seed` 可复现；`result.json` 记 seed/数据版本/降级档位/选中技法。
 - 通用：`--out <dir>` 覆盖产物目录、`--param k=v`（可重复）/`--params-json '<对象>'` 透传云端参数、`--reupload` 忽略上传缓存、`--json` 机读、`--ffmpeg-path <dir>` 指定 ffmpeg 目录。
 - cloud 型工具缺 Key → 报错引导 `gtrk init`。产物下载失败（如链接过期 404）→ `result.json` 记 `errors`、`ok=false`、`task.json` 保留可凭 `taskId` 恢复。
@@ -373,9 +399,9 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 ```
 gtrk-cli/
 ├── src/index.ts              # commander 入口
-├── src/commands/             # 子命令：install / init / oralcut / split / doctor / upgrade / skills
+├── src/commands/             # 子命令：install / init / oralcut / transcript / split / doctor / upgrade / skills
 ├── src/lib/                  # cloud / column-config / splitdoc / projection / user-config / jianying / …
-├── skills/                   # 打包的框架 skills：gtrk-oralcut / splitter / matrix / mg / ai-drama / style-maker
+├── skills/                   # 打包的框架 skills：oralcut / splitter / matrix / mg / ai-drama / style-maker / transcript / tools
 ├── contracts/                # 框架契约库正本（gsap-emit v1 + handoff→契约映射表）
 ├── assets/                   # 剪映草稿目录指引图
 └── AGENT.md                  # 可移植 agent playbook（skill 底座）
