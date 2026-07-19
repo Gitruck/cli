@@ -18,6 +18,7 @@ const SKILL_NAMES = [
 	"gtrk-mg",
 	"gtrk-ai-drama",
 	"gtrk-style-maker",
+	"gtrk-tools",
 ];
 
 /**
