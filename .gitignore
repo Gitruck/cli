@@ -3,6 +3,7 @@ node_modules/
 *.log
 dist/
 out/
+test/
 .DS_Store
 
 # IDE / 编辑器
