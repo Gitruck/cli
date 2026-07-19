@@ -1,6 +1,6 @@
 ---
 name: gtrk-tools
-description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtrk tool` 家族。当用户想“让图动起来 / 抠像去背景 / 图片去黑边 / 图片比例转换 / 清理有权处理图片中的水印或叠加元素 / 分离人声和伴奏 / 提取伴奏 / 给音频或视频降噪 / 去掉音频静音停顿 / 一键剪 MAD / 用某个 gtrk 单点工具 / gtrk 工具族里有什么”时使用本 Skill。凡涉及这些能力，优先驱动 CLI，不让用户自己去终端敲，也不手搓 ffmpeg。
+description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtrk tool` 家族。当用户想“让图动起来 / 抠像去背景 / 图片或视频去黑边 / 图片或视频比例转换 / 视频防抖 / 添加蒸汽波滤镜 / 清理有权处理图片中的水印或叠加元素 / 分离人声和伴奏 / 提取伴奏 / 给音频或视频降噪 / 去掉音频静音停顿 / 一键剪 MAD / 用某个 gtrk 单点工具 / gtrk 工具族里有什么”时使用本 Skill。凡涉及这些能力，优先驱动 CLI，不让用户自己去终端敲，也不手搓 ffmpeg。
 ---
 
 # gtrk 工具族（gtrk-tools）
@@ -21,6 +21,10 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `image_canvas_adapt` | 「图片比例转换 / 调整画布尺寸 / 转成矩形或方形裁剪」 | 单张本地图片；模式只支持 `normal` / `rectangle` / `square` | 比例适配图片 | 运行前实时查询 | 已上线 |
 | `image_purify` | 「清理我有权处理的图片水印 / 去掉 Logo 或叠加元素 / 图片净化」 | 单张本地图片（仅处理你有权处理的素材） | 净化图片 | 运行前实时查询 | 已上线 |
 | `video_matting` | 「视频抠像 / 视频去背景 / 出透明背景视频」 | 单条视频（≤10 分钟） | 透明背景 webm | 运行前实时查询 | 已上线 |
+| `video_blackborder_remove` | 「视频去黑边 / 裁掉视频四周黑边 / 保留有效画面」 | 单条本地视频 | 去黑边视频 | 运行前实时查询 | 已上线 |
+| `video_canvas_adapt` | 「视频比例转换 / 横竖屏适配 / 截取片段并转换画布」 | 单条本地视频；模式只支持 `normal` / `rectangle` / `square` | 比例适配视频 | 运行前实时查询 | 已上线 |
+| `video_stabilizer` | 「视频防抖 / 稳定手持画面 / 去抖」 | 单条本地视频；方式 `fast` / `exp` / `turbo` | 防抖视频 | 运行前实时查询 | 已上线 |
+| `video_vaporwave` | 「给视频加蒸汽波滤镜 / 复古滤镜 / 使用某个滤镜预设」 | 单条本地视频；滤镜名需精确 | 蒸汽波滤镜视频 | 运行前实时查询 | 已上线 |
 | `audio_separation` | 「分离人声和伴奏 / 提取人声 / 提取伴奏」 | 单条音频 | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_noise_reduce` | 「音频降噪 / 视频声音降噪 / 去底噪」 | 单条音频或视频 | 降噪后的音频 | 运行前实时查询 | 已上线 |
 | `audio_silence_remove` | 「去静音 / 删掉过长停顿 / 压缩音频空白」 | 单条音频 | 去静音音频 | 运行前实时查询 | 已上线 |
@@ -49,6 +53,12 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 7. **单发单收、批量靠循环**：一次一个输入；用户要批处理就你逐个循环调，不是一条命令喂多文件。
 
 图片比例转换常用形态：`gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --json`。`--canvas-type` 只接受实际运行时契约 `normal`、`rectangle`、`square`；不要传旧文档中的 `fit`。省略画布参数时不替服务端写死默认值。
+
+四个公共视频工具都只接本地文件，允许扩展名为 `.mp4/.avi/.mpg/.mov/.flv/.mxf/.mpeg/.ogg/.3gp/.wmv/.h264/.m4v/.ts`；不要把 `.mkv`、`.webm` 或 URL 交给它们。
+
+- 视频比例转换：`gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 12 --clip-end 60 --without-audio --json`。`--clip-start/--clip-end` 传起止帧序号；省略选项就沿用服务端默认，需要保留音轨时不要传 `--without-audio`。
+- 视频防抖：`gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo --json`。支持 `fast`、`exp`、`turbo`；未传时由服务端使用 `turbo`，`exp` 只按实验方式转述，不承诺观感。
+- 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
 
 ### 某工具显示「未开放」时怎么回应
 
