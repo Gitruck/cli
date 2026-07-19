@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, cpSync } from "node:fs";
 import { packageRoot } from "../lib/paths";
 import { log } from "../lib/log";
 
-// 仓库内打包分发的 skill 名（各含 SKILL.md，gtrk-splitter/gtrk-style-maker 另带 references/）
+// 仓库内打包分发的 skill 名（各含 SKILL.md；部分另带 references/ 或 agents/）
 const SKILL_NAMES = [
 	"gtrk-oralcut",
 	"gtrk-splitter",
@@ -18,6 +18,7 @@ const SKILL_NAMES = [
 	"gtrk-mg",
 	"gtrk-ai-drama",
 	"gtrk-style-maker",
+	"gtrk-transcript",
 	"gtrk-tools",
 ];
 
@@ -45,7 +46,7 @@ export function installSkill(opts: { dir?: string } = {}): boolean {
 			log.warn(`skill 安装失败（${name}，不影响命令行使用）：${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
-	log.info("在 Claude Code 里打 /gtrk-oralcut、/gtrk-splitter 或 /gtrk-style-maker，也可直接说「帮我剪个口播 / 拆个分镜 / 造我栏目的风格 skill」触发（可能需重载会话）。");
+	log.info("在 Claude Code 里打 /gtrk-oralcut、/gtrk-transcript 或 /gtrk-tools，也可直接说「帮我剪个口播 / 把本地视频转成文字稿 / 给视频声音降噪」触发（可能需重载会话）。");
 	return allOk;
 }
 
