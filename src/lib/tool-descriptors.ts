@@ -103,6 +103,23 @@ const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".
 const VIDEO_EXTS = [".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".m2ts"];
 const AUDIO_EXTS = [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"];
 
+/** 公共视频原子能力当前实际接受的 utils.base.video_ext；与宽松的通用 VIDEO_EXTS 分开维护。 */
+const PUBLIC_VIDEO_EXTS = [
+	".mp4",
+	".avi",
+	".mpg",
+	".mov",
+	".flv",
+	".mxf",
+	".mpeg",
+	".ogg",
+	".3gp",
+	".wmv",
+	".h264",
+	".m4v",
+	".ts",
+];
+
 /** 输入类别的默认扩展名白名单（descriptor.input.exts 缺省时用）。 */
 export function defaultExtsFor(kind: ToolInputKind): string[] | undefined {
 	if (kind === "image") return IMAGE_EXTS;
@@ -318,6 +335,144 @@ const imagePurify: ToolDescriptor = {
 	},
 };
 
+/** video_blackborder_remove —— 自动检测并裁去单条视频四周黑边。 */
+const videoBlackborderRemove: ToolDescriptor = {
+	name: "video_blackborder_remove",
+	title: "视频去黑边",
+	description: "自动检测并裁去单条视频四周的黑边，保留有效画面与原音轨。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_blackborder_remove",
+	outputHint: "去黑边视频",
+	enabled: true,
+	taskType: "video_blackborder_remove",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url
+			? [{ url, filename: `${ctx.baseName}-blackborder-removed${extFromUrl(url, ".mp4")}` }]
+			: [];
+	},
+};
+
+/** video_canvas_adapt —— 视频目标画布、时间片段与音轨保留适配。 */
+const videoCanvasAdapt: ToolDescriptor = {
+	name: "video_canvas_adapt",
+	title: "视频比例转换",
+	description: "把单条视频适配到目标画布，可选截取时间片段并移除音轨。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_canvas_adapt",
+	outputHint: "比例适配视频",
+	enabled: true,
+	taskType: "video_canvas_adapt",
+	options: [
+		{ flag: "--canvas-width <px>", desc: "目标画布宽度（像素；未传则使用服务端默认）" },
+		{ flag: "--canvas-height <px>", desc: "目标画布高度（像素；未传则使用服务端默认）" },
+		{
+			flag: "--canvas-type <normal|rectangle|square>",
+			desc: "画布模式：normal、rectangle 或 square（未传则使用服务端默认）",
+		},
+		{ flag: "--clip-start <frame>", desc: "截取起始帧序号（未传则使用服务端默认）" },
+		{ flag: "--clip-end <frame>", desc: "截取结束帧序号（未传则使用服务端默认）" },
+		{ flag: "--without-audio", desc: "输出视频不保留音轨" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		for (const [optKey, payloadKey, flag] of [
+			["canvasWidth", "target_width", "--canvas-width"],
+			["canvasHeight", "target_height", "--canvas-height"],
+		] as const) {
+			if (ctx.opts[optKey] == null) continue;
+			const value = Number(ctx.opts[optKey]);
+			if (!Number.isFinite(value) || !Number.isInteger(value)) {
+				throw new Error(`${flag} 必须是有限整数`);
+			}
+			payload[payloadKey] = value;
+		}
+		for (const [optKey, payloadKey, flag] of [
+			["clipStart", "start", "--clip-start"],
+			["clipEnd", "end", "--clip-end"],
+		] as const) {
+			if (ctx.opts[optKey] == null) continue;
+			const value = Number(ctx.opts[optKey]);
+			if (!Number.isFinite(value) || !Number.isInteger(value)) {
+				throw new Error(`${flag} 必须是有限整数帧号`);
+			}
+			payload[payloadKey] = value;
+		}
+		if (ctx.opts.canvasType != null) {
+			const value = String(ctx.opts.canvasType);
+			if (value !== "normal" && value !== "rectangle" && value !== "square") {
+				throw new Error("--canvas-type 只支持 normal、rectangle 或 square");
+			}
+			payload.canvas_type = value;
+		}
+		if (ctx.opts.withoutAudio === true) payload.need_audio = false;
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url
+			? [{ url, filename: `${ctx.baseName}-canvas-adapted${extFromUrl(url, ".mp4")}` }]
+			: [];
+	},
+};
+
+/** video_stabilizer —— 以公共 API 的 fast / exp / turbo 三种方式做视频防抖。 */
+const videoStabilizer: ToolDescriptor = {
+	name: "video_stabilizer",
+	title: "视频防抖",
+	description: "稳定手持或运动拍摄画面；exp 为实验方式，产物观感需自行检查。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_stabilizer",
+	outputHint: "防抖视频",
+	enabled: true,
+	taskType: "video_stabilizer",
+	options: [{ flag: "--stabilizer-method <fast|exp|turbo>", desc: "防抖方式（未传则使用服务端 turbo 默认值）" }],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.stabilizerMethod == null) return payload;
+		const method = String(ctx.opts.stabilizerMethod);
+		if (method !== "fast" && method !== "exp" && method !== "turbo") {
+			throw new Error("--stabilizer-method 只支持 fast、exp 或 turbo");
+		}
+		payload.method = method;
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-stabilized${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
+/** video_vaporwave —— 按服务端精确预设名应用蒸汽波滤镜。 */
+const videoVaporwave: ToolDescriptor = {
+	name: "video_vaporwave",
+	title: "视频蒸汽波滤镜",
+	description: "按精确预设名称为单条视频应用蒸汽波风格滤镜。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_vaporwave",
+	outputHint: "蒸汽波滤镜视频",
+	enabled: true,
+	taskType: "video_vaporwave",
+	options: [{ flag: "--vaporwave-filter <name>", desc: "精确滤镜名称（默认：愈漸升溫）" }],
+	buildPayload(fileId, ctx) {
+		const raw = ctx.opts.vaporwaveFilter;
+		const filter = raw == null ? "愈漸升溫" : String(raw);
+		if (!filter.trim()) throw new Error("--vaporwave-filter 不能为空");
+		return { file_id: fileId, filter };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-vaporwave${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
 /** video_matting —— 视频抠像（公共域 /task/video_matting，10min 硬上限、原片直传禁代理）。 */
 const videoMatting: ToolDescriptor = {
 	name: "video_matting",
@@ -479,6 +634,10 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	imageCanvasAdapt,
 	imagePurify,
 	videoMatting,
+	videoBlackborderRemove,
+	videoCanvasAdapt,
+	videoStabilizer,
+	videoVaporwave,
 	audioSeparation,
 	audioNoiseReduce,
 	audioSilenceRemove,
