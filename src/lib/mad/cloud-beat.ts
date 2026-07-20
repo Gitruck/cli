@@ -1,29 +1,23 @@
 /**
  * MAD BGM 云端节拍分析（add-tool-mad D8）：复用公共任务 audio_music_analyze（infra 零改动）。
  *
- * 复用族 runner 的 pollToolTask（轮询语义对齐 pollTask）+ cloud.submitTask + upload-cache。
- * 6004 失效重传：族 runner 的收编逻辑内嵌在 runCloudTool（未导出独立 helper），mad 的音频分析走独立
- * 上传/提交（非 runCloudTool 全链），故在此以同一口径（invalidateUpload + force 重传 + 重提交一次）内联
- * 一次——对齐 oralcut/runner 既有行为，不改沉淀 lib（红线）。
+ * 复用族 runner 的 pollToolTask（轮询语义对齐 pollTask）与 uploadAndSubmitTask（6004 共享恢复）。
  */
 import type { CloudConfig } from "../config";
 import { submitTask } from "../cloud";
 import { uploadCached, invalidateUpload } from "../upload-cache";
+import { uploadAndSubmitTask } from "../upload-submit";
 import { pollToolTask } from "../tool-runner";
 import type { BeatAnalysis } from "./beat";
 
 const ANALYZE_TASK = "audio_music_analyze";
-
-/** 鸭子判定 CloudError 6004（跨 bundle 稳，与 runner 同口径）。 */
-function isCode(e: unknown, code: number): boolean {
-	return !!e && typeof e === "object" && (e as { code?: unknown }).code === code;
-}
 
 export interface BeatCloudDeps {
 	uploadCached: typeof uploadCached;
 	invalidateUpload: typeof invalidateUpload;
 	submitTask: typeof submitTask;
 	pollToolTask: typeof pollToolTask;
+	sleep?: (ms: number) => Promise<void>;
 }
 
 /** 从 output_result 提取 beats/downbeats/bpm（宽容读取）。 */
@@ -47,18 +41,14 @@ export async function analyzeBgm(
 	bgmAbs: string,
 	deps: BeatCloudDeps,
 ): Promise<BeatAnalysis> {
-	let up = await deps.uploadCached(cfg, bgmAbs, {});
 	const payload = (fid: string) => ({ file_id: fid });
-	let taskId: string;
-	try {
-		taskId = await deps.submitTask(cfg, ANALYZE_TASK, payload(up.fileId));
-	} catch (e) {
-		if (up.cached && isCode(e, 6004)) {
-			await deps.invalidateUpload(bgmAbs);
-			up = await deps.uploadCached(cfg, bgmAbs, { force: true });
-			taskId = await deps.submitTask(cfg, ANALYZE_TASK, payload(up.fileId));
-		} else throw e;
-	}
+	const submitted = await uploadAndSubmitTask(cfg, bgmAbs, ANALYZE_TASK, payload, {}, {
+		uploadCached: deps.uploadCached,
+		invalidateUpload: deps.invalidateUpload,
+		submitTask: deps.submitTask,
+		sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+	});
+	const { taskId } = submitted;
 	const output = await deps.pollToolTask(cfg, ANALYZE_TASK, taskId, {});
 	return extractAnalysis(output);
 }

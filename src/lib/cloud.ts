@@ -26,6 +26,12 @@ export class CloudError extends Error {
 	}
 }
 
+/** 跨 bundle 稳定读取 CloudError 业务码；网络/解析错误返回 undefined。 */
+export function cloudErrorCode(error: unknown): number | undefined {
+	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+	return typeof code === "number" ? code : undefined;
+}
+
 export async function parseJson<T>(res: Response): Promise<ApiResp<T>> {
 	try {
 		return (await res.json()) as ApiResp<T>;
@@ -37,44 +43,71 @@ export async function parseJson<T>(res: Response): Promise<ApiResp<T>> {
 /**
  * 上传本地文件 → file_id。POST /base/file/upload（multipart，字段 file，最大 20GB）。
  *
- * 流式手拼 multipart：createReadStream + stat().size（正确 64 位）+ 精确 Content-Length。
- * 不可用 fs.openAsBlob —— 它对 ≥4GiB 文件把 blob.size 截断到 32 位（size mod 2^32），
- * 令 Content-Length 远小于实际 body、服务端收满即断链（"other side closed"），4GiB 以上毛片必挂。
- * 流式亦保证内存恒定（>4GiB 单个 Buffer 本就超过 buffer.constants.MAX_LENGTH）。
+ * Bun：FormData + Bun.file，避开 HTTPS CONNECT 代理下 ReadableStream 请求体异常断连。
+ * Node：流式手拼 multipart（createReadStream + 精确 Content-Length），保持恒定内存。
+ * ≥256MiB 文件由 uploadCached 前置路由到分片上传，不会进入本函数的 Bun FormData 分支。
  */
-export async function uploadFile(cfg: CloudConfig, path: string): Promise<string> {
-	const size = (await stat(path)).size;
-	const boundary = `----gtrkFormBoundary${randomBytes(16).toString("hex")}`;
-	const head = Buffer.from(
-		`--${boundary}\r\n` +
-			`Content-Disposition: form-data; name="file"; filename="${basename(path)}"\r\n` +
-			`Content-Type: application/octet-stream\r\n\r\n`,
-		"utf8",
-	);
-	const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+export interface UploadFileRuntime {
+	/** 测试覆盖；生产缺省按 globalThis.Bun 自动识别。 */
+	runtime?: "bun" | "node";
+	fetchFn?: typeof fetch;
+	bunFile?: (path: string) => Blob;
+}
 
-	async function* multipart() {
-		yield head;
-		for await (const chunk of createReadStream(path)) yield chunk as Buffer;
-		yield tail;
+function globalBunFile(): ((path: string) => Blob) | undefined {
+	const bun = (globalThis as typeof globalThis & { Bun?: { file(path: string): Blob } }).Bun;
+	return bun ? bun.file.bind(bun) : undefined;
+}
+
+export async function uploadFile(cfg: CloudConfig, path: string, runtime: UploadFileRuntime = {}): Promise<string> {
+	const fetchFn = runtime.fetchFn ?? fetch;
+	const bunFile = runtime.bunFile ?? globalBunFile();
+	const useBun = runtime.runtime ? runtime.runtime === "bun" : bunFile != null;
+
+	let res: Response;
+	if (useBun) {
+		if (!bunFile) throw new Error("Bun 上传运行时缺少 Bun.file");
+		const form = new FormData();
+		form.append("file", bunFile(path), basename(path));
+		res = await fetchFn(`${cfg.base}/base/file/upload`, {
+			method: "POST",
+			headers: { Authorization: cfg.apiKey },
+			body: form,
+		});
+	} else {
+		const size = (await stat(path)).size;
+		const boundary = `----gtrkFormBoundary${randomBytes(16).toString("hex")}`;
+		const head = Buffer.from(
+			`--${boundary}\r\n` +
+				`Content-Disposition: form-data; name="file"; filename="${basename(path)}"\r\n` +
+				`Content-Type: application/octet-stream\r\n\r\n`,
+			"utf8",
+		);
+		const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+
+		async function* multipart() {
+			yield head;
+			for await (const chunk of createReadStream(path)) yield chunk as Buffer;
+			yield tail;
+		}
+
+		res = await fetchFn(`${cfg.base}/base/file/upload`, {
+			method: "POST",
+			headers: {
+				Authorization: cfg.apiKey,
+				"Content-Type": `multipart/form-data; boundary=${boundary}`,
+				"Content-Length": String(head.length + size + tail.length),
+			},
+			// node:stream/web 与 DOM lib 的 ReadableStream 声明打架；运行时同一实现
+			body: Readable.toWeb(Readable.from(multipart())) as unknown as BodyInit,
+			// @ts-expect-error undici 专有：流式请求体需声明半双工
+			duplex: "half",
+		});
 	}
-
-	const res = await fetch(`${cfg.base}/base/file/upload`, {
-		method: "POST",
-		headers: {
-			Authorization: cfg.apiKey,
-			"Content-Type": `multipart/form-data; boundary=${boundary}`,
-			"Content-Length": String(head.length + size + tail.length),
-		},
-		// node:stream/web 与 DOM lib 的 ReadableStream 声明打架；运行时同一实现
-		body: Readable.toWeb(Readable.from(multipart())) as unknown as BodyInit,
-		// @ts-expect-error undici 专有：流式请求体需声明半双工
-		duplex: "half",
-	});
 	const r = await parseJson<{ file_id?: string; id?: string }>(res);
 	const fid = r.data?.file_id ?? r.data?.id;
 	if (r.code === 200 && fid) return String(fid);
-	throw new Error(`上传失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
+	throw new CloudError(r.code, `上传失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
 }
 
 /** 提交任务 → task_id。POST /task/<taskType>。 */
@@ -90,7 +123,7 @@ export async function submitTask(
 	});
 	const r = await parseJson<{ task_id?: string }>(res);
 	if (r.code === 200 && r.data?.task_id) return String(r.data.task_id);
-	throw new Error(`提交失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
+	throw new CloudError(r.code, `提交失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
 }
 
 /** 任务产物文件条目（video_oral_cut 等 outputs 含 project/video 时）。 */

@@ -2,11 +2,11 @@
  * gtrk tool 工具族 —— 共享 runner（add-tool-command-family D3/D4/D5/D10）。
  *
  * cloud 型统一流水线：输入校验 → (10min 硬上限前置) → 可选 preprocess →
- * 匿名查询并打印实时价格（stderr）→ uploadCached → submitTask（6004 收编重传一次）→ 自循环轮询（复用 getTaskResult，
+ * 匿名查询并打印实时价格（stderr）→ uploadAndSubmitTask（6004 可见性/缓存失效恢复）→ 自循环轮询（复用 getTaskResult，
  * 墙钟 per-tool 可覆盖）→ mapOutputs 流式下载落地 → task.json/result.json 面包屑。
  *
  * runner 只依赖 descriptor 契约字段，无任何工具名特判。沉淀 lib 零改动：
- *   - 6004 失效重传逻辑住此（不改 upload-cache）；
+ *   - 上传/6004 恢复复用 upload-submit 共享边界；
  *   - 轮询自循环住此（不改 cloud.ts 的 pollTask，逐行对齐其语义）；
  *   - 产物走**流式下载**（fetch body pipe 到 createWriteStream，GB 级 alpha 不过内存），
  *     不复用 cloud.ts 全内存 download（cloud.ts 保持零改动）。
@@ -19,6 +19,7 @@ import { pipeline } from "node:stream/promises";
 import type { CloudConfig } from "./config";
 import { submitTask, getTaskResult, type OralCutOutput } from "./cloud";
 import { uploadCached, invalidateUpload } from "./upload-cache";
+import { uploadAndSubmitTask } from "./upload-submit";
 import { probeDuration } from "./media";
 import { resolveToolPricing, type PriceResolver } from "./tool-pricing";
 import {
@@ -306,7 +307,6 @@ export async function runCloudTool(
 		billingHint = "实时价格暂不可用，以服务端结算为准";
 	}
 	emitBilling(billingHint);
-	let up = await deps.uploadCached(deps.cfg, uploadPath, { force: opts.reupload });
 
 	const buildPayload = (fid: string): Record<string, unknown> => {
 		const p = descriptor.buildPayload ? descriptor.buildPayload(fid, ctx) : { file_id: fid };
@@ -315,18 +315,23 @@ export async function runCloudTool(
 		return p;
 	};
 
-	// ④ 提交任务；缓存 file_id 在云端失效（6004）→ 失效重传一次（收编 oralcut 既有行为）
+	// ④ 上传并提交；新 file_id 延迟可见短退避，缓存 file_id 失效则强制重传一次
 	const taskType = descriptor.taskType!;
-	let taskId: string;
-	try {
-		taskId = await deps.submitTask(deps.cfg, taskType, buildPayload(up.fileId));
-	} catch (e) {
-		if (up.cached && isCloudErrorCode(e) === 6004) {
-			await deps.invalidateUpload(uploadPath);
-			up = await deps.uploadCached(deps.cfg, uploadPath, { force: true });
-			taskId = await deps.submitTask(deps.cfg, taskType, buildPayload(up.fileId));
-		} else throw e; // 非缓存 file_id 或非 6004：直接透传，不重试
-	}
+	const submitted = await uploadAndSubmitTask(
+		deps.cfg,
+		uploadPath,
+		taskType,
+		buildPayload,
+		{ force: opts.reupload },
+		{
+			uploadCached: deps.uploadCached,
+			invalidateUpload: deps.invalidateUpload,
+			submitTask: deps.submitTask,
+			sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+		},
+	);
+	const { taskId } = submitted;
+	const up = { fileId: submitted.fileId, cached: submitted.cached };
 
 	// ⑤ 面包屑：submit 一成功就落盘 task.json（目录延后到此刻才建），后续任何崩溃都能据 task_id 恢复
 	await mkdir(outDir, { recursive: true });

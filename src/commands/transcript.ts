@@ -16,6 +16,7 @@ import { defaultExtsFor } from "../lib/tool-descriptors";
 import { pollToolTask } from "../lib/tool-runner";
 import { resolveToolPricing, type ResolvedToolPricing } from "../lib/tool-pricing";
 import { invalidateUpload, uploadCached } from "../lib/upload-cache";
+import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { normalizeAsrOutput, renderTranscriptMarkdown } from "../lib/transcript";
 
 const TASK_TYPE = "asr";
@@ -51,6 +52,7 @@ export interface TranscriptDeps {
 	upload: (cfg: CloudConfig, path: string, opts?: { force?: boolean }) => Promise<UploadResult>;
 	invalidate: (path: string) => Promise<void>;
 	submit: (cfg: CloudConfig, taskType: string, payload: unknown) => Promise<string>;
+	sleep: (ms: number) => Promise<void>;
 	poll: (
 		cfg: CloudConfig,
 		taskType: string,
@@ -71,16 +73,12 @@ function buildDeps(overrides: Partial<TranscriptDeps> = {}): TranscriptDeps {
 		upload: overrides.upload ?? uploadCached,
 		invalidate: overrides.invalidate ?? invalidateUpload,
 		submit: overrides.submit ?? submitTask,
+		sleep: overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
 		poll: overrides.poll ?? (async (cfg, taskType, taskId, onTick) =>
 			(await pollToolTask(cfg, taskType, taskId, { onTick })) as unknown as Record<string, unknown>),
 		writeMarkdown: overrides.writeMarkdown ?? writeMarkdownAtomic,
 		now: overrides.now ?? (() => new Date()),
 	};
-}
-
-function cloudErrorCode(error: unknown): number | undefined {
-	const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-	return typeof code === "number" ? code : undefined;
 }
 
 function looksLikeRemote(value: string): boolean {
@@ -154,21 +152,25 @@ export async function runTranscript(
 	log.info(`上传物：${basename(audio)}（仅音频衍生物）`);
 
 	log.step("③ 上传音频并提交 ASR…");
-	let uploaded = await deps.upload(deps.cfg, audio, { force: opts.reupload });
 	const payload = (fileId: string) => ({ file_id: fileId, language, word_level: true });
-	let taskId: string;
-	try {
-		taskId = await deps.submit(deps.cfg, TASK_TYPE, payload(uploaded.fileId));
-	} catch (error) {
-		if (uploaded.cached && cloudErrorCode(error) === 6004) {
-			log.warn("缓存的 file_id 已失效，重新上传后重试…");
-			await deps.invalidate(audio);
-			uploaded = await deps.upload(deps.cfg, audio, { force: true });
-			taskId = await deps.submit(deps.cfg, TASK_TYPE, payload(uploaded.fileId));
-		} else {
-			throw error;
-		}
-	}
+	const submitted = await uploadAndSubmitTask(
+		deps.cfg,
+		audio,
+		TASK_TYPE,
+		payload,
+		{
+			force: opts.reupload,
+			onCacheInvalid: () => log.warn("缓存的 file_id 已失效，重新上传后重试…"),
+		},
+		{
+			uploadCached: deps.upload,
+			invalidateUpload: deps.invalidate,
+			submitTask: deps.submit,
+			sleep: deps.sleep,
+		},
+	);
+	const { taskId } = submitted;
+	const uploaded = { fileId: submitted.fileId, cached: submitted.cached };
 	log.info(`task_id = ${taskId}`);
 
 	log.step("④ 云端识别中…");
