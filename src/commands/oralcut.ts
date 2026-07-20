@@ -12,8 +12,8 @@ import { resolve, join, dirname, basename, extname } from "node:path";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../lib/config";
-import { submitTask, pollTask, CloudError } from "../lib/cloud";
-import { uploadCached, invalidateUpload } from "../lib/upload-cache";
+import { pollTask } from "../lib/cloud";
+import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
 import { materializeResult } from "../lib/materialize";
@@ -166,10 +166,8 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 
 	// ② 上传抽出物 → file_id（毛片不出本地；指纹缓存复用免二次上传）
 	log.step("② 上传抽出物到云端…");
-	let up = await uploadCached(cfg, artifact, { force: opts.reupload });
-	log.info(up.cached ? `命中上传缓存，复用 file_id = ${up.fileId}（免二次上传）` : `file_id = ${up.fileId}`);
 
-	// 用当前 file_id 拼提交体（缓存失效要重拼，故抽成函数）
+	// 用当前 file_id 拼提交体（缓存失效/延迟可见时要重拼，故抽成函数）
 	const buildPayload = (fid: string): Record<string, unknown> => {
 		const p: Record<string, unknown> = {
 			file_id: fid,
@@ -197,19 +195,21 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 		return p;
 	};
 
-	// ③ 提交 cli/video_oral_cut_for_cli；缓存的 file_id 若在云端失效（6004），重传重试一次
-	log.step("③ 提交智能口播剪辑任务…");
-	let taskId: string;
-	try {
-		taskId = await submitTask(cfg, TASK_TYPE, buildPayload(up.fileId));
-	} catch (e) {
-		if (up.cached && e instanceof CloudError && e.code === 6004) {
-			log.warn("缓存的 file_id 在云端已失效，重新上传后重试…");
-			await invalidateUpload(artifact);
-			up = await uploadCached(cfg, artifact, { force: true });
-			taskId = await submitTask(cfg, TASK_TYPE, buildPayload(up.fileId));
-		} else throw e;
-	}
+	// ③ 提交 cli/video_oral_cut_for_cli；共享恢复边界收编新 ID 可见性与缓存失效
+	const submitted = await uploadAndSubmitTask(cfg, artifact, TASK_TYPE, buildPayload, {
+		force: opts.reupload,
+		onUploaded: (uploaded) => {
+			log.info(
+				uploaded.cached
+					? `命中上传缓存，复用 file_id = ${uploaded.fileId}（免二次上传）`
+					: `file_id = ${uploaded.fileId}`,
+			);
+			log.step("③ 提交智能口播剪辑任务…");
+		},
+		onCacheInvalid: () => log.warn("缓存的 file_id 在云端已失效，重新上传后重试…"),
+	});
+	const { taskId } = submitted;
+	const up = { fileId: submitted.fileId, cached: submitted.cached };
 	log.info(`task_id = ${taskId}`);
 	// 面包屑：submit 一成功就落盘 task.json（按需建 outDir），任何后续崩溃都能据此按 task_id 恢复
 	await mkdir(outDir, { recursive: true });
