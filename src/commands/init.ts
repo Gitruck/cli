@@ -141,7 +141,7 @@ async function afterConfigDoctor(): Promise<void> {
 		log.step("装好了！两种用法任选：");
 		log.info('① 命令行直接剪：gtrk oralcut "<毛片.mp4>" --script "<文字稿.txt>"（无稿就别加 --script）');
 		log.info(
-			"② 重启你常用的 AI agent（Claude / Codex / Trae / WorkBuddy 等），用 /gtrk-oralcut <你的口播剪辑需求>，一句话交给它，体验更智能的剪辑~",
+			"② 刷新你常用的 AI Agent，在它的 Skills 入口选择或点名 gtrk-oralcut；不同客户端也都可以直接描述剪辑需求触发。",
 		);
 		log.info(
 			"想有自己栏目的风格体系？在 agent 里跑 /gtrk-style-maker 建一次「你的厨房」（skill 家族 + 栏目配置）；不建就直接用默认，照常开剪。",
