@@ -87,6 +87,12 @@ export interface ToolDescriptor {
 	buildPayload?: (fileId: string, ctx: ToolContext) => Record<string, unknown>;
 	/** 把 output_result 收敛为下载清单。 */
 	mapOutputs?: (out: OutputResult, ctx: ToolContext) => DownloadItem[];
+	/**
+	 * 把 output_result 收敛为一个可 JSON 序列化的结构对象，供 runner 落 `result-output.json`。
+	 * 只读纯函数、只返回结构、不负责落盘（落盘归 runner）；与 mapOutputs 相互独立——
+	 * 一个能力可以既下载文件（mapOutputs）又落结构化 JSON（mapResult）。分析型能力（分镜/运镜）只声明本项。
+	 */
+	mapResult?: (out: OutputResult, ctx: ToolContext) => Record<string, unknown>;
 	/** 轮询墙钟覆盖（毫秒）；缺省 30 分钟。 */
 	pollTimeoutMs?: number;
 
@@ -761,6 +767,338 @@ const audioSilenceRemove: ToolDescriptor = {
 	},
 };
 
+// ---------------------------------------------------------------- 分析型 descriptor（结构化 JSON 结果，add-tool-video-analysis-json）
+
+/**
+ * video_segment —— 机械分镜（画面变动率切分区间）。only_struct=true 出纯结构，不切片产文件。
+ * 结果经 mapResult 落 result-output.json（scene_count/scene_list[]），无文件下载。
+ */
+const videoSegment: ToolDescriptor = {
+	name: "video_segment",
+	title: "视频机械分镜",
+	description: "按画面变动率把视频切成分镜区间，输出结构化 JSON（场景数与各段起止/时长），不产切片文件。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_segment",
+	outputHint: "分镜区间结构（result-output.json）",
+	enabled: true,
+	taskType: "video_segment",
+	options: [
+		{ flag: "--detector <content|adaptive>", desc: "切分算法（未传则使用服务端默认）" },
+		{ flag: "--threshold <number>", desc: "切分阈值（未传则使用服务端默认）" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId, only_struct: true };
+		if (ctx.opts.detector != null) {
+			const detector = String(ctx.opts.detector);
+			if (detector !== "content" && detector !== "adaptive") {
+				throw new Error("--detector 只支持 content 或 adaptive");
+			}
+			payload.detector = detector;
+		}
+		if (ctx.opts.threshold != null) {
+			const value = Number(ctx.opts.threshold);
+			if (!Number.isFinite(value)) throw new Error("--threshold 必须是数字");
+			payload.threshold = value;
+		}
+		return payload;
+	},
+	mapResult(out) {
+		return out as Record<string, unknown>;
+	},
+};
+
+/**
+ * video_ai_segment —— 智能语义分镜（多模态类目/镜头）。only_struct=true 出纯结构。
+ * 结果经 mapResult 落 result-output.json（mode/total_shots/categories[].shots[]）。
+ */
+const videoAiSegment: ToolDescriptor = {
+	name: "video_ai_segment",
+	title: "视频智能分镜",
+	description: "按语义把视频切成带类目、景别、标签、描述的镜头结构，输出结构化 JSON，不产切片文件。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_ai_segment",
+	outputHint: "语义分镜结构（result-output.json）",
+	enabled: true,
+	taskType: "video_ai_segment",
+	// 注意：flag 全族唯一（options 统一挂同一 tool 命令）；--mode 已被 audio_separation 占用，故用 --segment-mode。
+	options: [
+		{ flag: "--segment-mode <scene|shot_type|narrative|subject>", desc: "分镜维度（未传则使用服务端默认）" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId, only_struct: true };
+		if (ctx.opts.segmentMode != null) {
+			const mode = String(ctx.opts.segmentMode);
+			if (mode !== "scene" && mode !== "shot_type" && mode !== "narrative" && mode !== "subject") {
+				throw new Error("--segment-mode 只支持 scene、shot_type、narrative 或 subject");
+			}
+			payload.mode = mode;
+		}
+		return payload;
+	},
+	mapResult(out) {
+		return out as Record<string, unknown>;
+	},
+};
+
+/**
+ * video_motion_cut —— 运镜/高光片段（光流分析）。服务端恒纯结构、无 only_struct、完全不产文件。
+ * 结果经 mapResult 落 result-output.json（total_cut_points/video_meta/cut_points[]）。
+ */
+const videoMotionCut: ToolDescriptor = {
+	name: "video_motion_cut",
+	title: "视频运镜高光",
+	description: "用光流分析提取运镜/高光片段，输出结构化 JSON（每片帧号、秒级时码与运动特征），不产文件。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_motion_cut",
+	outputHint: "运镜高光片段结构（result-output.json）",
+	enabled: true,
+	taskType: "video_motion_cut",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapResult(out) {
+		return out as Record<string, unknown>;
+	},
+};
+
+// ---------------------------------------------------------------- C1 漏网批（add-tool-c1-batch-2）
+
+/**
+ * audio_speaker_split —— 按说话人分轨。默认产各说话人 .wav（mapOutputs 多产物）+ spoken_list 时间线（mapResult）。
+ * --only-struct 只出结构不切文件。mapResult/mapOutputs 共存的真实用例。
+ */
+const audioSpeakerSplit: ToolDescriptor = {
+	name: "audio_speaker_split",
+	title: "按说话人分轨",
+	description: "把多说话人音频按说话人分成独立音轨，并产说话人时间线结构；--only-struct 只出结构不切文件。",
+	kind: "cloud",
+	input: { kind: "audio" },
+	priceKey: "audio_speaker_split",
+	outputHint: "各说话人音轨 + 时间线结构",
+	enabled: true,
+	taskType: "audio_speaker_split",
+	options: [{ flag: "--only-struct", desc: "只输出说话人时间线结构，不切分音轨文件" }],
+	buildPayload(fileId, ctx) {
+		return { file_id: fileId, only_struct: ctx.opts.onlyStruct === true };
+	},
+	mapOutputs(out, ctx) {
+		if (!Array.isArray(out.files)) return [];
+		const items: DownloadItem[] = [];
+		for (const raw of out.files) {
+			if (!raw || typeof raw !== "object") continue;
+			const file = raw as Record<string, unknown>;
+			const url = file.download_url;
+			if (typeof url !== "string" || !url.trim()) continue;
+			const speaker = typeof file.speaker === "string" && file.speaker.trim() ? file.speaker : `speaker_${items.length + 1}`;
+			items.push({ url, filename: `${ctx.baseName}-${speaker}${extFromUrl(url, ".wav")}` });
+		}
+		return items;
+	},
+	mapResult(out) {
+		// 只落时间线结构，不含已下载的 files 数组。
+		return { spoken_list: Array.isArray(out.spoken_list) ? out.spoken_list : [] };
+	},
+};
+
+/** audio_stretch —— 变调变速（semitones 升正降负、speed 倍率 MUST > 0，二者独立）。 */
+const audioStretch: ToolDescriptor = {
+	name: "audio_stretch",
+	title: "音频变调变速",
+	description: "对音频独立调整音高（半音）与速度（倍率），输出处理后的音频。",
+	kind: "cloud",
+	input: { kind: "audio" },
+	priceKey: "audio_stretch",
+	outputHint: "变调变速音频",
+	enabled: true,
+	taskType: "audio_stretch",
+	options: [
+		{ flag: "--semitones <n>", desc: "变调半音（升正降负；未传则不变调）" },
+		{ flag: "--speed <n>", desc: "变速倍率（必须 > 0；未传则不变速）" },
+	],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.semitones != null) {
+			const value = Number(ctx.opts.semitones);
+			if (!Number.isFinite(value)) throw new Error("--semitones 必须是数字");
+			payload.semitones = value;
+		}
+		if (ctx.opts.speed != null) {
+			const value = Number(ctx.opts.speed);
+			if (!Number.isFinite(value) || value <= 0) throw new Error("--speed 必须是大于 0 的数字");
+			payload.speed = value;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-stretch${extFromUrl(url, ".wav")}` }] : [];
+	},
+};
+
+/** piano_audio_to_midi —— 钢琴音频转 MIDI（仅 file_id，产 .mid）。 */
+const pianoAudioToMidi: ToolDescriptor = {
+	name: "piano_audio_to_midi",
+	title: "钢琴音频转 MIDI",
+	description: "把钢琴演奏音频扒谱为 MIDI 文件。",
+	kind: "cloud",
+	input: { kind: "audio" },
+	priceKey: "piano_audio_to_midi",
+	outputHint: "MIDI 文件（.mid）",
+	enabled: true,
+	taskType: "piano_audio_to_midi",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}${extFromUrl(url, ".mid")}` }] : [];
+	},
+};
+
+/** piano_audio_enhance —— 钢琴音频修复增强（WAV 主产物 + MIDI 副产物）。 */
+const pianoAudioEnhance: ToolDescriptor = {
+	name: "piano_audio_enhance",
+	title: "钢琴音频修复增强",
+	description: "修复并增强钢琴录音音质，产高质量 WAV 与配套 MIDI。",
+	kind: "cloud",
+	input: { kind: "audio" },
+	priceKey: "piano_audio_enhance",
+	outputHint: "高质量 WAV + MIDI",
+	enabled: true,
+	taskType: "piano_audio_enhance",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapOutputs(out, ctx) {
+		const files: DownloadItem[] = [];
+		const main = pickUrl(out, ["download_url"]);
+		if (main) files.push({ url: main, filename: `${ctx.baseName}-enhanced${extFromUrl(main, ".wav")}` });
+		const midi = pickUrl(out, ["midi_download_url"]);
+		if (midi) files.push({ url: midi, filename: `${ctx.baseName}${extFromUrl(midi, ".mid")}` });
+		return files;
+	},
+};
+
+/** image_to_square —— 长图转方图（max_line 默认 4000、上限 20000）。 */
+const imageToSquare: ToolDescriptor = {
+	name: "image_to_square",
+	title: "长图转方图",
+	description: "把长图智能转为方形图，可指定最大边长（默认 4000，上限 20000）。",
+	kind: "cloud",
+	input: { kind: "image" },
+	priceKey: "image_to_square",
+	outputHint: "方形图片",
+	enabled: true,
+	taskType: "image_to_square",
+	options: [{ flag: "--max-line <px>", desc: "最大边长像素（默认 4000，上限 20000）" }],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.maxLine != null) {
+			const value = Number(ctx.opts.maxLine);
+			if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1 || value > 20000) {
+				throw new Error("--max-line 必须是 1 到 20000 之间的整数");
+			}
+			payload.max_line = value;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-square${extFromUrl(url, ".jpg")}` }] : [];
+	},
+};
+
+/** image_to_live —— 智能 LivePhoto（图 → .mp4 微动视频，产物是视频非图片）。 */
+const imageToLive: ToolDescriptor = {
+	name: "image_to_live",
+	title: "智能 LivePhoto",
+	description: "把一张静态图片生成微动的 LivePhoto 视频（产物是视频）。",
+	kind: "cloud",
+	input: { kind: "image" },
+	priceKey: "image_to_live",
+	outputHint: "微动视频（.mp4）",
+	enabled: true,
+	taskType: "image_to_live",
+	buildPayload(fileId) {
+		return { file_id: fileId };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url", "video_download_url", "url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-live${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
+// ---------------------------------------------------------------- 智能视频字幕（add-tool-video-ai-subtitle）
+
+/** 服务端 subtitle_type 样式枚举（7 种小稳集，bundle 校验；--param 可绕过作前向兼容逃生）。 */
+const AI_SUBTITLE_TYPES = ["default", "outline", "cinema_yellow", "immersive_box", "wide_spacing", "deep_shadow", "boxed"];
+/** 服务端 subtitle_color 颜色枚举（11 种）。 */
+const AI_SUBTITLE_COLORS = ["雅黑", "淡绿", "森林绿", "湖蓝", "道奇蓝", "钢蓝", "浅粉红", "深橙", "珊瑚橙", "橙红", "土豪金"];
+
+/**
+ * video_ai_subtitle —— 智能视频字幕。一进多出的混合能力：
+ * mapOutputs 收 .ass 字幕（恒有）+ 可选烧录/去字幕 .mp4；mapResult 落 summary + asr 结构。
+ * --language 必填（服务端校验支持列表）；内部编排较重，pollTimeoutMs 放宽 4h。
+ */
+const videoAiSubtitle: ToolDescriptor = {
+	name: "video_ai_subtitle",
+	title: "智能视频字幕",
+	description: "为视频（或音频）智能生成字幕，可选双语翻译、烧录进视频、去除原字幕；另产 LLM 摘要与字级时间轴。",
+	kind: "cloud",
+	input: { kind: "video", exts: [...PUBLIC_VIDEO_EXTS, ...AUDIO_EXTS] },
+	priceKey: "video_ai_subtitle",
+	outputHint: "字幕 .ass + 可选烧录/去字幕视频 + 摘要/字级时轴结构",
+	enabled: true,
+	taskType: "video_ai_subtitle",
+	pollTimeoutMs: 4 * 60 * 60 * 1000, // 内部含去字幕+ASR+LLM+烧录，长视频耗时可观
+	options: [
+		{ flag: "--language <code>", desc: "源语种代码（必填；具体取值由服务端支持列表校验）" },
+		{ flag: "--translate-language <code>", desc: "译文目标语种（未传则单语）" },
+		{ flag: "--need-render", desc: "把字幕烧录进视频（仅视频输入有效）" },
+		{ flag: "--need-pure", desc: "先去除原视频中的字幕" },
+		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（未传则用服务端默认）` },
+		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（未传则用服务端默认）` },
+	],
+	buildPayload(fileId, ctx) {
+		const language = ctx.opts.language == null ? "" : String(ctx.opts.language).trim();
+		if (!language) throw new Error("--language 必填：请指定源语种代码（具体取值见云端 API 文档 / 服务端支持列表）");
+		const payload: Record<string, unknown> = { file_id: fileId, language };
+		if (ctx.opts.translateLanguage != null) {
+			const t = String(ctx.opts.translateLanguage).trim();
+			if (t) payload.translate_language = t;
+		}
+		if (ctx.opts.needRender === true) payload.need_render = true;
+		if (ctx.opts.needPure === true) payload.need_pure = true;
+		if (ctx.opts.subtitleType != null) {
+			const v = String(ctx.opts.subtitleType);
+			if (!AI_SUBTITLE_TYPES.includes(v)) throw new Error(`--subtitle-type 只支持 ${AI_SUBTITLE_TYPES.join("、")}`);
+			payload.subtitle_type = v;
+		}
+		if (ctx.opts.subtitleColor != null) {
+			const v = String(ctx.opts.subtitleColor);
+			if (!AI_SUBTITLE_COLORS.includes(v)) throw new Error(`--subtitle-color 只支持 ${AI_SUBTITLE_COLORS.join("、")}`);
+			payload.subtitle_color = v;
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const files: DownloadItem[] = [];
+		const sub = pickUrl(out, ["subtitle_file_download_url"]);
+		if (sub) files.push({ url: sub, filename: `${ctx.baseName}${extFromUrl(sub, ".ass")}` });
+		const rendered = pickUrl(out, ["rendered_file_download_url"]);
+		if (rendered) files.push({ url: rendered, filename: `${ctx.baseName}-subtitled${extFromUrl(rendered, ".mp4")}` });
+		const pure = pickUrl(out, ["pure_file_download_url"]);
+		if (pure) files.push({ url: pure, filename: `${ctx.baseName}-pure${extFromUrl(pure, ".mp4")}` });
+		return files;
+	},
+	mapResult(out) {
+		return { summary: typeof out.summary === "string" ? out.summary : "", asr: out.asr ?? null };
+	},
+};
+
 /**
  * mad —— 一键剪 MAD（local 型「纯本地工具、可选云端加料」形态首个成员，add-tool-mad）。
  * 素材文件夹（+可选 BGM）→ 自动选技法 → 生成 AE 母合成成片工程 .jsx。
@@ -810,6 +1148,16 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	audioSeparation,
 	audioNoiseReduce,
 	audioSilenceRemove,
+	videoSegment,
+	videoAiSegment,
+	videoMotionCut,
+	audioSpeakerSplit,
+	audioStretch,
+	pianoAudioToMidi,
+	pianoAudioEnhance,
+	imageToSquare,
+	imageToLive,
+	videoAiSubtitle,
 	mad,
 ];
 
@@ -832,5 +1180,9 @@ export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): vo
 		if (!d.enabled && !d.disabledReason) throw new Error(`未启用工具缺 disabledReason：「${d.name}」`);
 		if (d.kind === "cloud" && !d.taskType) throw new Error(`cloud 型工具缺 taskType：「${d.name}」`);
 		if (d.kind === "cloud" && !d.priceKey) throw new Error(`cloud 型工具缺 priceKey：「${d.name}」`);
+		// cloud 型须至少能落一种产物：文件下载（mapOutputs）或结构化结果（mapResult），二选一即可。
+		if (d.kind === "cloud" && !d.mapOutputs && !d.mapResult) {
+			throw new Error(`cloud 型工具须至少声明 mapOutputs 或 mapResult 之一：「${d.name}」`);
+		}
 	}
 }

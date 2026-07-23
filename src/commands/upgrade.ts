@@ -1,6 +1,6 @@
 /**
  * gtrk upgrade —— 一条命令升级 CLI 到最新版 + 刷新 skill（配置原样保留）。
- *   gtrk upgrade          有新版则升级、重装 /gtrk-oralcut skill
+ *   gtrk upgrade          有新版则升级、通过通用适配器刷新 Agent Skills
  *   gtrk upgrade --check  只查有没有新版、不动手
  * 客户端（桌面端）升级见输出提示：重跑安装脚本即覆盖装最新版，配置不动。
  */
@@ -58,7 +58,7 @@ export function registerUpgrade(program: Command): void {
 			}
 
 			// ② 用升级后的新版刷新 skill（只装 skill、不碰配置；gtrk shim 已指向新包）
-			log.step("② 刷新 /gtrk-oralcut skill…");
+			log.step("② 通过通用适配器刷新 Agent Skills…");
 			if (run("gtrk skills install") !== 0) {
 				log.warn("skill 没刷成，手动跑一次：gtrk skills install");
 			}

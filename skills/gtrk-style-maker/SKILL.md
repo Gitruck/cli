@@ -1,6 +1,6 @@
 ---
 name: gtrk-style-maker
-description: "能生产 skill 的 meta skill——通过启发式访谈引导视频创作者想清楚**他自己的**视觉语法，并把它落成**他自己的可执行 skill 家族**（黑盒、留本地）+ 栏目内共享词表 + 栏目配置登记。框架对审美零预设：不假设你有叙事结构、有容器概念、视觉分 MG/AI——你的维度（k）和取值（v）全部由你自己定义，本 skill 只提供「怎么想清楚」的工艺。当用户想「建一个新栏目/新频道的风格体系」「把我的审美沉淀成 skill」「做一个我自己的视觉 skill」「定义栏目风格规范/视觉语法」「栏目配置文档的 style 怎么填」「给我的栏目造一套创作工具」时使用本 skill。产出的 skill 落 ~/.claude/skills 即装即用，登记进 gtrk 栏目配置（style.skills）。"
+description: "能生产 skill 的 meta skill——通过启发式访谈引导视频创作者想清楚**他自己的**视觉语法，并把它落成**他自己的可执行 skill 家族**（黑盒、留本地）+ 栏目内共享词表 + 栏目配置登记。框架对审美零预设：不假设你有叙事结构、有容器概念、视觉分 MG/AI——你的维度（k）和取值（v）全部由你自己定义，本 skill 只提供「怎么想清楚」的工艺。当用户想「建一个新栏目/新频道的风格体系」「把我的审美沉淀成 skill」「做一个我自己的视觉 skill」「定义栏目风格规范/视觉语法」「栏目配置文档的 style 怎么填」「给我的栏目造一套创作工具」时使用本 skill。产出的 skill 通过通用 skills 适配器安装到当前或多个 Agent，登记进 gtrk 栏目配置（style.skills）。"
 ---
 
 # gtrk-style-maker · 造你自己的视觉 skill
@@ -75,7 +75,7 @@ description: "能生产 skill 的 meta skill——通过启发式访谈引导视
 1. **起 skill 目录**（用户作坊目录为正本，如 `D:\<他的工作区>\skills\<skill-name>\`）：SKILL.md（frontmatter `name`+`description`，description 即触发器，写清「当用户想…时使用」）+ **README.md 必产**（含「正本→安装」单向流声明）+ 按需 references/ assets/。exemplar 一旦在 SKILL.md 里被引用就必须真实存在——「计划中的案例」不能以文件路径形式出现。skill 正文结构**由访谈产出的维度决定**，不套模板。
 2. **契约绑定**：产物命中管线 handoff 类型的，查 `contracts/handoff-contracts.json`（本 CLI 包内）；映射到契约的（如 HTML 动画颗粒 → gsap-emit v1），在 skill 中引用「契约名+版本」并把契约合规项加进其自检清单；映射为 null 或管线外产物，无此要求。
 3. **共享词表**（条件产出，见第⑤招）。
-4. **安装**：整目录拷到 `~/.claude/skills/<skill-name>/`（即装即用）。skill README 写明**「正本→安装」单向流**：源码正本在作坊，安装位是产物，改动先改正本再重装。
+4. **安装**：以作坊里的 skill 目录为源，运行 `npx -y skills add "<skill正本目录>" -g -y`，让通用适配器自动探测 Agent，并以统一正本 + symlink/junction 安装；用户明确指定宿主时追加 `-a <agent-id>`（可重复），明确要求独立副本时追加 `--copy`。不要在本 skill 里维护 Claude/Codex/TRAE 等路径表。skill README 写明**「正本→安装」单向流**：源码正本在作坊，安装位是产物，改动先改正本再重装。
 5. **登记**：把 `{id, ref: <正本路径>, produces: <handoff 类型或自造串>}` **追加**进本地栏目配置 `style.skills`（词表进 `style.shared`）。配置文件位置以 gtrk 的 paths 口径为准（当前 `~/.gitruck/columns/<栏目id>.json`）；文件不存在则创建最小骨架 `{meta:{id},style:{skills:[…]}}`。**追加，绝不清空既有条目**。产物是管线外的（封面等），登记时加 `routing:"none"`。
 
 ## 交付前自检（你自己的 Quality Bar）

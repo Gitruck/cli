@@ -44,6 +44,8 @@ export interface RunToolResult {
 	outDir: string;
 	/** 已落地产物本地绝对路径。 */
 	files: string[];
+	/** 结构化结果落盘文件路径（descriptor 声明 mapResult 时落 result-output.json）。 */
+	resultFile?: string;
 	/** 产物下载失败明细（有则 ok=false、进程非 0）。 */
 	errors?: Record<string, string>;
 }
@@ -354,13 +356,13 @@ export async function runCloudTool(
 		now: deps.now,
 	});
 
-	// ⑦ 产物流式下载落地 + result.json 恒落盘（不受 --json 约束）
-	const items: DownloadItem[] = descriptor.mapOutputs
-		? descriptor.mapOutputs(output as unknown as OutputResult, ctx)
-		: [];
+	// ⑦ 产物落地（两条独立路径，均由 descriptor 声明驱动）+ result.json 恒落盘（不受 --json 约束）
+	const outputResult = output as unknown as OutputResult;
 	const files: string[] = [];
 	const errors: Record<string, string> = {};
-	if (items.length === 0) errors["output"] = "任务完成但未解析到产物下载链接（output_result 形态异常）";
+
+	// (a) 文件下载路径：mapOutputs 收敛下载清单，流式落地。
+	const items: DownloadItem[] = descriptor.mapOutputs ? descriptor.mapOutputs(outputResult, ctx) : [];
 	for (const it of items) {
 		const dest = join(outDir, it.filename);
 		try {
@@ -370,7 +372,20 @@ export async function runCloudTool(
 			errors[it.filename] = e instanceof Error ? e.message : String(e);
 		}
 	}
-	const ok = files.length > 0 && Object.keys(errors).length === 0;
+
+	// (b) 结构化结果路径：mapResult 收敛结构对象，落 result-output.json 面包屑。
+	let resultFile: string | undefined;
+	const structured = descriptor.mapResult ? descriptor.mapResult(outputResult, ctx) : undefined;
+	if (structured != null) {
+		resultFile = join(outDir, "result-output.json");
+		await writeFile(resultFile, JSON.stringify(structured, null, 2));
+	}
+
+	// 「既无文件也无结构」才判缺产物；有结构化产出时空下载清单不单独判失败。
+	if (items.length === 0 && resultFile == null) {
+		errors["output"] = "任务完成但未解析到任何产物（下载链接与结构化结果均为空，output_result 形态异常）";
+	}
+	const ok = Object.keys(errors).length === 0 && (files.length > 0 || resultFile != null);
 	const result: RunToolResult = {
 		ok,
 		tool: descriptor.name,
@@ -379,6 +394,7 @@ export async function runCloudTool(
 		fileId: up.fileId,
 		outDir,
 		files,
+		...(resultFile ? { resultFile } : {}),
 		...(Object.keys(errors).length ? { errors } : {}),
 	};
 	await writeFile(

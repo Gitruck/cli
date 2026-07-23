@@ -16,7 +16,7 @@
  *   gtrk tool <name>      单点工具族（image_move/image_matting/video_matting…）；gtrk tool list 查全部
  *   gtrk doctor           体检（配置 / 云端连通 / 剪映目录 / 运行时 / 版本）
  *   gtrk upgrade          升级 CLI 到最新版 + 刷新 skill（配置保留）
- *   gtrk skills install   单独把 /gtrk-oralcut skill 装进 Claude Code
+ *   gtrk skills install   通过通用 skills 适配器安装到各类 Agent
  */
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
@@ -35,6 +35,7 @@ import { registerMatrix } from "./commands/matrix";
 import { registerMg } from "./commands/mg";
 import { registerTool } from "./commands/tool";
 import { registerTranscript } from "./commands/transcript";
+import { registerMusicVisualizer } from "./commands/music-visualizer";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -74,6 +75,7 @@ registerMatrix(program); // B-roll 检索：dispatch.film_broll → split/broll-
 registerMg(program); // MG 颗粒铺轨：dispatch.mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track（弃用别名 gtrk rrv）
 registerTool(program); // 单点工具族：gtrk tool <name> [input]（image_move/image_matting/video_matting…）+ gtrk tool list
 registerTranscript(program); // 本地视频 → 只传抽取音频 → 单个含总结/时码记录/纯文本的 Markdown
+registerMusicVisualizer(program); // 音乐可视化：主音频 + 可选背景/封面 → 频谱可视化成片（独立命令 + driver skill）
 
 program.parseAsync(process.argv).catch((e: unknown) => {
 	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);
