@@ -1,7 +1,7 @@
 # GSAP-emit 契约 v1 · HTML 动画颗粒的逐帧 seek 渲染合规
 
-> **契约版本**：gsap-emit v1（2026-07-10；2026-07-24 增补铁律 7「占满坑位 + 终态驻留」，主理人硬性规定）。产 HTML 动画颗粒、经同合云渲染管线（html_animate_render）逐帧 seek 合成的 skill/工具，其产物 MUST 满足本契约。
-> **边界**：本契约只约束**机器可判定的管线消费属性**（封装/注册/确定性/自包含/依赖可达/禁 var()）。画面长什么样——颜色、字体、构图、节奏——**一律由调用方按其栏目自身规则决定**，本契约不置一词；文中示例取值均为中性占位。
+> **契约版本**：gsap-emit v1（2026-07-10；2026-07-24 增补铁律 7「占满坑位 + 终态驻留」，主理人硬性规定；同日铁律 6 增补字体注册表命中规则，对齐 gitruck-infra change `align-render-font-contract`）。产 HTML 动画颗粒、经同合云渲染管线（html_animate_render）逐帧 seek 合成的 skill/工具，其产物 MUST 满足本契约。
+> **边界**：本契约只约束**机器可判定的管线消费属性**（封装/注册/确定性/自包含/依赖可达/禁 var()/字体名命中注册表）。画面长什么样——颜色、字体取值、构图、节奏——**一律由调用方按其栏目自身规则决定**，本契约不点名任何具体字体/颜色；文中示例取值均为中性占位。
 
 ## 原理（为什么不能用 CSS animation）
 
@@ -14,7 +14,7 @@
 3. **确定性**：禁用 `Math.random` / `Date.now` / 无参 `new Date()`（过不了引擎 StaticGuard）。要"随机感"用固定种子/解析式/递归生成（见「确定性配方」）。
 4. **自包含 + 底色显式声明**：颗粒不依赖外部文件（除脚本 CDN）。**根底色透明与否必须显式声明**——全屏颗粒给根设明确 `background`（色值由调用方按栏目规则指定）；叠加在底轨上的透明颗粒根**不设** background。不显式想清楚这一层，叠加合成必出错。
 5. **脚本用渲染机可达的 CDN（编译期内联）**：`<script src="https://lib.baomitu.com/gsap/3.13.0/gsap.min.js"></script>` 或由渲染管线 vendor 本地。⚠️ jsdelivr 在渲染服务器不稳（实测 compile 期 `fetch failed` → GSAP 未加载 → 整片全黑）。编译器**只内联 http(s) CDN、不内联相对本地路径**（写 `src="gsap.min.js"` 运行时 404）。
-6. **颜色/字体用字面值，禁 CSS `var()` 自定义变量**：编译器/挂载不可靠地解析 var()（字体映射把 `var(--font-body)` 当字面字体名；颜色 var() 不应用 → 整片全黑，实测）。直接写字面值（如 `#RRGGBB` / `'某字体名'`）；SVG 属性里同样禁 var()。栏目级换色/换主题 = **生成期**替换字面值（查调用方自己的词表/token 注入），不是运行时变量。
+6. **颜色/字体用字面值，禁 CSS `var()` 自定义变量；字体名 MUST 命中服务端注册字体表**：编译器/挂载不可靠地解析 var()（字体映射把 `var(--font-body)` 当字面字体名；颜色 var() 不应用 → 整片全黑，实测）。直接写字面值（如 `#RRGGBB` / `'某字体名'`）；SVG 属性里同样禁 var()。栏目级换色/换主题 = **生成期**替换字面值（查调用方自己的词表/token 注入），不是运行时变量。**字体名规则（2026-07-24 增补）**：font-family 的每个具名家族 MUST 逐字符命中渲染服务端注册字体表（gitruck-infra 仓 `utils/assets/text/classic_template/font_manifest.json`，中英别名等价），并 SHOULD 以 `sans-serif`/`serif` 通用族收尾兜底；表外名字渲染不失败但**字形不保证**（服务端 fail-open 系统回退，2026-07-24 真机实锤：错名导致宋体被渲成回退黑体）。具体选哪款仍由调用方栏目规则决定，本契约不点名。
 7. **占满坑位 + 终态驻留（2026-07-24 主理人硬性规定）**：颗粒时间线总长 MUST ≥ 它在成片中的**坑位时长**（落轨 clip 的实际时长，通常 = 派单槽位包络 `track_ed − track_st`，**不是** `duration_hint`）；动画主叙事播完后，颗粒 MUST 以「**定格保持**」或「**有限次循环**」驻留到坑位末尾——坑位内任意时刻（含最后一帧）核心内容必须可见。**禁止**「整体渐隐到空 / 全局退场 / 清空画面」类收尾：渐隐会与剪辑层转场冲突，淡出与否由剪辑/装配层决定，不在颗粒内做。局部元素可按叙事退场（黯淡/让位），但画面在坑位内不得归零；**定格不动是完全合法的终态**（不必为凑动作密度在尾段硬加动画）。违反表现 = 观感上「动画一过完整个颗粒突兀消失」（2026-07-24 回声定位真机实测）。
 
 ## 颗粒骨架（中性模板）
@@ -22,7 +22,7 @@
 ```html
 <template id="p">
 <div data-composition-id="<id>" data-width="1920" data-height="1080"
-     style="position:absolute;inset:0;/* 底色显式声明:全屏颗粒填你栏目的底色,透明叠加则删除 background */background:<你的底色>;overflow:hidden;font-family:'<你的字体>',sans-serif;">
+     style="position:absolute;inset:0;/* 底色显式声明:全屏颗粒填你栏目的底色,透明叠加则删除 background */background:<你的底色>;overflow:hidden;font-family:'<你的字体·须命中服务端 font_manifest.json>',sans-serif;">
   <style> [data-composition-id="<id>"] .xxx{ … } </style>   <!-- 样式用属性选择器作用域，防跨颗粒污染 -->
   <svg viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid meet" style="position:absolute;inset:0;width:100%;height:100%;">…</svg>
   <script src="https://lib.baomitu.com/gsap/3.13.0/gsap.min.js"></script>
