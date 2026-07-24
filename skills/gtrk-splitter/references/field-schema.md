@@ -51,6 +51,9 @@
 // lane === "MG"（遗留 "RRV_MG" 读旧兼容）
 "handoff": { "category": "overlay", "slug_hint": "neural-overfit", "theme": "overfitting", "bg": "paper", "duration_hint": 12 }
 //   duration_hint（秒）必填；slug_hint / theme / bg / category 可选（bg 底色可由底轨态推导）
+//   ⚠️ duration_hint 语义（2026-07-24 主理人硬性规定）：只是「动画主叙事时长」参考，供生产 skill 排布节奏；
+//   落轨 clip 恒占满槽位包络（track_ed − track_st），颗粒 tl 总长须 ≥ 包络、终态定格或有限循环驻留、
+//   禁全局渐隐退场（gsap-emit v1 铁律⑦）。别把 duration_hint 当颗粒寿命写短。
 //   category（颗粒品类子类型，裁决⑩）：overlay（透明叠加,叠在 A-roll/B-roll 上,不挡主体）
 //     | fullscreen（不透明满屏,旁白主导整帧）；缺省=下游按颗粒 HTML 根 background 反推透明度。
 //     二期扩 subtitle/title。供剪辑器色带按品类分层(叠加/满屏 各一行)。
