@@ -49,6 +49,7 @@ gtrk mg status --project "<split产物目录>" --json
 ### 2. 逐槽位产颗粒（驱动栏目 MG 生产 skill）
 
 对每个「缺 HTML」的槽位：把它的 `composition_id` + `handoff`（`theme` / `duration_hint` / `category`：`overlay` 透明叠加·不挡主体 / `fullscreen` 不透明满屏）+ beat 语义上下文，**交给第「业务分离」节解析出的栏目 MG 生产 skill 产一颗 html-particle**。产完把颗粒**存到 `<产物目录>/mg/<composition_id>.html`**（`gtrk mg` 就从这里读）。
+- **产前先抽帧看底轨（`overlay` 槽位必做，别只凭派单盲产）**：颗粒最终要叠在真实画面上，构图必须因势象形。对该槽位挂点用本地 ffmpeg 抽 1-2 帧（`ffmpeg -ss <track_st秒> -i <底轨视频> -frames:v 1 <out.jpg>`，成本≈0）看清三件事——①真人主体/人脸的位置（颗粒 bbox 避开，呼应栏目「不盖说话人」铁律）；②该处是否已有烧入包装或 AI 画面（有 → 别铺这颗，报用户裁决——二次过毛片高发）；③画面明暗基调（深底/浅底影响衬底与配色取舍）。把这些**连同抽帧图一起附进产片订单**交给栏目生产 skill；`fullscreen` 槽位可免（满屏不透明无避让问题）。
 - **产片订单必须附带坑位硬约束（gsap-emit v1 铁律⑦，2026-07-24 主理人硬性规定）**：颗粒 GSAP 时间线总长 ≥ **坑位时长**（该槽位 `track_ed − track_st` 包络，**不是** `duration_hint`）+ 0.3s 余量；`duration_hint` 只是动画主叙事节奏参考。主叙事播完后颗粒必须**定格保持或有限循环驻留到坑位末尾**——坑位内任意一帧核心内容都可见；**禁全局渐隐/整体退场/清空画面**（渐隐与剪辑层转场冲突，淡出由剪辑层决定）；定格不动是合法终态。违反的观感 = 动画一过完颗粒突兀消失。
 - **`-aux<n>` 叠层颗粒同样处理**：`gtrk split` 若在某 beat 的 `aux_layers` 派了 `overlay`，会派生 `<beat>-aux<n>` 进 `dispatch.mg`（多为 B-roll 底轨之上叠透明概念图解）——照样产、照样存到对应 `composition_id.html`。
 - **category 决定叠法**：`overlay` 颗粒背景透明、盖在 B-roll 上不挡主体；`fullscreen` 不透明满屏。最终透明度由颗粒 HTML 根 `background` 反推的 `opaque` 定，生产 skill 要让二者自洽（lint 会查）。
