@@ -339,10 +339,13 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `--top-k <n>` | 每 query 候选数上限（覆盖派单 shots；服务端上限 50） | 派单值 |
 | `--material-class <c>` | 素材类型 `real_shot` \| `concept`（仅矩阵成员口；覆盖栏目策略） | 栏目策略 |
 | `--score-floor <f>` | 填充置信度地板：segment score 低于此值不采纳、留空露主轨 | `0.2` |
+| `--no-black-bed` | 不铺纯黑底垫轨（默认铺一条） | 默认铺 |
 | `--out <file>` | ad-hoc 模式结果落文件 | stdout |
 | `--json` | 机读：stdout 只输出结果 JSON | 关 |
 
 > preview 代理 url 约 24h 过期，重跑即重签。
+>
+> **纯黑底垫轨**：默认在全部候选轨之下、口播主轨之上垫一条纯黑底轨（`struct_meta.broll.black_track` 记其 `track_index`），按已落成的 beat 包络整条铺满，使 B-roll 期间（含候选轨留空处）不漏出底下的口播画面。字节落 `assets/builtin/solid-000000-<W>x<H>.png`，与客户端内置纯色素材同 id 命名空间、幂等复用。删候选轨时别误删它；换片请拖到候选轨颗粒上、**别拖到黑底条上**——含拖拽保护的客户端会直接拒绝并提示，尚未升级到该版本的客户端会被误拖打出黑底破洞（该处漏口播）。不想要加 `--no-black-bed` 重跑即剥净。
 
 ### `gtrk mg` — MG 动态图颗粒（铺轨 / lint / status）
 

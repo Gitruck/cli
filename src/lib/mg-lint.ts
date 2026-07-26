@@ -63,9 +63,60 @@ const CATEGORY_EXPECTED_OPAQUE: Record<string, boolean> = {
 	"op-ed-title": true,
 };
 
+
+/**
+ * 铁律⑦ 静态估长（尽力而为下界）：解析 `tl.to/from/fromTo/set(...)` 的 duration 与 position。
+ * 返回 null = 置信不足，调用方 MUST 沉默（宁可不报，也不误报）。
+ *
+ * 沉默条件：repeat（任意，含 -1 无限=驻留已达成、正数=实长被放大令下界失真）、yoyo、
+ * 相对 position（"+=" / "-=" / 标签）、以及估长为 0（只有 set 之类，解析不出时长）。
+ */
+export function estimateTimelineSec(html: string): number | null {
+	// 逐个截取 `tl.<method>( … );` 的实参串（非贪婪到 `);`，颗粒规范里每个调用都独立成句）。
+	const re = /\.\s*(?:to|from|fromTo|set|add)\s*\(([\s\S]*?)\)\s*;/g;
+	const calls: { body: string; pos: string | null }[] = [];
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(html))) {
+		const args = m[1] ?? "";
+		// position = 最后一个顶层实参（在最后一个 `}` 之后）；无 `}` 则视作无 position
+		const lastBrace = args.lastIndexOf("}");
+		let pos: string | null = null;
+		if (lastBrace >= 0) {
+			const tail = args.slice(lastBrace + 1).replace(/^\s*,\s*/, "").trim();
+			if (tail) pos = tail.replace(/^["']|["']$/g, "");
+		}
+		calls.push({ body: args, pos });
+	}
+	if (!calls.length) return null;
+
+	let chain = 0;
+	let maxEnd = 0;
+	for (const c of calls) {
+		// repeat（-1 无限=驻留已达成；正数=实长被放大令下界失真）与 yoyo 一律沉默
+		if (/\brepeat\s*:/.test(c.body) || /\byoyo\s*:\s*true\b/.test(c.body)) return null;
+		if (c.pos !== null && !/^-?\d+(?:\.\d+)?$/.test(c.pos)) return null; // 相对 position / 标签
+		const d = /\bduration\s*:\s*(-?\d+(?:\.\d+)?)/.exec(c.body);
+		const dur = d ? Number(d[1]) : 0;
+		if (!Number.isFinite(dur) || dur < 0) return null;
+		if (c.pos !== null) maxEnd = Math.max(maxEnd, Number(c.pos) + dur);
+		else chain += dur;
+	}
+	const est = Math.max(chain, maxEnd);
+	return est > 0 ? Math.round(est * 1000) / 1000 : null;
+}
+
 export function lintParticle(
 	html: string,
-	opts: { compositionId?: string; dispatchIds?: string[]; category?: string } = {},
+	opts: {
+		compositionId?: string;
+		dispatchIds?: string[];
+		category?: string;
+		/**
+		 * 该颗粒的槽位包络（秒）。给了才跑铁律⑦启发式；裸 lint / 未命中派单时不给 → 整项跳过。
+		 * 契约明令「逐帧与总长只有真渲染引擎能判」，故本项**恒非致命**、只做提醒。
+		 */
+		slotDuration?: number;
+	} = {},
 ): LintResult {
 	const v: LintViolation[] = [];
 	const push = (law: string, fatal: boolean, msg: string) => v.push({ law, fatal, msg });
@@ -139,6 +190,19 @@ export function lintParticle(
 		const expect = CATEGORY_EXPECTED_OPAQUE[opts.category];
 		if (expect !== opaque)
 			push("x-category-opaque", false, `category「${opts.category}」期望${expect ? "不透明满屏" : "透明叠加"}，但颗粒 HTML 反推为${opaque ? "不透明满屏" : "透明叠加"}（以 HTML 为准落 clip.opaque=${opaque}）`);
+	}
+
+	// 铁律⑦：颗粒应占满坑位并终态驻留。静态估长只能给**下界**，故恒非致命、置信不足即沉默。
+	// 真正的判据是渲染引擎逐帧，本项只提醒「疑似做短了」。
+	if (typeof opts.slotDuration === "number" && opts.slotDuration > 0) {
+		const est = estimateTimelineSec(html);
+		if (est !== null && est < opts.slotDuration * 0.8) {
+			push(
+				"7-fill-slot",
+				false,
+				`时间线静态估长 ~${est}s，短于槽位包络 ${opts.slotDuration}s（铁律⑦：颗粒应占满坑位并终态驻留）——静态估算仅供参考，含 repeat/yoyo/相对定位时不作数`,
+			);
+		}
 	}
 
 	return { ok: !v.some((x) => x.fatal), violations: v, opaque, compositionId: cid };

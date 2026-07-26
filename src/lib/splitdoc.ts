@@ -394,7 +394,10 @@ function isKnownCategory(v: unknown): boolean {
 export interface MgDispatch {
 	beat: string;
 	composition_id: string;
+	/** **槽位包络** r3(track_ed − track_st) = 落轨 clip 的坑位长度（铁律⑦，非动画节奏参考）。 */
 	duration: number | null;
+	/** 动画主叙事节奏参考，原样透传自 handoff.duration_hint；缺失落 null。**不参与落轨**。 */
+	duration_hint: number | null;
 	/** 品类子类型（可选；缺省=向后兼容，下游回落颗粒 HTML 反推 opaque）。 */
 	category?: unknown;
 	theme?: unknown;
@@ -540,7 +543,9 @@ export function buildLanding(
 			dispatch.mg.push({
 				beat: beat.id,
 				composition_id: compositionId,
-				duration: typeof h.duration_hint === "number" ? h.duration_hint : null,
+				// 铁律⑦：duration = 槽位包络（落轨事实）；hint 另立字段透传，不参与落轨。
+				duration: r3(track_ed - track_st),
+				duration_hint: typeof h.duration_hint === "number" ? h.duration_hint : null,
 				...(h.category !== undefined ? { category: h.category } : {}),
 				theme: h.theme,
 				bg: h.bg,
@@ -608,7 +613,8 @@ export function buildLanding(
 			dispatch.mg.push({
 				beat: beat.id,
 				composition_id: auxCompositionId,
-				duration: ah && typeof ah.duration_hint === "number" ? ah.duration_hint : null,
+				duration: r3(auxTrackEd - auxTrackSt),
+				duration_hint: ah && typeof ah.duration_hint === "number" ? ah.duration_hint : null,
 				category: "overlay",
 				theme: ah?.theme,
 				bg: ah?.bg,
@@ -690,7 +696,10 @@ export function renderSplitMarkdown(
 	L.push("");
 	L.push("## MG Queue");
 	for (const r of landing.dispatch.mg) {
-		L.push(`- \`${r.beat}\` composition_id=\`${r.composition_id}\`${r.duration != null ? ` · ${r.duration}s` : ""}`);
+		// 铁律⑦：展示**坑位包络**（落轨事实）；hint 有值才另注，null 不打印。
+		const slot = r.duration != null ? ` · 坑位 ${r.duration}s` : "";
+		const hint = r.duration_hint != null ? ` · hint ${r.duration_hint}s` : "";
+		L.push(`- \`${r.beat}\` composition_id=\`${r.composition_id}\`${slot}${hint}`);
 	}
 	L.push("");
 	L.push("## AI_DRAMA Queue");

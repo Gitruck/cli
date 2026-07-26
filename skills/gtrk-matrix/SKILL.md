@@ -46,10 +46,11 @@ description: B-roll 检索铺轨器——成片管线里第一个铺的车道（
 | 每段多给几个候选 | `--top-k <n>` | 整数 · 派单 `shots` 值（服务端上限 50） | 覆盖派单里每 query 的候选数上限 |
 | 指定素材类型 | `--material-class <c>` | `real_shot` \| `concept` · 栏目策略 | 仅 internal 矩阵成员口；external 固定 real_shot、传 concept 报错 |
 | 填充太满/太差调门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | segment score 低于此值不采纳、槽位留空露主轨 |
+| 不要那条纯黑底轨 | `--no-black-bed` | 开关 · 默认铺 | 默认在候选轨之下、口播主轨之上垫一条纯黑底轨，按 beat 包络整条铺满，B-roll 期间遮住底下的口播画面（含候选轨留空处）；不想要就传这个 |
 | ad-hoc 结果落文件 | `--out <file>` | 路径 · 缺省 stdout | 仅 `search` 模式 |
 | 机读（你必带） | `--json` | 开关 · 关 | 人读日志转 stderr，stdout 只出一行结果 JSON |
 
-> **因势象形举例**：「B-roll 多铺几条候选让我挑」→ `--lay 3`；「这段填得太杂、卡严点」→ `--score-floor 0.35`；「每段多给点候选」→ `--top-k 12`；「先只出清单别铺轨」→ `--lay 0`；「单独给『深夜地铁失神』搜一组」→ `gtrk matrix search "exhausted commuter staring blankly on a late night subway" --project <目录> --json`。
+> **因势象形举例**：「B-roll 多铺几条候选让我挑」→ `--lay 3`；「这段填得太杂、卡严点」→ `--score-floor 0.35`；「每段多给点候选」→ `--top-k 12`；「先只出清单别铺轨」→ `--lay 0`；「别给我垫那条黑底」→ `--no-black-bed`；「单独给『深夜地铁失神』搜一组」→ `gtrk matrix search "exhausted commuter staring blankly on a late night subway" --project <目录> --json`。
 
 ## 执行（每次都带 `--json`）
 
@@ -58,7 +59,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 ```
 
 - `--json`：人读日志走 stderr，**成功时 stdout 只有一行结果 JSON**：
-  `{ ok, mode:"plan", memberType:"internal"|"external", columnId?, planPath, lay:{ laidTracks:[…], laidClips, downloads:{preview,raw,reused,failed} }, counts:{ beats, queries, results, errors } }`
+  `{ ok, mode:"plan", memberType:"internal"|"external", columnId?, planPath, lay:{ laidTracks:[…], laidClips, blackTrack, downloads:{preview,raw,reused,failed} }, counts:{ beats, queries, results, errors } }`
   （`--lay 0` 时无 `lay` 字段；ad-hoc `search` 模式则是 `{ ok, mode:"search", results:[…], counts, outPath? }`）
 - 产物：候选清单 `<目录>/split/broll-plan.json`（只含引用不含素材，`cover_url` 可预览、签名 url 约 24h 过期，过期重跑即重签），铺轨则把候选轨写回工程 `gtrk/project.gtrk`。
 - **命令失败**（缺 `--dispatch`/派单、鉴权失败、全部 query 检索失败、参数越界等）→ **进程非 0 退出、报错打到 stderr、stdout 无 JSON**。先看退出码，非 0 就把 stderr 的报错如实回给用户，别当成功。
@@ -70,7 +71,8 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 
 - `counts`：`beats` 个 beat、`queries` 条检索（`errors` 条失败）、`results` 条候选——一句话概括这次铺了多大盘子。
 - `memberType`：`internal` = 矩阵成员口（栏目偏好/concept 生效）；`external` = 通用口（固定 real_shot + 有版权素材）——档位影响命中类型，若用户期望 concept 却是 external，明说「当前身份只能出实拍有版权素材」。
-- `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、共几个颗粒（`--lay 0` 时无此字段，只出了 plan）。
+- `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、共几个颗粒（`--lay 0` 时无此字段，只出了 plan）。**`laidTracks` 只含候选轨、不含黑底垫轨。**
+- `lay.blackTrack`：纯黑底垫轨的 `track_index`（未铺时 `null`，如传了 `--no-black-bed`、画布尺寸非法、或零候选轨落成）。
 - `lay.downloads`：`preview` 代理数 / `raw` **原片回落**数（无 preview 代理的候选回落下原片、体积大，服务端 backfill 后重跑本命令可换回代理）/ `reused` 复用 / `failed` 掉的槽位——`raw`/`failed` 非零时提一句。
 - **单 query 失败是局部化的**（`counts.errors > 0` 但 `ok:true`）：个别检索失败不拖垮整盘，如实说哪几段没检到、其余照铺。只有**全部 query 都失败**才会整体非 0 退出。
 - 工程缺失/非 v1 → 命令会**告警跳过铺轨但仍产 plan**（stderr 有提示）——这时 `lay` 字段缺失，告诉用户 plan 已出、可在有工程的目录重跑铺轨。
@@ -82,6 +84,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - **在同合云桌面客户端（opencut / OpenCut Gitruck Edition）里打开这个工程**，B-roll 候选轨已经铺好。
 - **用轨道头的「小眼睛」开关逐条切换对比**：看哪条候选最贴这段口播的情绪/画面，留下满意的、关掉不要的。
 - 候选默认是 preview 代理（轻量预览）；**下载原片属挑选后的动作**（客户端挑选 UI），确认要哪条再拉原片。
+- **候选轨下方还垫了一条纯黑底轨**（`lay.blackTrack`），按 beat 包络整条铺满，作用是 B-roll 期间遮住底下的口播画面（含候选轨上的留空处）——删多余候选轨时**别误删它**；换片请拖到**候选轨的颗粒**上、**别拖到黑底条上**（含拖拽保护的客户端会直接拒绝并提示；尚未升级到该版本的客户端会被误拖打出黑底破洞、该处漏口播）。不想要黑底就加 `--no-black-bed` 重跑，会自动剥净。
 - 觉得填充有问题（太杂/太空/漏段）先别急着往下——**回来告诉我**，我按下面「常见情况」调参重铺。
 
 **用户明确说「B-roll 就这样、可以了」之后**，才交棒 ④。别自作主张替他拍板往下冲。
@@ -91,6 +94,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | 情况 | 怎么做 |
 |---|---|
 | 想在多个候选里挑 | `--lay N` 多铺几条候选轨，opencut 小眼睛切换对比（N 越大越占轨、挑完可删多余轨） |
+| 不要那条黑底垫轨 | `--no-black-bed` 重跑，黑轨与黑底素材一并剥净、候选轨层级不受影响 |
 | 填充太差 / 命中太杂 | 调 `--score-floor`（调高更严、露主轨；调低更满、可能杂）重跑 |
 | 每段候选太少不够挑 | 调 `--top-k`（每 query 给更多候选）重跑 |
 | 某段有空槽 / 漏检 / 想补个特定意象 | `gtrk matrix search "<英文长句场景描述>" --project <目录> --json` 单条 ad-hoc 补检，把中意的候选记下、在 opencut 里手动铺进那段 |
