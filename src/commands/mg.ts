@@ -123,15 +123,22 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		}
 		const html = await readFile(srcPath, "utf8");
 		const category = typeof q.category === "string" ? q.category : undefined;
-		const lint = lintParticle(html, { compositionId: q.composition_id, dispatchIds, category });
+		// 铁律⑦：坑位长度 = 槽位包络，与 dispatch 的 duration（=duration_hint 语义）彻底解耦。
+		const slotDuration = Math.round((q.track_ed - q.track_st) * 1000) / 1000;
+		const lint = lintParticle(html, {
+			compositionId: q.composition_id,
+			dispatchIds,
+			category,
+			...(slotDuration > 0 ? { slotDuration } : {}),
+		});
 		for (const vv of lint.violations) (vv.fatal ? log.warn : log.info)(`${q.beat} lint ${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
 		if (!lint.ok) {
 			skipped.push({ beat: q.beat, reason: "lint 未过" });
 			log.warn(`${q.beat}：lint 未过，跳过`);
 			continue;
 		}
-		if (typeof q.duration !== "number" || !(q.duration > 0)) {
-			skipped.push({ beat: q.beat, reason: "duration 非正数" });
+		if (!(slotDuration > 0)) {
+			skipped.push({ beat: q.beat, reason: "槽位包络非正数" });
 			continue;
 		}
 		srcByComp.set(q.composition_id, srcPath);
@@ -140,7 +147,6 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 			composition_id: q.composition_id,
 			track_st: q.track_st,
 			track_ed: q.track_ed,
-			duration: q.duration,
 			opaque: lint.opaque,
 			html_rel: `${MG_ASSET_DIR}/${q.composition_id}.html`,
 			...(category ? { category } : {}),

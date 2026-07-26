@@ -18,13 +18,20 @@ const isOwnMaterialId = (id: string): boolean =>
 	id.startsWith(MG_MATERIAL_PREFIX) || id.startsWith(LEGACY_MATERIAL_PREFIX);
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
+/**
+ * 槽位包络（秒）= 落轨 clip 的唯一时长来源（铁律⑦「颗粒占满坑位 + 终态驻留」）。
+ * MUST NOT 回退到 dispatch.mg[].duration —— 那是给栏目 MG 生产 skill 的动画节奏参考（duration_hint），
+ * 不是坑位长度；混用会让 clip 提前结束、颗粒突兀消失（2026-07-24 回声定位事故）。
+ */
+const slotEnvelope = (it: { track_st: number; track_ed: number }): number =>
+	r3(it.track_ed - it.track_st);
+
 /** 一个已就绪颗粒（命令侧已定位 HTML、lint、推导 opaque、复制进 assets/mg/）。 */
 export interface MgLayItem {
 	beat: string;
 	composition_id: string;
 	track_st: number;
 	track_ed: number;
-	duration: number;
 	/** 从颗粒 HTML 根 background 推导（非 dispatch.bg）：满屏盖底=true / 透明叠加=false */
 	opaque: boolean;
 	/** 相对 gtrk 目录的 .html 路径（assets/mg/<composition_id>.html） */
@@ -38,6 +45,7 @@ export interface MgMetaBeat {
 	composition_id: string;
 	track_st: number;
 	track_ed: number;
+	/** 落轨包络事实 = r3(track_ed − track_st)，**不是** dispatch 的 duration_hint。 */
 	duration: number;
 	html_path: string;
 	category?: string;
@@ -114,7 +122,10 @@ export function layMgTracks(opts: {
 	const newIndex = Math.max(9, ...allIndices) + 1;
 
 	for (const it of items) {
-		if (!(it.duration > 0)) {
+		// 铁律⑦：clip 寿命只由槽位包络决定，与 dispatch.mg[].duration 彻底解耦。
+		// 包络非正数才跳过（旧实现判 it.duration，那正是「颗粒填不满坑位」的病根）。
+		const envelope = slotEnvelope(it);
+		if (!(envelope > 0)) {
 			metaBeats.push({ ...toMetaBeat(it), laid: null });
 			continue;
 		}
@@ -128,7 +139,7 @@ export function layMgTracks(opts: {
 			html_material: materialId,
 			opaque: it.opaque,
 			track_st: it.track_st,
-			duration: it.duration,
+			duration: envelope,
 		});
 		metaBeats.push({ ...toMetaBeat(it), laid: { track_index: newIndex } });
 	}
@@ -173,7 +184,7 @@ function toMetaBeat(it: MgLayItem): Omit<MgMetaBeat, "laid"> {
 		composition_id: it.composition_id,
 		track_st: it.track_st,
 		track_ed: r3(it.track_ed),
-		duration: it.duration,
+		duration: slotEnvelope(it),
 		html_path: it.html_rel,
 		...(it.category ? { category: it.category } : {}),
 	};

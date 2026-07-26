@@ -10,9 +10,21 @@
  *   - 紧邻槽位不同 clip；(clip,segment) 对跨轨不复用（轨 2 = 真正差异化方案）；
  *   - excluded_hint（note 命中派单负词）不进自动填充，人工面板仍可选。
  * 素材 = 已下载落地的 preview 代理（契约铁律「无 url 素材态」，url 只活在 struct_meta.broll）。
- * 幂等：自产物 = `broll-` 前缀 materials + `struct_meta.broll.lay_tracks` 登记的轨。
+ * 幂等：自产物 = `broll-`/`ex-solid-` 前缀 materials + `struct_meta.broll.lay_tracks` 登记的轨
+ * （lay_tracks = 候选轨 ∪ 黑底垫轨）。剥离时对仍被保留轨引用的素材有零引用保护，故合并写回按 id 去重。
+ *
+ * 黑底垫轨（add-matrix-black-bed-track）：在全部候选轨之下、口播主轨之上铺一条纯黑 image 轨，
+ * 时窗按**已落成候选轨的 beat 包络整条**（主理人 2026-07-25 拍板，非槽位并集）——B-roll 期间
+ * 恒不漏出底下的 A-roll 口播。默认开，`--no-black-bed` 关。
  */
 import type { BrollPlan, PlanBeat, PlanResult } from "./matrix";
+import {
+	BLACK_BED_HEX,
+	SOLID_MATERIAL_PREFIX,
+	isLayoutableCanvas,
+	solidMaterialId,
+	solidRelPath,
+} from "./solid-png";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
 export const BROLL_MATERIAL_PREFIX = "broll-";
@@ -70,9 +82,43 @@ export interface StructMetaBroll {
 	contract_version: "v1";
 	generated_at: string;
 	plan_path: string;
+	/** 本次自产轨 index 全集（候选轨 ∪ 黑底轨，升序）——黑轨在册才能被老版 CLI 一并剥掉。 */
 	lay_tracks: number[];
+	/** 黑底垫轨 track_index；未铺时 null。供消费方从 lay_tracks 中区分出黑底轨。 */
+	black_track: number | null;
 	confirmed: false;
 	beats: BrollMetaBeat[];
+}
+
+/** 黑底段合并容差（秒）：间隙/重叠 ≤ 此值即并为一段。 */
+export const BLACK_BED_MERGE_EPS = 0.001;
+
+/**
+ * 黑底时窗合并（纯函数）：入参为**已落成候选轨的 beat 包络**，按 track_st 升序合并
+ * （重叠或间隙 ≤ EPS 者并为一段），输出不重叠升序段。
+ *
+ * 口径铁律（主理人 2026-07-25 拍板）：黑底按 **beat 包络整条**铺，MUST NOT 做槽位收集或
+ * 跨轨槽位并集——黑底时窗因此完全不依赖种子化随机的槽位切分，确定性只由 beat 端点决定。
+ */
+export function mergeBlackBedSegments(
+	envelopes: { track_st: number; track_ed: number }[],
+): { track_st: number; track_ed: number }[] {
+	const valid = envelopes
+		.filter(
+			(e) =>
+				Number.isFinite(e.track_st) && Number.isFinite(e.track_ed) && e.track_ed > e.track_st,
+		)
+		.sort((a, b) => a.track_st - b.track_st);
+	const out: { track_st: number; track_ed: number }[] = [];
+	for (const e of valid) {
+		const last = out[out.length - 1];
+		if (last && e.track_st - last.track_ed <= BLACK_BED_MERGE_EPS) {
+			if (e.track_ed > last.track_ed) last.track_ed = e.track_ed;
+			continue;
+		}
+		out.push({ track_st: e.track_st, track_ed: e.track_ed });
+	}
+	return out.map((s) => ({ track_st: r3(s.track_st), track_ed: r3(s.track_ed) }));
 }
 
 /** beat 候选合并：各 query results（beat 内已去重）按 score 降序（面板/下载排序用）。 */
@@ -313,8 +359,16 @@ interface LooseMaterial {
 
 export interface LayResult {
 	next: Record<string, unknown>;
-	summary: { laidTracks: number[]; laidClips: number; beatsWithCandidates: number };
+	/** laidTracks 只含**候选轨**（人读计数不把黑底算成候选轨）；黑轨另以 blackTrack 报。 */
+	summary: {
+		laidTracks: number[];
+		laidClips: number;
+		beatsWithCandidates: number;
+		blackTrack: number | null;
+	};
 	broll: StructMetaBroll;
+	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
+	warnings: string[];
 }
 
 /**
@@ -329,8 +383,12 @@ export function layBrollTracks(opts: {
 	downloads: Map<string, DownloadedProxy>;
 	generatedAt: string;
 	planPath: string;
+	/** 是否铺纯黑底垫轨（默认 true，`--no-black-bed` 关）。 */
+	blackBed?: boolean;
 }): LayResult {
 	const { gtrk, plan, lay, fills, downloads } = opts;
+	const blackBedOn = opts.blackBed !== false;
+	const warnings: string[] = [];
 	const videoTracks = [...((gtrk.video_track as LooseTrack[] | undefined) ?? [])];
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}) };
@@ -344,14 +402,43 @@ export function layBrollTracks(opts: {
 	);
 	const removedTracks = videoTracks.filter((t) => typeof t.track_index === "number" && prevIndices.has(t.track_index));
 	const keptTracks = videoTracks.filter((t) => !(typeof t.track_index === "number" && prevIndices.has(t.track_index)));
+	// 自产素材 = `broll-` 前缀（候选片）∪ `ex-solid-` 前缀（黑底垫片）
 	const removedMaterialIds = new Set<string>();
 	for (const t of removedTracks) {
 		for (const c of t.track_timeline ?? []) {
 			const m = c.material;
-			if (typeof m === "string" && m.startsWith(BROLL_MATERIAL_PREFIX)) removedMaterialIds.add(m);
+			if (
+				typeof m === "string" &&
+				(m.startsWith(BROLL_MATERIAL_PREFIX) || m.startsWith(SOLID_MATERIAL_PREFIX))
+			) {
+				removedMaterialIds.add(m);
+			}
 		}
 	}
+	// 零引用保护：`ex-solid-*` 与客户端内置示例素材同命名空间（同色同画布恒等 id），用户从示例面板
+	// 加过纯黑就必然撞 id；`broll-*` 也可能被用户复制到自有轨。凡仍被任一保留轨引用者 MUST NOT 删。
+	const stillReferenced = new Set<string>();
+	for (const group of [keptTracks, (gtrk.beat_track as LooseTrack[] | undefined) ?? [], (gtrk.audio_track as LooseTrack[] | undefined) ?? []]) {
+		for (const t of group) {
+			for (const c of t.track_timeline ?? []) {
+				if (typeof c.material === "string") stillReferenced.add(c.material);
+			}
+		}
+	}
+	for (const id of stillReferenced) removedMaterialIds.delete(id);
 	const keptMaterials = materials.filter((m) => !(typeof m.id === "string" && removedMaterialIds.has(m.id)));
+
+	// 手工黑底轨检测：用户此前手加的黑底轨会被当用户轨保留并顶高 baseIndex，令新候选轨落到它之下
+	// 被整片遮住。宁可告警不猜删（登记缺失宁留勿删铁律）。
+	for (const t of keptTracks) {
+		const clips = t.track_timeline ?? [];
+		if (!clips.length) continue;
+		if (clips.every((c) => typeof c.material === "string" && c.material.startsWith(SOLID_MATERIAL_PREFIX))) {
+			warnings.push(
+				`检测到疑似手工纯色底轨（track_index=${t.track_index}）：新候选轨会落到它之下被遮住。建议删除该轨后重跑，或用 --no-black-bed。`,
+			);
+		}
+	}
 
 	// ── 按 fills 平铺构建 ──
 	const canvas = Array.isArray(gtrk.video_size) ? (gtrk.video_size as number[]) : [1920, 1080];
@@ -437,24 +524,83 @@ export function layBrollTracks(opts: {
 			track_timeline: clips.sort((a, b) => (a.track_st as number) - (b.track_st as number)),
 		}));
 
+	// ── 纯黑底垫轨（track_index 恒 = baseIndex + lay，即比所有候选轨都大）──
+	// gtrk v1 里非主轨 track_index 越大越靠下（客户端 importer 升序进 overlay、overlay[0] 最上层），
+	// 故黑底恰好落在「全部候选轨之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	let blackTrack: number | null = null;
+	let blackTrackObj: Record<string, unknown> | null = null;
+	if (blackBedOn && createdTracks.length > 0) {
+		if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
+			warnings.push(
+				`画布尺寸非法（${canvas[0]}x${canvas[1]}），跳过铺纯黑底轨（候选轨照常铺）。`,
+			);
+		} else {
+			// 时窗 = 本轮**至少落成一条候选轨**的 beat 的包络（整条铺，非槽位并集）。
+			const laidBeatEnvelopes = metaBeats
+				.filter((b) => b.laid.length > 0)
+				.map((b) => ({ track_st: b.track_st, track_ed: b.track_ed }));
+			const segments = mergeBlackBedSegments(laidBeatEnvelopes);
+			if (segments.length > 0) {
+				const width = canvas[0]!;
+				const height = canvas[1]!;
+				const solidId = solidMaterialId({ hex: BLACK_BED_HEX, width, height });
+				// 黑底 material MUST NOT 带 duration：带了会让客户端 resolveTrim 走素材时长分支。
+				newMaterialsById.set(solidId, {
+					id: solidId,
+					path: solidRelPath({ hex: BLACK_BED_HEX, width, height }),
+					video_size: [width, height],
+				});
+				blackTrack = baseIndex + lay;
+				blackTrackObj = {
+					track_index: blackTrack,
+					track_size: [width, height],
+					muted: false,
+					track_timeline: segments.map((s, i) => ({
+						clip_id: `blackbed-${i}`,
+						material: solidId,
+						clip_st: 0,
+						clip_ed: r3(s.track_ed - s.track_st),
+						track_st: s.track_st,
+						track_ed: s.track_ed,
+						duration: r3(s.track_ed - s.track_st),
+					})),
+				};
+			}
+		}
+	}
+
+	const laidTrackIndices = createdTracks.map((t) => t.track_index);
 	const broll: StructMetaBroll = {
 		contract_version: "v1",
 		generated_at: opts.generatedAt,
 		plan_path: opts.planPath,
-		lay_tracks: createdTracks.map((t) => t.track_index),
+		// 黑轨也登记进 lay_tracks：老版 CLI 只读这个键剥旧，不在册就会把黑轨当用户轨保留、
+		// 顶高 baseIndex，令下次新候选轨落到黑轨之下整片黑。
+		lay_tracks: blackTrack === null ? laidTrackIndices : [...laidTrackIndices, blackTrack],
+		black_track: blackTrack,
 		confirmed: false,
 		beats: metaBeats,
 	};
 
+	// 素材按 id 去重合并：零引用保护会让同一 id 同时出现在保留集与自产集里（旧的「先全删再全加」
+	// 天然无重复），自产条目覆盖同 id 的保留条目，杜绝 materials 出现重复 id。
+	const mergedMaterials = new Map<string, LooseMaterial>();
+	for (const m of keptMaterials) {
+		if (typeof m.id === "string") mergedMaterials.set(m.id, m);
+		else mergedMaterials.set(`__anon_${mergedMaterials.size}`, m);
+	}
+	for (const [id, m] of newMaterialsById) mergedMaterials.set(id, m);
+
 	const next: Record<string, unknown> = {
 		...gtrk,
-		materials: [...keptMaterials, ...newMaterialsById.values()],
-		video_track: [...keptTracks, ...createdTracks],
+		materials: [...mergedMaterials.values()],
+		video_track: [...keptTracks, ...createdTracks, ...(blackTrackObj ? [blackTrackObj] : [])],
 		struct_meta: { ...structMeta, broll },
 	};
 	return {
 		next,
-		summary: { laidTracks: broll.lay_tracks, laidClips, beatsWithCandidates },
+		summary: { laidTracks: laidTrackIndices, laidClips, beatsWithCandidates, blackTrack },
 		broll,
+		warnings,
 	};
 }

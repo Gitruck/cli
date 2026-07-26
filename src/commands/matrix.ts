@@ -11,7 +11,7 @@
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
 import { resolveColumnConfig } from "../lib/column-config";
@@ -25,6 +25,7 @@ import {
 	previewUrlFor,
 	type DownloadedProxy,
 } from "../lib/matrix-lay";
+import { BLACK_BED_HEX, encodeSolidPng, solidRelPath } from "../lib/solid-png";
 import type { Dispatch, FilmDispatch } from "../lib/splitdoc";
 import {
 	buildPlan,
@@ -49,6 +50,8 @@ interface MatrixOpts {
 	scoreFloor?: string;
 	out?: string;
 	json?: boolean;
+	/** commander `--no-black-bed` → 缺省 true，传参即 false。 */
+	blackBed?: boolean;
 }
 
 export function registerMatrix(program: Command): void {
@@ -64,6 +67,7 @@ export function registerMatrix(program: Command): void {
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option("--score-floor <f>", "填充置信度地板：segment score 低于此值不采纳，槽位留空露主轨（默认 0.2）")
+		.option("--no-black-bed", "不铺纯黑底垫轨（默认铺一条，垫在候选轨之下、口播主轨之上，用于 B-roll 期间遮住口播画面）")
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
@@ -210,7 +214,7 @@ async function runPlanMode(
 	const layN = parseLay(opts.lay);
 	let laySummary: Record<string, unknown> | undefined;
 	if (layN > 0) {
-		laySummary = await layIntoProject(baseDir, plan, layN, parseScoreFloor(opts.scoreFloor));
+		laySummary = await layIntoProject(baseDir, plan, layN, parseScoreFloor(opts.scoreFloor), opts.blackBed ?? true);
 	}
 
 	const result: MatrixResult = {
@@ -259,6 +263,7 @@ async function layIntoProject(
 	plan: BrollPlan,
 	layN: number,
 	scoreFloor: number,
+	blackBed: boolean,
 ): Promise<Record<string, unknown> | undefined> {
 	const gtrkPath = locateGtrk(baseDir);
 	if (!gtrkPath) {
@@ -327,7 +332,7 @@ async function layIntoProject(
 		}
 	}
 
-	const { next, summary } = layBrollTracks({
+	let { next, summary, warnings } = layBrollTracks({
 		gtrk,
 		plan,
 		lay: layN,
@@ -335,17 +340,61 @@ async function layIntoProject(
 		downloads,
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
+		blackBed,
 	});
+
+	// 黑底 PNG 落盘：客户端能凭 id 现画重建，但剪映导出/云渲/第三方读的是盘上的文件，故必须真写字节。
+	// 落盘失败 → 撤掉黑轨重铺（宁可无黑底，也不留「.gtrk 说有、盘上没有」）。
+	if (summary.blackTrack !== null) {
+		const canvas = gtrk.video_size as number[];
+		const spec = { hex: BLACK_BED_HEX, width: canvas[0]!, height: canvas[1]! };
+		const rel = solidRelPath(spec);
+		const abs = join(gtrkDir, ...rel.split("/"));
+		try {
+			if (!existsSync(abs)) {
+				await mkdir(dirname(abs), { recursive: true });
+				// 临时文件 + rename 原子落地：中断不留半包 PNG（半包会被下次「同名即复用」静默命中）
+				const tmp = `${abs}.tmp-${process.pid}`;
+				await writeFile(tmp, encodeSolidPng(spec));
+				await rename(tmp, abs);
+			}
+		} catch (e) {
+			log.warn(`纯黑底 PNG 落盘失败（${rel}）：${(e as Error).message} —— 本次不铺黑底垫轨，候选轨照常。`);
+			({ next, summary, warnings } = layBrollTracks({
+				gtrk,
+				plan,
+				lay: layN,
+				fills,
+				downloads,
+				generatedAt: new Date().toISOString(),
+				planPath: "split/broll-plan.json",
+				blackBed: false,
+			}));
+		}
+	}
+
 	writeGtrkAtomic(gtrkPath, next, mtimeMs);
+	const bedNote =
+		summary.blackTrack !== null
+			? ` · 纯黑底垫轨 track_index ${summary.blackTrack}`
+			: blackBed
+				? " · 未铺纯黑底垫轨"
+				: " · 纯黑底垫轨已关闭（--no-black-bed）";
 	log.ok(
 		`铺轨完成：${summary.laidTracks.length} 条候选轨（track_index ${summary.laidTracks.join("/") || "-"}）· 平铺 ${summary.laidClips} 个颗粒 / ${clipIds.size} 个 clip` +
-			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）`,
+			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）${bedNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
+	for (const w of warnings) log.warn(w);
 	if (dlStats.raw > 0) {
 		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
 	}
-	return { laidTracks: summary.laidTracks, laidClips: summary.laidClips, downloads: dlStats };
+	return {
+		laidTracks: summary.laidTracks,
+		laidClips: summary.laidClips,
+		blackTrack: summary.blackTrack,
+		downloads: dlStats,
+	};
 }
 
 /** 下载代理：preview（直连或推导）→ 404/失败回落 raw → 都失败返回 null（调用方丢槽位）。
