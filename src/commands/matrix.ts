@@ -26,7 +26,18 @@ import {
 	type DownloadedProxy,
 } from "../lib/matrix-lay";
 import { BLACK_BED_HEX, encodeSolidPng, solidRelPath } from "../lib/solid-png";
+import {
+	reportMaterialIntegrity,
+	safeCheckMaterialIntegrity,
+	type IntegrityReport,
+} from "../lib/material-integrity";
 import type { Dispatch, FilmDispatch } from "../lib/splitdoc";
+import {
+	reportReprojection,
+	reprojectDispatchWindows,
+	withTimecodeSource,
+	type ReprojectResult,
+} from "../lib/reproject";
 import {
 	buildPlan,
 	buildPlanBeat,
@@ -52,6 +63,8 @@ interface MatrixOpts {
 	json?: boolean;
 	/** commander `--no-black-bed` → 缺省 true，传参即 false。 */
 	blackBed?: boolean;
+	/** `--force-relay`：候选轨已被用户编辑时仍强制剥离重铺（②-B 拒铺的逃生门）。 */
+	forceRelay?: boolean;
 }
 
 export function registerMatrix(program: Command): void {
@@ -66,8 +79,17 @@ export function registerMatrix(program: Command): void {
 		.option("--top-k <n>", "每 query 候选数上限（覆盖派单 shots 翻译；服务端上限 50）")
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
-		.option("--score-floor <f>", "填充置信度地板：segment score 低于此值不采纳，槽位留空露主轨（默认 0.2）")
+		.option(
+			"--score-floor <f>",
+			"填充置信度地板：segment score 低于此值不采纳，槽位留空——黑底垫轨默认开，留空处露的是黑底（要露主轨口播画面得配 --no-black-bed）。" +
+				"调高会收缩取材池、可能整段无槽位铺成纯黑，调完先看铺轨输出的空洞告警（默认 0.2）",
+		)
 		.option("--no-black-bed", "不铺纯黑底垫轨（默认铺一条，垫在候选轨之下、口播主轨之上，用于 B-roll 期间遮住口播画面）")
+		.option(
+			"--force-relay",
+			"候选轨已被你在客户端编辑过（改过 clip / 确认过原片）时仍强制剥离重铺：缺省会拒铺并保留那条轨，本开关是逃生门——" +
+				"会删除已确认原片的 broll-raw-* 素材登记，盘上已下载的原片文件就地成孤儿，且那条轨上的编辑不可恢复",
+		)
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
@@ -159,7 +181,37 @@ async function runPlanMode(
 	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split <拆分稿> 落地派单）`);
 
 	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch;
-	const queue: FilmDispatch[] = Array.isArray(dispatch.film_broll) ? dispatch.film_broll : [];
+	const rawQueue: FilmDispatch[] = Array.isArray(dispatch.film_broll) ? dispatch.film_broll : [];
+
+	// ── 现场重投影（add-consume-side-reprojection 6.1）：在**发起第一次云端检索之前**完成 ──
+	// 窗口长度直接决定检索的镜头切分与时长诉求；用过期窗口检索 = 先烧掉整轮配额再拿错料。
+	// 工程读取因此从 layIntoProject 提前到这里；读失败按 D6 ①a **门内吞掉**（既有失败面不挪：
+	// assertGtrkV1 仍留在 layIntoProject 里、在 plan 落盘之后 —— 「非 v1 仍能拿到 plan」不变）。
+	const earlyGtrkPath = locateGtrk(baseDir);
+	let earlyGtrk: Record<string, unknown> | undefined;
+	let earlyUnreadable = false;
+	if (earlyGtrkPath) {
+		try {
+			earlyGtrk = readGtrk(earlyGtrkPath).gtrk;
+		} catch {
+			earlyUnreadable = true; // 报错留给 layIntoProject 的原位置（本处只是「算不出窗口」）
+		}
+	}
+	const reproj = await reprojectDispatchWindows({
+		baseDir,
+		gtrk: earlyGtrk,
+		gtrkUnreadable: earlyUnreadable,
+		entries: rawQueue.map((e) => ({ key: e.beat, beat: e.beat, span: e.span, track_st: e.track_st, track_ed: e.track_ed })),
+	});
+	reportReprojection(reproj);
+	// 重投影后**零存活**的 beat：从检索与 plan 中一并跳过（MUST NOT 为它烧配额、也不铺轨）
+	const droppedBeats = new Set(reproj.summary.dropped);
+	const queue: FilmDispatch[] = rawQueue
+		.filter((e) => !droppedBeats.has(e.beat))
+		.map((e) => {
+			const win = reproj.windows.get(e.beat);
+			return win ? { ...e, track_st: win.track_st, track_ed: win.track_ed } : e;
+		});
 	log.step(`▶ B-roll 检索：${queue.length} 个 beat（${tier} 口）…`);
 
 	const beats = [];
@@ -189,7 +241,8 @@ async function runPlanMode(
 	}
 
 	const totalQueries = okCount + errCount;
-	if (queue.length === 0) log.warn("无 B-roll 派单（film_broll 队列为空）——照常写出空 plan");
+	// 判据用 rawQueue：队列本来就空 ≠ 被重投影全判零存活（后者已由重投影摘要单独报因）
+	if (rawQueue.length === 0) log.warn("无 B-roll 派单（film_broll 队列为空）——照常写出空 plan");
 	if (totalQueries > 0 && okCount === 0) {
 		throw new Error(`全部 ${totalQueries} 个 query 检索失败，未写入 plan（逐条原因见上方日志）`);
 	}
@@ -212,20 +265,39 @@ async function runPlanMode(
 	// ⑤ 候选铺轨（add-matrix-lay-tracks）：下载 preview 代理落地 → 幂等替换自产轨 → 原子写回。
 	//    工程缺失/非 v1 = 告警跳过（plan 已产，铺轨是增值不是门槛）。
 	const layN = parseLay(opts.lay);
-	let laySummary: Record<string, unknown> | undefined;
+	let laid: LayOutcome | undefined;
 	if (layN > 0) {
-		laySummary = await layIntoProject(baseDir, plan, layN, parseScoreFloor(opts.scoreFloor), opts.blackBed ?? true);
+		laid = await layIntoProject(
+			baseDir,
+			plan,
+			layN,
+			parseScoreFloor(opts.scoreFloor),
+			opts.blackBed ?? true,
+			opts.forceRelay === true,
+			reproj,
+		);
 	}
+	const laySummary = laid?.lay;
 
+	// ②-B 拒铺（fix-matrix-strip-identity）：候选轨已被用户编辑 → 工程零改动。
+	// 退出码口径已拍板取**非 0**（`ok:false` 一律连带非 0 退出码，与 `gtrk mg` 的 done() 同调）——
+	// 本 CLI 的主要消费者是 agent，「ok:false + 退出码 0」是静默错判的源头。plan 仍已产出、可复用。
+	const refused = laySummary?.refused === true ? (laySummary.keptEditedTracks as number[]) : undefined;
 	const result: MatrixResult = {
-		ok: true,
+		ok: refused === undefined,
 		mode: "plan",
 		memberType: tier,
 		...(columnId ? { columnId } : {}),
 		planPath,
+		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
+		// 素材落盘自检（material-integrity-check）：只在**真写回过**的路径上出现。
+		// 字段缺席 = 「本次没查」，MUST NOT 用空结果冒充「查过且干净」；与 `gtrk mg` 同名同形。
+		...(laid?.integrity ? { integrity: laid.integrity } : {}),
+		reprojection: reproj.summary,
 		counts: { beats: beats.length, queries: totalQueries, results: resultCount, errors: errCount },
 	};
+	if (!result.ok) process.exitCode = 1;
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }
@@ -254,9 +326,16 @@ function locateGtrk(baseDir: string): string | undefined {
 	return cands.find((p) => existsSync(p));
 }
 
+/** 铺轨返回：`lay` = 既有铺轨摘要（进 `--json` 的 `lay`）；`integrity` 仅在真写回过时才有。 */
+interface LayOutcome {
+	lay: Record<string, unknown>;
+	integrity?: IntegrityReport;
+}
+
 /**
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 下载代理（preview 优先 → 推导 → 404 回落 raw）
- * → layBrollTracks → 原子写回。任何整体性失败（工程缺失/非 v1/mtime 冲突）都不影响已产出的 plan。
+ * → layBrollTracks → 原子写回 → 素材落盘自检（只读）。
+ * 任何整体性失败（工程缺失/非 v1/mtime 冲突）都不影响已产出的 plan。
  */
 async function layIntoProject(
 	baseDir: string,
@@ -264,7 +343,9 @@ async function layIntoProject(
 	layN: number,
 	scoreFloor: number,
 	blackBed: boolean,
-): Promise<Record<string, unknown> | undefined> {
+	forceRelay: boolean,
+	reproj: ReprojectResult,
+): Promise<LayOutcome | undefined> {
 	const gtrkPath = locateGtrk(baseDir);
 	if (!gtrkPath) {
 		log.warn(`未找到工程文件（${join(baseDir, "gtrk", "project.gtrk")}），跳过铺轨——plan 已产出，可后续在有工程的目录重跑`);
@@ -341,7 +422,39 @@ async function layIntoProject(
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
 		blackBed,
+		forceRelay,
 	});
+
+	// ── ②-B 拒铺：存在「自产内容但已被你编辑」的轨且未开逃生门 → 一个字节都不动工程 ──
+	// 报因三件套（缺一不可）：① 是哪条轨 ② 判定证据 ③ 下一步与逃生门用法。
+	if (summary.refused) {
+		const list = summary.keptEditedTracks;
+		log.err(
+			`拒绝铺轨：${list.length} 条候选轨已被你在客户端编辑过（track_index ${list.join("/") || "-"}）——` +
+				"本次不剥它们、也不铺新轨，工程文件零改动。",
+		);
+		for (const w of warnings) log.warn(w); // 逐轨证据：clip 数 vs 登记条数 / material 是否已变 broll-raw-*
+		log.warn(
+			"下一步二选一：① 在客户端处置那条轨（删掉 / 移走 / 改用别的轨）后重跑本命令；" +
+				"② 确知要丢弃那条轨上的编辑 → 加 --force-relay 强制剥离重铺" +
+				"（会删掉已确认原片的 broll-raw-* 素材登记，盘上原片文件成孤儿，不可恢复）。",
+		);
+		log.warn("已产出的 broll-plan.json 与已落盘的 preview 代理照常可用——拒的只是「改工程」这一步。");
+		// 拒铺 = 工程零改动 = 本次没写回 → 不做素材自检（`integrity` 字段缺席即「本次没查」）
+		return {
+			lay: {
+				refused: true,
+				keptEditedTracks: list,
+				laidTracks: [],
+				laidClips: 0,
+				removedTracks: [],
+				blackTrack: null,
+				blackBedHoleSec: 0,
+				blackBedHoles: [],
+				downloads: dlStats,
+			},
+		};
+	}
 
 	// 黑底 PNG 落盘：客户端能凭 id 现画重建，但剪映导出/云渲/第三方读的是盘上的文件，故必须真写字节。
 	// 落盘失败 → 撤掉黑轨重铺（宁可无黑底，也不留「.gtrk 说有、盘上没有」）。
@@ -369,31 +482,58 @@ async function layIntoProject(
 				generatedAt: new Date().toISOString(),
 				planPath: "split/broll-plan.json",
 				blackBed: false,
+				// 重跑必须原样带上 forceRelay：漏传会让「已授权强剥」的这次退回拒铺态（半截行为）
+				forceRelay,
 			}));
 		}
 	}
 
-	writeGtrkAtomic(gtrkPath, next, mtimeMs);
+	// 时码来源登记（add-consume-side-reprojection 7.2，纯追加可选字段）：本 change 只**登记**，不据此判失效
+	const written = withTimecodeSource(next, "broll", reproj);
+	writeGtrkAtomic(gtrkPath, written, mtimeMs);
+	// 素材落盘自检（material-integrity-check）：对象取**写回后**的那份（报的必须是「用户现在打开工程会遇到什么」）；
+	// 只读、非致命——查出悬空 MUST NOT 改 ok / 退出码 / 写回结果。人读输出压在铺轨完成行之后（见下）。
+	const integrity = safeCheckMaterialIntegrity({ gtrk: written, gtrkDir, log });
 	const bedNote =
 		summary.blackTrack !== null
 			? ` · 纯黑底垫轨 track_index ${summary.blackTrack}`
 			: blackBed
 				? " · 未铺纯黑底垫轨"
 				: " · 纯黑底垫轨已关闭（--no-black-bed）";
+	// 剥离/保留如实呈现（ADDED「剥离与保留必须如实呈现」）：今天的完成日志对删除只字不提，是静默铲轨的帮凶
+	const stripNote =
+		`剥离 ${summary.removedTracks.length} 条旧自产轨` +
+		(summary.removedTracks.length ? `（track_index ${summary.removedTracks.join("/")}）` : "") +
+		(forceRelay ? "（含 --force-relay 强剥的已编辑轨）" : "") +
+		" · ";
+	const keptNote = summary.keptEditedTracks.length
+		? ` · 保留 ${summary.keptEditedTracks.length} 条已被你编辑的轨（track_index ${summary.keptEditedTracks.join("/")}，本次未剥，因由见下方告警）`
+		: "";
 	log.ok(
-		`铺轨完成：${summary.laidTracks.length} 条候选轨（track_index ${summary.laidTracks.join("/") || "-"}）· 平铺 ${summary.laidClips} 个颗粒 / ${clipIds.size} 个 clip` +
-			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）${bedNote}`,
+		`铺轨完成：${stripNote}${summary.laidTracks.length} 条候选轨（track_index ${summary.laidTracks.join("/") || "-"}）· 平铺 ${summary.laidClips} 个颗粒 / ${clipIds.size} 个 clip` +
+			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）${bedNote}${keptNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
 	for (const w of warnings) log.warn(w);
 	if (dlStats.raw > 0) {
 		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
 	}
+	if (integrity) reportMaterialIntegrity(integrity, log);
 	return {
-		laidTracks: summary.laidTracks,
-		laidClips: summary.laidClips,
-		blackTrack: summary.blackTrack,
-		downloads: dlStats,
+		lay: {
+			refused: false,
+			laidTracks: summary.laidTracks,
+			laidClips: summary.laidClips,
+			removedTracks: summary.removedTracks,
+			keptEditedTracks: summary.keptEditedTracks,
+			blackTrack: summary.blackTrack,
+			// 空洞是「告知」不是「阻断」：人读走上面的 warnings 通道单独成行，机读全量出这两个字段，
+			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。
+			blackBedHoleSec: summary.blackBedHoleSec,
+			blackBedHoles: summary.blackBedHoles,
+			downloads: dlStats,
+		},
+		...(integrity ? { integrity } : {}),
 	};
 }
 

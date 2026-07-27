@@ -118,10 +118,13 @@
 
 ## 落地产物（CLI 写，供参照）
 
-- **`.gtrk` 的 `struct_meta.split`**：`{contract_version, transcript_hash, projected_at, material_id, beats:[{id, lane, span, track_st, track_ed, source_ranges, narrative, container_stage, visual_task, shrunk?, handoff}]}`——投影时刻快照。**消费方要新鲜时码就重新投影**（`gtrk split --project`）。
+- **`.gtrk` 的 `struct_meta.split`**：`{contract_version, transcript_hash, projected_at, material_id, beats:[{id, lane, span, track_st, track_ed, source_ranges, narrative, container_stage, visual_task, shrunk?, handoff}]}`——投影时刻快照。
+  **谁负责重投影**：CLI 的消费方命令（`gtrk mg` / `gtrk matrix`）**每次消费都自己现场重投影**（`transcript × 当刻 .gtrk`，与 `gtrk split` 落地同一段代码），所以**用户在 split 之后继续微调口播轨是常态、无需重跑 split**；只有**拆分稿本身**变了才要重跑 `gtrk split`。快照只在重投影不可行时（transcript 缺失 / 工程定位不到 / 主轨查不到口播素材）作回退值，届时命令会显式告警并在 `--json` 里标注降级。
   - `material_id`：口播素材 id（= transcript.material_id），消费方脱离 transcript 文件即可定位素材。
   - `beats[].source_ranges`：`[{st, ed}]` 源时基秒（v1 恒单元素 = span 源包络，含句间静默与被剪词）——**源时基不随时间线编辑漂移**，消费方以「源区间 ∩ 当刻颗粒源窗口」投影可得实时覆盖（客户端色带跟随模式即此）。
-- **`split/dispatch.json`**：`{mg:[{beat, composition_id, duration, category?, theme, bg, slug_hint, track_st, track_ed}], film_broll:[{beat, queries, shots, per_shot_sec, exclude, track_st, track_ed}], ai_drama:[{beat, ...handoff, track_st, track_ed}]}`（去品牌化前 `mg` 键为 `rrv_mg`，消费方 `mg ?? rrv_mg` 双读）。`composition_id` = `<工程slug>-<beatId>`（MG 颗粒 `data-composition-id` 直接用它，打通 beat↔颗粒命名）；`overlay` aux 派生颗粒 = `<工程slug>-<beatId>-aux<n>`（`n` 从 1）——`composition_id` 全局唯一，一 beat 可派生主 + N 个 `-aux<n>` 颗粒。
+- **`split/dispatch.json`**：`{mg:[{beat, composition_id, duration, category?, theme, bg, slug_hint, track_st, track_ed, span}], film_broll:[{beat, queries, shots, per_shot_sec, exclude, track_st, track_ed, span}], ai_drama:[{beat, ...handoff, track_st, track_ed, span}]}`（去品牌化前 `mg` 键为 `rrv_mg`，消费方 `mg ?? rrv_mg` 双读）。
+  - **`span:{from,to}`**：该条目对应的 utterance 区间——派单**自述「派什么」**，消费方据它现场重投影，时码不再是派单唯一的权威内容。**aux 派生条目写的是 aux 自己的 span**（`mount` 为子区间时 ≠ 主 beat span）；注意 aux 条目的 `beat` 字段记的仍是**主 beat id**，所以按 `beat` 回查 `struct_meta.split` 会把 aux 错算成主 beat 的整段窗口——要回查一律用 `composition_id`。
+  - **`track_st/track_ed` 是快照**：投影那一刻的值。老档（无 `span`）消费方会回落到 `struct_meta.split.beats[].span` 定位，照样重投影。`composition_id` = `<工程slug>-<beatId>`（MG 颗粒 `data-composition-id` 直接用它，打通 beat↔颗粒命名）；`overlay` aux 派生颗粒 = `<工程slug>-<beatId>-aux<n>`（`n` 从 1）——`composition_id` 全局唯一，一 beat 可派生主 + N 个 `-aux<n>` 颗粒。
 - **`split/visual-split.md`**（`--md`）：由机器 JSON 单向渲染的人读稿，不回读。
 
 ## 落地时的 dropped 处理（你要知道）

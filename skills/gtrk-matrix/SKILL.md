@@ -22,7 +22,7 @@ description: B-roll 检索铺轨器——成片管线里第一个铺的车道（
 - 需要一个**跑过 `gtrk split` 的产物目录**，里面有 `split/dispatch.json`。没有 → 先回到 ② 触发 `/gtrk-splitter` 产派单。
 - 看 `dispatch.json` 的 `film_broll` 队列：**空 = 本片没有 B-roll 车道**（拆分时没有段落被判给 `FILM_BROLL`）→ 直接跳过本步、交棒 ④ 铺 MG，别空跑。非空才往下。
 - `gtrk` 命令找不到 → 让用户装 `npm i -g @gitruck/cli@latest`（需先有 Node.js）。
-- 用户可以先在 opencut 里手调切点再保存——铺轨是往当前工程 append 候选轨，基于工程现状。
+- 用户可以先在 opencut 里手调切点再保存——**轨号与剥旧**按工程现状算（append 候选轨），**时码也跟随**：命令每次都用 `transcript × 当刻 .gtrk` **现场重投影** beat 窗口，`dispatch.json` 里的时码只是投影那一刻的快照、仅在重投影不可行时兜底。**所以微调口播轨不用回去重跑 `gtrk split`**；只有**拆分稿本身**变了才要重跑。
 
 ## 业务分离：B-roll 无栏目生产 skill，检索偏好由栏目配置供
 
@@ -45,12 +45,13 @@ description: B-roll 检索铺轨器——成片管线里第一个铺的车道（
 | 多铺几条候选来对比 | `--lay <n>` | 非负整数 · `1`（`0`=只出 plan 不铺轨） | 平铺 N 条候选轨，opencut 里小眼睛切换对比挑选 |
 | 每段多给几个候选 | `--top-k <n>` | 整数 · 派单 `shots` 值（服务端上限 50） | 覆盖派单里每 query 的候选数上限 |
 | 指定素材类型 | `--material-class <c>` | `real_shot` \| `concept` · 栏目策略 | 仅 internal 矩阵成员口；external 固定 real_shot、传 concept 报错 |
-| 填充太满/太差调门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | segment score 低于此值不采纳、槽位留空露主轨 |
+| 填充太满/太差调门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | segment score 低于此值不采纳、槽位**留空露黑底**（黑底默认铺；除非同时带 `--no-black-bed` 才露主轨）。**调高有代价**：取材池收缩，整段铺不满时那段就是纯黑压口播——调完先看铺轨输出的空洞告警 |
 | 不要那条纯黑底轨 | `--no-black-bed` | 开关 · 默认铺 | 默认在候选轨之下、口播主轨之上垫一条纯黑底轨，按 beat 包络整条铺满，B-roll 期间遮住底下的口播画面（含候选轨留空处）；不想要就传这个 |
+| 候选轨已被改过仍要强铺 | `--force-relay` | 开关 · 关 | **逃生门，别默认带**：缺省下「候选轨已被你编辑过（改过 clip / 确认过原片）」会**拒铺 + 工程零改动**；传它才强剥重铺——**会删掉已确认原片的 `broll-raw-*` 素材登记、盘上原片成孤儿、那条轨上的编辑不可恢复**。只在用户明确点头后带 |
 | ad-hoc 结果落文件 | `--out <file>` | 路径 · 缺省 stdout | 仅 `search` 模式 |
 | 机读（你必带） | `--json` | 开关 · 关 | 人读日志转 stderr，stdout 只出一行结果 JSON |
 
-> **因势象形举例**：「B-roll 多铺几条候选让我挑」→ `--lay 3`；「这段填得太杂、卡严点」→ `--score-floor 0.35`；「每段多给点候选」→ `--top-k 12`；「先只出清单别铺轨」→ `--lay 0`；「别给我垫那条黑底」→ `--no-black-bed`；「单独给『深夜地铁失神』搜一组」→ `gtrk matrix search "exhausted commuter staring blankly on a late night subway" --project <目录> --json`。
+> **因势象形举例**：「B-roll 多铺几条候选让我挑」→ `--lay 3`；「这段填得太杂、卡严点」→ **先别急着改地板**：按默认 `0.2` 跑一遍，看铺轨输出的空洞告警与 `lay.blackBedHoleSec`，再决定要不要调严——调严会砍掉大半取材池，铺不满的地方是**纯黑压口播**（黑底默认铺，留空处露黑底而非主轨），真要调就小步试、每次都对着空洞告警看；「每段多给点候选」→ `--top-k 12`；「先只出清单别铺轨」→ `--lay 0`；「别给我垫那条黑底」→ `--no-black-bed`；「单独给『深夜地铁失神』搜一组」→ `gtrk matrix search "exhausted commuter staring blankly on a late night subway" --project <目录> --json`。
 
 ## 执行（每次都带 `--json`）
 
@@ -59,10 +60,13 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 ```
 
 - `--json`：人读日志走 stderr，**成功时 stdout 只有一行结果 JSON**：
-  `{ ok, mode:"plan", memberType:"internal"|"external", columnId?, planPath, lay:{ laidTracks:[…], laidClips, blackTrack, downloads:{preview,raw,reused,failed} }, counts:{ beats, queries, results, errors } }`
+  `{ ok, mode:"plan", memberType:"internal"|"external", columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[{beat,track_st,track_ed,sec}…], downloads:{preview,raw,reused,failed} }, integrity:{ checked, counts:{relative,absolute,remote,noPath}, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }, counts:{ beats, queries, results, errors } }`
   （`--lay 0` 时无 `lay` 字段；ad-hoc `search` 模式则是 `{ ok, mode:"search", results:[…], counts, outPath? }`）
-- 产物：候选清单 `<目录>/split/broll-plan.json`（只含引用不含素材，`cover_url` 可预览、签名 url 约 24h 过期，过期重跑即重签），铺轨则把候选轨写回工程 `gtrk/project.gtrk`。
+- **拒铺结局**（候选轨已被用户编辑过）：stdout 出 `{ ok:false, refused:[<track_index>…], reason:"tracks_edited", planReusable:true, planPath, lay:{ refused:true, … } }` 且**进程非 0 退出**。
+  这**不是命令失败**——`broll-plan.json` 已产出、代理已落盘，只是工程一个字节没动。处置口径见下方「常见情况处置」表。
+- 产物：候选清单 `<目录>/split/broll-plan.json`（只含引用不含素材；`cover_url`/`preview_url` **不带签名、不会过期**，带签名 24h 过期的是原片 `url`），铺轨则把候选轨写回工程 `gtrk/project.gtrk`。
 - **命令失败**（缺 `--dispatch`/派单、鉴权失败、全部 query 检索失败、参数越界等）→ **进程非 0 退出、报错打到 stderr、stdout 无 JSON**。先看退出码，非 0 就把 stderr 的报错如实回给用户，别当成功。
+  **非 0 退出还有一种是上面的「拒铺」**（stdout 有 JSON 且 `refused` 非空）——两者靠有没有 JSON 区分，别把拒铺讲成命令挂了。
 - 检索是分钟级（逐 beat 逐 query + 下载代理），耐心等命令返回。
 
 ## 跑完读结果、给用户交代
@@ -73,7 +77,25 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - `memberType`：`internal` = 矩阵成员口（栏目偏好/concept 生效）；`external` = 通用口（固定 real_shot + 有版权素材）——档位影响命中类型，若用户期望 concept 却是 external，明说「当前身份只能出实拍有版权素材」。
 - `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、共几个颗粒（`--lay 0` 时无此字段，只出了 plan）。**`laidTracks` 只含候选轨、不含黑底垫轨。**
 - `lay.blackTrack`：纯黑底垫轨的 `track_index`（未铺时 `null`，如传了 `--no-black-bed`、画布尺寸非法、或零候选轨落成）。
+- `lay.blackBedHoleSec` / `lay.blackBedHoles`：**黑底空洞**——黑底盖着、其上却没有任何 B-roll 的**纯黑压口播**时段（全片累计秒数 / 逐段 `{beat, track_st, track_ed, sec}`，按 `track_st` 升序）。
+  **这两个字段恒全量列出、不按告警阈值过滤**（读到 `blackBedHoleSec:0` 才是真没有）；超阈值时 stderr 另有一条人读告警。
+  非零就**主动报给用户**（哪个 beat、几秒、在哪）——这是粗剪期的既定取舍不是故障，但用户有权知道并决定是调参还是手动补片。别只报「铺好了」。
+- `lay.removedTracks` / `lay.keptEditedTracks`：本次**剥掉了哪些旧自产轨** / **因判定「你编辑过」而保留未剥的轨**。
+  重跑是「剥旧重铺」，删了什么必须跟用户说，别只报铺了几条。`lay.refused:true` = 本次一条轨都没铺、工程零改动。
 - `lay.downloads`：`preview` 代理数 / `raw` **原片回落**数（无 preview 代理的候选回落下原片、体积大，服务端 backfill 后重跑本命令可换回代理）/ `reused` 复用 / `failed` 掉的槽位——`raw`/`failed` 非零时提一句。
+- **`integrity`（素材落盘自检）**：写回工程之后自动查一遍「`materials[].path` 是不是真的都落盘了」。
+  只在**真写回过**的运行里出现（`--lay 0` / 拒铺 / 工程缺失时**字段缺席** = 本次没查，别当成「查过且干净」）。
+  - `integrity.dangling`：**悬空引用**全量清单（工程自带的相对路径素材，登记在、文件不在）。每条带 `id` / `path` /
+    `resolved`（解析后的绝对路径）/ `referenced`（是否被时间线引用）/ `refs`（引用位置：轨类型、`track_index`、
+    `clip_id`、区间）。**恒全量、不截断**。
+  - `integrity.danglingReferenced` / `integrity.danglingOrphan`：**被时间线引用的**悬空数 / 孤儿数。
+    **两者严重度差一个量级**：被引用 = 时间线上那一段没素材可放（客户端可能 relink 回落到别的素材）；
+    孤儿 = 只在 `materials` 里挂着、不影响画面。回报时**必须分开说**，别只报总数。
+  - `integrity.external`：**绝对路径**素材当前找不到文件（毛片被移走 / 外接盘没挂载都会这样）——另一档，不进 `dangling`。
+  - `integrity.counts` / `noPathIds`：形态分布与「没有 path」的素材（结构问题，非落盘问题）。
+  - **这是告知不是拦阻**：查出悬空**不会**让命令失败、不改退出码、不删任何东西。非零就主动报给用户
+    （哪几条、在哪一段、是不是被引用），并说明多半是历史遗留（如客户端「确认原片」下载中断），
+    修法是在客户端重新确认原片、或删掉那条 clip。**别自己去删素材或文件。**
 - **单 query 失败是局部化的**（`counts.errors > 0` 但 `ok:true`）：个别检索失败不拖垮整盘，如实说哪几段没检到、其余照铺。只有**全部 query 都失败**才会整体非 0 退出。
 - 工程缺失/非 v1 → 命令会**告警跳过铺轨但仍产 plan**（stderr 有提示）——这时 `lay` 字段缺失，告诉用户 plan 已出、可在有工程的目录重跑铺轨。
 
@@ -93,14 +115,17 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 
 | 情况 | 怎么做 |
 |---|---|
-| 想在多个候选里挑 | `--lay N` 多铺几条候选轨，opencut 小眼睛切换对比（N 越大越占轨、挑完可删多余轨） |
+| 想在多个候选里挑 | `--lay N` 多铺几条候选轨，opencut 小眼睛切换对比（N 越大越占轨、挑完可删多余轨）。**只增加可选方案数，不扩大覆盖**——(clip,segment) 对跨轨不复用，地板抬高时第二轨可能一个槽位都落不成，**别把它当空洞的解药** |
 | 不要那条黑底垫轨 | `--no-black-bed` 重跑，黑轨与黑底素材一并剥净、候选轨层级不受影响 |
-| 填充太差 / 命中太杂 | 调 `--score-floor`（调高更严、露主轨；调低更满、可能杂）重跑 |
+| 填充太差 / 命中太杂 | 调 `--score-floor`（调低更满、可能杂；调高更严但**留空处露的是黑底不是主轨**——取材池一收缩就可能整段纯黑压口播）。**调高后必看**铺轨输出的空洞告警与 `lay.blackBedHoleSec`：不接受就调回来、改 `--no-black-bed`、或在客户端手动补片 |
+| **出现「黑底空洞」告警**（某几段是纯黑、上面没有任何 B-roll） | **这不是故障、也没拦你**，是把粗剪期的既定取舍如实报出来：黑底按 beat 包络整条铺，槽位没填满的地方就是纯黑。照 `lay.blackBedHoles` 逐段报给用户（哪个 beat、几秒、在哪），三条出路让他挑：① 调低 `--score-floor` 多放些候选进来；② `--no-black-bed` 改成露主轨口播；③ 到 opencut 里手动往那几段补片 |
 | 每段候选太少不够挑 | 调 `--top-k`（每 query 给更多候选）重跑 |
 | 某段有空槽 / 漏检 / 想补个特定意象 | `gtrk matrix search "<英文长句场景描述>" --project <目录> --json` 单条 ad-hoc 补检，把中意的候选记下、在 opencut 里手动铺进那段 |
 | 只想先看清单不铺轨 | `--lay 0`（只产 `broll-plan.json`，不动工程） |
-| 代理过期看不了预览 | 直接重跑本命令即重签 preview url（约 24h 过期） |
+| **命令报「候选轨已被你编辑过」并拒绝铺轨** | **这是保护，不是故障**：说明那条轨你动过（改过 clip / 在客户端确认过原片），本次**一条轨都不铺、工程零改动**（`.gtrk` 逐字节没变），`broll-plan.json` 照常产出。告警里会指名 `track_index` 与证据。二选一：① 在 opencut 里把那条轨处置掉（不要了就删、要留就先移走/改用别的轨）后重跑；② 确知要丢弃那条轨上的编辑 → 加 `--force-relay` 强剥重铺——**会删掉已确认原片的 `broll-raw-*` 素材登记、盘上已下载原片就地成孤儿，不可恢复**，先把后果说给用户听、等他点头再跑 |
+| 预览看不了 / 想「重签」代理 url | **别为此重跑铺轨**：候选 `preview_url`/`cover_url` 本就不带签名、不会过期，本地代理落盘后一律复用；带签名 24h 过期的是**原片 `url`**，那条链路由客户端「确认原片」时重签，不是本命令的事。真缺代理文件（被删了）才重跑本命令补下载 |
 | 出现 raw 原片回落 / 体积大 | 提示用户；服务端 backfill 后重跑可换回轻量代理 |
+| **报「已降级至派单快照时码」**（`reprojection.degraded:true`） | **不是故障、没拦你**：命令算不出当刻窗口，退回 `dispatch.json` 里那份可能已过期的快照继续检索/铺轨。照 `reprojection.reason` 给出路：`transcript_missing` → 把 `transcript.json` 补回产物目录（`transcript/` 或 `json/` 下），或用新版 `gtrk oralcut` 重出产物；`no_project`/`gtrk_unreadable` → 把工程放回 `<产物目录>/gtrk/project.gtrk` 或用 `--project` 指对目录；`no_material_clip` → 口播主轨被整条删了 / relink 换了素材 id / 拿了另一个工程的 dispatch。**用户若接受快照就照跑**，但要如实告诉他「这批位置按的是上一次投影的时间线，可能已经偏了」 |
 | 期望 concept 却报 external 限制 | 如实说明当前身份（`memberType:external`）只出 real_shot 有版权素材，concept 需矩阵成员口 |
 
 > **搜词规范**（ad-hoc `search` 与理解派单 queries 通用）：用**英文长句场景描述**（5–12 词，谁+在哪+做什么），一条只装一个场景意象，**避多义/字面强的动词**（"pointing"/"hunting" 会召回特写/猎人，改用场景语义如 "giving suggestions in a meeting"）。派单里的 queries 已按此校准，你补检时照此写。

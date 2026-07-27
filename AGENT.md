@@ -144,6 +144,7 @@ gtrk split <拆分稿.json> --project <目录> --md --json  # ⑤ 校验落地�
 
 **关键行为（agent 需知）：**
 - **时码恒挂源时基、每次发起现场投影**：用户手调切点后重导视图即跟随；此前被剪、现落回 clip 的句子自动复活，无需重跑转写。「拖入已剪好成片」= 恒等投影，同一套逻辑。
+- **dispatch 的时码是快照，但消费侧会现场重投影**：`dispatch.json` 里的 `track_st/track_ed` 只在投影那一刻成立；`gtrk mg` / `gtrk matrix` **每次消费都用 `transcript × 当刻 .gtrk` 重算窗口**（与 split 落地同一段代码，构造性同源），所以**用户在 split 之后继续微调口播轨无需重跑 split**——只有**拆分稿本身**变了才要重跑。派单条目另带 `span:{from,to}` 自述「派什么」（aux 条目写 aux 自己的 span）。重投影不可行时（transcript 缺失 / 工程定位不到 / 主轨查不到口播素材）**降级用快照 + 显式告警 + `--json` 标 `reprojection.degraded`**，绝不硬崩。
 - **拆分稿零时码、id 区间引用**：beat 的文稿范围 = `span:{from:"u0007",to:"u0011"}`（utterance id 区间），**绝不抄原句文字、绝不自造时码**（防 LLM 幻觉）。幻觉 id / 区间倒序 / 跨 beat 重叠 / `transcript_hash` 错版 → **硬拒、非 0 退出、零副作用**。
 - **dropped 处理**：beat 的 span 内 utterance 全被剪 → 跳过该 beat 并入报告；部分被剪 → 按存活句包络收缩、标 `shrunk`。均不使命令失败。
 - **transcript 缺失**（旧任务）→ 明确报错引导「用新版本重跑 oralcut（恒出工程所需的结构化 transcript）」，不做降级猜测；`gtrk transcript` 只产人读 Markdown，不能替代 split 所需的结构化词表。
@@ -264,7 +265,7 @@ gtrk oralcut "D:/素材/某条.mp4" --params-json '{"punctuation_breaks":{"。":
 ## 7. 扩展（给改 CLI 的 agent）
 
 新增命令 = 写 `src/commands/<name>.ts` 的 `register<Name>(program)` + 在 `src/index.ts` 注册一行。
-云端调用走 `src/lib/cloud.ts`（`{code,msg,data}` 包装、鉴权 Header `Authorization:<裸key>`；单发取结果 `getTaskResult`、`pollTask` 复用之）；上传一律走 `src/lib/upload-cache.ts` 的 `uploadCached`（白嫖指纹缓存；≥256MiB 自动分片断点续传，见 `src/lib/chunk-upload.ts`）。本地预处理（探几何 / 抽音频 / 压 720p）在 `src/lib/media.ts`；本地渲染（gtrk EDL → ffmpeg filter_complex）在 `src/lib/render.ts`；三方产物落地 + `result.json` 两段写在 `src/lib/materialize.ts`（`oralcut` 与 `oralcut-result` 共用）。已上线：`oralcut`（云剪）、`oralcut-result`（按 task_id 取回）、`render`（本地渲染 gtrk）、`split`（视觉拆分派单器：`src/lib/projection.ts` 投影纯函数 + `src/lib/splitdoc.ts` 拆分稿校验/落地 + `src/lib/gtrk-writeback.ts` 原子写回 `struct_meta.split`，随包分发 `skills/gtrk-splitter/`）。`matrix`（B-roll 检索：`src/lib/matrix.ts` 双口路由/派单翻译/plan 构建 + `src/commands/matrix.ts`;`matrix search "<词>"` ad-hoc）。规划中：`struct`（已有 gtrk → 三方工程）。
+云端调用走 `src/lib/cloud.ts`（`{code,msg,data}` 包装、鉴权 Header `Authorization:<裸key>`；单发取结果 `getTaskResult`、`pollTask` 复用之）；上传一律走 `src/lib/upload-cache.ts` 的 `uploadCached`（白嫖指纹缓存；≥256MiB 自动分片断点续传，见 `src/lib/chunk-upload.ts`）。本地预处理（探几何 / 抽音频 / 压 720p）在 `src/lib/media.ts`；本地渲染（gtrk EDL → ffmpeg filter_complex）在 `src/lib/render.ts`；三方产物落地 + `result.json` 两段写在 `src/lib/materialize.ts`（`oralcut` 与 `oralcut-result` 共用）。已上线：`oralcut`（云剪）、`oralcut-result`（按 task_id 取回）、`render`（本地渲染 gtrk）、`split`（视觉拆分派单器：`src/lib/projection.ts` 投影纯函数 + `src/lib/splitdoc.ts` 拆分稿校验/落地 + `src/lib/gtrk-writeback.ts` 原子写回 `struct_meta.split`，随包分发 `skills/gtrk-splitter/`）。`matrix`（B-roll 检索：`src/lib/matrix.ts` 双口路由/派单翻译/plan 构建 + `src/commands/matrix.ts`;`matrix search "<词>"` ad-hoc）。写回 `.gtrk` 的命令（`matrix` 铺轨 / `mg` 铺轨）在写回**之后**跑一次**素材落盘自检**（`src/lib/material-integrity.ts`，纯只读、可注入 `exists` 谓词）：遍历 `materials[].path` 确认文件真在盘上，相对路径**恒以 `.gtrk` 所在目录为基准**（历史坑：按工程根解析会全面误报），结果以 `integrity` 字段出 `--json`、以摘要 + 逐条清单出人读日志。**非致命**——查出悬空不改 `ok` / 退出码，也**不删任何素材条目或文件**（预防面在 opencut 客户端侧，本仓只做检测）。规划中：`struct`（已有 gtrk → 三方工程）。
 
 ### 工具族：接单点云能力 = 加一个 descriptor（不写编排）
 
