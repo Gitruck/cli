@@ -12,6 +12,9 @@
  * **恒非致命**：该主题的主防线是契约压在**引擎侧**的 MUST（定帧 MUST 保证 GSAP 回调可达），
  * 本文件只做哨兵（define-seek-suppress-events-contract）。
  *
+ * 铁律⑧ `8-primitive-merge` 同样**恒非致命**：它只提示「循环批量生成、整组同步驱动」的重复图元
+ * 可无损合并，**不是**渲染风险判定。真实触发轴未知、根治在渲染侧；本项只落实契约铁律⑧的作者侧形态规避。
+ *
  * 顺带从颗粒 HTML 的 background 声明推导 opaque（权威源是颗粒作者，非可缺省的 dispatch.bg）。
  * 推导面 = **根 style ∪ 根下首个全幅子层 style**（契约铁律4④）——2026-07-26 r69 真渲实测：
  * 根元素的绘制属性在子合成挂载时被丢弃，实心底只有下沉子层才落成像素
@@ -347,6 +350,836 @@ function namedFnBody(html: string, name: string): string | null {
 /** 跟不进去的「函数调用」噪音：这些关键字后面也跟 `(`，逐一去解析纯属浪费（解析不到也无害，仅为清晰）。 */
 const NOT_A_CALL = new Set(["if", "for", "while", "switch", "catch", "return", "function", "typeof", "new", "delete", "void", "in", "of", "do", "else"]);
 
+// ── 铁律⑧：循环批量生成的可合并重复图元（add-particle-primitive-merge-law）──
+
+/** 铁律⑧只覆盖能机械合成 `<path>` 多子路径、且可读性成本可控的图元。 */
+const MERGEABLE_PRIMITIVES = new Set(["line", "rect", "path", "polyline", "polygon"]);
+/** 只用于「已能静态求出批量」时过滤可读性收益很小的小批次；不是渲染风险阈值。 */
+const PRIMITIVE_MERGE_MIN = 8;
+
+export interface PrimitiveLoopBatch {
+	tag: string;
+	parent: string;
+	count: number | null;
+	perElementDriven: boolean;
+	site: string;
+}
+
+/** 先把 HTML 注释等长置空，避免注释里的 `<script>` 被误当成可执行脚本。 */
+function maskHtmlComments(src: string): string {
+	const out = src.split("");
+	for (let at = src.indexOf("<!--"); at >= 0; at = src.indexOf("<!--", at)) {
+		const close = src.indexOf("-->", at + 4);
+		const end = close < 0 ? src.length : close + 3;
+		for (let i = at; i < end; i++) if (out[i] !== "\r" && out[i] !== "\n") out[i] = " ";
+		at = end;
+	}
+	return out.join("");
+}
+
+/** 有 `<script>` 时只保留其 body（等长、保留换行）；裸 JS 单测/片段则原样返回。 */
+function scriptBodiesOnly(src: string): string {
+	const openRe = /<script\b[^>]*>/gi;
+	const first = openRe.exec(src);
+	if (!first) return src;
+	const out: string[] = src.split("").map((c) => (c === "\r" || c === "\n" ? c : " "));
+	let open: RegExpExecArray | null = first;
+	while (open) {
+		const bodyStart = (open.index as number) + open[0].length;
+		const closeRe = /<\/script\s*>/gi;
+		closeRe.lastIndex = bodyStart;
+		const close = closeRe.exec(src);
+		const bodyEnd = close?.index ?? src.length;
+		for (let i = bodyStart; i < bodyEnd; i++) out[i] = src[i];
+		openRe.lastIndex = close ? close.index + close[0].length : src.length;
+		open = openRe.exec(src);
+	}
+	return out.join("");
+}
+
+/**
+ * 把 JS 注释与 regex literal 替成等长空白（换行保留），避免其中的引号或伪代码干扰后续扫描。
+ * 字符串保持原样，供 `CREATE_PRIMITIVE` 读取第二实参的 tag；引号内的伪代码由 `maskJsStrings` 再屏蔽。
+ */
+function maskJsComments(src: string): string {
+	const out = src.split("");
+	const blank = (from: number, to: number) => {
+		for (let i = from; i < to; i++) if (out[i] !== "\r" && out[i] !== "\n") out[i] = " ";
+	};
+	const canStartRegexAfter = new Set(["(", "[", "{", "=", ":", ",", ";", "!", "?", "&", "|", "+", "-", "*", "%", "^", "~", "<", ">"]);
+	const keywordBeforeRegex = new Set(["return", "case", "throw", "else", "do", "yield", "await"]);
+	const regexStartsAt = (at: number) => {
+		let prev = at - 1;
+		while (prev >= 0 && /\s/.test(out[prev])) prev--;
+		if (prev < 0 || canStartRegexAfter.has(out[prev])) return true;
+		if (!/[\w$]/.test(out[prev])) return false;
+		let begin = prev;
+		while (begin > 0 && /[\w$]/.test(out[begin - 1])) begin--;
+		return keywordBeforeRegex.has(out.slice(begin, prev + 1).join(""));
+	};
+	for (let i = 0; i < src.length; i++) {
+		const c = src[i];
+		if (c === '"' || c === "'" || c === "`") {
+			i = skipString(src, i);
+			continue;
+		}
+		if (src.startsWith("<!--", i)) {
+			const end = src.indexOf("-->", i + 4);
+			const to = end < 0 ? src.length : end + 3;
+			blank(i, to);
+			i = to - 1;
+			continue;
+		}
+		if (c === "/" && src[i + 1] === "/") {
+			const end = src.indexOf("\n", i + 2);
+			const to = end < 0 ? src.length : end;
+			blank(i, to);
+			i = to - 1;
+			continue;
+		}
+		if (c === "/" && src[i + 1] === "*") {
+			const end = src.indexOf("*/", i + 2);
+			const to = end < 0 ? src.length : end + 2;
+			blank(i, to);
+			i = to - 1;
+			continue;
+		}
+		if (c !== "/" || src[i + 1] === "=" || !regexStartsAt(i)) continue;
+		let inClass = false;
+		let end = -1;
+		for (let j = i + 1; j < src.length; j++) {
+			if (src[j] === "\\") {
+				j++;
+				continue;
+			}
+			if (src[j] === "\r" || src[j] === "\n") break;
+			if (src[j] === "[") inClass = true;
+			else if (src[j] === "]") inClass = false;
+			else if (src[j] === "/" && !inClass) {
+				end = j + 1;
+				while (end < src.length && /[A-Za-z]/.test(src[end])) end++;
+				break;
+			}
+		}
+		if (end < 0) continue;
+		blank(i, end);
+		i = end - 1;
+	}
+	return out.join("");
+}
+
+/** 再把字符串替成等长空白，供结构 / 调用 / driver 正则使用；标签识别仍在只去注释的源码上跑。 */
+function maskJsStrings(src: string): string {
+	const out = src.split("");
+	for (let i = 0; i < src.length; i++) {
+		const c = src[i];
+		if (c !== '"' && c !== "'" && c !== "`") continue;
+		const end = skipString(src, i);
+		for (let j = i; j <= end && j < out.length; j++) if (out[j] !== "\r" && out[j] !== "\n") out[j] = " ";
+		i = end;
+	}
+	return out.join("");
+}
+
+interface LoopSite {
+	kind: "for" | "while";
+	bodyStart: number;
+	bodyEnd: number;
+	count: number | null;
+	header: string;
+}
+
+/** 与 `braceBlock` 同口径地跳过字符串/注释，找与 `open` 配平的右圆括号。 */
+function closeParen(src: string, open: number): number {
+	let depth = 0;
+	for (let i = open; i < src.length; i++) {
+		const c = src[i];
+		if (c === '"' || c === "'" || c === "`") {
+			i = skipString(src, i);
+			continue;
+		}
+		if (c === "/" && src[i + 1] === "/") {
+			const nl = src.indexOf("\n", i);
+			i = nl < 0 ? src.length : nl;
+			continue;
+		}
+		if (c === "/" && src[i + 1] === "*") {
+			const e = src.indexOf("*/", i + 2);
+			i = e < 0 ? src.length : e + 1;
+			continue;
+		}
+		if (c === "(") depth++;
+		else if (c === ")" && --depth === 0) return i;
+	}
+	return -1;
+}
+
+function skipSpace(src: string, at: number): number {
+	while (at < src.length && /\s/.test(src[at])) at++;
+	return at;
+}
+
+/** 返回 `{…}` 的右花括号后一位；未配平时退到源码末尾。 */
+function braceStatementEnd(src: string, open: number): number {
+	const body = braceBlock(src, open);
+	const close = open + 1 + body.length;
+	return src[close] === "}" ? close + 1 : src.length;
+}
+
+/**
+ * 无花括号 loop 后“一条 JS statement”的结尾。控制语句递归解析自己的 body，
+ * 普通表达式才按分号/ASI 收口，避免把 loop 外下一条调用误归进来。
+ */
+function statementEnd(src: string, start: number): number {
+	const at = skipSpace(src, start);
+	if (src[at] === "{") return braceStatementEnd(src, at);
+	const keyword = /^([A-Za-z_$][\w$]*)\b/.exec(src.slice(at))?.[1] ?? "";
+
+	if (keyword === "if" || keyword === "for" || keyword === "while" || keyword === "with" || keyword === "switch") {
+		const open = src.indexOf("(", at + keyword.length);
+		const close = open < 0 ? -1 : closeParen(src, open);
+		if (close < 0) return src.length;
+		if (keyword === "switch") {
+			const block = skipSpace(src, close + 1);
+			return src[block] === "{" ? braceStatementEnd(src, block) : statementEnd(src, block);
+		}
+		const bodyEnd = statementEnd(src, close + 1);
+		if (keyword !== "if") return bodyEnd;
+		const next = skipSpace(src, bodyEnd);
+		return /^else\b/.test(src.slice(next)) ? statementEnd(src, next + 4) : bodyEnd;
+	}
+
+	if (keyword === "do") {
+		const bodyEnd = statementEnd(src, at + 2);
+		const trailer = skipSpace(src, bodyEnd);
+		if (!/^while\b/.test(src.slice(trailer))) return bodyEnd;
+		const open = src.indexOf("(", trailer + 5);
+		const close = open < 0 ? -1 : closeParen(src, open);
+		if (close < 0) return src.length;
+		const semi = skipSpace(src, close + 1);
+		return src[semi] === ";" ? semi + 1 : close + 1;
+	}
+
+	if (keyword === "try") {
+		let end = statementEnd(src, at + 3);
+		for (;;) {
+			const next = skipSpace(src, end);
+			if (/^catch\b/.test(src.slice(next))) {
+				let body = skipSpace(src, next + 5);
+				if (src[body] === "(") {
+					const close = closeParen(src, body);
+					if (close < 0) return src.length;
+					body = skipSpace(src, close + 1);
+				}
+				end = statementEnd(src, body);
+				continue;
+			}
+			if (/^finally\b/.test(src.slice(next))) {
+				end = statementEnd(src, next + 7);
+				continue;
+			}
+			return end;
+		}
+	}
+
+	let parens = 0;
+	let brackets = 0;
+	let braces = 0;
+	for (let i = at; i < src.length; i++) {
+		const c = src[i];
+		if (c === '"' || c === "'" || c === "`") {
+			i = skipString(src, i);
+			continue;
+		}
+		if (c === "(") parens++;
+		else if (c === ")") parens = Math.max(0, parens - 1);
+		else if (c === "[") brackets++;
+		else if (c === "]") brackets = Math.max(0, brackets - 1);
+		else if (c === "{") braces++;
+		else if (c === "}") {
+			if (braces === 0 && parens === 0 && brackets === 0) return i;
+			braces = Math.max(0, braces - 1);
+		} else if (c === ";" && parens === 0 && brackets === 0 && braces === 0) return i + 1;
+		else if ((c === "\r" || c === "\n") && parens === 0 && brackets === 0 && braces === 0) {
+			let prev = i - 1;
+			while (prev >= at && /\s/.test(src[prev])) prev--;
+			let next = skipSpace(src, i + 1);
+			// ASI：完整表达式后的换行结束当前单语句；`.` / `(`/`[` / 运算符开头则仍是续行。
+			if (
+				prev >= at &&
+				/[\w$)\]'"`}]/.test(src[prev]) &&
+				next < src.length &&
+				!/[.(\[`?+\-*/%&|^<>=,:]/.test(src[next])
+			)
+				return i;
+		}
+	}
+	return src.length;
+}
+
+/** 只计算纯数字字面量三段式 `for`；逐次模拟 JS Number 加法，避免小数步长被代数公式舍错一轮。 */
+function numericForCount(header: string): number | null {
+	const parts = header.split(";");
+	if (parts.length !== 3) return null;
+	const init = /^(?:(?:var|let|const)\s+)?([A-Za-z_$][\w$]*)\s*=\s*(-?\d+(?:\.\d+)?)\s*$/.exec(parts[0].trim());
+	if (!init) return null;
+	const name = init[1];
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const cond = new RegExp(`^${escaped}\\s*(<=|<|>=|>)\\s*(-?\\d+(?:\\.\\d+)?)\\s*$`).exec(parts[1].trim());
+	if (!cond) return null;
+	const updateRaw = parts[2].trim();
+	let step: number | null = null;
+	if (new RegExp(`^(?:${escaped}\\s*\\+\\+|\\+\\+\\s*${escaped})$`).test(updateRaw)) step = 1;
+	else if (new RegExp(`^(?:${escaped}\\s*--|--\\s*${escaped})$`).test(updateRaw)) step = -1;
+	else {
+		const by = new RegExp(`^${escaped}\\s*([+-])=\\s*(-?\\d+(?:\\.\\d+)?)$`).exec(updateRaw);
+		if (by) step = (by[1] === "+" ? 1 : -1) * Number(by[2]);
+	}
+	if (step === null || !Number.isFinite(step) || step === 0) return null;
+
+	const from = Number(init[2]);
+	const to = Number(cond[2]);
+	const op = cond[1];
+	if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+	const compare = (value: number) =>
+		op === "<" ? value < to : op === "<=" ? value <= to : op === ">" ? value > to : value >= to;
+	if (!compare(from)) return 0;
+	if ((step > 0 && op.startsWith(">")) || (step < 0 && op.startsWith("<"))) return null;
+	if (Number.isSafeInteger(from) && Number.isSafeInteger(to) && Number.isSafeInteger(step)) {
+		const distance = step > 0 ? to - from : from - to;
+		if (!Number.isSafeInteger(distance) || distance < 0) return null;
+		const stride = Math.abs(step);
+		const count = op === "<" || op === ">" ? Math.ceil(distance / stride) : Math.floor(distance / stride) + 1;
+		return Number.isSafeInteger(count) ? count : null;
+	}
+	let value = from;
+	let count = 0;
+	while (compare(value)) {
+		if (++count > 1_000_000) {
+			// 小数超大循环不再逐次耗时；这里仍是纯数字头，退到代数估算而不是误称“边界非数字”。
+			const distance = step > 0 ? to - from : from - to;
+			const stride = Math.abs(step);
+			const estimated = op === "<" || op === ">" ? Math.ceil(distance / stride) : Math.floor(distance / stride) + 1;
+			return Number.isSafeInteger(estimated) && estimated >= 0 ? estimated : null;
+		}
+		const next = value + step;
+		if (Object.is(next, value) || !Number.isFinite(next)) return null;
+		value = next;
+	}
+	return count;
+}
+
+/** 找出所有 loop 的精确体区间；有 `{}` 用 `braceBlock`，否则只纳入紧随其后的单条语句。 */
+function loopSites(html: string): LoopSite[] {
+	const out: LoopSite[] = [];
+	const doWhileTrailers = new Set<number>();
+	const doRe = /\bdo\b/g;
+	let dm: RegExpExecArray | null;
+	while ((dm = doRe.exec(html))) {
+		const bodyEnd = statementEnd(html, dm.index + dm[0].length);
+		const trailer = skipSpace(html, bodyEnd);
+		if (/^while\b/.test(html.slice(trailer))) doWhileTrailers.add(trailer);
+	}
+	const re = /\b(for|while)\s*\(/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(html))) {
+		if (m[1] === "while" && doWhileTrailers.has(m.index)) continue;
+		const open = m.index + m[0].lastIndexOf("(");
+		const close = closeParen(html, open);
+		if (close < 0) continue;
+		let at = close + 1;
+		while (at < html.length && /\s/.test(html[at])) at++;
+		let bodyStart = at;
+		let bodyEnd: number;
+		if (html[at] === "{") {
+			const body = braceBlock(html, at);
+			bodyStart = at + 1;
+			bodyEnd = bodyStart + body.length;
+		} else bodyEnd = statementEnd(html, at);
+		const kind = m[1] as "for" | "while";
+		const header = html.slice(open + 1, close);
+		out.push({
+			kind,
+			bodyStart,
+			bodyEnd,
+			count: kind === "for" ? numericForCount(header) : null,
+			header,
+		});
+	}
+	return out;
+}
+
+interface FunctionSite {
+	name: string | null;
+	declStart: number;
+	bodyStart: number;
+	bodyEnd: number;
+	body: string;
+	params: Set<string>;
+	immediatelyInvoked: boolean;
+}
+
+/**
+ * 函数的精确体区间。赋值式先认，防 `const f=function inner(){}` 被同时登记成 `f` 与 `inner`；
+ * 再补声明 / IIFE / callback 形态。具名体继续复用 `namedFnBody` 的既有解析口径。
+ */
+function namedFunctionSites(code: string): FunctionSite[] {
+	const out: FunctionSite[] = [];
+	const invocationAfter = (declStart: number, bodyEnd: number, expression: boolean) => {
+		let before = declStart - 1;
+		while (before >= 0 && /\s/.test(code[before])) before--;
+		const expressionContext = expression || (before >= 0 && /[(!=,:+\-~?]/.test(code[before]));
+		let after = bodyEnd + 1;
+		while (after < code.length && /\s/.test(code[after])) after++;
+		if (code[after] === "(") return expressionContext;
+		if (code[before] !== "(") return false;
+		let groupingCount = 0;
+		let beforeOpen = before;
+		while (beforeOpen >= 0 && code[beforeOpen] === "(") {
+			groupingCount++;
+			beforeOpen--;
+			while (beforeOpen >= 0 && /\s/.test(code[beforeOpen])) beforeOpen--;
+		}
+		// `consume(function(){…})()` / `consume(0,function(){…})()` 调的是 consume 的返回值，不是 callback。
+		if (beforeOpen >= 0 && /[\w$)\]]/.test(code[beforeOpen])) return false;
+		for (let i = 0; i < groupingCount; i++) {
+			if (code[after] !== ")") return false;
+			after = skipSpace(code, after + 1);
+		}
+		return expressionContext && code[after] === "(";
+	};
+	const patterns: Array<{ re: RegExp; nameGroup: number | null; expression: boolean }> = [
+		{
+			re: /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:(?:async\s+)?function\s*\*?\s*[\w$]*\s*\([^)]*\)|(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)\s*\{/g,
+			nameGroup: 1,
+			expression: true,
+		},
+		{
+			re: /\b(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g,
+			nameGroup: 1,
+			expression: false,
+		},
+		{
+			re: /\b(?:async\s+)?function\s*\*?\s*\([^)]*\)\s*\{/g,
+			nameGroup: null,
+			expression: true,
+		},
+		{
+			re: /(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g,
+			nameGroup: null,
+			expression: true,
+		},
+	];
+	for (const { re, nameGroup, expression } of patterns) {
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(code))) {
+			const open = m.index + m[0].lastIndexOf("{");
+			const paired = braceBlock(code, open);
+			const bodyStart = open + 1;
+			const bodyEnd = bodyStart + paired.length;
+			// 赋值式已登记的同一函数体，不再按内部函数名 / 匿名表达式重复登记。
+			if (out.some((fn) => fn.bodyStart === bodyStart)) continue;
+			const name = nameGroup === null ? null : m[nameGroup];
+			const signature = m[0].slice(0, m[0].lastIndexOf("{"));
+			const parenGroups = [...signature.matchAll(/\(([^()]*)\)/g)];
+			const singleArrow = /=\s*([A-Za-z_$][\w$]*)\s*=>\s*$/.exec(signature);
+			const rawParams = parenGroups.at(-1)?.[1] ?? singleArrow?.[1] ?? "";
+			const params = new Set(
+				rawParams
+					.split(",")
+					.map((part) => /^([A-Za-z_$][\w$]*)/.exec(part.trim())?.[1])
+					.filter((name): name is string => Boolean(name)),
+			);
+			out.push({
+				name,
+				declStart: m.index,
+				bodyStart,
+				bodyEnd,
+				body: paired,
+				params,
+				immediatelyInvoked: invocationAfter(m.index, bodyEnd, expression),
+			});
+		}
+	}
+	// 上面的快速正则不覆盖 `function f(p=getParent()){…}` 这类参数内嵌圆括号；用配平扫描补齐函数边界。
+	const functionRe = /\b(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)?\s*\(/g;
+	let fm: RegExpExecArray | null;
+	while ((fm = functionRe.exec(code))) {
+		const open = fm.index + fm[0].lastIndexOf("(");
+		const close = closeParen(code, open);
+		if (close < 0) continue;
+		let brace = close + 1;
+		while (brace < code.length && /\s/.test(code[brace])) brace++;
+		if (code[brace] !== "{") continue;
+		const paired = braceBlock(code, brace);
+		const bodyStart = brace + 1;
+		const bodyEnd = bodyStart + paired.length;
+		if (out.some((fn) => fn.bodyStart === bodyStart)) continue;
+		const prefix = code.slice(Math.max(0, fm.index - 160), fm.index);
+		const assigned = /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*$/.exec(prefix);
+		const name = assigned?.[1] ?? fm[1] ?? null;
+		const params = new Set(
+			code
+				.slice(open + 1, close)
+				.split(",")
+				.map((part) => /^([A-Za-z_$][\w$]*)/.exec(part.trim())?.[1])
+				.filter((param): param is string => Boolean(param)),
+		);
+		out.push({
+			name,
+			declStart: fm.index,
+			bodyStart,
+			bodyEnd,
+			body: paired,
+			params,
+			immediatelyInvoked: invocationAfter(fm.index, bodyEnd, assigned !== null || fm[1] === undefined),
+		});
+	}
+	// 同理补齐 `const f=(p=getParent())=>{…}` 这类参数内嵌圆括号的具名 arrow factory。
+	const arrowRe = /\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(/g;
+	let am: RegExpExecArray | null;
+	while ((am = arrowRe.exec(code))) {
+		const open = am.index + am[0].lastIndexOf("(");
+		const close = closeParen(code, open);
+		if (close < 0) continue;
+		let arrow = skipSpace(code, close + 1);
+		if (!code.startsWith("=>", arrow)) continue;
+		const brace = skipSpace(code, arrow + 2);
+		if (code[brace] !== "{") continue;
+		const paired = braceBlock(code, brace);
+		const bodyStart = brace + 1;
+		const bodyEnd = bodyStart + paired.length;
+		if (out.some((fn) => fn.bodyStart === bodyStart)) continue;
+		const params = new Set(
+			code
+				.slice(open + 1, close)
+				.split(",")
+				.map((part) => /^([A-Za-z_$][\w$]*)/.exec(part.trim())?.[1])
+				.filter((param): param is string => Boolean(param)),
+		);
+		out.push({
+			name: am[1],
+			declStart: am.index,
+			bodyStart,
+			bodyEnd,
+			body: paired,
+			params,
+			immediatelyInvoked: invocationAfter(am.index, bodyEnd, true),
+		});
+	}
+	return out.sort((a, b) => a.declStart - b.declStart);
+}
+
+const CREATE_PRIMITIVE =
+	/\b(?:(?:var|let|const)\s+)?([A-Za-z_$][\w$]*)\s*=(?!=)\s*document\s*\.\s*createElementNS\s*\(\s*[^,]+,\s*["']([A-Za-z][\w-]*)["']\s*\)/gi;
+
+function escapedIdent(name: string): string {
+	return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 从 create 后的同一执行作用域取 `<parent>.appendChild(<elVar>)`；重赋值或嵌套函数一律不借用。 */
+function appendedParent(
+	body: string,
+	elVar: string,
+	baseAt: number,
+	sameExecutionScope: (absoluteAt: number) => boolean,
+): string | null {
+	const el = escapedIdent(elVar);
+	const appendRe = new RegExp(`\\b([A-Za-z_$][\\w$]*)\\s*\\.\\s*appendChild\\s*\\(\\s*${el}\\s*\\)`, "g");
+	let append: RegExpExecArray | null;
+	while ((append = appendRe.exec(body)) && !sameExecutionScope(baseAt + append.index));
+	if (!append) return null;
+	const reassignRe = new RegExp(`\\b(?:(?:var|let|const)\\s+)?${el}\\s*=(?!=)`, "g");
+	let reassign: RegExpExecArray | null;
+	while ((reassign = reassignRe.exec(body))) {
+		if (reassign.index >= append.index) break;
+		if (body[reassign.index - 1] === ".") continue;
+		if (sameExecutionScope(baseAt + reassign.index)) return null;
+	}
+	return append[1];
+}
+
+/** `<elVar>` 是否在 loop/factory 体内被直接驱动，或 push 后以数组/数组下标作 tween 首实参。 */
+function perElementDriven(html: string, body: string, elVar: string): boolean {
+	const el = escapedIdent(elVar);
+	if (new RegExp(`\\bgsap\\s*\\.\\s*set\\s*\\(\\s*${el}\\b`).test(body)) return true;
+	if (new RegExp(`\\b[A-Za-z_$][\\w$]*\\s*\\.\\s*(?:to|from|fromTo)\\s*\\(\\s*${el}\\b`).test(body)) return true;
+	const pushes = new Set<string>();
+	for (const pm of body.matchAll(new RegExp(`\\b([A-Za-z_$][\\w$]*)(?:\\s*\\[[^\\]]+\\])?\\s*\\.\\s*push\\s*\\(\\s*${el}\\s*\\)`, "g")))
+		pushes.add(pm[1]);
+	for (const arr of pushes) {
+		const a = escapedIdent(arr);
+		if (new RegExp(`\\b[A-Za-z_$][\\w$]*\\s*\\.\\s*(?:to|from|fromTo)\\s*\\(\\s*${a}(?:\\s*\\[[^\\]]+\\])?\\s*,`).test(html))
+			return true;
+	}
+	return false;
+}
+
+/**
+ * 静态识别「循环批量生成、且整组同步驱动」的可合并图元。
+ *
+ * - create 可直接位于 loop 体内，也可位于被 loop 调用的具名 factory 体内；
+ * - 归属靠 loop 精确体区间，不做“前 N 字符出现 for”邻近猜测；
+ * - 工厂内外的嵌套 loop 相乘，独立 loop 在同一 `tag + parent` 批次内相加；任一项不可求则批次 count=null；
+ * - 注释与字符串先做等长屏蔽，函数声明体不继承声明点外层 loop，声明签名也不算调用；
+ * - 本函数只报写法事实，不推断渲染风险。复杂动态 JS 一律漏向“不报”。
+ */
+export function detectPrimitiveLoops(html: string): PrimitiveLoopBatch[] {
+	const source = maskJsComments(scriptBodiesOnly(maskHtmlComments(html)));
+	const code = maskJsStrings(source);
+	const loops = loopSites(code);
+	const functions = namedFunctionSites(code);
+	const containingFunction = (at: number): FunctionSite | null =>
+		functions
+			.filter((fn) => at >= fn.bodyStart && at < fn.bodyEnd)
+			.sort((a, b) => a.bodyEnd - a.bodyStart - (b.bodyEnd - b.bodyStart))[0] ?? null;
+	const functionOwner = (fn: FunctionSite): FunctionSite | null => containingFunction(fn.declStart);
+	const hasOwnVariableBinding = (scope: FunctionSite, name: string) => {
+		if (scope.params.has(name)) return true;
+		const re = new RegExp(`\\b(?:var|let|const|class)\\s+${escapedIdent(name)}\\b`, "g");
+		re.lastIndex = scope.bodyStart;
+		let binding: RegExpExecArray | null;
+		while ((binding = re.exec(code)) && binding.index < scope.bodyEnd)
+			if (containingFunction(binding.index) === scope) return true;
+		return false;
+	};
+	const resolveFunction = (name: string, at: number): FunctionSite | null => {
+		let scope = containingFunction(at);
+		while (scope) {
+			const local = functions
+				.filter((fn) => fn.name === name && functionOwner(fn) === scope)
+				.sort((a, b) => b.declStart - a.declStart)[0];
+			if (local) return local;
+			if (scope.name === name) return scope;
+			if (hasOwnVariableBinding(scope, name)) return null;
+			scope = functionOwner(scope);
+		}
+		return (
+			functions
+				.filter((fn) => fn.name === name && functionOwner(fn) === null)
+			.sort((a, b) => b.declStart - a.declStart)[0] ?? null
+		);
+	};
+	const parentBindingScope = (fn: FunctionSite, parent: string): FunctionSite | null => {
+		let scope: FunctionSite | null = fn;
+		while (scope) {
+			if (hasOwnVariableBinding(scope, parent)) return scope;
+			scope = functionOwner(scope);
+		}
+		return null;
+	};
+	const freshParentDeclaration = (parent: string, before: number, scope: FunctionSite | null): number | null => {
+		const ident = escapedIdent(parent);
+		const re = new RegExp(
+			`\\b(?:var|let|const)\\s+${ident}\\s*=\\s*(?:document\\s*\\.\\s*createElement(?:NS)?\\s*\\(|new\\b)`,
+			"g",
+		);
+		re.lastIndex = scope?.bodyStart ?? 0;
+		let found: number | null = null;
+		let m: RegExpExecArray | null;
+		while ((m = re.exec(code)) && m.index < before && (!scope || m.index < scope.bodyEnd))
+			if (containingFunction(m.index) === scope) found = m.index;
+		return found;
+	};
+	const loopsForOneParent = (owned: LoopSite[], freshAt: number | null) =>
+		freshAt === null ? owned : owned.filter((loop) => freshAt < loop.bodyStart || freshAt >= loop.bodyEnd);
+	/**
+	 * 只取当前执行作用域里的 loop：函数声明文本即使写在外层 loop 里，函数体也不会在“声明”时执行，
+	 * 因而不能把那个外层 loop 乘给函数体；真正的外层次数由调用点另算。
+	 */
+	const executionLoopsAt = (at: number): LoopSite[] => {
+		const fn = containingFunction(at);
+		return loops.filter((loop) => {
+			if (at < loop.bodyStart || at >= loop.bodyEnd) return false;
+			if (fn) return loop.bodyStart >= fn.bodyStart && loop.bodyEnd <= fn.bodyEnd;
+			return containingFunction(loop.bodyStart) === null;
+		});
+	};
+	const loopProduct = (owned: LoopSite[]): number | null => {
+		if (owned.some((loop) => loop.count === null)) return null;
+		let product = 1;
+		for (const loop of owned) {
+			product *= loop.count as number;
+			if (!Number.isSafeInteger(product)) return null;
+		}
+		return product;
+	};
+	const innermostLoopBody = (at: number, owned = executionLoopsAt(at)): string => {
+		const loop = owned.sort((a, b) => a.bodyEnd - a.bodyStart - (b.bodyEnd - b.bodyStart))[0];
+		return loop ? code.slice(loop.bodyStart, loop.bodyEnd) : "";
+	};
+	type MutableBatch = {
+		tag: string;
+		parent: string;
+		count: number;
+		unknown: boolean;
+		perElementDriven: boolean;
+		sites: Set<string>;
+	};
+	const grouped = new Map<string, MutableBatch>();
+	const add = (tag: string, parent: string, count: number | null, driven: boolean, site: string, scope: string) => {
+		/*
+		 * `scope` 隔开不同函数里的参数 / 局部 parent；闭包引用的同名 parent 仍与顶层批次累计。
+		 * 同一工厂参数在不同调用点究竟指向哪个 DOM 节点仍刻意不求值
+		 *（proposal「同一父节点怎么判」已拍定只认 appendChild 的标识符）。
+		 */
+		const key = `${scope}\u0000${tag}\u0000${parent}`;
+		const batch =
+			grouped.get(key) ??
+			{ tag, parent, count: 0, unknown: false, perElementDriven: false, sites: new Set<string>() };
+		if (count === null) batch.unknown = true;
+		else {
+			batch.count += count;
+			if (!Number.isSafeInteger(batch.count)) batch.unknown = true;
+		}
+		batch.perElementDriven ||= driven;
+		batch.sites.add(site);
+		grouped.set(key, batch);
+	};
+
+	type CreateSite = {
+		at: number;
+		tag: string;
+		elVar: string;
+		parent: string;
+		fn: FunctionSite | null;
+		loops: LoopSite[];
+	};
+	const creates: CreateSite[] = [];
+	CREATE_PRIMITIVE.lastIndex = 0;
+	let cm: RegExpExecArray | null;
+	while ((cm = CREATE_PRIMITIVE.exec(source))) {
+		// `source` 为读取 tag 保留字符串；起点若在 `code` 中已被屏蔽，整段只是字符串里的伪代码。
+		if (!code[cm.index] || /\s/.test(code[cm.index])) continue;
+		const tag = cm[2].toLowerCase();
+		if (!MERGEABLE_PRIMITIVES.has(tag)) continue;
+		const fn = containingFunction(cm.index);
+		const owned = executionLoopsAt(cm.index);
+		const nearest = owned
+			.slice()
+			.sort((a, b) => a.bodyEnd - a.bodyStart - (b.bodyEnd - b.bodyStart))[0];
+		// create 自己在 loop 内时，append 也必须落在该 loop 体内；loop 外 append 只会追加最终一次赋值。
+		// 只有“create 不在 loop 内的 factory”才在完整函数体里找 append。
+		const bodyStart = nearest?.bodyStart ?? fn?.bodyStart ?? cm.index;
+		const body = nearest ? code.slice(nearest.bodyStart, nearest.bodyEnd) : (fn?.body ?? "");
+		const tailStart = Math.max(0, cm.index - bodyStart) + cm[0].length;
+		const parent = appendedParent(
+			body.slice(tailStart),
+			cm[1],
+			bodyStart + tailStart,
+			(at) => containingFunction(at) === fn,
+		);
+		if (!parent) continue;
+		creates.push({ at: cm.index, tag, elVar: cm[1], parent, fn, loops: owned });
+	}
+
+	type CallSite = { at: number; loops: LoopSite[] };
+	const callsByFunction = new Map<number, CallSite[]>();
+	const pushCall = (fn: FunctionSite, at: number) => {
+		const list = callsByFunction.get(fn.declStart) ?? [];
+		list.push({ at, loops: executionLoopsAt(at) });
+		callsByFunction.set(fn.declStart, list);
+	};
+	const functionNames = new Set(functions.map((fn) => fn.name).filter((name): name is string => name !== null));
+	for (const call of code.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)) {
+		const name = call[1];
+		const at = call.index as number;
+		let before = at - 1;
+		while (before >= 0 && /\s/.test(code[before])) before--;
+		if (NOT_A_CALL.has(name) || !functionNames.has(name) || code[before] === ".") continue;
+		// `function make(` 的 `make(` 是声明签名，不是一次调用。
+		if (functions.some((fn) => fn.name === name && at >= fn.declStart && at < fn.bodyStart)) continue;
+		const target = resolveFunction(name, at);
+		if (target) pushCall(target, at);
+	}
+	// `(function named(){…})()` / `(function(){…})()` / `(()=>{…})()` 没有第二个具名调用 token，补执行入口。
+	for (const fn of functions) if (fn.immediatelyInvoked) pushCall(fn, fn.bodyEnd);
+
+	for (const create of creates) {
+		if (!create.fn) {
+			// ① create 直接落在 loop 体内：嵌套次数由当前执行作用域中的所有祖先 loop 相乘。
+			if (create.loops.length === 0) continue;
+			const nearest = create.loops
+				.slice()
+				.sort((a, b) => a.bodyEnd - a.bodyStart - (b.bodyEnd - b.bodyStart))[0];
+			const body = innermostLoopBody(create.at, create.loops);
+			const freshAt = freshParentDeclaration(create.parent, create.at, null);
+			add(
+				create.tag,
+				create.parent,
+				loopProduct(loopsForOneParent(create.loops, freshAt)),
+				perElementDriven(code, body, create.elVar),
+				`${nearest.kind} (${nearest.header.trim()})`,
+				freshAt === null ? "shared-parent" : `fresh-parent:${freshAt}`,
+			);
+			continue;
+		}
+
+		/*
+		 * ② 具名 factory：只跟一层显式调用。factory 自己还有 loop 时，内部 trip count 与调用点
+		 * 的外部 loop 相乘，而不是把“定义处内层次数”和“调用处外层次数”各算一批后相加。
+		 */
+		const fnCalls = callsByFunction.get(create.fn.declStart) ?? [];
+		if (fnCalls.length === 0 && create.loops.length > 0) {
+			// 函数体自己的 loop 本身即满足“create 落在配平 loop 体内”；无需猜测 callback 的运行时可达性。
+			const nearest = create.loops
+				.slice()
+				.sort((a, b) => a.bodyEnd - a.bodyStart - (b.bodyEnd - b.bodyStart))[0];
+			const boundParent = parentBindingScope(create.fn, create.parent);
+			const freshAt = freshParentDeclaration(create.parent, create.at, boundParent);
+			add(
+				create.tag,
+				create.parent,
+				loopProduct(loopsForOneParent(create.loops, freshAt)),
+				perElementDriven(code, innermostLoopBody(create.at, create.loops), create.elVar),
+				`${nearest.kind} (${nearest.header.trim()})`,
+				freshAt !== null
+					? `fresh-parent:${freshAt}`
+					: boundParent
+						? `function:${boundParent.declStart}`
+						: "shared-parent",
+			);
+		}
+		for (const call of fnCalls) {
+			if (create.loops.length === 0 && call.loops.length === 0) continue;
+			const inside = loopProduct(create.loops);
+			const callerBody = innermostLoopBody(call.at, call.loops);
+			const boundParent = parentBindingScope(create.fn, create.parent);
+			const freshAt = freshParentDeclaration(create.parent, create.at, boundParent);
+			const oneParentInside = loopProduct(loopsForOneParent(create.loops, freshAt));
+			const oneParentOutside = loopProduct(loopsForOneParent(call.loops, freshAt));
+			const freshOwnedByFactory = freshAt !== null && boundParent === create.fn;
+			// 工厂内新建的 parent 每次调用都不是同一节点；参数 parent 仍按 spec 的标识符口径累计。
+			const count =
+				freshOwnedByFactory
+					? oneParentInside
+					: oneParentInside === null || oneParentOutside === null
+						? null
+						: oneParentInside * oneParentOutside;
+			add(
+				create.tag,
+				create.parent,
+				count,
+				perElementDriven(code, `${create.fn.body}\n${callerBody}`, create.elVar),
+				create.fn.name ? `factory ${create.fn.name}` : `IIFE @${create.fn.declStart}`,
+				freshAt !== null
+					? `fresh-parent:${freshAt}`
+					: boundParent
+						? `function:${boundParent.declStart}`
+						: "shared-parent",
+			);
+		}
+	}
+
+	return [...grouped.values()].map((batch) => ({
+		tag: batch.tag,
+		parent: batch.parent,
+		count: batch.unknown ? null : batch.count,
+		perElementDriven: batch.perElementDriven,
+		site: [...batch.sites].join(" + "),
+	}));
+}
+
 /**
  * 回调体（或它调用的具名函数体）里是否有 DOM 写入。
  *
@@ -616,6 +1449,20 @@ export function lintParticle(
 				false,
 				`时间线静态估长 ~${est}s，短于槽位包络 ${slot}s（铁律⑦：颗粒应占满坑位并终态驻留）——静态估算是**下界**（${skipped} 条调用因无法静态解析被跳过），仅供参考，最终以真渲染引擎逐帧为准`,
 			);
+	}
+
+	// 铁律⑧：只提示可无损合并的写法形态，**不是**风险判定；恒非致命，不影响 ok / 铺轨 / 退出码。
+	for (const batch of detectPrimitiveLoops(html)) {
+		if (batch.perElementDriven || (batch.count !== null && batch.count < PRIMITIVE_MERGE_MIN)) continue;
+		const amount =
+			batch.count === null ? "条数未知（循环边界非数字字面量）" : `静态估算 ${batch.count} 个`;
+		push(
+			"8-primitive-merge",
+			false,
+			`${batch.site} 向同一父节点「${batch.parent}」循环生成 ${amount} <${batch.tag}>。` +
+				"这里有一批可无损合并的重复图元：请按相同 stroke/fill 分档合并成单个 <path> 的多子路径；" +
+				"合并后画面逐像素不变，属零成本改法。本项只提示写法形态，最终画面仍以真渲染出片为准",
+		);
 	}
 
 	return { ok: !v.some((x) => x.fatal), violations: v, opaque, compositionId: cid };
