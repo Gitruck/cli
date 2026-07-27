@@ -6,6 +6,9 @@
  * 并入 report；部分 dropped → 按存活包络收缩、标 shrunk。落地产 struct_meta.split 快照 + dispatch 派单清单。
  */
 import type { ProjectionView } from "./projection";
+// 「span → 存活实例包络」的**唯一**实现（add-consume-side-reprojection）：split 落地与 mg/matrix
+// 消费侧共用同一份 —— 两侧相等是「同一段代码 × 同一份输入」的构造性保证，MUST NOT 两处各算一遍。
+import { buildSpanIndex, envelopeForSpan } from "./reproject";
 
 export const BASE_TRACKS = ["真人出镜", "口播继续", "旁白主导"] as const;
 export const LANES = ["A_ROLL", "MG", "AI_DRAMA", "FILM_BROLL"] as const;
@@ -405,6 +408,12 @@ export interface MgDispatch {
 	slug_hint?: unknown;
 	track_st: number;
 	track_ed: number;
+	/**
+	 * 该条目对应的 utterance 区间（add-consume-side-reprojection，纯追加可选）——让派单**自述「派什么」**，
+	 * 时码不再是它唯一的权威内容。aux 派生条目写的是 **aux 自己的** span（可为主 beat span 的子区间），
+	 * 这直接消掉「按 `beat` 字段回查会把 aux 错算成主 beat 窗口」的陷阱。
+	 */
+	span?: SplitSpan;
 }
 export interface FilmDispatch {
 	beat: string;
@@ -414,11 +423,15 @@ export interface FilmDispatch {
 	exclude?: unknown;
 	track_st: number;
 	track_ed: number;
+	/** 该 beat 的 utterance 区间（add-consume-side-reprojection，纯追加可选）。 */
+	span?: SplitSpan;
 }
 export interface AiDramaDispatch {
 	beat: string;
 	track_st: number;
 	track_ed: number;
+	/** 该 beat 的 utterance 区间（add-consume-side-reprojection，纯追加可选）。 */
+	span?: SplitSpan;
 	[k: string]: unknown;
 }
 export interface Dispatch {
@@ -474,16 +487,9 @@ export function buildLanding(
 		};
 	},
 ): Landing {
-	// id → 存活投影实例（可多实例）；无实例即该 id 被全剪
-	const byId = new Map<string, { track_st: number; track_ed: number }[]>();
-	for (const id of opts.utteranceIds) byId.set(id, []);
-	for (const u of view.utterances) {
-		if (u.dropped || u.track_st == null || u.track_ed == null) continue;
-		if (!byId.has(u.id)) byId.set(u.id, []);
-		byId.get(u.id)!.push({ track_st: u.track_st, track_ed: u.track_ed });
-	}
-	const idIndex = new Map<string, number>();
-	opts.utteranceIds.forEach((id, i) => idIndex.set(id, i));
+	// id → 存活投影实例（可多实例）；无实例即该 id 被全剪。
+	// **单点收敛**：索引与包络计算都走 reproject 叶子，消费侧重投影用的是同一份代码。
+	const spanIndex = buildSpanIndex(view, opts.utteranceIds);
 
 	const split: StructMetaSplit = {
 		contract_version: doc.contract_version,
@@ -498,19 +504,13 @@ export function buildLanding(
 	const unhandledLanes = new Set<string>();
 
 	for (const beat of doc.beats) {
-		const fromIdx = idIndex.get(beat.span.from)!;
-		const toIdx = idIndex.get(beat.span.to)!;
-		const spanIds = opts.utteranceIds.slice(fromIdx, toIdx + 1);
-		const instances = spanIds.flatMap((id) => byId.get(id) ?? []);
-		const droppedCount = spanIds.filter((id) => (byId.get(id)?.length ?? 0) === 0).length;
-
-		if (instances.length === 0) {
+		const env = envelopeForSpan(spanIndex, beat.span);
+		if (env.kind !== "ok") {
+			// 全剪 = 未落轨；unresolved 在此不可达（id 合法性由 validateSplitDoc 前置保证），同路处置不静默丢
 			skipped.push({ beat: beat.id, reason: "span 内全部 utterance 被剪，未落轨" });
 			continue;
 		}
-		const track_st = Math.min(...instances.map((x) => x.track_st));
-		const track_ed = Math.max(...instances.map((x) => x.track_ed));
-		const isShrunk = droppedCount > 0;
+		const { track_st, track_ed, shrunk: isShrunk } = env;
 
 		// 读旧写新：遗留 lane 值（RRV_MG）归一为中性名 MG 后落地/派单（既有工程零迁移）
 		const lane = normalizeLane(beat.lane) ?? beat.lane;
@@ -534,7 +534,7 @@ export function buildLanding(
 		split.beats.push(metaBeat);
 
 		if (isShrunk) {
-			shrunk.push({ beat: beat.id, kept: spanIds.length - droppedCount, dropped: droppedCount, track_st, track_ed });
+			shrunk.push({ beat: beat.id, kept: env.kept, dropped: env.dropped, track_st, track_ed });
 		}
 
 		const h = beat.handoff ?? {};
@@ -552,6 +552,8 @@ export function buildLanding(
 				slug_hint: h.slug_hint,
 				track_st,
 				track_ed,
+				// 派单自述「派什么」（add-consume-side-reprojection）：消费方据此现场重投影，不必再靠时码说话
+				span: beat.span,
 			});
 		} else if (lane === "FILM_BROLL") {
 			dispatch.film_broll.push({
@@ -562,9 +564,11 @@ export function buildLanding(
 				exclude: h.exclude,
 				track_st,
 				track_ed,
+				span: beat.span,
 			});
 		} else if (lane === "AI_DRAMA") {
-			dispatch.ai_drama.push({ beat: beat.id, ...h, track_st, track_ed });
+			// span 排在 ...h 之后：handoff 里若混进同名键，以落地口径为准（span 是派单自述、不是创作参数）
+			dispatch.ai_drama.push({ beat: beat.id, ...h, track_st, track_ed, span: beat.span });
 		} else if (lane !== "A_ROLL") {
 			// A_ROLL 故意无派单；其余 lane 过了校验却无 dispatch 分支
 			// = 未来扩展 LANES 漏改此处 → 收集告警，不静默丢队列（footgun 防御）
@@ -596,17 +600,15 @@ export function buildLanding(
 				skipped.push({ beat: auxTag, reason: "overlay aux 使用 {trigger} 点挂载，一期不支持（二期补合成窗口）" });
 				continue;
 			}
-			const auxFromIdx = idIndex.get(auxFromId)!;
-			const auxToIdx = idIndex.get(auxToId)!;
-			const auxSpanIds = opts.utteranceIds.slice(auxFromIdx, auxToIdx + 1);
-			const auxInstances = auxSpanIds.flatMap((id) => byId.get(id) ?? []);
-			if (auxInstances.length === 0) {
+			const auxSpan: SplitSpan = { from: auxFromId, to: auxToId };
+			const auxEnv = envelopeForSpan(spanIndex, auxSpan);
+			if (auxEnv.kind !== "ok") {
 				// 全 dropped：与主 beat 全剪同纪律，计入 skipped 不静默丢
 				skipped.push({ beat: auxTag, reason: "overlay aux 源区间 utterance 全被剪，未落轨" });
 				continue;
 			}
-			const auxTrackSt = Math.min(...auxInstances.map((x) => x.track_st));
-			const auxTrackEd = Math.max(...auxInstances.map((x) => x.track_ed));
+			const auxTrackSt = auxEnv.track_st;
+			const auxTrackEd = auxEnv.track_ed;
 			const auxCompositionId = `${opts.projectSlug}-${beat.id}-aux${auxN}`;
 			const ah = aux.handoff;
 
@@ -621,12 +623,15 @@ export function buildLanding(
 				slug_hint: ah?.slug_hint,
 				track_st: auxTrackSt,
 				track_ed: auxTrackEd,
+				// **aux 自己的** span（mount 为子区间时 ≠ 主 beat span）——这条直接消掉
+				// 「按 `beat` 字段回查会把 aux 错算成主 beat 窗口」的 join 陷阱
+				span: auxSpan,
 			});
 
 			const auxMetaBeat: SplitMetaBeat = {
 				id: auxTag,
 				lane: "MG",
-				span: { from: auxFromId, to: auxToId },
+				span: auxSpan,
 				track_st: auxTrackSt,
 				track_ed: auxTrackEd,
 				category: "overlay",

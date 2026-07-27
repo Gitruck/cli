@@ -20,6 +20,7 @@ description: 视觉拆分派单器——把一条已剪好的口播工程（gtrk
 - 需要一个 **oralcut 产物目录**（跑过 `gtrk oralcut` 得到的目录），里面有 `gtrk/project.gtrk` 与 `transcript/transcript.json`。没有 transcript（旧任务）→ 让用户用新版本重跑 `gtrk oralcut`（恒出 transcript）。
 - `gtrk` 命令找不到 → 让用户装 `npm i -g @gitruck/cli@latest`。
 - 用户可以先在客户端手调切点再保存——**每次拆分都基于「发起那一刻」的时间线投影**，所见即所得。
+  - **下游后果**：落地写进 `dispatch.json` 的 `track_st/track_ed` 因此是**那一刻的快照**。不用担心它变旧——下游消费方（`gtrk mg` / `gtrk matrix`）每次消费都**自己现场重投影**（`transcript × 当刻 .gtrk`，与本命令同一段代码），**用户之后再微调口播轨无需回来重跑 split**。只有**拆分稿本身**要改（beat 划分 / lane / handoff 变了）才重跑。
 
 ## 完整流程（取视图 → 拆分 → 落地 → 修正循环 ≤3 轮）
 

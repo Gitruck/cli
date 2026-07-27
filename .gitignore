@@ -3,7 +3,10 @@ node_modules/
 *.log
 dist/
 out/
+# 测试仅本地（开源项目不外泄测试项；本机开发、无 CI，发版前由 prepublishOnly 自动跑一次，主理人 2026-07-26 定）
+# —— 这是决策不是缺陷：不要再把它当作「忘了入库」提改进
 test/
+# 本机工件仅本地（真机验收清单 .plans/*-checklist.md 等留本机、不入 git，主理人 2026-07-26 定）
 .plans/
 .DS_Store
 

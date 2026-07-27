@@ -325,6 +325,8 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `--json` | 机读：stdout 只输出结果 JSON | 关 |
 
 > 落地产物 `dispatch.json` 三队列 → 下游消费：`mg`（MG 颗粒）→ `gtrk mg` 命令、`film_broll` → `gtrk matrix` 命令、`ai_drama` → `/gtrk-ai-drama` skill（产四段描述稿·中英分块，纯创作、无命令）。配套 skill `/gtrk-splitter` 产拆分稿。
+>
+> **派单条目自带 `span:{from,to}`**（该条目对应的 utterance 区间；`overlay` aux 派生条目写 **aux 自己的** span，可为主 beat span 的子区间）。**`track_st/track_ed` 是投影时刻的快照**——`gtrk mg` / `gtrk matrix` 消费时会**现场重投影**（见下），所以改完口播轨**不必**回来重跑 `gtrk split`，只有拆分稿本身变了才要重跑。
 
 ### `gtrk matrix` — B-roll 检索 + 候选铺轨
 
@@ -338,14 +340,21 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `--lay <n>` | 候选铺轨数：平铺 N 条 B-roll 候选轨（`0` = 只出 plan 不铺轨） | `1` |
 | `--top-k <n>` | 每 query 候选数上限（覆盖派单 shots；服务端上限 50） | 派单值 |
 | `--material-class <c>` | 素材类型 `real_shot` \| `concept`（仅矩阵成员口；覆盖栏目策略） | 栏目策略 |
-| `--score-floor <f>` | 填充置信度地板：segment score 低于此值不采纳、留空露主轨 | `0.2` |
+| `--score-floor <f>` | 填充置信度地板：segment score 低于此值不采纳、槽位留空——留空处**露黑底垫轨**（默认铺；除非 `--no-black-bed` 才露主轨）。调高会收缩取材池，整段铺不满即纯黑压口播，调完先看空洞告警 | `0.2` |
 | `--no-black-bed` | 不铺纯黑底垫轨（默认铺一条） | 默认铺 |
+| `--force-relay` | 候选轨已被你在客户端编辑过时仍强剥重铺（缺省会拒铺并保留那条轨）——**会删掉已确认原片的 `broll-raw-*` 素材登记、盘上原片成孤儿** | 关 |
 | `--out <file>` | ad-hoc 模式结果落文件 | stdout |
 | `--json` | 机读：stdout 只输出结果 JSON | 关 |
 
-> preview 代理 url 约 24h 过期，重跑即重签。
+> **beat 窗口现场重投影**：派单消费模式在**发起第一次云端检索之前**，用「`transcript` × 当刻 `.gtrk`」重算每个 beat 的 `[track_st, track_ed]`，检索、`broll-plan.json` 与铺轨一律以重算值为准（`--lay 0` 同守；ad-hoc `search` 不受影响）。`dispatch.json` 里的时码只是**投影时刻快照**，仅在重投影不可行时兜底——**所以改完口播轨直接跑本命令即可，不必先重跑 `gtrk split`**。`--json` 恒出 `reprojection:{mode,degraded,reason?,drifted,max_offset,shrunk,dropped}`；重投影后**零存活**的 beat 会被跳过（不为它烧检索配额、也不铺）。重投影不可行（transcript 缺失 / 工程定位不到 / 主轨查不到口播素材）→ **降级用快照 + 告警 + `--json` 标注**，检索与 plan 照产、不硬崩；非 v1 工程的既有行为不变（plan 先落盘、随后版本门非 0 退出）。
 >
-> **纯黑底垫轨**：默认在全部候选轨之下、口播主轨之上垫一条纯黑底轨（`struct_meta.broll.black_track` 记其 `track_index`），按已落成的 beat 包络整条铺满，使 B-roll 期间（含候选轨留空处）不漏出底下的口播画面。字节落 `assets/builtin/solid-000000-<W>x<H>.png`，与客户端内置纯色素材同 id 命名空间、幂等复用。删候选轨时别误删它；换片请拖到候选轨颗粒上、**别拖到黑底条上**——含拖拽保护的客户端会直接拒绝并提示，尚未升级到该版本的客户端会被误拖打出黑底破洞（该处漏口播）。不想要加 `--no-black-bed` 重跑即剥净。
+> 候选的 `preview_url`/`cover_url` **不带签名、不会过期**（本地代理落盘后一律复用）；带签名约 24h 过期的是**原片 `url`**，由客户端「确认原片」链路重签——**不必为「重签」重跑本命令**。
+>
+> **重跑会剥旧重铺，但不碰你改过的轨**：候选轨的身份按「素材前缀 + 上一轮登记指纹」认，不再认轨号（客户端保存会把 overlay 轨整体重编号）。一旦某条候选轨被判定「你编辑过」（改过 clip，或在客户端确认过原片使 material 变成 `broll-raw-*`），本次**整体不铺**：不剥任何轨、不追加新轨、`.gtrk` 逐字节不变，`broll-plan.json` 照常产出，命令给出「哪条轨 / 什么证据 / 下一步」并以非 0 退出码结束（`--json` 出 `{ok:false, refused:[…]}`）。要强行重铺加 `--force-relay`。
+>
+> **素材落盘自检**：写回工程之后自动查一遍 `materials[].path` 是不是真的都落盘了（**只读、只报不动**）。相对路径恒以 **`.gtrk` 文件所在目录**（`<产物目录>/gtrk/`）为基准解析。`--json` 出 `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`——`dangling` 是工程自带素材的**悬空引用**（登记在、文件不在）全量清单，每条标出**是否被时间线引用**及引用位置（被引用 = 那一段没素材可放，比孤儿严重得多）；绝对路径缺失另计 `external`（外接盘没挂载也会这样，不混进主判）；http(s) 素材只计数、**不发网络请求**。**这是告知不是拦阻**：查出悬空不改 `ok`、不改退出码、不删任何素材条目或文件。悬空多半是历史遗留（如客户端「确认原片」下载中断），修法是在客户端重新确认原片或删掉那条 clip。没写回的运行（`--lay 0` / 拒铺 / 工程缺失）**不出 `integrity` 字段**——缺席 = 本次没查，不是「查过且干净」。
+>
+> **纯黑底垫轨**：默认在全部候选轨之下、口播主轨之上垫一条纯黑底轨（`struct_meta.broll.black_track` 记其 `track_index`），按已落成的 beat 包络整条铺满，使 B-roll 期间（含候选轨留空处）不漏出底下的口播画面。**代价是「黑底空洞」**：候选轨没填满的地方就是纯黑压口播，铺轨会把它算出来——`--json` 恒出 `lay.blackBedHoleSec` 与逐段的 `lay.blackBedHoles`，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时另出一条非致命告警（不改退出码、不阻断铺轨），可据此调 `--score-floor`、改用 `--no-black-bed`、或到客户端手动补片。字节落 `assets/builtin/solid-000000-<W>x<H>.png`，与客户端内置纯色素材同 id 命名空间、幂等复用。删候选轨时别误删它；换片请拖到候选轨颗粒上、**别拖到黑底条上**——含拖拽保护的客户端会直接拒绝并提示，尚未升级到该版本的客户端会被误拖打出黑底破洞（该处漏口播）。不想要加 `--no-black-bed` 重跑即剥净。
 
 ### `gtrk mg` — MG 动态图颗粒（铺轨 / lint / status）
 
@@ -355,15 +364,25 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 |---|---|---|
 | `--project <dir>` | oralcut / split 产物目录（定位 `split/dispatch.json` 与工程 `.gtrk`） | — |
 | `--dispatch <path>` | 显式指定 `dispatch.json`（非标准布局兜底） | 由 `--project` 推 |
-| `--only <beat>` | 只跑单 beat（主 + 其 `-aux<n>` 叠层颗粒一并选） | 全部 |
+| `--only <beat>` | 只跑单 beat（收 **beat id** 如 `B12`、非 `composition_id`；主 + 其 `-aux<n>` 叠层颗粒一并选）。**真增量合并**：只重铺命中的那几颗，轨上其余已铺颗粒（连同手调）原样保留 | 全部 |
 | `--lint-only` | 只 lint 校验，不铺轨不写回 | 关 |
+| `--replace-all` | 显式授权**重置整轨**：不走增量保留、整轨剥掉重铺——**会删掉轨上其余已铺颗粒** | 关 |
 | `--json` | 机读：人读日志转 stderr，stdout 只输出结果 JSON | 关 |
 
 - **铺轨**（`gtrk mg --project <dir>`）：读 `dispatch.mg` → 逐 beat 从 `<project>/mg/<composition_id>.html` 取源颗粒 → lint → 铺进 `beat_track`，把 `struct_meta.mg` 原子写回 `.gtrk`（幂等登记自产轨 `lay_tracks`，重铺先剥旧自产物再 append、用户手加轨零连带）。「透明叠加 / 满屏底层」由颗粒 HTML 根 `background` 反推的 `opaque` 决定。缺 HTML / lint 失败的 beat 计入 `skipped`、不拦其余。
+  - **剥离面 ≠ 「本次铺什么」，也 ≠ 「登记轨全集」**：`--only <beat>` **只剥命中的那几颗**（真增量合并）——轨上其余已铺颗粒的 clip / 素材 / 登记条目**原样保留**，连同用户在 opencut 对它们的手调（保留的是既有 clip 原件，非照登记重建，故透明度 `opaque` 不会丢）；这些保留条目**不重新 lint、不重新复制源 HTML**（工程自包含，`<project>/mg/` 下源文件删了也不影响）。全量重铺仍是「剥净再整轨重建」，**唯一例外**是本次派单里有、却因缺 HTML / lint 未过 / 重投影后零存活而**没铺成**的那几颗——它们上一轮的 clip 保留在轨上（不因为新的做坏了就把旧的也毁掉）；反之**派单里已不存在**的已铺条目仍照剥（计划变更 ≠ 做坏了）。要连其余已铺颗粒一起剥掉重来：`--replace-all` 显式授权。
+  - **素材表不囤积**：素材的剥离键按「**自产身份 × 零引用**」判（自产 = `mg-`/`rrv-` 前缀 **或** 落在 CLI 独占的 `assets/mg/` 下且文件名在自产登记里），**不认客户端可改写的 `html_material` 前缀**——所以在 opencut 里编辑过工程之后重铺，旧素材照样剥得掉，`mg-` 素材数**恒等于轨上颗粒数**，历史遗留的重复 / 孤儿条目一并清掉。**非自产素材零连带**（`broll-*` / `ex-solid-*` / 你自加的，哪怕零引用也不碰）；仍被存活 clip 引用的自产素材也不剥（不会剥出失联 clip）；盘上 `assets/mg/` 的 html 副本从不删。
+  - **「一条都没定位到」不是清空指令**：`--only` 打空、`dispatch.mg` 为空/缺失、或本次条目全被 skip，**而轨上已有已铺颗粒**时，同样拒绝写回（那是派单或选择器出问题的信号）。确要清空加 `--replace-all`。首次铺轨（轨上本就没有已铺条目）不受此限，照常走完报 `laid=0`。
+  - **槽位窗口现场重投影**：铺轨与 lint 之前先用「`transcript` × 当刻 `.gtrk`」重算每条队列条目的 `[track_st, track_ed]`，之后 lint 的坑位包络（铁律⑦）与落轨 clip 时长一律以重算值为准（`--only` 同守；aux 派生颗粒按**自己的** span 重投影，不与主 beat 窗口混同）。`dispatch.mg` 里的时码只是**投影时刻快照**，仅在重投影不可行时兜底——**改完口播轨直接铺即可，不必先重跑 `gtrk split`**。`--json` 恒出 `reprojection:{mode,degraded,reason?,drifted,max_offset,shrunk,dropped}`（`--lint-only` 也有）。重投影后**零存活**的条目 skip 并计入 `skipped`（不复制 HTML、不按快照铺回去）；重投影不可行（transcript 缺失 / 工程定位不到 / 主轨查不到口播素材）→ 降级用快照 + 告警 + `--json` 标注，退出码不变；工程**非 v1** 的既有行为不变（铺轨路径版本门非 0 退出、`--lint-only` 照旧出报告）。铺轨成功会把本次时码来源（`timecode_source` / `reprojected_at`）纯追加登记进 `struct_meta.mg`。
 - **lint**（`gtrk mg lint <颗粒.html> [--dispatch <path>]`）：纯本地静态校验颗粒 HTML 的六铁律机器可判定子集（`<template>` 包裹、`data-composition-id` + 1920×1080、`gsap.timeline({ paused: true })`、`window.__timelines` 注册、无 `Math.random` / `Date.now`、自包含无相对外链、根 `background` 与 `opaque` 自洽…）；给 `--dispatch` 时校验 `composition_id` 命中派单。任一致命项非 0 退出并逐条报因。
+  - **期望 id 一致性**（`1-cid-expect`，**致命**）：HTML 内 `data-composition-id` 必须等于期望 id（铺轨=该条派单的 `composition_id`；`mg lint`=文件名，仅当它命中派单或形如 `…-B<数字>[-aux<n>]` 时比对，`./tmp.html` 这类改过名的副本不比对）。防的是「复制 `<id>.html` 改名时漏改内部 id」——落轨会写出以文件名命名的 clip/material，而文件注册的是另一个 `__timelines` 键、还与同名颗粒抢同一个样式作用域。
+  - **铁律⑦ tl 总长估长**（`7-fill-slot` / `7-no-estimate` / `7-infinite-repeat`，**恒非致命、不拦铺轨**）：已知坑位包络时（铺轨逐颗；`mg lint --dispatch` 命中派单条目）对 GSAP 时间线做**静态下界估算**——逐调用降级，能解析的计入（`duration×(repeat+1) + repeatDelay×repeat`，`yoyo` 不加时长），表达式 position / 非字面量 duration 那条**跳过不计**（忽略若干调用仍是合法下界）。估长 < 包络 → 告警；一条都算不出 → 显式提示「无法静态估长，铁律⑦未校验，须真引擎 seek 验收」（**不静默**，「算不出」与「算过且通过」在输出上可区分）；含 `repeat:-1` → 告警「无限循环令总长 Infinity、铁律⑦不可静态验证，请改按坑位算死的有限 repeat」。真判据永远是渲染引擎逐帧，本项只做提醒层。
+  - **回调与 seek 语义**（`x-callback-driven` / `x-engine-api-override` / `x-raf-interval`，**恒非致命、不拦铺轨**）：对齐契约同名一节（2026-07-26 增补）。GSAP `seek(t)` 默认抑制回调 → 补间属性照常插值、但 `onUpdate` 里的 DOM 写入不执行，翻车形态是**画面定在初始态而非黑屏**。契约把保证压在**引擎侧**（定帧 MUST 用 `seek(t,false)` / `time(t)` / `progress(p)`），故颗粒**用回调驱动画面是合规写法**；lint 这三项只是**哨兵**：`x-callback-driven` = 回调写 DOM 且无任何 seek 兜底（有兜底则沉默，避免重复提醒）；`x-engine-api-override` = 颗粒运行时覆写 `tl.seek` 或把 `__timelines[…]` 换成包装对象（会推翻引擎显式传的 `seek(t,true)`，且引擎改走 `time()`/`progress()` 即失效，属过渡态）；`x-raf-interval` = 含 `requestAnimationFrame(` / `setInterval(`（自有时钟不被 seek，等于冻结）。三项 MUST NOT 致命——「用回调驱动画面」不是违规。
 - **status**（`gtrk mg status --project <dir>`）：汇总 MG 流水线——`dispatch.mg` beat 总数 / 已产源 HTML 数 / 已铺进 `.gtrk` 数，并逐 beat 标注（缺 HTML / 已产未铺 / 已铺）。
 
-`--json` 输出：`{ ok, mode:"lay"|"lint"|"status", … }`（各模式带对应字段，如铺轨的 `laid` / `skipped`、status 的逐 beat 状态）。
+`--json` 输出：`{ ok, mode:"lay"|"lint"|"status", … }`（各模式带对应字段，如铺轨的 `laid` / `skipped`、status 的逐 beat 状态）。铺轨模式另带 **`track_total`**（轨上现存已铺数）、**`kept`** / **`kept_ids`**（其中**上轮遗留**、本次没重铺的颗数与 `composition_id` 清单）与 **`removed`**（本次被剥的旧自产颗粒数）——`laid`（本次）、`track_total`（轨上共）与 `kept`（上轮遗留）**要一起读**，恒有 `track_total = laid + kept`；只看 `laid` 会让「铺 1 颗、剥 20 颗」跟「补铺 1 颗」长得一模一样，只看前两个又会漏掉「轨上那几颗不是这一轮的版本」这条代价（`kept_ids` 与 `skipped` 会重叠：这轮没铺成、上一轮那条还在轨上）。非全绿时另带机读 **`reason`**：`skipped`（部分没铺上）/ `empty_queue`（**拒写回**，工程未被改动，另带 `refused:true` 与 `blocked[]`）/ `no_project`（工程缺失未铺轨）。真写回过的运行另带 **`integrity`**（素材落盘自检，与 `gtrk matrix` 同名同形，口径见上节）。
+
+> **退出码**：铺轨与 `--lint-only` 的 `ok:false` **一律连带非 0 退出**（含「有 beat 被 skip」这种循环中途的正常态）。agent 别把非 0 读成「命令崩了」——按 `reason` / `skipped` 判断即可。
 
 > **aux 叠层颗粒**：`gtrk split` 若在某 beat 的 `aux_layers` 派了 `overlay` 颗粒，会派生 `<beat>-aux<n>` 合成条目进 `dispatch.mg`——`gtrk mg` 一并铺，实现「同段既有底轨主视觉、又叠透明概念图解」。
 > **双读兼容**：`dispatch.mg`（读旧 `rrv_mg`）、源目录 `mg/`（读旧 `rrv/`）、素材前缀 `mg-`（读旧 `rrv-`）——去品牌化前的既有工程零迁移。

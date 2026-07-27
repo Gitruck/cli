@@ -11,6 +11,22 @@ metadata:
 
 Archive a completed change in the experimental workflow.
 
+> ## ⚠️ 本仓附加：归档门（add-local-prepublish-gate · 2026-07-26 定）
+>
+> **归档前 MUST 先跑本机归档门，不过就不许 archive：**
+>
+> ```bash
+> npm run openspec:gate -- <change-name>
+> ```
+>
+> 两条判据同时满足才放行：① `tasks.md` 无未勾条目；② 每个 `[真机]` 项的「验收日期 / 真机工程」都已填实（空串 / `TBD` / `____-__-__` 一律判未填）。
+>
+> **为什么加这道门**：复选框作为门控信号在本仓已被证伪——9 个已归档 change 带着未勾任务归档，其中 `debrand-rrv-to-mg` 是 35 项未勾 / 0 项已勾就归档，而代码早已落地。复选框已无法区分「没做」和「做了没勾」。该门只对**从今往后**的归档生效，不回溯补勾历史 change。
+>
+> 门的实现在 `openspec/gate.mjs`（`openspec/` 不入 git，属本机工具，不随 npm 包分发；也**不**挂在 `prepublishOnly` 上——发版门与归档门是两件事）。
+>
+> **⚠️ 本文件是 openspec CLI 生成物**（front-matter `generatedBy: "1.3.1"`），CLI 升级可能覆盖本段；且它有两份镜像（`.claude/skills/` 与 `.agents/skills/`），改一处须同步另一处。升级后请复查本段是否还在。
+
 **Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
 **Steps**

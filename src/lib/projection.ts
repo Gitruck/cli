@@ -116,6 +116,23 @@ function pickMainVideoTrack(gtrk: GtrkProject): GtrkTrack | undefined {
 	return best;
 }
 
+/**
+ * 主轨上命中该 material_id 的 clip 条数（只读判据，add-consume-side-reprojection）。
+ *
+ * **投影算法零改动**：本函数不投影、不读 transcript，只复用同一个「谁是主轨」口径
+ * （`pickMainVideoTrack` = `track_index` 最小的 video_track）回答一个判据问题——
+ * 消费侧重投影的降级矩阵里「当刻主轨查不到命中 `material_id` 的 clip」需要它，
+ * 而 `projectTranscript` 在这种情形下只会把所有 utterance 判 dropped，与「整段都被剪掉」不可分辨。
+ *
+ * 之所以放在本文件而不是复制进重投影叶子：主轨口径一旦两处各写一遍就会分叉，
+ * 而「口径同源」正是消费侧重投影这条路线的立身之本。
+ */
+export function countMainTrackMaterialClips(gtrk: GtrkProject, materialId: string): number {
+	const id = String(materialId);
+	const mainTrack = pickMainVideoTrack(gtrk);
+	return (mainTrack?.track_timeline ?? []).filter((c) => c.material != null && String(c.material) === id).length;
+}
+
 interface Instance {
 	track_st: number;
 	track_ed: number;

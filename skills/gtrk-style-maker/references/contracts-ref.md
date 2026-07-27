@@ -4,6 +4,6 @@
 
 - `contracts/README.md` — 收录双轴边界（管线性 + 脱敏）
 - `contracts/handoff-contracts.json` — handoff 类型 → 契约映射表（**查表，不硬编码**）
-- `contracts/gsap-emit-v1.md` — HTML 动画颗粒逐帧 seek 合规契约 v1
+- `contracts/gsap-emit-v1.md` — HTML 动画颗粒逐帧 seek 合规契约 v1（**含「回调与 seek 语义」一节**：颗粒可用 `onUpdate` 等时间线回调驱动画面，回调可达性由**引擎侧** MUST 条款保证，颗粒不应自加 `tl.seek` 垫片；该节是本主题的唯一口径来源）
 
 定位方式：本 skill 经 `gtrk skills install` 安装时，CLI 包根即 `gtrk` 命令所属包（`npm root -g` 下的 `@gitruck/cli`，或开发仓根）。找不到包时，让用户跑 `gtrk doctor` 确认安装。
