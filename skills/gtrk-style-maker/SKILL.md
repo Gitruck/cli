@@ -75,7 +75,7 @@ description: "能生产 skill 的 meta skill——通过启发式访谈引导视
 1. **起 skill 目录**（用户作坊目录为正本，如 `D:\<他的工作区>\skills\<skill-name>\`）：SKILL.md（frontmatter `name`+`description`，description 即触发器，写清「当用户想…时使用」）+ **README.md 必产**（含「正本→安装」单向流声明）+ 按需 references/ assets/。exemplar 一旦在 SKILL.md 里被引用就必须真实存在——「计划中的案例」不能以文件路径形式出现。skill 正文结构**由访谈产出的维度决定**，不套模板。
 2. **契约绑定**：产物命中管线 handoff 类型的，查 `contracts/handoff-contracts.json`（本 CLI 包内）；映射到契约的（如 HTML 动画颗粒 → gsap-emit v1），在 skill 中引用「契约名+版本」并把契约合规项加进其自检清单；映射为 null 或管线外产物，无此要求。
 3. **共享词表**（条件产出，见第⑤招）。
-4. **安装**：以作坊里的 skill 目录为源，运行 `npx -y skills add "<skill正本目录>" -g -y`，让通用适配器自动探测 Agent，并以统一正本 + symlink/junction 安装；用户明确指定宿主时追加 `-a <agent-id>`（可重复），明确要求独立副本时追加 `--copy`。不要在本 skill 里维护 Claude/Codex/TRAE 等路径表。skill README 写明**「正本→安装」单向流**：源码正本在作坊，安装位是产物，改动先改正本再重装。
+4. **安装**：以作坊里的 skill 目录为源，运行 `npx -y skills add "<skill正本目录>" -g -y`，让通用适配器自动探测 Agent，并以统一正本 + symlink/junction 安装；用户明确指定宿主时追加 `-a <agent-id>`（可重复），明确要求独立副本时追加 `--copy`。不要在本 skill 里维护各 Agent 宿主的安装路径表（探测归适配器）。skill README 写明**「正本→安装」单向流**：源码正本在作坊，安装位是产物，改动先改正本再重装。
 5. **登记**：把 `{id, ref: <正本路径>, produces: <handoff 类型或自造串>}` **追加**进本地栏目配置 `style.skills`（词表进 `style.shared`）。配置文件位置以 gtrk 的 paths 口径为准（当前 `~/.gitruck/columns/<栏目id>.json`）；文件不存在则创建最小骨架 `{meta:{id},style:{skills:[…]}}`。**追加，绝不清空既有条目**。产物是管线外的（封面等），登记时加 `routing:"none"`。
 
 ## 交付前自检（你自己的 Quality Bar）
@@ -87,7 +87,7 @@ description: "能生产 skill 的 meta skill——通过启发式访谈引导视
 - [ ] 契约绑定查了映射表（而不是凭记忆）？
 - [ ] 产出 skill 是**纯生产者**——正文里没有任何 gtrk 命令、没有「产完接着跑…」、不碰 dispatch/struct_meta/SOP 编排（铁律 6）？
 - [ ] 栏目配置登记是**追加**语义，既有条目一条没丢？
-- [ ] 已提醒用户：skill 是他的资产，留本地即可用；上传云端（claude.ai）是可选分发，非必需？
+- [ ] 已提醒用户：skill 是他的资产，留本地即可用；上传到 agent 产品的云端 skill 市场是可选分发，非必需？
 
 ## 下一步（回成片管线）
 

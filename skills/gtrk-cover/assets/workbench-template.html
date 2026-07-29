@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>示例标题 · 封面排版工作台</title>
+<!-- ↑ 替换位：当期 T1 -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- 替换位：字体族按栏目风格资产增删（衬线/黑体/手写体等） -->
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@700;900&family=Noto+Sans+SC:wght@400;700;900&family=Cormorant+Garamond:ital,wght@0,500;1,400&family=JetBrains+Mono:wght@400;600&family=Long+Cang&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  /* 替换位：色板变量——变量名固定、换值即换装（语义见 workbench-guide §3）。以下为中性默认值 */
+  :root {
+    --midnight: #14161E;
+    --indigo:   #232838;
+    --amber:    #7A869E;
+    --amber-soft: #9AA5BC;
+    --bone:     #ECEEF3;
+    --ink:      #0A0C12;
+    --panel:    #161923;
+    --panel-2:  #1E2230;
+    --border:   #2C3145;
+    --muted:    #8B92A8;
+    --text:     #E4E7F0;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    background: #07080D; color: var(--text);
+    font-family: "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px; min-height: 100vh; overflow: hidden;
+  }
+
+  header.app-head {
+    padding: 20px 32px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 24px; flex-wrap: wrap;
+  }
+  header h1 {
+    font-family: "Noto Sans SC", sans-serif;
+    font-weight: 900; font-size: 20px; letter-spacing: 2px;
+    margin: 0; color: var(--bone);
+  }
+  header h1 .ink { color: var(--amber); }
+  header .sub { font-size: 11px; color: var(--muted); letter-spacing: 1px; margin-left: 12px; }
+  header .meta { display: flex; gap: 8px; align-items: center; font-family: "JetBrains Mono", monospace; font-size: 10px; color: var(--muted); }
+  header .meta .pill { border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; color: var(--amber-soft); }
+
+  main {
+    display: grid;
+    grid-template-columns: 220px 1fr 340px;
+    min-height: calc(100vh - 60px);
+  }
+  .tabs { border-right: 1px solid var(--border); padding: 20px 14px; background: #0A0C13; overflow-y: auto; max-height: calc(100vh - 60px); }
+  .tab-title { font-size: 10px; letter-spacing: 2.5px; color: var(--muted); margin: 0 0 10px 4px; text-transform: uppercase; font-family: "JetBrains Mono", monospace; }
+  .tab {
+    display: block; width: 100%; text-align: left;
+    padding: 12px; background: transparent;
+    border: 1px solid transparent; color: var(--text);
+    cursor: pointer; border-radius: 5px; margin-bottom: 6px;
+    font-family: inherit; font-size: 13px; transition: all 0.15s;
+  }
+  .tab:hover { background: var(--panel); border-color: var(--border); }
+  .tab.active { background: var(--panel-2); border-color: var(--amber); color: var(--bone); }
+  .tab .ratio { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--amber); letter-spacing: 1px; }
+  .tab .desc { font-size: 10px; color: var(--muted); margin-top: 3px; }
+  .tabs .divider { height: 1px; background: var(--border); margin: 16px 0; }
+
+  .upload-btn {
+    display: block; width: 100%; padding: 10px; border-radius: 5px;
+    background: transparent; border: 1px dashed var(--border); color: var(--muted);
+    cursor: pointer; font-size: 11px; font-family: inherit;
+    transition: all 0.15s; text-align: center;
+  }
+  .upload-btn:hover { border-color: var(--amber); color: var(--amber); }
+  .upload-btn input { display: none; }
+  .hint { font-size: 10px; color: var(--muted); line-height: 1.7; margin-top: 10px; padding: 10px; background: var(--panel); border-radius: 4px; border-left: 2px solid var(--amber); }
+  .reset-btn {
+    display: block; width: 100%; padding: 9px; margin-top: 8px;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 5px;
+    font-family: inherit; font-size: 11px; cursor: pointer; letter-spacing: 1px;
+    transition: all 0.15s;
+  }
+  .reset-btn:hover { color: var(--amber); border-color: var(--amber); }
+
+  .stage {
+    padding: 26px 32px 50px;
+    display: flex; align-items: flex-start; justify-content: center;
+    background: radial-gradient(ellipse at top, rgba(35,40,56,0.25), transparent 60%), #07080D;
+    overflow: auto;
+  }
+  /* 工程注意：transform 只缩视觉不缩布局——占位靠 fitStage 的负 margin 收缩，勿改回直接设小宽高 */
+  .canvas-wrap {
+    position: relative;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 4px 16px rgba(0,0,0,0.4), 0 0 0 1px rgba(122,134,158,0.14);
+    transform-origin: top left;
+  }
+  .canvas-wrap .dim-tag { position: absolute; top: -24px; left: 0; font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--muted); letter-spacing: 1.5px; }
+  .canvas-wrap .dim-tag .num { color: var(--amber); }
+
+  .cover { position: relative; overflow: hidden; background: var(--midnight); font-family: "Noto Sans SC", sans-serif; }
+  .cover[data-size="16_9"] { width: 2400px; height: 1350px; }
+  .cover[data-size="4_3"]  { width: 2400px; height: 1800px; }
+  .cover[data-size="3_4"]  { width: 1500px; height: 2000px; }
+  .cover .bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; user-select: none; pointer-events: none; }
+  .cover { display: none; }
+  .cover.active { display: block; }
+
+  /* 所有文字图层的通用交互样式（引擎层，勿改） */
+  .layer-text {
+    position: absolute;
+    cursor: grab;
+    user-select: none;
+    transition: outline 0.12s;
+    outline: 0 dashed transparent;
+    outline-offset: 8px;
+    white-space: nowrap;
+  }
+  .layer-text:hover { outline: 3px dashed rgba(122,134,158,0.5); }
+  .layer-text.selected { outline: 5px dashed rgba(122,134,158,0.95); }
+  .layer-text.dragging { cursor: grabbing; outline: 5px solid rgba(122,134,158,0.95); }
+
+  /* 替换位：T1 主字风格——字体/描边/发光按栏目风格资产注入；发光 rgba 与 applyT1Style() 内保持同色 */
+  .t1 {
+    font-family: "Noto Sans SC", sans-serif;
+    font-weight: 900;
+    color: #FFFFFF;
+    line-height: 1;
+    letter-spacing: 0;
+    z-index: 10;
+    -webkit-text-stroke: 2px var(--midnight);
+    text-shadow:
+      0 0 1px var(--midnight),
+      0 0 2px var(--midnight),
+      0 0 3px var(--midnight),
+      0 0 20px rgba(200,210,230,0.14),
+      0 0 45px rgba(200,210,230,0.10),
+      0 8px 24px rgba(0,0,0,0.55);
+  }
+
+  /* 替换位：T2 副标题风格 */
+  .t2 {
+    font-family: "Noto Sans SC", sans-serif;
+    font-weight: 700;
+    color: rgba(236,238,243,0.88);
+    letter-spacing: 0.4em;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+    z-index: 9;
+  }
+  /* 替换位：T5 装饰英文风格 */
+  .t5 {
+    font-family: "Cormorant Garamond", serif;
+    font-style: italic;
+    font-weight: 500;
+    color: rgba(236,238,243,0.5);
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    z-index: 8;
+  }
+  /* 替换位：T4 品牌戳风格（手写签名感；用户没给栏目名则 visible:false、不编内容） */
+  .t4 {
+    font-family: "Long Cang", cursive;
+    font-weight: 400;
+    color: rgba(236,238,243,0.72);
+    letter-spacing: 0.12em;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+    z-index: 8;
+  }
+
+  /* 装饰件：薄内框（默认关，按当期决策开）。浅底尺寸的深色覆写见 workbench-guide §5 */
+  .inner-frame {
+    position: absolute; inset: 50px;
+    border: 2px solid rgba(236,238,243,0.30);
+    pointer-events: none; z-index: 5;
+  }
+
+  /* 装饰件：四角断线框（默认关） */
+  .corner {
+    position: absolute; width: 80px; height: 80px;
+    border: 1.5px solid rgba(236,238,243,0.28);
+    pointer-events: none; z-index: 5;
+  }
+  .corner.tl { top: 60px; left: 60px; border-right: 0; border-bottom: 0; }
+  .corner.tr { top: 60px; right: 60px; border-left: 0; border-bottom: 0; }
+  .corner.bl { bottom: 60px; left: 60px; border-right: 0; border-top: 0; }
+  .corner.br { bottom: 60px; right: 60px; border-left: 0; border-top: 0; }
+
+  .controls { border-left: 1px solid var(--border); padding: 20px 16px; background: #0A0C13; overflow-y: auto; max-height: calc(100vh - 60px); }
+  .ctrl-group { margin-bottom: 18px; }
+  .ctrl-group h3 {
+    font-size: 10px; letter-spacing: 2.5px; color: var(--muted);
+    margin: 0 0 10px; text-transform: uppercase;
+    font-family: "JetBrains Mono", monospace;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .ctrl-group h3::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 8px; }
+  .row label { font-size: 12px; color: var(--text); min-width: 60px; flex: 0 0 auto; }
+  .row .val { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--amber); min-width: 44px; text-align: right; }
+  .row input[type="range"] { flex: 1; accent-color: var(--amber); height: 3px; }
+  .row input[type="text"], .row select {
+    flex: 1; background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 6px 8px; font-family: inherit; font-size: 12px;
+  }
+  .row input[type="text"]:focus, .row select:focus { outline: none; border-color: var(--amber); }
+  .row input[type="checkbox"] { accent-color: var(--amber); }
+
+  /* 通用 layer block（引擎层，勿改） */
+  .layer-block {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 9px 11px;
+    margin-bottom: 7px;
+    background: var(--panel);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .layer-block:hover { border-color: rgba(122,134,158,0.55); }
+  .layer-block.selected { border-color: var(--amber); background: var(--panel-2); box-shadow: 0 0 0 1px rgba(122,134,158,0.35); }
+  .layer-block .head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 7px; gap: 6px;
+  }
+  .layer-block .char-preview {
+    font-family: "Noto Sans SC", sans-serif;
+    font-weight: 900; font-size: 22px;
+    color: var(--bone);
+    width: 30px; height: 30px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--midnight); border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .layer-block .tag-preview {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; color: var(--amber);
+    padding: 6px 10px;
+    background: var(--midnight); border-radius: 4px;
+    letter-spacing: 1px; flex-shrink: 0;
+  }
+  .layer-block .pos-tag {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; color: var(--muted);
+    letter-spacing: 1px;
+  }
+  .layer-block .vis-toggle {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; color: var(--muted);
+    display: flex; align-items: center; gap: 4px;
+  }
+  .layer-block .mini-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .layer-block .mini-row:last-child { margin-bottom: 0; }
+  .layer-block .mini-row label { font-size: 10px; color: var(--muted); min-width: 14px; font-family: "JetBrains Mono", monospace; }
+  .layer-block .mini-row input[type="number"] {
+    width: 66px;
+    background: var(--ink); color: var(--amber);
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 4px 6px;
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
+  }
+  .layer-block .mini-row input[type="number"]:focus { outline: none; border-color: var(--amber); }
+  .layer-block .mini-row input[type="text"] {
+    flex: 1; background: var(--ink); color: var(--text);
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 4px 6px;
+    font-family: inherit; font-size: 11px;
+  }
+  .layer-block .mini-row input[type="text"]:focus { outline: none; border-color: var(--amber); }
+
+  .export-btn {
+    display: block; width: 100%;
+    padding: 13px; margin-top: 6px;
+    background: var(--amber); color: #fff;
+    border: none; border-radius: 6px;
+    font-family: inherit; font-weight: 700; font-size: 13px;
+    cursor: pointer; letter-spacing: 2px; transition: all 0.15s;
+  }
+  .export-btn:hover { background: var(--amber-soft); transform: translateY(-1px); }
+  .export-btn:disabled { background: var(--border); color: var(--muted); cursor: wait; transform: none; }
+
+  .notes { font-size: 10px; color: var(--muted); line-height: 1.75; padding: 10px; background: var(--panel); border-radius: 4px; border-left: 2px solid var(--amber); }
+  .notes strong { color: var(--amber-soft); }
+  .notes kbd { background: var(--ink); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; font-size: 10px; color: var(--amber-soft); font-family: "JetBrains Mono", monospace; }
+
+  @media (max-width: 1200px) {
+    main { grid-template-columns: 200px 1fr 300px; }
+  }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    .tabs, .controls { border: none; max-height: none; }
+    .tabs { display: flex; overflow-x: auto; padding: 12px; }
+    .tab { flex-shrink: 0; width: 160px; margin-right: 6px; margin-bottom: 0; }
+  }
+</style>
+</head>
+<body>
+
+<header class="app-head">
+  <div>
+    <!-- 替换位：当期 T1 与英文副题 -->
+    <h1>示例 <span class="ink">·</span> 标题<span class="sub">TEMPLATE — 封面排版工作台</span></h1>
+  </div>
+  <div class="meta">
+    <!-- 替换位：布局名 / 色板名 -->
+    <span class="pill">布局待定</span>
+    <span class="pill">色板待注入</span>
+    <span class="pill">拖拽 / 滚轮 / 一键导出</span>
+  </div>
+</header>
+
+<main>
+  <aside class="tabs">
+    <p class="tab-title">// 尺寸</p>
+    <button class="tab active" data-size="16_9">
+      <div class="ratio">16 : 9</div>
+      <div class="desc">横版 · 布局按当期标注</div>
+    </button>
+    <button class="tab" data-size="4_3">
+      <div class="ratio">4 : 3</div>
+      <div class="desc">横版饱满 · 布局按当期标注</div>
+    </button>
+    <button class="tab" data-size="3_4">
+      <div class="ratio">3 : 4</div>
+      <div class="desc">竖版 · 布局按当期标注</div>
+    </button>
+
+    <div class="divider"></div>
+    <p class="tab-title">// 替换背景</p>
+    <label class="upload-btn">
+      上传当前尺寸的背景图
+      <input type="file" id="bg-upload" accept="image/*">
+    </label>
+    <p class="hint">
+      背景图已默认载入三张。抽到新版本想替换，在此上传只影响当前激活尺寸。
+    </p>
+
+    <div class="divider"></div>
+    <button class="reset-btn" id="resetAllBtn">↺ 恢复当前尺寸默认布局</button>
+  </aside>
+
+  <section class="stage" id="stage">
+    <div class="canvas-wrap" id="canvasWrap">
+      <div class="dim-tag"><span id="dimLabel">2400 × 1350</span> <span class="num">— 16:9</span></div>
+
+      <!-- 替换位：char* div 数量与 T1_KEYS 一致（当期 T1 字数驱动），initial 逐字填 -->
+      <div class="cover active" data-size="16_9">
+        <img class="bg" src="__BG_16_9__" alt="">
+        <div class="inner-frame"></div>
+        <div class="corner tl"></div><div class="corner tr"></div>
+        <div class="corner bl"></div><div class="corner br"></div>
+        <div class="layer-text t1" data-layer-key="char1">示</div>
+        <div class="layer-text t1" data-layer-key="char2">例</div>
+        <div class="layer-text t1" data-layer-key="char3">标</div>
+        <div class="layer-text t1" data-layer-key="char4">题</div>
+        <div class="layer-text t2" data-layer-key="t2">副标题钩子示例</div>
+        <div class="layer-text t5" data-layer-key="t5">SUBTITLE</div>
+        <div class="layer-text t4" data-layer-key="t4">品牌戳未提供</div>
+      </div>
+
+      <div class="cover" data-size="4_3">
+        <img class="bg" src="__BG_4_3__" alt="">
+        <div class="inner-frame"></div>
+        <div class="corner tl"></div><div class="corner tr"></div>
+        <div class="corner bl"></div><div class="corner br"></div>
+        <div class="layer-text t1" data-layer-key="char1">示</div>
+        <div class="layer-text t1" data-layer-key="char2">例</div>
+        <div class="layer-text t1" data-layer-key="char3">标</div>
+        <div class="layer-text t1" data-layer-key="char4">题</div>
+        <div class="layer-text t2" data-layer-key="t2">副标题钩子示例</div>
+        <div class="layer-text t5" data-layer-key="t5">SUBTITLE</div>
+        <div class="layer-text t4" data-layer-key="t4">品牌戳未提供</div>
+      </div>
+
+      <div class="cover" data-size="3_4">
+        <img class="bg" src="__BG_3_4__" alt="">
+        <div class="inner-frame"></div>
+        <div class="corner tl"></div><div class="corner tr"></div>
+        <div class="corner bl"></div><div class="corner br"></div>
+        <div class="layer-text t1" data-layer-key="char1">示</div>
+        <div class="layer-text t1" data-layer-key="char2">例</div>
+        <div class="layer-text t1" data-layer-key="char3">标</div>
+        <div class="layer-text t1" data-layer-key="char4">题</div>
+        <div class="layer-text t2" data-layer-key="t2">副标题钩子示例</div>
+        <div class="layer-text t5" data-layer-key="t5">SUBTITLE</div>
+        <div class="layer-text t4" data-layer-key="t4">品牌戳未提供</div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="controls">
+    <div class="ctrl-group">
+      <h3>T1 文案</h3>
+      <div class="row">
+        <!-- 替换位：value 与 maxlength 按当期 T1；与 state.t1Text 保持一致 -->
+        <input type="text" id="t1-text" value="示例标题" maxlength="4"
+               style="font-family:'Noto Sans SC',sans-serif; font-weight:700; letter-spacing:0.3em; font-size:14px;">
+      </div>
+      <p class="notes" style="margin-top:6px;">
+        改这里 <strong>同步到全部三张</strong>；每字独立位置/字号在下方调。
+      </p>
+    </div>
+
+    <div class="ctrl-group">
+      <h3>T1 逐字微调 <span style="font-size:9px; color:var(--amber); margin-left:4px;">画布上可拖</span></h3>
+      <div id="char-blocks"></div>
+    </div>
+
+    <div class="ctrl-group">
+      <h3>T1 全局样式</h3>
+      <div class="row">
+        <label>描边粗细</label>
+        <input type="range" id="t1-stroke" min="0" max="8" step="0.5" value="2">
+        <span class="val" id="t1-stroke-val">2</span>
+      </div>
+      <div class="row">
+        <!-- 替换位：发光名与默认值跟色板叫（银辉/琥珀/…） -->
+        <label>外发光</label>
+        <input type="range" id="t1-glow" min="0" max="100" step="5" value="20">
+        <span class="val" id="t1-glow-val">20%</span>
+      </div>
+      <div class="row">
+        <label>字色</label>
+        <!-- 替换位：字色选项按栏目色板给 2~3 档 -->
+        <select id="t1-color">
+          <option value="#FFFFFF" selected>纯白 #FFFFFF</option>
+          <option value="#ECEEF3">浅灰白 #ECEEF3</option>
+          <option value="#7A869E">强调色 #7A869E</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>统一字号</label>
+        <input type="range" id="t1-size-all" min="280" max="800" step="10" value="520">
+        <span class="val" id="t1-size-all-val">520</span>
+      </div>
+    </div>
+
+    <div class="ctrl-group">
+      <h3>附加图层 <span style="font-size:9px; color:var(--amber); margin-left:4px;">同样可拖</span></h3>
+      <div id="sub-blocks"></div>
+    </div>
+
+    <div class="ctrl-group">
+      <h3>装饰件</h3>
+      <!-- 替换位：默认开关按当期装饰件决策；不用的装饰件保持关闭即可 -->
+      <div class="row">
+        <label>薄内框</label>
+        <input type="checkbox" id="inner-show">
+      </div>
+      <div class="row">
+        <label>四角断线框</label>
+        <input type="checkbox" id="corner-show">
+      </div>
+    </div>
+
+    <div class="ctrl-group">
+      <h3>导出</h3>
+      <button class="export-btn" id="exportBtn">导出当前封面 PNG</button>
+      <button class="export-btn" id="exportAllBtn" style="margin-top:8px; background: transparent; color: var(--amber); border: 1.5px solid var(--amber);">一键导出全部三张</button>
+      <p class="notes" style="margin-top: 10px;">
+        <strong>导出规格：</strong>原分辨率 PNG<br>
+        16:9 → 2400 × 1350<br>
+        4 : 3 → 2400 × 1800<br>
+        3 : 4 → 1500 × 2000<br><br>
+        <strong>操作提示：</strong><br>
+        · 画布上 <kbd>拖任何字</kbd> 直接改位置<br>
+        · 点字选中后 <kbd>↑↓←→</kbd> 精调 1px<br>
+        · 按住 <kbd>Shift</kbd> + 方向键走 10px<br>
+        · 数值框选中后 <kbd>滚轮</kbd> 微调，<kbd>Shift</kbd>+滚轮 ×10<br>
+        · 一键导出首次会请求「允许下载多个文件」，点允许即可<br>
+        · 布局状态在内存里，调好就导出、导出前别刷新<br>
+      </p>
+    </div>
+  </aside>
+</main>
+
+<script>
+// ===== 替换位：T1 字数驱动（当期 T1 为 N 字 → T1_KEYS 列 N 项 + 各 cover 放 N 个 char div + maxlength=N + DEFAULTS 各含 N 条）=====
+const T1_KEYS = ['char1', 'char2', 'char3', 'char4'];
+const T1_LEN = T1_KEYS.length;
+
+// ===== 替换位：默认布局配方——从 layout-recipes 选配方起步，按实际画面气口微调；注意分发平台安全区 =====
+const DEFAULTS = {
+  '16_9': {
+    canvas: { w: 2400, h: 1350 },
+    layers: {
+      char1: { type: 't1', pos: '左上', left: 140,  top: 200,  size: 520 },
+      char2: { type: 't1', pos: '左下', left: 260,  top: 720,  size: 520 },
+      char3: { type: 't1', pos: '右上', left: 1740, top: 200,  size: 520 },
+      char4: { type: 't1', pos: '右下', left: 1620, top: 720,  size: 520 },
+      t2:    { type: 't2', pos: '底部居中', text: '副标题钩子示例', left: 910,  top: 1130, size: 46, visible: true },
+      t5:    { type: 't5', pos: '顶部居中', text: 'SUBTITLE',      left: 1020, top: 80,   size: 34, visible: true },
+      t4:    { type: 't4', pos: '左下角', text: '品牌戳未提供',    left: 70,   top: 1156, size: 44, visible: false },
+    },
+  },
+  '4_3': {
+    canvas: { w: 2400, h: 1800 },
+    layers: {
+      char1: { type: 't1', pos: '左上', left: 110,  top: 150,  size: 560 },
+      char2: { type: 't1', pos: '左中', left: 300,  top: 700,  size: 560 },
+      char3: { type: 't1', pos: '右中', left: 1540, top: 540,  size: 560 },
+      char4: { type: 't1', pos: '右下', left: 1730, top: 1090, size: 560 },
+      t2:    { type: 't2', pos: '右下角', text: '副标题钩子示例', left: 1680, top: 1680, size: 44, visible: true },
+      t5:    { type: 't5', pos: '左上角', text: 'SUBTITLE',      left: 130,  top: 75,   size: 36, visible: true },
+      t4:    { type: 't4', pos: '左下角', text: '品牌戳未提供',   left: 150,  top: 1700, size: 40, visible: false },
+    },
+  },
+  '3_4': {
+    canvas: { w: 1500, h: 2000 },
+    layers: {
+      char1: { type: 't1', pos: '左上', left: 180, top: 140,  size: 440 },
+      char2: { type: 't1', pos: '右上', left: 880, top: 140,  size: 440 },
+      char3: { type: 't1', pos: '左下', left: 180, top: 1380, size: 440 },
+      char4: { type: 't1', pos: '右下', left: 880, top: 1380, size: 440 },
+      t2:    { type: 't2', pos: '中段留白', text: '副标题钩子示例', left: 475, top: 620,  size: 44, visible: true },
+      t5:    { type: 't5', pos: '底部居中', text: 'SUBTITLE',      left: 550, top: 1880, size: 34, visible: true },
+      t4:    { type: 't4', pos: '左上角', text: '品牌戳未提供',    left: 100, top: 40,   size: 38, visible: false },
+    },
+  },
+};
+
+// 替换位：附加图层组（加图层四步见 workbench-guide §4）
+const SUB_LABELS = { t2: 'T2 副标题', t5: 'T5 英文', t4: 'T4 品牌戳' };
+const SUB_KEYS = ['t2', 't5', 't4'];
+
+const state = {
+  activeSize: '16_9',
+  t1Text: '示例标题', // 替换位：与 #t1-text 的 value 一致
+  selectedLayerKey: null,
+  data: JSON.parse(JSON.stringify(DEFAULTS)),
+  currentScale: 1,
+};
+
+function fitStage() {
+  const stage = document.getElementById('stage');
+  const wrap = document.getElementById('canvasWrap');
+  const size = DEFAULTS[state.activeSize].canvas;
+  const headH = document.querySelector('header.app-head').offsetHeight;
+  const availW = stage.clientWidth - 64;
+  const availH = window.innerHeight - headH - 120;
+  const scale = Math.min(availW / size.w, availH / size.h, 1);
+  state.currentScale = scale;
+  wrap.style.transform = `scale(${scale})`;
+  wrap.style.width = size.w + 'px';
+  wrap.style.height = size.h + 'px';
+  // 负 margin 把布局占位收缩到缩放后尺寸（transform 只缩视觉不缩布局，占位不缩会把页面撑出滚动条）
+  wrap.style.marginRight = -(size.w * (1 - scale)) + 'px';
+  wrap.style.marginBottom = -(size.h * (1 - scale)) + 'px';
+  document.getElementById('dimLabel').textContent = `${size.w} × ${size.h}`;
+  document.querySelector('.dim-tag .num').textContent = `— ${state.activeSize.replace('_', ':')}`;
+}
+window.addEventListener('resize', fitStage);
+
+// ===== 应用图层位置和字号 =====
+function applyLayers() {
+  const cover = document.querySelector('.cover.active');
+  const layers = state.data[state.activeSize].layers;
+  Object.entries(layers).forEach(([key, ls]) => {
+    const el = cover.querySelector(`.layer-text[data-layer-key="${key}"]`);
+    if (!el) return;
+    el.style.left = ls.left + 'px';
+    el.style.top  = ls.top + 'px';
+    el.style.fontSize = ls.size + 'px';
+    // 非 T1 图层的 text 和 visible（对任意附加图层通用）
+    if (ls.type !== 't1') {
+      document.querySelectorAll(`.cover .layer-text[data-layer-key="${key}"]`).forEach(n => {
+        n.textContent = ls.text;
+        n.style.display = ls.visible ? 'block' : 'none';
+      });
+    }
+  });
+}
+
+function applyT1Text() {
+  const raw = document.getElementById('t1-text').value;
+  const text = (raw + '　'.repeat(T1_LEN)).slice(0, T1_LEN);
+  state.t1Text = text;
+  document.querySelectorAll('.cover').forEach(cover => {
+    T1_KEYS.forEach((k, i) => {
+      const el = cover.querySelector(`.layer-text[data-layer-key="${k}"]`);
+      if (el) el.textContent = text.charAt(i);
+    });
+  });
+  document.querySelectorAll('.char-block .char-preview').forEach((el, i) => {
+    el.textContent = text.charAt(i);
+  });
+}
+
+function applyT1Style() {
+  const stroke = document.getElementById('t1-stroke').value;
+  const glow = document.getElementById('t1-glow').value / 100;
+  const color = document.getElementById('t1-color').value;
+  document.getElementById('t1-stroke-val').textContent = stroke;
+  document.getElementById('t1-glow-val').textContent = (glow * 100 | 0) + '%';
+  document.querySelectorAll('.t1').forEach(el => {
+    el.style.webkitTextStroke = `${stroke}px var(--midnight)`;
+    el.style.color = color;
+    // 替换位：发光 rgba 与 CSS .t1 的 text-shadow 保持同色
+    el.style.textShadow = `
+      0 0 1px var(--midnight),
+      0 0 2px var(--midnight),
+      0 0 3px var(--midnight),
+      0 0 20px rgba(200,210,230,${glow * 0.7}),
+      0 0 45px rgba(200,210,230,${glow * 0.5}),
+      0 8px 24px rgba(0,0,0,0.55)
+    `;
+  });
+}
+
+function applyT1SizeAll() {
+  const size = parseInt(document.getElementById('t1-size-all').value);
+  document.getElementById('t1-size-all-val').textContent = size;
+  T1_KEYS.forEach(k => {
+    state.data[state.activeSize].layers[k].size = size;
+  });
+  applyLayers();
+  renderCharBlocks();
+}
+
+function applyCorner() {
+  const show = document.getElementById('corner-show').checked;
+  document.querySelectorAll('.cover.active .corner').forEach(c => {
+    c.style.display = show ? 'block' : 'none';
+  });
+}
+
+function applyInner() {
+  const show = document.getElementById('inner-show').checked;
+  document.querySelectorAll('.cover.active .inner-frame').forEach(c => {
+    c.style.display = show ? 'block' : 'none';
+  });
+}
+
+// ===== 右栏 T1 逐字 block =====
+function renderCharBlocks() {
+  const container = document.getElementById('char-blocks');
+  const layers = state.data[state.activeSize].layers;
+  container.innerHTML = '';
+  T1_KEYS.forEach((k, i) => {
+    const ls = layers[k];
+    const block = document.createElement('div');
+    block.className = 'layer-block';
+    block.dataset.layerKey = k;
+    if (state.selectedLayerKey === k) block.classList.add('selected');
+    block.innerHTML = `
+      <div class="head">
+        <span class="char-preview">${state.t1Text.charAt(i)}</span>
+        <span class="pos-tag">${ls.pos}</span>
+      </div>
+      <div class="mini-row">
+        <label>X</label>
+        <input type="number" data-field="left" value="${Math.round(ls.left)}" step="5">
+        <label>Y</label>
+        <input type="number" data-field="top" value="${Math.round(ls.top)}" step="5">
+      </div>
+      <div class="mini-row">
+        <label>号</label>
+        <input type="number" data-field="size" value="${ls.size}" step="10" min="100" max="900">
+      </div>
+    `;
+    bindLayerBlock(block, ls, k);
+    container.appendChild(block);
+  });
+}
+
+// ===== 右栏附加图层 block =====
+function renderSubBlocks() {
+  const container = document.getElementById('sub-blocks');
+  const layers = state.data[state.activeSize].layers;
+  container.innerHTML = '';
+  SUB_KEYS.forEach(k => {
+    const ls = layers[k];
+    const block = document.createElement('div');
+    block.className = 'layer-block';
+    block.dataset.layerKey = k;
+    if (state.selectedLayerKey === k) block.classList.add('selected');
+    const labelText = SUB_LABELS[k];
+    block.innerHTML = `
+      <div class="head">
+        <span class="tag-preview">${labelText}</span>
+        <span class="pos-tag">${ls.pos}</span>
+        <label class="vis-toggle" title="显示 / 隐藏">
+          <input type="checkbox" data-field="visible" ${ls.visible ? 'checked' : ''}> 显示
+        </label>
+      </div>
+      <div class="mini-row">
+        <input type="text" data-field="text" value="${escapeHtml(ls.text)}">
+      </div>
+      <div class="mini-row">
+        <label>X</label>
+        <input type="number" data-field="left" value="${Math.round(ls.left)}" step="5">
+        <label>Y</label>
+        <input type="number" data-field="top" value="${Math.round(ls.top)}" step="5">
+      </div>
+      <div class="mini-row">
+        <label>号</label>
+        <input type="number" data-field="size" value="${ls.size}" step="2" min="14" max="200">
+      </div>
+    `;
+    bindLayerBlock(block, ls, k);
+    container.appendChild(block);
+  });
+}
+
+function bindLayerBlock(block, ls, key) {
+  block.addEventListener('click', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    selectLayer(key);
+  });
+  block.querySelectorAll('input').forEach(input => {
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.addEventListener('focus', () => selectLayer(key));
+    if (input.type === 'number') {
+      input.addEventListener('wheel', (e) => {
+        if (document.activeElement !== input) return;
+        e.preventDefault();
+        const step = (parseFloat(input.step) || 1) * (e.shiftKey ? 10 : 1);
+        const dir = e.deltaY < 0 ? 1 : -1;
+        input.value = String((parseFloat(input.value) || 0) + dir * step);
+        input.dispatchEvent(new Event('input'));
+      }, { passive: false });
+    }
+    input.addEventListener('input', (e) => {
+      const field = e.target.dataset.field;
+      if (field === 'visible') {
+        ls.visible = e.target.checked;
+      } else if (field === 'text') {
+        ls.text = e.target.value;
+      } else {
+        const val = parseFloat(e.target.value);
+        if (!isNaN(val)) ls[field] = val;
+      }
+      applyLayers();
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function selectLayer(key) {
+  state.selectedLayerKey = key;
+  document.querySelectorAll('.layer-text').forEach(el => el.classList.remove('selected'));
+  document.querySelectorAll('.layer-block').forEach(el => el.classList.remove('selected'));
+  if (key) {
+    const el = document.querySelector(`.cover.active .layer-text[data-layer-key="${key}"]`);
+    if (el) el.classList.add('selected');
+    const block = document.querySelector(`.layer-block[data-layer-key="${key}"]`);
+    if (block) block.classList.add('selected');
+  }
+}
+
+// ===== 拖拽（引擎层，勿改） =====
+let dragState = null;
+document.addEventListener('mousedown', (e) => {
+  const layer = e.target.closest('.layer-text');
+  if (!layer || !layer.closest('.cover.active')) return;
+  const key = layer.dataset.layerKey;
+  selectLayer(key);
+  const ls = state.data[state.activeSize].layers[key];
+  dragState = {
+    key, startX: e.clientX, startY: e.clientY,
+    startLeft: ls.left, startTop: ls.top,
+  };
+  layer.classList.add('dragging');
+  e.preventDefault();
+});
+document.addEventListener('mousemove', (e) => {
+  if (!dragState) return;
+  const dx = (e.clientX - dragState.startX) / state.currentScale;
+  const dy = (e.clientY - dragState.startY) / state.currentScale;
+  const ls = state.data[state.activeSize].layers[dragState.key];
+  ls.left = dragState.startLeft + dx;
+  ls.top  = dragState.startTop  + dy;
+  applyLayers();
+  const block = document.querySelector(`.layer-block[data-layer-key="${dragState.key}"]`);
+  if (block) {
+    const lInput = block.querySelector('input[data-field="left"]');
+    const tInput = block.querySelector('input[data-field="top"]');
+    if (lInput) lInput.value = Math.round(ls.left);
+    if (tInput) tInput.value = Math.round(ls.top);
+  }
+});
+document.addEventListener('mouseup', () => {
+  if (dragState) {
+    document.querySelectorAll('.layer-text.dragging').forEach(el => el.classList.remove('dragging'));
+    dragState = null;
+  }
+});
+
+// ===== 方向键（引擎层，勿改） =====
+document.addEventListener('keydown', (e) => {
+  if (!state.selectedLayerKey) return;
+  const tag = document.activeElement?.tagName;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag)) return;
+  const step = e.shiftKey ? 10 : 1;
+  const ls = state.data[state.activeSize].layers[state.selectedLayerKey];
+  if (!ls) return;
+  let handled = true;
+  if (e.key === 'ArrowLeft')       ls.left -= step;
+  else if (e.key === 'ArrowRight') ls.left += step;
+  else if (e.key === 'ArrowUp')    ls.top  -= step;
+  else if (e.key === 'ArrowDown')  ls.top  += step;
+  else handled = false;
+  if (handled) {
+    e.preventDefault();
+    applyLayers();
+    renderCharBlocks();
+    renderSubBlocks();
+    selectLayer(state.selectedLayerKey);
+  }
+});
+
+// ===== tab 切换 =====
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.cover').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    state.activeSize = tab.dataset.size;
+    document.querySelector(`.cover[data-size="${state.activeSize}"]`).classList.add('active');
+    state.selectedLayerKey = null;
+    const defSize = DEFAULTS[state.activeSize].layers.char1.size;
+    document.getElementById('t1-size-all').value = defSize;
+    document.getElementById('t1-size-all-val').textContent = defSize;
+    fitStage();
+    applyLayers();
+    applyT1Style();
+    applyCorner();
+    applyInner();
+    renderCharBlocks();
+    renderSubBlocks();
+  });
+});
+
+document.getElementById('t1-text').addEventListener('input', applyT1Text);
+['t1-stroke', 't1-glow', 't1-color'].forEach(id =>
+  document.getElementById(id).addEventListener('input', applyT1Style));
+document.getElementById('t1-size-all').addEventListener('input', applyT1SizeAll);
+document.getElementById('corner-show').addEventListener('input', applyCorner);
+document.getElementById('inner-show').addEventListener('input', applyInner);
+
+document.getElementById('resetAllBtn').addEventListener('click', () => {
+  state.data[state.activeSize] = JSON.parse(JSON.stringify(DEFAULTS[state.activeSize]));
+  state.selectedLayerKey = null;
+  applyLayers();
+  renderCharBlocks();
+  renderSubBlocks();
+});
+
+document.getElementById('bg-upload').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    document.querySelector('.cover.active .bg').src = ev.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+// ===== 导出（引擎层，勿改） =====
+document.getElementById('exportBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('exportBtn');
+  btn.disabled = true;
+  btn.textContent = '正在渲染…';
+  const cover = document.querySelector('.cover.active');
+  const wrap = document.getElementById('canvasWrap');
+  const originalTransform = wrap.style.transform;
+  wrap.style.transform = 'scale(1)';
+  document.querySelectorAll('.layer-text').forEach(el => el.classList.remove('selected', 'dragging'));
+  try {
+    const canvas = await html2canvas(cover, {
+      backgroundColor: null, scale: 1, useCORS: true, logging: false,
+      width: cover.offsetWidth, height: cover.offsetHeight,
+    });
+    const link = document.createElement('a');
+    const txt = state.t1Text.replace(/　/g, '').trim() || '封面';
+    link.download = `${txt}_${state.activeSize.replace('_', 'x')}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    btn.textContent = '✓ 导出成功';
+    setTimeout(() => { btn.textContent = '导出当前封面 PNG'; btn.disabled = false; }, 1500);
+  } catch (err) {
+    console.error(err);
+    btn.textContent = '导出失败，看控制台';
+    btn.disabled = false;
+  } finally {
+    wrap.style.transform = originalTransform;
+    if (state.selectedLayerKey) selectLayer(state.selectedLayerKey);
+  }
+});
+
+// ===== 一键导出全部三张（引擎层，勿改） =====
+document.getElementById('exportAllBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('exportAllBtn');
+  const originalSize = state.activeSize;
+  btn.disabled = true;
+  const wrap = document.getElementById('canvasWrap');
+  const originalTransform = wrap.style.transform;
+  wrap.style.transform = 'scale(1)';
+  document.querySelectorAll('.layer-text').forEach(el => el.classList.remove('selected', 'dragging'));
+  try {
+    for (const size of ['16_9', '4_3', '3_4']) {
+      btn.textContent = `正在渲染 ${size.replace('_', ':')} …`;
+      document.querySelectorAll('.cover').forEach(c => c.classList.remove('active'));
+      const cover = document.querySelector(`.cover[data-size="${size}"]`);
+      cover.classList.add('active');
+      state.activeSize = size;
+      applyLayers();
+      applyCorner();
+      applyInner();
+      await new Promise(r => setTimeout(r, 80));
+      const canvas = await html2canvas(cover, {
+        backgroundColor: null, scale: 1, useCORS: true, logging: false,
+        width: cover.offsetWidth, height: cover.offsetHeight,
+      });
+      const link = document.createElement('a');
+      const txt = state.t1Text.replace(/　/g, '').trim() || '封面';
+      link.download = `${txt}_${size.replace('_', 'x')}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+      await new Promise(r => setTimeout(r, 400));
+    }
+    btn.textContent = '✓ 三张已导出';
+  } catch (err) {
+    console.error(err);
+    btn.textContent = '导出失败，看控制台';
+  } finally {
+    wrap.style.transform = originalTransform;
+    const backTab = document.querySelector(`.tab[data-size="${originalSize}"]`);
+    if (backTab) backTab.click();
+    setTimeout(() => { btn.textContent = '一键导出全部三张'; btn.disabled = false; }, 1800);
+  }
+});
+
+function init() {
+  fitStage();
+  applyT1Text();
+  applyLayers();
+  applyT1Style();
+  applyCorner();
+  applyInner();
+  renderCharBlocks();
+  renderSubBlocks();
+}
+document.fonts.ready.then(init);
+setTimeout(fitStage, 100);
+setTimeout(fitStage, 600);
+</script>
+
+</body>
+</html>
