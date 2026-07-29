@@ -1142,7 +1142,6 @@ export function detectPrimitiveLoops(html: string): PrimitiveLoopBatch[] {
 		}
 		for (const call of fnCalls) {
 			if (create.loops.length === 0 && call.loops.length === 0) continue;
-			const inside = loopProduct(create.loops);
 			const callerBody = innermostLoopBody(call.at, call.loops);
 			const boundParent = parentBindingScope(create.fn, create.parent);
 			const freshAt = freshParentDeclaration(create.parent, create.at, boundParent);
