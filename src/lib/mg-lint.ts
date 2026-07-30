@@ -15,6 +15,17 @@
  * 铁律⑧ `8-primitive-merge` 同样**恒非致命**：它只提示「循环批量生成、整组同步驱动」的重复图元
  * 可无损合并，**不是**渲染风险判定。真实触发轴未知、根治在渲染侧；本项只落实契约铁律⑧的作者侧形态规避。
  *
+ * **违规项 id 的三个前缀命名空间（add-particle-css-cost-lint 登记，与 `specs/mg-command` 的不变量条文逐字对齐）**：
+ * - **数字前缀 `1-`~`8-` = 契约铁律项**（正确性失效：整片渲染失败 / 冻结 / 全黑 / 突兀消失 / 横带叠印）。
+ *   致命性**按项声明**——数字前缀**不是**「一律致命」（`4-bg-explicit` / `4-bg-on-root` / `5-cdn-*` /
+ *   `7-*` / `8-primitive-merge` 均非致命），下游 MUST NOT 按数字前缀反推致命性。
+ * - **`x-` = 非铁律哨兵项，恒非致命**：`x-` 空间内**任何**项恒 `fatal:false`、不影响 `ok`、不拦铺轨。
+ *   这是既有实现事实的固化，下游按前缀推断「这条不会拦我」成立；要引入致命项 MUST NOT 放进 `x-`。
+ * - **`c-` = 成本项**：命中项**渲得出正确画面、只是每帧成本高**（真卷积滤镜的每帧卷积开销）。
+ *   致命性**按项声明**（语义上允许致命），但**本期落地的三项 `c-filter-*` 全部非致命**；
+ *   提为致命须另走独立 change（spec 写死两项前提：MAD 出成片路线已立项 + 生产语料全量复扫零命中），
+ *   **MUST NOT** 用 env / 配置项 / 运行期开关翻转。
+ *
  * 顺带从颗粒 HTML 的 background 声明推导 opaque（权威源是颗粒作者，非可缺省的 dispatch.bg）。
  * 推导面 = **根 style ∪ 根下首个全幅子层 style**（契约铁律4④）——2026-07-26 r69 真渲实测：
  * 根元素的绘制属性在子合成挂载时被丢弃，实心底只有下沉子层才落成像素
@@ -96,14 +107,25 @@ function firstChildTag(html: string, rootTagStr: string | null): string | null {
 	}
 }
 
-/** 该开标签的 style 是否「全幅铺满」（契约铁律4①：`position:absolute` + `inset:0` 或等价 `top/left/width/height`）。 */
-function isFullBleed(tagStr: string): boolean {
-	const style = (attr(tagStr, "style") ?? "").toLowerCase();
+/**
+ * 一段**纯 style 声明串**是否「全幅铺满」（契约铁律4①：`position:absolute` + `inset:0` 或等价 `top/left/width/height`）。
+ *
+ * 与 `isFullBleed(tagStr)` 的分工：本函数收**声明串**，故既可喂元素内联 `style` 属性值，
+ * 也可喂 `<style>` 块里某条规则的**规则体自身**（add-particle-css-cost-lint D6.1：
+ * 规则体的全幅性 MUST 只由它自己的声明决定，**MUST NOT 借根/祖先的全幅性**）。
+ */
+function isFullBleedStyle(styleDecls: string): boolean {
+	const style = styleDecls.toLowerCase();
 	if (!/position\s*:\s*(?:absolute|fixed)/.test(style)) return false;
 	if (/\binset\s*:\s*0(?:px|%)?\b/.test(style)) return true;
 	const has = (p: string) => new RegExp(`\\b${p}\\s*:\\s*0(?:px|%)?\\s*(?:;|$)`).test(style);
 	const full = (p: string) => new RegExp(`\\b${p}\\s*:\\s*(?:100%|100vw|100vh|1920px|1080px)\\s*(?:;|$)`).test(style);
 	return has("top") && has("left") && full("width") && full("height");
+}
+
+/** 该开标签的 style 是否「全幅铺满」（`isFullBleedStyle` 的薄封装，行为与既有实现逐字相同）。 */
+function isFullBleed(tagStr: string): boolean {
+	return isFullBleedStyle(attr(tagStr, "style") ?? "");
 }
 
 /** 从一段 style 串里取 background 声明 → 有无声明 / 是否非透明。 */
@@ -1269,6 +1291,260 @@ export function detectSeekSignals(html: string): SeekSignals {
 	};
 }
 
+// ── 渲染成本：真卷积滤镜（add-particle-css-cost-lint · `c-` 命名空间）──
+//
+// 本组三项是**成本**检查、**不是**正确性检查：命中项渲得出正确画面，只是每帧贵。
+// 成本 ∝「被覆盖面积 × 半径 × 帧数」，动画化时卷积结果每帧失效、缓存失灵。
+// **判别式恒偏保守（宁漏勿误）**：判不准一律不报——`box-shadow` 整族豁免（现网大量
+// `box-shadow:0 0 0 Npx` 零卷积脉冲写法，误报一次规范当场作废）；半径为零、非字面量值同样不报，
+// 只有补间值判不了时出独立的 `c-filter-indeterminate`（不静默、也不冒充命中）。
+
+/** CSS 长度字面量（含单位）；非此即「静态判不准」。 */
+const CSS_LEN = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:px|em|rem|pt|%|vh|vw|vmin|vmax|ch|ex|cm|mm|in|pc|q)?$/i;
+
+/** 长度字面量是否**非零**（判不准 → `false`，保守不报）。 */
+function nonZeroLength(raw: string): boolean {
+	const s = raw.trim();
+	if (!CSS_LEN.test(s)) return false;
+	return Number.parseFloat(s) !== 0;
+}
+
+/** 从 `open`（指向 `(`）起圆括号配平，返回实参串（不含外层括号）；未配平返回 `null`。 */
+function parenArg(src: string, open: number): string | null {
+	const close = closeParen(src, open);
+	return close < 0 ? null : src.slice(open + 1, close);
+}
+
+/** 按顶层空白拆 token（`rgba(0,0,0,.4)` 整体算一个 token）。 */
+function topLevelTokens(src: string): string[] {
+	const out: string[] = [];
+	let depth = 0;
+	let cur = "";
+	for (let i = 0; i < src.length; i++) {
+		const c = src[i];
+		if (c === "(") depth++;
+		else if (c === ")") depth = Math.max(0, depth - 1);
+		if (depth === 0 && /\s/.test(c)) {
+			if (cur) out.push(cur);
+			cur = "";
+			continue;
+		}
+		cur += c;
+	}
+	if (cur) out.push(cur);
+	return out;
+}
+
+/**
+ * `drop-shadow(<x> <y> [<blur>] [<color>])` 是否真卷积：
+ * 第三个长度 token 才是模糊半径，**只有两个长度 token（半径缺省 = 0）→ 零卷积、不报**。
+ */
+function dropShadowConvolves(arg: string): boolean {
+	const lens = topLevelTokens(arg).filter((t) => CSS_LEN.test(t));
+	return lens.length >= 3 && nonZeroLength(lens[2]);
+}
+
+/**
+ * 一段 **CSS `filter` 类属性的值**是否含射程内的真卷积。
+ *
+ * 射程 = `blur(<非零>)` / `drop-shadow(… <非零半径> …)` / `url(#id)` 指向含非零 `feGaussianBlur`
+ * 或 `feDropShadow` 的 SVG `<filter>`。射程外 = 零半径、`none`、非字面量值（判不准不报）。
+ */
+function filterValueConvolves(value: string, svgConvIds: Set<string>): boolean {
+	const v = value.toLowerCase();
+	for (const m of v.matchAll(/\bblur\s*\(/g)) {
+		const arg = parenArg(v, m.index + m[0].length - 1);
+		if (arg !== null && nonZeroLength(arg)) return true;
+	}
+	for (const m of v.matchAll(/\bdrop-shadow\s*\(/g)) {
+		const arg = parenArg(v, m.index + m[0].length - 1);
+		if (arg !== null && dropShadowConvolves(arg)) return true;
+	}
+	for (const m of v.matchAll(/\burl\s*\(/g)) {
+		const arg = parenArg(v, m.index + m[0].length - 1);
+		if (arg === null) continue;
+		const id = arg.trim().replace(/^["']|["']$/g, "").replace(/^#/, "");
+		if (id && svgConvIds.has(id)) return true;
+	}
+	return false;
+}
+
+/** SVG 滤镜基元是否真卷积（`feGaussianBlur` 缺 `stdDeviation` 默认 0；`feDropShadow` 默认 2）。 */
+function svgPrimitivesConvolve(filterBody: string): boolean {
+	for (const m of filterBody.matchAll(/<fe(GaussianBlur|DropShadow)\b[^>]*>/gi)) {
+		const std = attr(m[0], "stdDeviation");
+		if (std === undefined) {
+			if (m[1].toLowerCase() === "dropshadow") return true; // 缺省 stdDeviation=2
+			continue;
+		}
+		if (std.trim().split(/[\s,]+/).some((t) => /^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(t) && Number.parseFloat(t) !== 0)) return true;
+	}
+	return false;
+}
+
+/** 文档里所有**真卷积** SVG `<filter>` 的 id（供 `filter:url(#id)` / `filter="url(#id)"` 解引用）。 */
+function svgConvolutionFilterIds(html: string): Set<string> {
+	const ids = new Set<string>();
+	for (const m of html.matchAll(/<filter\b([^>]*)>([\s\S]*?)<\/filter\s*>/gi)) {
+		const id = attr(`<filter${m[1]}>`, "id");
+		if (id && svgPrimitivesConvolve(m[2])) ids.add(id);
+	}
+	return ids;
+}
+
+/** 取一段声明串里的全部 `filter` / `-webkit-filter` / `backdrop-filter` 声明值。 */
+function filterDecls(styleDecls: string): string[] {
+	const out: string[] = [];
+	for (const m of styleDecls.matchAll(/(?:^|[;{}\s])\s*(?:-webkit-)?(?:backdrop-)?filter\s*:\s*([^;}]*)/gi)) out.push(m[1].trim());
+	return out;
+}
+
+/** `<style>` 块里每个花括号块的**自身声明**（嵌套块整体剔除 → `@media`/`@keyframes` 不借内层声明）。 */
+function styleBlockOwnDecls(html: string): string[] {
+	const out: string[] = [];
+	for (const sm of html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)) {
+		const css = sm[1].replace(/\/\*[\s\S]*?\*\//g, " ");
+		const stack: number[] = [];
+		for (let i = 0; i < css.length; i++) {
+			const c = css[i];
+			if (c === '"' || c === "'") {
+				i = skipString(css, i);
+				continue;
+			}
+			if (c === "{") stack.push(i);
+			else if (c === "}") {
+				const open = stack.pop();
+				if (open === undefined) continue;
+				let own = css.slice(open + 1, i);
+				for (let prev = ""; own !== prev; ) {
+					prev = own;
+					own = own.replace(/\{[^{}]*\}/g, " ");
+				}
+				out.push(own);
+			}
+		}
+	}
+	return out;
+}
+
+/** 从 `from`（`:` 之后）读一个对象字面量的属性值：到顶层 `,` 或块尾为止，跳字符串与括号。 */
+function readObjValue(body: string, from: number): string {
+	let depth = 0;
+	for (let i = from; i < body.length; i++) {
+		const c = body[i];
+		if (c === '"' || c === "'" || c === "`") {
+			i = skipString(body, i);
+			continue;
+		}
+		if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") {
+			if (depth === 0) return body.slice(from, i);
+			depth--;
+		} else if (c === "," && depth === 0) return body.slice(from, i);
+	}
+	return body.slice(from);
+}
+
+/** 属性值若是**字符串字面量**（含无插值模板串）→ 返回其内容；否则 `null`（= 静态判不了）。 */
+function stringLiteral(raw: string): string | null {
+	const s = raw.trim();
+	if (s.length < 2) return null;
+	const q = s[0];
+	if ((q === '"' || q === "'") && s.endsWith(q) && skipString(s, 0) === s.length - 1) return s.slice(1, -1);
+	if (q === "`" && s.endsWith("`") && skipString(s, 0) === s.length - 1 && !s.includes("${")) return s.slice(1, -1);
+	return null;
+}
+
+/** 时间线补间调用（`tl.to/from/fromTo/set` 与 `gsap.to/set/…`）的**属性对象**体。 */
+function tweenVarObjects(js: string): string[] {
+	const out: string[] = [];
+	const re = /\.\s*(?:to|from|fromTo|set)\s*\(/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(js))) {
+		const open = m.index + m[0].length - 1;
+		const args = parenArg(js, open);
+		if (args === null) continue;
+		for (let i = 0; i < args.length; i++) {
+			const c = args[i];
+			if (c === '"' || c === "'" || c === "`") {
+				i = skipString(args, i);
+				continue;
+			}
+			if (c !== "{") continue;
+			const body = braceBlock(args, i);
+			out.push(body);
+			i += body.length + 1;
+		}
+		re.lastIndex = open + 1; // 允许嵌套调用（如 `tl.to(a,{...},0); ` 内再有 gsap.to）被下一轮扫到
+	}
+	return out;
+}
+
+/** 真卷积滤镜成本的三档命中位点（各档最多留几个样本串，供文案定位）。 */
+export interface FilterCostFindings {
+	/** 补间 / `gsap.set` 直接驱动 `filter`（或驱动被引用 SVG 滤镜的 `stdDeviation`）。 */
+	animated: string[];
+	/** 静态声明含真卷积，**且该声明自身**判为全幅。 */
+	staticFullBleed: string[];
+	/** 补间值非字符串字面量 → 静态判不了。 */
+	indeterminate: string[];
+}
+
+/**
+ * 静态识别颗粒 HTML 里的**真卷积滤镜**并分三档（add-particle-css-cost-lint）。
+ *
+ * **扫描面三处**：① `<style>` 块规则；② 元素 `style="…"` 内联属性（含 SVG `filter="url(#id)"` 属性）；
+ * ③ 时间线补间的属性对象。**不引外部 CSS/JS parser、不做表达式求值**（判不准不报，恒偏保守）。
+ *
+ * **全幅性的取值面（D6.1，本项的命门）**：`<style>` 块规则的全幅性 **只看该规则体自身**的声明，
+ * **MUST NOT 借根元素或任何祖先的全幅性**——现网唯一那颗必须不报的负样本，其局部衬底
+ * （`left/top/width/height` 定死的 790×290）就写在 `<style>` 规则里，而同文件根元素内联 style 恰是 `inset:0`；
+ * 按祖先取值会当场把它误报成整幅滤镜。内联 style 情形才走既有开标签判定（滤镜与全幅声明同处一处，无歧义）。
+ */
+export function detectFilterCost(html: string): FilterCostFindings {
+	const src = maskHtmlComments(html);
+	const svgConvIds = svgConvolutionFilterIds(src);
+	const animated: string[] = [];
+	const staticFullBleed: string[] = [];
+	const indeterminate: string[] = [];
+	const add = (bucket: string[], site: string) => {
+		const s = site.replace(/\s+/g, " ").trim().slice(0, 120);
+		if (!bucket.includes(s)) bucket.push(s);
+	};
+
+	// ① `<style>` 块规则：规则体自身既含真卷积、又自陈全幅才报
+	for (const own of styleBlockOwnDecls(src)) {
+		const hit = filterDecls(own).filter((val) => filterValueConvolves(val, svgConvIds));
+		if (hit.length && isFullBleedStyle(own)) add(staticFullBleed, `<style> 规则：filter:${hit[0]}`);
+	}
+
+	// ② 元素内联 style / SVG filter 属性：全幅性取同一开标签
+	for (const m of src.matchAll(/<[a-zA-Z][^>]*>/g)) {
+		const tag = m[0];
+		const style = attr(tag, "style") ?? "";
+		const inline = filterDecls(style).filter((val) => filterValueConvolves(val, svgConvIds));
+		const refAttr = attr(tag, "filter");
+		const byAttr = refAttr !== undefined && filterValueConvolves(refAttr, svgConvIds) ? refAttr : null;
+		if (!inline.length && byAttr === null) continue;
+		if (!isFullBleedStyle(style)) continue;
+		add(staticFullBleed, inline.length ? `内联 style：filter:${inline[0]}` : `SVG 属性：filter="${byAttr}"`);
+	}
+
+	// ③ 时间线补间属性对象：filter/webkitFilter 键，或驱动 SVG 滤镜基元的 stdDeviation
+	const js = maskJsComments(scriptBodiesOnly(src));
+	for (const body of tweenVarObjects(js)) {
+		for (const km of body.matchAll(/(?:^|[{,])\s*["']?(filter|webkitFilter|WebkitFilter|-webkit-filter)["']?\s*:/g)) {
+			const raw = readObjValue(body, km.index + km[0].length);
+			const lit = stringLiteral(raw);
+			if (lit === null) add(indeterminate, `补间属性 ${km[1]}:${raw}`);
+			else if (filterValueConvolves(lit, svgConvIds)) add(animated, `补间属性 ${km[1]}:"${lit}"`);
+		}
+		if (svgConvIds.size && /(?:^|[{,])\s*["']?stdDeviation["']?\s*:/.test(body))
+			add(animated, "补间驱动 SVG 滤镜基元的 stdDeviation");
+	}
+	return { animated, staticFullBleed, indeterminate };
+}
+
 export function lintParticle(
 	html: string,
 	opts: {
@@ -1463,6 +1739,42 @@ export function lintParticle(
 				"合并后画面逐像素不变，属零成本改法。本项只提示写法形态，最终画面仍以真渲染出片为准",
 		);
 	}
+
+	// 渲染成本：真卷积滤镜（add-particle-css-cost-lint）。**三项本期一律非致命**——
+	// 命中项渲得出正确画面、只是每帧贵；提为致命须另走独立 change（spec 已写死两项前提）。
+	// 本组不影响 ok / 退出码 / 铺轨，MUST NOT 在此加任何运行期开关翻转致命性。
+	const cost = detectFilterCost(html);
+	if (cost.animated.length)
+		push(
+			"c-filter-animated",
+			false,
+			`时间线补间直接驱动了真卷积滤镜（${cost.animated.slice(0, 3).join("；")}）——` +
+				"blur / drop-shadow / feGaussianBlur 是**真卷积**，每帧成本 ∝「被覆盖面积 × 半径 × 帧数」；" +
+				"一旦被补间驱动，卷积结果**每帧失效**、缓存彻底失灵，这是本组三项里成本机制最重的一项。" +
+				"改法：用 `opacity` / `transform`（`scale` / 位移）表达同一叙事动作；" +
+				"确需滤镜就做成**静态两态切换**（滤镜值不随时间连续变），并把被滤元素的几何覆盖面积收到真正需要的那块矩形上。" +
+				"本项是**成本提示**，不影响 ok / 退出码 / 铺轨；**未报 ≠ 这颗便宜**——真判据是真渲染出片计时",
+		);
+	if (cost.staticFullBleed.length)
+		push(
+			"c-filter-static-fullbleed",
+			false,
+			`整幅静态真卷积滤镜（${cost.staticFullBleed.slice(0, 3).join("；")}）——该声明自身即全幅` +
+				"（`position:absolute|fixed` + `inset:0` 或等价铺满），于是每帧都要对整幅做一次卷积。" +
+				"**首选改法：缩小被滤镜覆盖的几何面积**（把滤镜收到它真正需要的那块矩形上——面积一项同时压掉卷积与整幅逐帧合成两笔成本）；" +
+				"次选把静态滤镜结果**预烘成图**，且 MUST 用 **RGBA PNG**（透明叠加颗粒的 alpha 是成片合成的必需通道，" +
+				"烘成 JPEG 或任何无 alpha 格式会在成片里塌成不透明色块），但预烘只消得掉卷积、消不掉整幅逐帧合成，收益有上限、必有残差。" +
+				"去不去滤镜属审美取值，判断权在作者：本项只给信息与改法，**恒非致命**、不拦铺轨；未报 ≠ 便宜，真判据是真渲染出片计时",
+		);
+	if (cost.indeterminate.length)
+		push(
+			"c-filter-indeterminate",
+			false,
+			`该处 filter 值无法静态判定是否含真卷积（${cost.indeterminate.slice(0, 3).join("；")}）——` +
+				"补间值不是字符串字面量（变量 / 模板串 / 函数返回），本 lint 不做表达式求值与常量折叠，" +
+				"故对该处**未作判定**：既不是「判过且通过」，也不是命中。请人工确认它是否会驱动 blur / drop-shadow；" +
+				"若是，按 `c-filter-animated` 的改法处理。本项恒非致命、不拦铺轨",
+		);
 
 	return { ok: !v.some((x) => x.fatal), violations: v, opaque, compositionId: cid };
 }
