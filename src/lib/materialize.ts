@@ -47,6 +47,9 @@ export interface MaterializeOpts {
 	projName?: string;
 	json?: boolean;
 	open?: boolean;
+	/** 静默模式：跳过 stdout 输出（三方打开提示与 --json 结果行），由调用方自行汇总输出。
+	 * 供多工程循环调用（long2short 逐 clip）——stdout 机读契约归根级调用方所有。 */
+	quiet?: boolean;
 	/** 可注入下载实现（测试用）；缺省真 download。 */
 	download?: (url: string, dest: string) => Promise<void>;
 }
@@ -166,8 +169,8 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 	// result.json 补写解析出的本地路径
 	const result = await writeResult({ files: byFormat, jianyingDraftPath, rendered });
 
-	// 三方打开提示（人读；--json 跳过，避免污染 stdout 机读 JSON）
-	if (!opts.json) {
+	// 三方打开提示（人读；--json / quiet 跳过，避免污染 stdout 机读 JSON）
+	if (!opts.json && !opts.quiet) {
 		if (Object.keys(byFormat).length) log.step("三方打开（产物已就位，按需自取）：");
 		for (const base of Object.keys(byFormat)) {
 			const meta = FORMAT_META[base];
@@ -182,7 +185,7 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 		openFolder(outDir);
 		log.info("已打开产物目录文件夹");
 	}
-	if (opts.json) console.log(JSON.stringify(result));
+	if (opts.json && !opts.quiet) console.log(JSON.stringify(result));
 
 	return result;
 }
