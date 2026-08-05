@@ -48,7 +48,7 @@ const collectParam = (v: string, acc: string[]): string[] => {
 /** 给 tool 顶层命令挂通用选项 + 各 descriptor 的工具专属选项（去重），并接上 action。导出供测试。 */
 export function configureToolCommand(cmd: Command, registry: ToolDescriptor[] = TOOL_REGISTRY): Command {
 	cmd
-		.description("单点工具族：`gtrk tool <name> [input]` 跑单个能力；`gtrk tool list` 查全部（含输入/产物/计费/状态）")
+		.description("单点工具族：`gtrk tool <name> [输入...]` 跑单个能力（多文件工具可传多个输入，顺序即拼装顺序）；`gtrk tool list` 查全部（含输入/产物/计费/状态）")
 		.option("-o, --out <dir>", "产物目录（缺省 = <输入名>-<tool>/；input=none 落 cwd 下 <tool>-<时间戳>/）")
 		.option("--param <k=v>", "透传任意云端参数（标量、可重复；如 --param width=1080）", collectParam, [])
 		.option("--params-json <json>", "透传任意云端参数（JSON 对象）")
@@ -86,7 +86,7 @@ export async function runToolCommand(
 	if (opts.json) routeLogsToStderr();
 	const name = words[0];
 	if (!name) {
-		throw new Error("用法：`gtrk tool <name> [input]` 跑工具；`gtrk tool list` 查全部工具");
+		throw new Error("用法：`gtrk tool <name> [输入...]` 跑工具（多文件工具可传多个输入）；`gtrk tool list` 查全部工具");
 	}
 	if (name === "list") {
 		await runList(opts, registry);
@@ -97,7 +97,9 @@ export async function runToolCommand(
 		const names = registry.map((d) => d.name).join(", ");
 		throw new Error(`未知工具「${name}」。可用工具：${names || "（空）"}（用 gtrk tool list 查看详情）`);
 	}
-	return runTool(descriptor, words[1], opts, deps);
+	// images 多文件工具消费全部剩余 positional（顺序即拼装顺序）；其余类别维持单输入
+	const inputArg = descriptor.input.kind === "images" ? words.slice(1) : words[1];
+	return runTool(descriptor, inputArg, opts, deps);
 }
 
 /** list 发现子模式：无 Key可用；每次最多匿名查一次实时价格，失败仍列完整清单。 */
@@ -140,7 +142,7 @@ export async function runList(
 /** 分派到单个工具执行。 */
 async function runTool(
 	descriptor: ToolDescriptor,
-	inputArg: string | undefined,
+	inputArg: string | string[] | undefined,
 	opts: ToolOpts,
 	depsOverride?: Partial<CloudToolDeps>,
 ): Promise<RunToolResult> {
@@ -150,7 +152,7 @@ async function runTool(
 	}
 	if (descriptor.kind === "local") {
 		// local 型分派到工具自己的 handler（add-tool-mad D8 认可的族扩展：mad = 族内复杂度上限标尺）
-		if (descriptor.name === "mad") return runMadInTool(inputArg, opts);
+		if (descriptor.name === "mad") return runMadInTool(typeof inputArg === "string" ? inputArg : undefined, opts);
 		throw new Error(`local 型工具「${descriptor.name}」由后续 change 实现，暂不可用`);
 	}
 	// cloud 型：缺 Key → loadConfig 抛错引导 gtrk init（零网络）
