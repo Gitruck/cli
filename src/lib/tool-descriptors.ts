@@ -1113,7 +1113,9 @@ const imageToLive: ToolDescriptor = {
 	input: { kind: "image" },
 	priceKey: "image_to_live",
 	outputHint: "微动视频（.mp4）",
-	enabled: true,
+	// 2026-08-05 回收（adjust-gate-image-to-live）：上游生成能力暂未开放，恢复后新 change 翻门重上
+	enabled: false,
+	disabledReason: "上游生成能力暂未开放，恢复后重新上架",
 	taskType: "image_to_live",
 	buildPayload(fileId) {
 		return { file_id: fileId };
