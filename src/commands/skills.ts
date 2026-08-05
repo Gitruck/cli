@@ -16,6 +16,7 @@ import { log } from "../lib/log";
 // 仓库内打包分发的 skill 名（各含 SKILL.md；部分另带 references/ 或 agents/）
 export const SKILL_NAMES = [
 	"gtrk-oralcut",
+	"gtrk-long2short",
 	"gtrk-splitter",
 	"gtrk-matrix",
 	"gtrk-mg",

@@ -22,6 +22,7 @@
 | | 命令 | 做什么 |
 |---|---|---|
 | 🎬 | `gtrk oralcut <毛片>` | 智能口播剪辑闭环：一次出 gtrk + 剪映 + PR 三方工程，自动打开 |
+| ✂️ | `gtrk long2short <毛片>` | 长剪短闭环：长视频语义选段+跳剪（可选 720p 代理智能分屏）→ 逐 clip 出 gtrk + 剪映 + PR 三方工程（毛片不上传） |
 | 📝 | `gtrk transcript <本地视频>` | 视频转文字稿：原视频不上传，只传本地抽取音频，生成一个含总结、时码记录和纯文本的 Markdown |
 | 🎵 | `gtrk music-visualizer <音频>` | 音乐可视化：一首歌 → 频谱可视化成片（`--template` 必填 + 可选背景/封面 + 模板/配色样式），配套 driver skill `gtrk-music-visualizer` |
 | ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单；`--column <id>` 按栏目词表校验 |
@@ -160,7 +161,7 @@ irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex
 | ![在 Agent 中调用 gtrk 示例 1](assets/agent-example-1.png) | ![在 Agent 中调用 gtrk 示例 2](assets/agent-example-2.png) |
 | ![在 Agent 中调用 gtrk 示例 3](assets/agent-example-3.png) | ![在 Agent 中调用 gtrk 示例 4](assets/agent-example-4.png) |
 
-`gtrk install` 会把 10 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`）装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
+`gtrk install` 会把 11 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`)装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
 
 默认使用 `~/.agents/skills` 作为统一正本，再链接到各 Agent 的兼容目录（Windows 使用 junction）；链接不可用时适配器会回退复制。这样更新只有一份正本，不会让多份副本逐渐漂移。常用命令：
 

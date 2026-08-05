@@ -25,6 +25,7 @@ import { migrateLegacyHome, packageRoot } from "./lib/paths";
 import { registerInstall } from "./commands/install";
 import { registerInit } from "./commands/init";
 import { registerOralCut } from "./commands/oralcut";
+import { registerLong2Short } from "./commands/long2short";
 import { registerOralCutResult } from "./commands/oralcut-result";
 import { registerDoctor } from "./commands/doctor";
 import { registerSkills } from "./commands/skills";
@@ -64,6 +65,7 @@ program
 registerInstall(program);
 registerInit(program);
 registerOralCut(program);
+registerLong2Short(program);
 registerOralCutResult(program); // 按 task_id 取回已完成任务的报告/产物（不重跑云端）
 registerDoctor(program);
 registerSkills(program);
