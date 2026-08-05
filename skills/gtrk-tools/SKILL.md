@@ -7,7 +7,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 飞书使用教程统一入口：[gtrk CLI 使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk)。
 
-`gtrk tool <name> [input]` 是 gtrk 的**单点能力**族：一个工具 = 单发单收（给一个输入、出一份产物），没有 SOP 次序、没有用户检查点链——与成片管线的车道命令（`oralcut` / `split` / `matrix` / `mg`）是两回事。本 skill 是这个族的**统一调用向导**：认清有哪些工具、按纪律驱动 `gtrk tool` 命令、把产物和计费如实回给用户。
+`gtrk tool <name> [输入...]` 是 gtrk 的**单点能力**族：一个工具 = 单发单收（给一份输入、出一份产物；多文件图片工具的「一份输入」是一组图片路径，顺序即拼装顺序），没有 SOP 次序、没有用户检查点链——与成片管线的车道命令（`oralcut` / `split` / `matrix` / `mg`）是两回事。本 skill 是这个族的**统一调用向导**：认清有哪些工具、按纪律驱动 `gtrk tool` 命令、把产物和计费如实回给用户。
 
 > **本 skill 已含你需要的全部信息**（工具清单、调用纪律、恢复语义、排错话术）。工具清单以 `gtrk tool list --json` 为**唯一真相**——本文件与它漂移时以命令输出为准并回来修本文件。参数细节以 `gtrk tool --help` 为准。
 
@@ -31,6 +31,8 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `video_segment` | 「机械分镜 / 按画面变动切分镜区间 / 场景切分」 | 单条本地视频；可选 `--detector content\|adaptive`、`--threshold` | 分镜区间结构 `result-output.json`（非下载文件） | 运行前实时查询 | 已上线 |
 | `video_ai_segment` | 「智能分镜 / 语义切镜头 / 按类目景别拆镜头」 | 单条本地视频；可选 `--segment-mode scene\|shot_type\|narrative\|subject` | 语义分镜结构 `result-output.json`（非下载文件） | 运行前实时查询 | 已上线 |
 | `video_motion_cut` | 「运镜高光 / 提取运镜片段 / 找高光镜头」 | 单条本地视频 | 运镜/高光片段结构 `result-output.json`（非下载文件） | 运行前实时查询 | 已上线 |
+| `video_speaker_detect` | 「谁在说话 / 说话人检测 / 检测画面里谁在何时开口」 | 单条本地视频；可选 `--language`、`--max-faces-per-frame`、`--detect-body`、`--track-sample-fps`。**重 GPU、按分钟计费较高，长片先想清楚** | 可见说话人结构 `result-output.json`（时间字段时基以服务端输出为准） | 运行前实时查询 | 已上线 |
+| `video_face_track` | 「人脸追踪 / 人物出场时间段 / 视频里有哪几个人」 | 单条本地视频；可选 `--sample-fps`、`--max-faces`、`--min-face-ratio`、`--enable-body-match`、`--similarity-threshold`；`time_ranges` 经 `--params-json` 传（**单位毫秒**，如 `{"begin_time":0,"end_time":30000}`）。**重 GPU、按分钟计费较高** | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 「智能字幕 / 给视频加字幕 / 视频翻译字幕 / 烧录字幕 / 去原字幕」 | 单条视频或音频；**`--language <码>` 必填**；可选 `--translate-language`、`--need-render`（烧录）、`--need-pure`（去原字幕）、`--subtitle-type`、`--subtitle-color` | `.ass` 字幕文件 + 可选烧录/去字幕 `.mp4` + `result-output.json`（LLM 摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `audio_separation` | 「分离人声和伴奏 / 提取人声 / 提取伴奏」 | 单条音频 | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_speaker_split` | 「按说话人分轨 / 把不同人的声音分开 / 谁在什么时候说话」 | 单条音频；可选 `--only-struct` 只出结构 | 各说话人 `.wav` 分轨 + `spoken_list` 时间线（`result-output.json`） | 运行前实时查询 | 已上线 |
@@ -41,6 +43,8 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `piano_audio_enhance` | 「钢琴录音修复 / 增强钢琴音质」 | 单条音频 | 高质量 WAV + 配套 MIDI（双产物） | 运行前实时查询 | 已上线 |
 | `image_to_square` | 「长图转方图 / 把长图变方的」 | 单张图片；可选 `--max-line`（≤20000） | 方形图片 | 运行前实时查询 | 已上线 |
 | `image_to_live` | 「图片变 LivePhoto / 静图微动 / 让照片动起来」 | 单张图片 | 微动视频 `.mp4`（产物是视频） | 运行前实时查询 | 已上线 |
+| `image_classic_template` | 「做封面 / 智能拼图 / 标题配图出封面图」 | **多张图片**（可传多个路径，文件顺序即拼装顺序）；**`--main-title <标题>` 必填**；可选 `--sub-title`、`--template-mode`、`--aspect`、`--quality`、`--output-pic-count`（服务端钳制 ≤20）、`--output-text-count`（≤20）、`--title-layout` | 封面/拼图成品（text/pic/render 三组、各组可空可多张） | 运行前实时查询 | 已上线 |
+| `image_vertical_stitch` | 「拼长图 / 多图竖拼 / 截图接成一张长图」 | **多张图片**（可传多个路径，顺序=自上而下拼接顺序） | 一张垂直拼接长图 | 运行前实时查询 | 已上线 |
 | `mad` | 「一键剪 MAD / 素材文件夹自动出卡点成片 / 自动选技法 / 给这堆素材出个 AE 工程」 | 一个素材文件夹（3~10 条视频）+ 可选 `--bgm 歌.mp3` | AE 母合成工程 `.jsx`（仅支持 AE） | 仅 `--bgm` 触发实时查价 | 已上线 |
 
 > 清单随 CLI 版本增补。**动手前先跑 `gtrk tool list --json` 拿最新清单**，别凭记忆——新工具、状态变化都在那里。
@@ -69,7 +73,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 5. **瞬时网络错误退避后只重试 1 次**：若 `gtrk tool list --json` 或工具命令因 `fetch failed`、`ECONNRESET`、`ETIMEDOUT`、`ENOTFOUND`、`socket hang up`、网络不可达或 HTTP `502/503/504` 失败，先等 **2 秒**，再原样执行同一命令 **1 次且仅 1 次**（总尝试次数最多 2 次）。第二次仍失败就停止，如实说明网络波动并给出最后错误，绝不循环重试。参数/文件校验错误、缺 Key、HTTP 4xx、云端业务错误码、明确的任务失败/取消均**不重试**。重试前先检查日志及输出目录：一旦已出现 `taskId` 或 `task.json`，说明任务可能已经提交，禁止重跑整条以免重复计费，转入下一条恢复语义。
 6. **产物落地与恢复**：产物落在 `outDir`（缺省 = 输入同目录下 `<输入名>-<工具名>/`，可 `--out <dir>` 覆盖）。提交成功即写 `task.json`（含 `taskId`）、完成即写 `result.json`。**分析型工具**（`video_segment` / `video_ai_segment` / `video_motion_cut`）产的是**结构化数据不是下载文件**：结果落 `result-output.json`（分镜/运镜结构），`result.json` 的 `resultFile` 字段指向它、`files` 为空且 `ok=true` 属正常，别当成「没出产物」。**若 `ok=false`**（任务完成但产物下载失败，如链接过期；或既无文件也无结构）：`result.json` 的 `errors` 有明细、`task.json` 保留——凭其中的 `taskId` 可稍后人工恢复取回，别急着重跑整条（重跑会重新计费）。
 7. **透传高级参数**：命令没为某个云端参数开 flag 时，用 `--param k=v`（可重复）或 `--params-json '<对象>'` 直接透传（如 `image_move` 想指定输出几何 `--param width=1080 --param height=1920`）。
-8. **单发单收、批量靠循环**：一次一个输入；用户要批处理就你逐个循环调，不是一条命令喂多文件。
+8. **单发单收、批量靠循环**：一次一份输入；用户要批处理就你逐个循环调。例外是多文件图片工具（`image_classic_template` / `image_vertical_stitch`）——它们的一份输入天然是一组图片（一次任务一次计费），传参顺序即拼装顺序，别把它当批处理。
 
 图片比例转换常用形态：`gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --json`。`--canvas-type` 只接受实际运行时契约 `normal`、`rectangle`、`square`；不要传旧文档中的 `fit`。省略画布参数时不替服务端写死默认值。
 

@@ -15,7 +15,7 @@ import { probeGeometry } from "./media";
 // ---------------------------------------------------------------- 类型
 
 export type ToolKind = "cloud" | "local";
-export type ToolInputKind = "image" | "video" | "audio" | "directory" | "none";
+export type ToolInputKind = "image" | "video" | "audio" | "images" | "directory" | "none";
 
 /** 工具专属 CLI 选项声明（族命令注册时统一挂 commander）。 */
 export interface ToolOption {
@@ -34,9 +34,11 @@ export interface ToolInputSpec {
 
 /** buildPayload / preprocess / mapOutputs 的执行上下文。 */
 export interface ToolContext {
-	/** 输入文件/目录绝对路径（input=none 时 undefined）。 */
+	/** 输入文件/目录绝对路径（input=none 时 undefined；images 多文件时为首个输入）。 */
 	inputAbs?: string;
-	/** 输入名去扩展（产物文件/目录命名用；input=none 时为工具名）。 */
+	/** images 多文件输入的全量绝对路径（传入顺序即拼装顺序；其余类别 undefined）。 */
+	inputAbsList?: string[];
+	/** 输入名去扩展（产物文件/目录命名用；input=none 时为工具名；images 取首个输入）。 */
 	baseName: string;
 	/** 显式 ffmpeg/ffprobe 目录（--ffmpeg-path）。 */
 	ffmpegPath?: string;
@@ -85,6 +87,11 @@ export interface ToolDescriptor {
 	preprocess?: (ctx: ToolContext) => Promise<string> | string;
 	/** 拼云端 payload；--param/--params-json 由 runner 在其结果上逐字段合并覆盖。 */
 	buildPayload?: (fileId: string, ctx: ToolContext) => Record<string, unknown>;
+	/**
+	 * images 多文件专用 payload 拼装（接收按传入顺序的 file_ids）。
+	 * 与 buildPayload 互斥：input.kind="images" ⇔ 声明本项且不声明 buildPayload（注册表校验）。
+	 */
+	buildPayloadMulti?: (fileIds: string[], ctx: ToolContext) => Record<string, unknown>;
 	/** 把 output_result 收敛为下载清单。 */
 	mapOutputs?: (out: OutputResult, ctx: ToolContext) => DownloadItem[];
 	/**
@@ -128,7 +135,7 @@ const PUBLIC_VIDEO_EXTS = [
 
 /** 输入类别的默认扩展名白名单（descriptor.input.exts 缺省时用）。 */
 export function defaultExtsFor(kind: ToolInputKind): string[] | undefined {
-	if (kind === "image") return IMAGE_EXTS;
+	if (kind === "image" || kind === "images") return IMAGE_EXTS;
 	if (kind === "video") return VIDEO_EXTS;
 	if (kind === "audio") return AUDIO_EXTS;
 	return undefined; // directory / none 不做扩展名校验
@@ -864,6 +871,92 @@ const videoMotionCut: ToolDescriptor = {
 	},
 };
 
+// ---------------------------------------------------------------- 分析型二批（add-tool-video-analysis-batch-2）
+
+/** 数值 flag 解析：显式给出时须为有限数值（语义边界交服务端），否则提交前人话报错；缺省 undefined。 */
+function parseNumFlag(v: unknown, flag: string): number | undefined {
+	if (v == null) return undefined;
+	const n = Number(v);
+	if (!Number.isFinite(n)) throw new Error(`${flag} 需要有限数值，拿到「${String(v)}」`);
+	return n;
+}
+
+/**
+ * video_speaker_detect —— 音视频说话人检测（重 GPU）。内部融合 ASR/人声/画面，产可见说话人 struct。
+ * --language 复用全族共享 flag（本工具可选、缺省交服务端默认；必填语义只属 video_ai_subtitle）。
+ * struct 原样透传（不做时基换算/字段重命名），时基以服务端输出为准。
+ */
+const videoSpeakerDetect: ToolDescriptor = {
+	name: "video_speaker_detect",
+	title: "音视频说话人检测",
+	description: "检测画面中谁在何时说话（融合语音转写与人脸/人身追踪），输出可见说话人结构化 JSON，不产文件。重 GPU 能力、按分钟计费较高，长片先想清楚。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_speaker_detect",
+	outputHint: "可见说话人结构（result-output.json，时基以服务端输出为准）",
+	enabled: true,
+	taskType: "video_speaker_detect",
+	options: [
+		{ flag: "--max-faces-per-frame <n>", desc: "单帧最多检测人脸数（未传则服务端默认）" },
+		{ flag: "--detect-body", desc: "同时检测人身（未传则服务端默认关闭）" },
+		{ flag: "--track-sample-fps <n>", desc: "追踪采样帧率（未传则服务端默认）" },
+	],
+	buildPayload(fileId, ctx) {
+		const o = ctx.opts;
+		const p: Record<string, unknown> = { file_id: fileId };
+		if (typeof o.language === "string" && o.language.trim()) p.language = o.language;
+		const maxFaces = parseNumFlag(o.maxFacesPerFrame, "--max-faces-per-frame");
+		if (maxFaces != null) p.max_faces_per_frame = maxFaces;
+		if (o.detectBody === true) p.detect_body = true;
+		const fps = parseNumFlag(o.trackSampleFps, "--track-sample-fps");
+		if (fps != null) p.track_sample_fps = fps;
+		return p;
+	},
+	mapResult(out) {
+		return out as Record<string, unknown>;
+	},
+};
+
+/**
+ * video_face_track —— 多脸追踪/身份聚类（重 GPU）。产稳定人物 ID + 时间段 + 轨迹 struct。
+ * 结构化 time_ranges 不设标量 flag，经 --params-json 透传（先例：ai_subtitle 的 content）。
+ */
+const videoFaceTrack: ToolDescriptor = {
+	name: "video_face_track",
+	title: "多脸追踪/身份聚类",
+	description: "追踪视频中的人脸并聚成稳定人物 ID（出场时间段与轨迹），输出结构化 JSON，不产文件；`time_ranges` 经 --params-json 透传。重 GPU 能力、按分钟计费较高。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_face_track",
+	outputHint: "人物 ID/时间段/轨迹结构（result-output.json，时基以服务端输出为准）",
+	enabled: true,
+	taskType: "video_face_track",
+	options: [
+		{ flag: "--sample-fps <n>", desc: "检测采样帧率（未传则服务端默认）" },
+		{ flag: "--max-faces <n>", desc: "最多聚类人物数（未传则服务端默认）" },
+		{ flag: "--min-face-ratio <n>", desc: "最小人脸占比阈值（未传则服务端默认）" },
+		{ flag: "--enable-body-match", desc: "启用人身匹配辅助聚类（未传则服务端默认关闭）" },
+		{ flag: "--similarity-threshold <n>", desc: "身份聚类相似度阈值（未传则服务端默认）" },
+	],
+	buildPayload(fileId, ctx) {
+		const o = ctx.opts;
+		const p: Record<string, unknown> = { file_id: fileId };
+		const sampleFps = parseNumFlag(o.sampleFps, "--sample-fps");
+		if (sampleFps != null) p.sample_fps = sampleFps;
+		const maxFaces = parseNumFlag(o.maxFaces, "--max-faces");
+		if (maxFaces != null) p.max_faces = maxFaces;
+		const minRatio = parseNumFlag(o.minFaceRatio, "--min-face-ratio");
+		if (minRatio != null) p.min_face_ratio = minRatio;
+		if (o.enableBodyMatch === true) p.enable_body_match = true;
+		const sim = parseNumFlag(o.similarityThreshold, "--similarity-threshold");
+		if (sim != null) p.similarity_threshold = sim;
+		return p;
+	},
+	mapResult(out) {
+		return out as Record<string, unknown>;
+	},
+};
+
 // ---------------------------------------------------------------- C1 漏网批（add-tool-c1-batch-2）
 
 /**
@@ -1055,7 +1148,7 @@ const videoAiSubtitle: ToolDescriptor = {
 	taskType: "video_ai_subtitle",
 	pollTimeoutMs: 4 * 60 * 60 * 1000, // 内部含去字幕+ASR+LLM+烧录，长视频耗时可观
 	options: [
-		{ flag: "--language <code>", desc: "源语种代码（必填；具体取值由服务端支持列表校验）" },
+		{ flag: "--language <code>", desc: "源语种代码（video_ai_subtitle 必填、其余工具可选；具体取值由服务端支持列表校验）" },
 		{ flag: "--translate-language <code>", desc: "译文目标语种（未传则单语）" },
 		{ flag: "--need-render", desc: "把字幕烧录进视频（仅视频输入有效）" },
 		{ flag: "--need-pure", desc: "先去除原视频中的字幕" },
@@ -1096,6 +1189,99 @@ const videoAiSubtitle: ToolDescriptor = {
 	},
 	mapResult(out) {
 		return { summary: typeof out.summary === "string" ? out.summary : "", asr: out.asr ?? null };
+	},
+};
+
+// ---------------------------------------------------------------- 多文件图片工具（add-tool-multifile-images）
+
+/** 数值 flag 解析：显式给出时须为有限非负整数，否则提交前人话报错；缺省返回 undefined。 */
+function parseCountFlag(v: unknown, flag: string): number | undefined {
+	if (v == null) return undefined;
+	const n = Number(v);
+	if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+		throw new Error(`${flag} 需要有限非负整数，拿到「${String(v)}」`);
+	}
+	return n;
+}
+
+/**
+ * image_classic_template —— 智能拼图/封面（images 多文件首个成员）。
+ * --main-title 必填（服务端 required）；数量类参数服务端钳制 ≤20（CLI 照传、如实转述不复刻）。
+ * 产物三组（text/pic/render）各自可空，按组命名收敛。
+ */
+const imageClassicTemplate: ToolDescriptor = {
+	name: "image_classic_template",
+	title: "智能拼图/封面",
+	description: "标题 + 多张图 → 成品封面/拼图；--main-title 必填，文件顺序即拼装顺序。",
+	kind: "cloud",
+	input: { kind: "images" },
+	priceKey: "image_classic_template",
+	outputHint: "封面/拼图成品（text/pic/render 三组、可多张）",
+	enabled: true,
+	taskType: "image_classic_template",
+	options: [
+		{ flag: "--main-title <text>", desc: "主标题（image_classic_template 必填）" },
+		{ flag: "--sub-title <text>", desc: "副标题（未传则服务端默认）" },
+		{ flag: "--template-mode <mode>", desc: "拼图模式（映射服务端 mode；未传则服务端默认）" },
+		{ flag: "--aspect <ratio>", desc: "画幅比例（如 3:4；未传则服务端默认）" },
+		{ flag: "--quality <q>", desc: "输出质量（如 1080p；未传则服务端默认）" },
+		{ flag: "--output-pic-count <n>", desc: "图组产出数量（服务端钳制 ≤20；未传则服务端默认）" },
+		{ flag: "--output-text-count <n>", desc: "文字组产出数量（服务端钳制 ≤20；未传则服务端默认）" },
+		{ flag: "--title-layout <layout>", desc: "标题版式（映射服务端 output_title_layout；未传则服务端默认）" },
+	],
+	buildPayloadMulti(fileIds, ctx) {
+		const o = ctx.opts;
+		const mainTitle = typeof o.mainTitle === "string" && o.mainTitle.trim() ? o.mainTitle : undefined;
+		if (!mainTitle) throw new Error("image_classic_template 需要 --main-title <text>（主标题必填）");
+		const p: Record<string, unknown> = { file_ids: fileIds, main_title: mainTitle };
+		if (typeof o.subTitle === "string") p.sub_title = o.subTitle;
+		if (typeof o.templateMode === "string") p.mode = o.templateMode;
+		if (typeof o.aspect === "string") p.aspect = o.aspect;
+		if (typeof o.quality === "string") p.quality = o.quality;
+		const pic = parseCountFlag(o.outputPicCount, "--output-pic-count");
+		if (pic != null) p.output_pic_count = pic;
+		const text = parseCountFlag(o.outputTextCount, "--output-text-count");
+		if (text != null) p.output_text_count = text;
+		if (typeof o.titleLayout === "string") p.output_title_layout = o.titleLayout;
+		return p;
+	},
+	mapOutputs(out, ctx) {
+		const groups: Array<[key: string, tag: string]> = [
+			["text_file_download_url_list", "text"],
+			["pic_file_download_url_list", "pic"],
+			["render_file_download_url_list", "render"],
+		];
+		const items: DownloadItem[] = [];
+		for (const [key, tag] of groups) {
+			const arr = out[key];
+			if (!Array.isArray(arr)) continue;
+			arr.forEach((u, i) => {
+				if (typeof u === "string" && u.trim()) {
+					items.push({ url: u, filename: `${ctx.baseName}-${tag}-${i + 1}${extFromUrl(u, ".jpg")}` });
+				}
+			});
+		}
+		return items;
+	},
+};
+
+/** image_vertical_stitch —— 拼长图：多图按传入顺序竖拼，payload 仅 file_ids，单产物。 */
+const imageVerticalStitch: ToolDescriptor = {
+	name: "image_vertical_stitch",
+	title: "拼长图",
+	description: "多张图片按传入顺序竖向拼接成一张长图。",
+	kind: "cloud",
+	input: { kind: "images" },
+	priceKey: "image_vertical_stitch",
+	outputHint: "垂直拼接长图",
+	enabled: true,
+	taskType: "image_vertical_stitch",
+	buildPayloadMulti(fileIds) {
+		return { file_ids: fileIds };
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-stitch${extFromUrl(url, ".jpg")}` }] : [];
 	},
 };
 
@@ -1151,6 +1337,8 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	videoSegment,
 	videoAiSegment,
 	videoMotionCut,
+	videoSpeakerDetect,
+	videoFaceTrack,
 	audioSpeakerSplit,
 	audioStretch,
 	pianoAudioToMidi,
@@ -1158,6 +1346,8 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	imageToSquare,
 	imageToLive,
 	videoAiSubtitle,
+	imageClassicTemplate,
+	imageVerticalStitch,
 	mad,
 ];
 
@@ -1183,6 +1373,15 @@ export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): vo
 		// cloud 型须至少能落一种产物：文件下载（mapOutputs）或结构化结果（mapResult），二选一即可。
 		if (d.kind === "cloud" && !d.mapOutputs && !d.mapResult) {
 			throw new Error(`cloud 型工具须至少声明 mapOutputs 或 mapResult 之一：「${d.name}」`);
+		}
+		// images 多文件类别与 payload 钩子互斥（add-tool-multifile-images）：
+		// images ⇔ buildPayloadMulti 且无 buildPayload；images 不支持 preprocess；其余类别禁声明 multi。
+		if (d.input.kind === "images") {
+			if (!d.buildPayloadMulti) throw new Error(`images 工具缺 buildPayloadMulti：「${d.name}」`);
+			if (d.buildPayload) throw new Error(`images 工具不得声明 buildPayload（与 buildPayloadMulti 互斥）：「${d.name}」`);
+			if (d.preprocess) throw new Error(`images 工具不支持 preprocess：「${d.name}」`);
+		} else if (d.buildPayloadMulti) {
+			throw new Error(`非 images 工具不得声明 buildPayloadMulti：「${d.name}」`);
 		}
 	}
 }

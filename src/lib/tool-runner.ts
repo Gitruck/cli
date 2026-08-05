@@ -20,6 +20,7 @@ import type { CloudConfig } from "./config";
 import { submitTask, getTaskResult, type OralCutOutput } from "./cloud";
 import { uploadCached, invalidateUpload } from "./upload-cache";
 import { uploadAndSubmitTask } from "./upload-submit";
+import { DEFAULT_VISIBILITY_BACKOFF_MS } from "./upload-submit";
 import { probeDuration } from "./media";
 import { resolveToolPricing, type PriceResolver } from "./tool-pricing";
 import {
@@ -41,6 +42,8 @@ export interface RunToolResult {
 	taskType?: string;
 	taskId?: string;
 	fileId?: string;
+	/** images 多文件输入时的全量 file_id（与输入同序；此时 fileId=首个）。 */
+	fileIds?: string[];
 	outDir: string;
 	/** 已落地产物本地绝对路径。 */
 	files: string[];
@@ -128,6 +131,21 @@ export function validateToolInput(descriptor: ToolDescriptor, inputAbs: string |
 			throw new Error(
 				`${descriptor.name} 需要 ${spec.kind} 输入，但拿到「${e || "无扩展名"}」（支持：${exts.join(" ")}）`,
 			);
+		}
+	}
+}
+
+/** images 多文件输入校验：≥1、逐个存在性 + 图片扩展名白名单；任一非法整单拒绝（零上传）。 */
+export function validateToolInputs(descriptor: ToolDescriptor, inputAbsList: string[]): void {
+	if (!inputAbsList.length) throw new Error(`${descriptor.name} 需要至少一个输入文件（可传多个，顺序即拼装顺序）`);
+	const exts = descriptor.input.exts ?? defaultExtsFor(descriptor.input.kind);
+	for (const p of inputAbsList) {
+		if (!existsSync(p)) throw new Error(`输入不存在：${p}`);
+		if (exts && exts.length) {
+			const e = extname(p).toLowerCase();
+			if (!exts.includes(e)) {
+				throw new Error(`${descriptor.name} 需要图片输入，但「${basename(p)}」是「${e || "无扩展名"}」（支持：${exts.join(" ")}）`);
+			}
 		}
 	}
 }
@@ -222,6 +240,62 @@ function isCloudErrorCode(e: unknown): number | undefined {
 	return typeof c === "number" ? c : undefined;
 }
 
+// ---------------------------------------------------------------- images 多文件上传 + 提交（add-tool-multifile-images）
+
+/** 与 upload-submit 同义的服务端错误码：素材暂不可见/已失效。 */
+const MATERIAL_NOT_FOUND = 6004;
+
+/** 提交并对 6004 按可见性退避表重试（fresh=false 时零退避、首错即抛，对齐单文件语义）。 */
+async function submitWithVisibilityBackoff(
+	trySubmit: () => Promise<string>,
+	fresh: boolean,
+	sleep: (ms: number) => Promise<void>,
+): Promise<string> {
+	const backoff = fresh ? DEFAULT_VISIBILITY_BACKOFF_MS : [];
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return await trySubmit();
+		} catch (e) {
+			if (isCloudErrorCode(e) !== MATERIAL_NOT_FOUND || attempt >= backoff.length) throw e;
+			await sleep(backoff[attempt]!);
+		}
+	}
+}
+
+/**
+ * 多文件版上传+提交编排（等效拆装 uploadAndSubmitTask 语义，不降级恢复保证）：
+ * 逐文件缓存上传（顺序=传入顺序）→ 一次提交；6004 时把全部缓存条目失效并强制重传一次，
+ * 再按新 file_id 可见性退避重提。含任一 fresh 上传的首轮提交也走退避（新 ID 延迟可见）。
+ */
+async function uploadManyAndSubmit(
+	deps: CloudToolDeps,
+	paths: string[],
+	taskType: string,
+	buildPayload: (fileIds: string[]) => unknown,
+	force: boolean,
+): Promise<{ taskId: string; fileIds: string[]; cached: boolean }> {
+	const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+	const uploads: Array<{ fileId: string; cached: boolean }> = [];
+	for (const p of paths) uploads.push(await deps.uploadCached(deps.cfg, p, { force }));
+	const trySubmit = () => deps.submitTask(deps.cfg, taskType, buildPayload(uploads.map((u) => u.fileId)));
+	const anyFresh = uploads.some((u) => !u.cached);
+	try {
+		const taskId = await submitWithVisibilityBackoff(trySubmit, anyFresh, sleep);
+		return { taskId, fileIds: uploads.map((u) => u.fileId), cached: !anyFresh };
+	} catch (e) {
+		if (isCloudErrorCode(e) !== MATERIAL_NOT_FOUND || !uploads.some((u) => u.cached)) throw e;
+		// 缓存 file_id 可能已失效：全部缓存条目失效并强制重传一次，再按新 ID 退避重提
+		for (let i = 0; i < paths.length; i++) {
+			if (uploads[i]!.cached) {
+				await deps.invalidateUpload(paths[i]!);
+				uploads[i] = await deps.uploadCached(deps.cfg, paths[i]!, { force: true });
+			}
+		}
+		const taskId = await submitWithVisibilityBackoff(trySubmit, true, sleep);
+		return { taskId, fileIds: uploads.map((u) => u.fileId), cached: false };
+	}
+}
+
 // ---------------------------------------------------------------- 面包屑目录名
 
 /** 本地时间戳 YYMMDD-HHMMSS（input=none 的工具产物目录用）。 */
@@ -273,21 +347,30 @@ interface CommonOpts {
  */
 export async function runCloudTool(
 	descriptor: ToolDescriptor,
-	inputArg: string | undefined,
+	inputArg: string | string[] | undefined,
 	opts: CommonOpts,
 	deps: CloudToolDeps,
 ): Promise<RunToolResult> {
-	const inputAbs = inputArg ? resolve(inputArg) : undefined;
+	const isImages = descriptor.input.kind === "images";
+	const inputList = isImages
+		? (Array.isArray(inputArg) ? inputArg : inputArg != null ? [inputArg] : []).map((p) => resolve(p))
+		: undefined;
+	const inputAbs = isImages ? inputList![0] : typeof inputArg === "string" ? resolve(inputArg) : undefined;
 	const baseName = inputAbs ? basename(inputAbs, extname(inputAbs)) : descriptor.name;
 
 	// ① 输入校验（扩展名/存在性）+ 视频硬上限前置（上传前拒绝，零上传零提交）
-	validateToolInput(descriptor, inputAbs);
-	const probe = deps.probeDurationSec ?? probeDuration;
-	guardDuration(descriptor, inputAbs, probe, opts.ffmpegPath);
+	if (isImages) {
+		validateToolInputs(descriptor, inputList!);
+	} else {
+		validateToolInput(descriptor, inputAbs);
+		const probe = deps.probeDurationSec ?? probeDuration;
+		guardDuration(descriptor, inputAbs, probe, opts.ffmpegPath);
+	}
 
 	const extraParams = parseExtraParams(opts.param ?? [], opts.paramsJson);
 	const ctx: ToolContext = {
 		inputAbs,
+		...(inputList ? { inputAbsList: inputList } : {}),
 		baseName,
 		ffmpegPath: opts.ffmpegPath,
 		opts,
@@ -296,9 +379,12 @@ export async function runCloudTool(
 	};
 	const outDir = resolveOutDir(descriptor, inputAbs, opts.out);
 
-	// ② 可选本地预处理（缺省=原文件直传）
+	// ①b images 必填参数前置干跑：payload 纯函数跑一遍占位 id，缺参（如 --main-title）在上传前即报错
+	if (isImages) descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
+
+	// ② 可选本地预处理（缺省=原文件直传；images 不支持 preprocess，注册表已拒）
 	let uploadPath = inputAbs;
-	if (descriptor.preprocess) uploadPath = await descriptor.preprocess(ctx);
+	if (!isImages && descriptor.preprocess) uploadPath = await descriptor.preprocess(ctx);
 	if (!uploadPath) throw new Error(`${descriptor.name} 缺上传物（input=none 的 cloud 型工具需 preprocess 产上传物）`);
 
 	// ③ 提交前匿名查询实时价格并提示 → 上传（失败仅提示 unavailable，不阻断能力）
@@ -310,38 +396,67 @@ export async function runCloudTool(
 	}
 	emitBilling(billingHint);
 
-	const buildPayload = (fid: string): Record<string, unknown> => {
-		const p = descriptor.buildPayload ? descriptor.buildPayload(fid, ctx) : { file_id: fid };
-		// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
-		mergeParams(p, extraParams);
-		return p;
-	};
-
 	// ④ 上传并提交；新 file_id 延迟可见短退避，缓存 file_id 失效则强制重传一次
 	const taskType = descriptor.taskType!;
-	const submitted = await uploadAndSubmitTask(
-		deps.cfg,
-		uploadPath,
-		taskType,
-		buildPayload,
-		{ force: opts.reupload },
-		{
-			uploadCached: deps.uploadCached,
-			invalidateUpload: deps.invalidateUpload,
-			submitTask: deps.submitTask,
-			sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
-		},
-	);
-	const { taskId } = submitted;
-	const up = { fileId: submitted.fileId, cached: submitted.cached };
+	let taskId: string;
+	let fileId: string;
+	let fileIds: string[] | undefined;
+	if (isImages) {
+		const buildMulti = (fids: string[]): unknown => {
+			const p = descriptor.buildPayloadMulti!(fids, ctx);
+			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
+			mergeParams(p, extraParams);
+			return p;
+		};
+		const submitted = await uploadManyAndSubmit(deps, inputList!, taskType, buildMulti, !!opts.reupload);
+		taskId = submitted.taskId;
+		fileIds = submitted.fileIds;
+		fileId = submitted.fileIds[0]!;
+	} else {
+		const buildPayload = (fid: string): Record<string, unknown> => {
+			const p = descriptor.buildPayload ? descriptor.buildPayload(fid, ctx) : { file_id: fid };
+			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
+			mergeParams(p, extraParams);
+			return p;
+		};
+		const submitted = await uploadAndSubmitTask(
+			deps.cfg,
+			uploadPath,
+			taskType,
+			buildPayload,
+			{ force: opts.reupload },
+			{
+				uploadCached: deps.uploadCached,
+				invalidateUpload: deps.invalidateUpload,
+				submitTask: deps.submitTask,
+				sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+			},
+		);
+		taskId = submitted.taskId;
+		fileId = submitted.fileId;
+	}
 
 	// ⑤ 面包屑：submit 一成功就落盘 task.json（目录延后到此刻才建），后续任何崩溃都能据 task_id 恢复
+	// images 多文件时 source/fingerprint 为与输入同序的数组；单输入维持字符串形态逐字节不变。
 	await mkdir(outDir, { recursive: true });
-	const fingerprint = inputAbs ? await safeFingerprint(inputAbs) : undefined;
+	const fingerprint = inputList
+		? await Promise.all(inputList.map((p) => safeFingerprint(p)))
+		: inputAbs
+			? await safeFingerprint(inputAbs)
+			: undefined;
 	await writeFile(
 		join(outDir, "task.json"),
 		JSON.stringify(
-			{ tool: descriptor.name, taskType, taskId, fileId: up.fileId, source: inputAbs, fingerprint, createdAt: new Date().toISOString() },
+			{
+				tool: descriptor.name,
+				taskType,
+				taskId,
+				fileId,
+				...(fileIds ? { fileIds } : {}),
+				source: inputList ?? inputAbs,
+				fingerprint,
+				createdAt: new Date().toISOString(),
+			},
 			null,
 			2,
 		),
@@ -391,7 +506,8 @@ export async function runCloudTool(
 		tool: descriptor.name,
 		taskType,
 		taskId,
-		fileId: up.fileId,
+		fileId,
+		...(fileIds ? { fileIds } : {}),
 		outDir,
 		files,
 		...(resultFile ? { resultFile } : {}),
