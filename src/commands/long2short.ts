@@ -224,12 +224,15 @@ async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void>
 	if (manifest.length) {
 		log.step(`⑤ 拉回分屏素材（${manifest.length} 条 → 毛片旁 split_screen/）…`);
 		for (const [i, item] of manifest.entries()) {
-			const dest = item.expected_path;
+			let dest = item.expected_path;
 			const url = item.download_url;
 			if (!dest || !url) {
 				errors[`split_manifest[${i}]`] = "缺 expected_path/download_url，已跳过";
 				continue;
 			}
+			// 防御：老服务端曾对 Windows 路径产相对 expected_path（2026-08-06 E2E 实锤，infra 已修）——
+			// 相对路径按契约语义落回毛片旁，不落 CWD
+			if (!/^(?:[A-Za-z]:[\\/]|[\\/])/.test(dest)) dest = join(dirname(inputAbs), dest);
 			try {
 				await mkdir(dirname(dest), { recursive: true });
 				await download(url, dest);
