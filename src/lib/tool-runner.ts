@@ -24,6 +24,7 @@ import { DEFAULT_VISIBILITY_BACKOFF_MS } from "./upload-submit";
 import { probeDuration } from "./media";
 import { resolveToolPricing, type PriceResolver } from "./tool-pricing";
 import {
+	MULTI_INPUT_KINDS,
 	type ToolDescriptor,
 	type ToolContext,
 	type DownloadItem,
@@ -42,7 +43,7 @@ export interface RunToolResult {
 	taskType?: string;
 	taskId?: string;
 	fileId?: string;
-	/** images 多文件输入时的全量 file_id（与输入同序；此时 fileId=首个）。 */
+	/** 多文件类别（images/videos）输入时的全量 file_id（与输入同序；此时 fileId=首个）。 */
 	fileIds?: string[];
 	outDir: string;
 	/** 已落地产物本地绝对路径。 */
@@ -135,7 +136,7 @@ export function validateToolInput(descriptor: ToolDescriptor, inputAbs: string |
 	}
 }
 
-/** images 多文件输入校验：≥1、逐个存在性 + 图片扩展名白名单；任一非法整单拒绝（零上传）。 */
+/** 多文件输入校验：≥1、逐个存在性 + 对应类别扩展名白名单；任一非法整单拒绝（零上传）。 */
 export function validateToolInputs(descriptor: ToolDescriptor, inputAbsList: string[]): void {
 	if (!inputAbsList.length) throw new Error(`${descriptor.name} 需要至少一个输入文件（可传多个，顺序即拼装顺序）`);
 	const exts = descriptor.input.exts ?? defaultExtsFor(descriptor.input.kind);
@@ -144,7 +145,8 @@ export function validateToolInputs(descriptor: ToolDescriptor, inputAbsList: str
 		if (exts && exts.length) {
 			const e = extname(p).toLowerCase();
 			if (!exts.includes(e)) {
-				throw new Error(`${descriptor.name} 需要图片输入，但「${basename(p)}」是「${e || "无扩展名"}」（支持：${exts.join(" ")}）`);
+				const noun = descriptor.input.kind === "videos" ? "视频" : "图片";
+				throw new Error(`${descriptor.name} 需要${noun}输入，但「${basename(p)}」是「${e || "无扩展名"}」（支持：${exts.join(" ")}）`);
 			}
 		}
 	}
@@ -240,7 +242,7 @@ function isCloudErrorCode(e: unknown): number | undefined {
 	return typeof c === "number" ? c : undefined;
 }
 
-// ---------------------------------------------------------------- images 多文件上传 + 提交（add-tool-multifile-images）
+// ---------------------------------------------------------------- 多文件上传 + 提交（add-tool-multifile-images / add-tool-video-split-screen）
 
 /** 与 upload-submit 同义的服务端错误码：素材暂不可见/已失效。 */
 const MATERIAL_NOT_FOUND = 6004;
@@ -351,15 +353,15 @@ export async function runCloudTool(
 	opts: CommonOpts,
 	deps: CloudToolDeps,
 ): Promise<RunToolResult> {
-	const isImages = descriptor.input.kind === "images";
-	const inputList = isImages
+	const isMulti = MULTI_INPUT_KINDS.has(descriptor.input.kind);
+	const inputList = isMulti
 		? (Array.isArray(inputArg) ? inputArg : inputArg != null ? [inputArg] : []).map((p) => resolve(p))
 		: undefined;
-	const inputAbs = isImages ? inputList![0] : typeof inputArg === "string" ? resolve(inputArg) : undefined;
+	const inputAbs = isMulti ? inputList![0] : typeof inputArg === "string" ? resolve(inputArg) : undefined;
 	const baseName = inputAbs ? basename(inputAbs, extname(inputAbs)) : descriptor.name;
 
 	// ① 输入校验（扩展名/存在性）+ 视频硬上限前置（上传前拒绝，零上传零提交）
-	if (isImages) {
+	if (isMulti) {
 		validateToolInputs(descriptor, inputList!);
 	} else {
 		validateToolInput(descriptor, inputAbs);
@@ -379,12 +381,12 @@ export async function runCloudTool(
 	};
 	const outDir = resolveOutDir(descriptor, inputAbs, opts.out);
 
-	// ①b images 必填参数前置干跑：payload 纯函数跑一遍占位 id，缺参（如 --main-title）在上传前即报错
-	if (isImages) descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
+	// ①b 多文件必填参数前置干跑：payload 纯函数跑一遍占位 id，缺参（如 --main-title）在上传前即报错
+	if (isMulti) descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
 
-	// ② 可选本地预处理（缺省=原文件直传；images 不支持 preprocess，注册表已拒）
+	// ② 可选本地预处理（缺省=原文件直传；多文件类别不支持 preprocess，注册表已拒）
 	let uploadPath = inputAbs;
-	if (!isImages && descriptor.preprocess) uploadPath = await descriptor.preprocess(ctx);
+	if (!isMulti && descriptor.preprocess) uploadPath = await descriptor.preprocess(ctx);
 	if (!uploadPath) throw new Error(`${descriptor.name} 缺上传物（input=none 的 cloud 型工具需 preprocess 产上传物）`);
 
 	// ③ 提交前匿名查询实时价格并提示 → 上传（失败仅提示 unavailable，不阻断能力）
@@ -401,7 +403,7 @@ export async function runCloudTool(
 	let taskId: string;
 	let fileId: string;
 	let fileIds: string[] | undefined;
-	if (isImages) {
+	if (isMulti) {
 		const buildMulti = (fids: string[]): unknown => {
 			const p = descriptor.buildPayloadMulti!(fids, ctx);
 			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
@@ -437,7 +439,7 @@ export async function runCloudTool(
 	}
 
 	// ⑤ 面包屑：submit 一成功就落盘 task.json（目录延后到此刻才建），后续任何崩溃都能据 task_id 恢复
-	// images 多文件时 source/fingerprint 为与输入同序的数组；单输入维持字符串形态逐字节不变。
+	// 多文件类别输入时 source/fingerprint 为与输入同序的数组；单输入维持字符串形态逐字节不变。
 	await mkdir(outDir, { recursive: true });
 	const fingerprint = inputList
 		? await Promise.all(inputList.map((p) => safeFingerprint(p)))

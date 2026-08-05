@@ -16,6 +16,7 @@ import { probeDuration } from "../lib/media";
 import { log, routeLogsToStderr } from "../lib/log";
 import {
 	TOOL_REGISTRY,
+	MULTI_INPUT_KINDS,
 	findTool,
 	validateRegistry,
 	type ToolDescriptor,
@@ -97,8 +98,8 @@ export async function runToolCommand(
 		const names = registry.map((d) => d.name).join(", ");
 		throw new Error(`未知工具「${name}」。可用工具：${names || "（空）"}（用 gtrk tool list 查看详情）`);
 	}
-	// images 多文件工具消费全部剩余 positional（顺序即拼装顺序）；其余类别维持单输入
-	const inputArg = descriptor.input.kind === "images" ? words.slice(1) : words[1];
+	// 多文件类别（images/videos）消费全部剩余 positional（顺序即拼装顺序）；其余类别维持单输入
+	const inputArg = MULTI_INPUT_KINDS.has(descriptor.input.kind) ? words.slice(1) : words[1];
 	return runTool(descriptor, inputArg, opts, deps);
 }
 
