@@ -15,7 +15,10 @@ import { probeGeometry } from "./media";
 // ---------------------------------------------------------------- 类型
 
 export type ToolKind = "cloud" | "local";
-export type ToolInputKind = "image" | "video" | "audio" | "images" | "directory" | "none";
+export type ToolInputKind = "image" | "video" | "audio" | "images" | "videos" | "directory" | "none";
+
+/** 多文件扁平输入类别（add-tool-multifile-images 建 images、add-tool-video-split-screen 推广 videos）。 */
+export const MULTI_INPUT_KINDS: ReadonlySet<ToolInputKind> = new Set(["images", "videos"]);
 
 /** 工具专属 CLI 选项声明（族命令注册时统一挂 commander）。 */
 export interface ToolOption {
@@ -136,7 +139,7 @@ const PUBLIC_VIDEO_EXTS = [
 /** 输入类别的默认扩展名白名单（descriptor.input.exts 缺省时用）。 */
 export function defaultExtsFor(kind: ToolInputKind): string[] | undefined {
 	if (kind === "image" || kind === "images") return IMAGE_EXTS;
-	if (kind === "video") return VIDEO_EXTS;
+	if (kind === "video" || kind === "videos") return VIDEO_EXTS;
 	if (kind === "audio") return AUDIO_EXTS;
 	return undefined; // directory / none 不做扩展名校验
 }
@@ -1288,6 +1291,96 @@ const imageVerticalStitch: ToolDescriptor = {
 };
 
 /**
+ * video_split_screen —— 智能分屏（videos 多文件首个成员，add-tool-video-split-screen）。
+ * 简单档：positional 2–16 个视频每文件一条整段 clip；精确档：--clips-json 条目按 0 起索引引用
+ * positional 输入（{input, begin_time_ms?, end_time_ms?, crop?}，毫秒时基/归一化 crop 原样透传，
+ * 同文件可多窗口）。枚举/区间/资源闸以服务端校验为真相（参数非法不计费）；成片时长对齐最短段。
+ */
+const videoSplitScreen: ToolDescriptor = {
+	name: "video_split_screen",
+	title: "智能分屏",
+	description:
+		"把 2–16 段视频合成一条分屏成片（reaction/对比/多画面同框）；--clips-json 可按 0 起索引精确指定每段毫秒区间与裁剪框，成片时长对齐最短段。",
+	kind: "cloud",
+	input: { kind: "videos", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_split_screen",
+	outputHint: "分屏成片视频",
+	enabled: true,
+	taskType: "video_split_screen",
+	options: [
+		{
+			flag: "--clips-json <json>",
+			desc: "结构化条目数组：{input:0 起 positional 序号, begin_time_ms?, end_time_ms?, crop?{x,y,width,height 归一化}}；缺省=每个输入整段参与",
+		},
+		{ flag: "--layout-mode <m>", desc: "布局模式（auto/template；未传则服务端默认 auto）" },
+		{ flag: "--layout-id <n>", desc: "template 模式的布局模板号（合法性由服务端校验）" },
+		{ flag: "--output-ratio <r>", desc: "成片画幅（9:16/16:9/1:1；未传则服务端默认）" },
+		{ flag: "--fit-mode <m>", desc: "画面贴合方式（cover/contain；未传则服务端默认）" },
+		{ flag: "--audio-mode <m>", desc: "音频方式（first/mix/mute；未传则服务端默认）" },
+		{ flag: "--gap-ratio <n>", desc: "分屏缝隙比例（0–0.05；未传则服务端默认）" },
+		{ flag: "--background-color <c>", desc: "缝隙底色 #RRGGBB（未传则服务端默认）" },
+	],
+	buildPayloadMulti(fileIds, ctx) {
+		const o = ctx.opts;
+		let clips: Record<string, unknown>[];
+		const clipsJson = o.clipsJson;
+		if (typeof clipsJson === "string" && clipsJson.trim()) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(clipsJson);
+			} catch {
+				throw new Error(`--clips-json 不是合法 JSON：${clipsJson}`);
+			}
+			if (!Array.isArray(parsed)) throw new Error("--clips-json 必须是一个 JSON 数组");
+			if (parsed.length < 2 || parsed.length > 16) {
+				throw new Error(`--clips-json 需要 2–16 个条目，拿到 ${parsed.length}`);
+			}
+			clips = parsed.map((raw, i) => {
+				if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+					throw new Error(`--clips-json 条目[${i}] 必须是对象`);
+				}
+				const { input, ...rest } = raw as Record<string, unknown>;
+				if (typeof input !== "number" || !Number.isInteger(input) || input < 0 || input >= fileIds.length) {
+					throw new Error(
+						`--clips-json 条目[${i}].input 需要 0 起整数且 < 输入文件数（${fileIds.length}），拿到「${String(input)}」`,
+					);
+				}
+				return { file_id: fileIds[input], ...rest };
+			});
+		} else {
+			if (fileIds.length < 2 || fileIds.length > 16) {
+				throw new Error(`video_split_screen 需要 2–16 个输入视频，拿到 ${fileIds.length}`);
+			}
+			clips = fileIds.map((id) => ({ file_id: id }));
+		}
+		const p: Record<string, unknown> = { clips };
+		if (typeof o.layoutMode === "string") p.layout_mode = o.layoutMode;
+		const layoutId = parseNumFlag(o.layoutId, "--layout-id");
+		if (layoutId != null) {
+			if (!Number.isInteger(layoutId)) throw new Error(`--layout-id 需要整数，拿到「${String(o.layoutId)}」`);
+			p.layout_id = layoutId;
+		}
+		const seed = parseNumFlag(o.seed, "--seed");
+		if (seed != null) {
+			if (!Number.isInteger(seed)) throw new Error(`--seed 需要整数，拿到「${String(o.seed)}」`);
+			p.random_seed = seed;
+		}
+		if (typeof o.outputRatio === "string") p.output_ratio = o.outputRatio;
+		if (typeof o.quality === "string") p.quality = o.quality;
+		if (typeof o.fitMode === "string") p.fit_mode = o.fitMode;
+		if (typeof o.audioMode === "string") p.audio_mode = o.audioMode;
+		const gap = parseNumFlag(o.gapRatio, "--gap-ratio");
+		if (gap != null) p.gap_ratio = gap;
+		if (typeof o.backgroundColor === "string") p.background_color = o.backgroundColor;
+		return p;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		return url ? [{ url, filename: `${ctx.baseName}-splitscreen${extFromUrl(url, ".mp4")}` }] : [];
+	},
+};
+
+/**
  * mad —— 一键剪 MAD（local 型「纯本地工具、可选云端加料」形态首个成员，add-tool-mad）。
  * 素材文件夹（+可选 BGM）→ 自动选技法 → 生成 AE 母合成成片工程 .jsx。
  * kind:local → tool.ts 分派到 mad 自己的 handler（runMad）；无 Key 可跑、仅 --bgm 卡点计费。
@@ -1308,7 +1401,7 @@ const mad: ToolDescriptor = {
 	options: [
 		{ flag: "--bgm <音频文件>", desc: "可选 BGM，卡点到 downbeat（需 API Key，计费一次；无 Key 则 BGM 仍入轨、固定节奏）" },
 		{ flag: "--duration <秒>", desc: "成片目标时长（默认 20，文案口径 15~30）" },
-		{ flag: "--seed <n>", desc: "选窗随机种子（同素材同种子同数据版本 → 可复现同序列）" },
+		{ flag: "--seed <n>", desc: "随机种子（可复现；各工具语义见各自说明）" },
 		{ flag: "--refresh", desc: "强制忽略本地缓存、重拉当前 manifest 版本数据" },
 	],
 };
@@ -1350,6 +1443,7 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	videoAiSubtitle,
 	imageClassicTemplate,
 	imageVerticalStitch,
+	videoSplitScreen,
 	mad,
 ];
 
@@ -1376,14 +1470,15 @@ export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): vo
 		if (d.kind === "cloud" && !d.mapOutputs && !d.mapResult) {
 			throw new Error(`cloud 型工具须至少声明 mapOutputs 或 mapResult 之一：「${d.name}」`);
 		}
-		// images 多文件类别与 payload 钩子互斥（add-tool-multifile-images）：
-		// images ⇔ buildPayloadMulti 且无 buildPayload；images 不支持 preprocess；其余类别禁声明 multi。
-		if (d.input.kind === "images") {
-			if (!d.buildPayloadMulti) throw new Error(`images 工具缺 buildPayloadMulti：「${d.name}」`);
-			if (d.buildPayload) throw new Error(`images 工具不得声明 buildPayload（与 buildPayloadMulti 互斥）：「${d.name}」`);
-			if (d.preprocess) throw new Error(`images 工具不支持 preprocess：「${d.name}」`);
+		// 多文件类别（images/videos）与 payload 钩子互斥（add-tool-multifile-images / add-tool-video-split-screen）：
+		// 多文件 ⇔ buildPayloadMulti 且无 buildPayload；不支持 preprocess 与 maxDurationSec（防静默失效）；其余类别禁声明 multi。
+		if (MULTI_INPUT_KINDS.has(d.input.kind)) {
+			if (!d.buildPayloadMulti) throw new Error(`多文件工具缺 buildPayloadMulti：「${d.name}」`);
+			if (d.buildPayload) throw new Error(`多文件工具不得声明 buildPayload（与 buildPayloadMulti 互斥）：「${d.name}」`);
+			if (d.preprocess) throw new Error(`多文件工具不支持 preprocess：「${d.name}」`);
+			if (d.input.maxDurationSec != null) throw new Error(`多文件工具不支持 maxDurationSec：「${d.name}」`);
 		} else if (d.buildPayloadMulti) {
-			throw new Error(`非 images 工具不得声明 buildPayloadMulti：「${d.name}」`);
+			throw new Error(`非多文件工具不得声明 buildPayloadMulti：「${d.name}」`);
 		}
 	}
 }

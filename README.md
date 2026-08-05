@@ -425,6 +425,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `image_to_live` | 单张图片 | 微动 LivePhoto 视频 `.mp4`（产物是视频） | 运行前实时查询 | 未开放（上游生成能力暂未开放，恢复后重新上架） |
 | `image_classic_template` | **多张图片** + `--main-title` 必填；可选副标题/模式/比例/质量/数量/版式 | 封面/拼图成品（text/pic/render 三组、可多张） | 运行前实时查询 | 已上线 |
 | `image_vertical_stitch` | **多张图片**（顺序=自上而下拼接顺序） | 一张垂直拼接长图 | 运行前实时查询 | 已上线 |
+| `video_split_screen` | **2~16 段视频**（多 positional）；精确档 `--clips-json`（条目 `{input:0 起序号, begin_time_ms, end_time_ms, crop}`，毫秒时基）；九个可选布局/画幅/音频参数 | 一条分屏成片（成片时长对齐最短段） | 运行前实时查询 | 已上线 |
 | `mad` | 一个素材文件夹（3~10 条视频）+ 可选 `--bgm` | AE 母合成成片工程 `.jsx`（仅支持 AE） | 仅 `--bgm` 触发实时查价 | 已上线 |
 
 > 价格以 `gtrk tool list --json` 和执行前 stderr 的匿名实时查询为准，README 不保存价格快照。`video_matting` 上传前 ffprobe 探时长，> 10 分钟直接拒绝（不上传不提交、请先裁剪）。
@@ -461,6 +462,8 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 - `gtrk tool image_to_live ./photo.jpg` — 静态图生成微动 LivePhoto，产物是 `.mp4` 视频。（暂未开放：上游生成能力恢复后重新上架。）
 - `gtrk tool image_classic_template a.jpg b.jpg c.jpg --main-title "新品速览"` — 标题+多图出封面/拼图；`--output-pic-count`/`--output-text-count` 由服务端钳制 ≤20。
 - `gtrk tool image_vertical_stitch top.png mid.png bottom.png` — 多图按传入顺序竖拼成一张长图。
+- `gtrk tool video_split_screen a.mp4 b.mp4 --output-ratio 16:9` — 简单档：整段视频自动布局分屏（reaction/对比同框）。
+- `gtrk tool video_split_screen a.mp4 b.mp4 --clips-json '[{"input":0,"begin_time_ms":0,"end_time_ms":5000},{"input":1,"crop":{"x":0.1,"y":0,"width":0.8,"height":1}}]'` — 精确档：按 0 起索引指定每段毫秒区间与归一化裁剪框；同一文件可多条目出多窗口。
 - `gtrk tool video_speaker_detect ./talk.mp4 --language zh-CN` — 检测画面里谁在何时说话，出结构化 JSON（重 GPU）。
 - `gtrk tool video_face_track ./talk.mp4 --params-json '{"time_ranges":[{"begin_time":0,"end_time":30000}]}'` — 人脸追踪/身份聚类，可限定时间段（**单位毫秒**；重 GPU）。
 - `gtrk tool mad ./素材 [--bgm 歌.mp3] [--duration 20] [--seed 42] [--refresh] [--json]` — 一键剪 MAD：扫素材文件夹 → 自动选技法 → 单一 `.jsx`（AE 2020+ 跑一遍出母合成成片工程）。`--seed` 可复现；`result.json` 记 seed/数据版本/降级档位/选中技法。
