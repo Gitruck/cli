@@ -7,8 +7,9 @@
  * 下载遇 404（产物过期被 GC）不整体中止：记入 errors、仍完成报告落盘与输出。
  */
 import { join, basename } from "node:path";
-import { mkdir, cp, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { download as realDownload, type OralCutOutput } from "./cloud";
+import { copyJianyingDraft } from "./jianying";
 import { renderGtrk, readGtrkFile, type GtrkV1 } from "./render";
 import { openFolder } from "./open";
 import { log } from "./log";
@@ -125,16 +126,22 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 		}
 	}
 
-	// 剪映：把草稿拷进 <草稿目录>/<产物目录同名>/（尽力而为，失败记错不中止）
+	// 剪映：把草稿拷进 <草稿目录>/<产物目录同名>/（尽力而为，失败记错不中止）。
+	// 文件名走命名律落地器：云端 oralcut 今日产的就是固定两件套名，此处逐字节 no-op——
+	// 换的是防线，「带前缀名剪映扫不到」那枚 bug 不该有第二条实现路径（见 long2short ⑦）。
 	let jianyingDraftPath: string | null = null;
 	if (byFormat.jianying && opts.draftDir) {
+		const dest = join(opts.draftDir, basename(outDir));
 		try {
-			jianyingDraftPath = join(opts.draftDir, basename(outDir));
-			await mkdir(jianyingDraftPath, { recursive: true });
-			await cp(join(outDir, "jianying"), jianyingDraftPath, { recursive: true });
-			log.info(`剪映草稿已落到：${jianyingDraftPath}`);
+			const landing = await copyJianyingDraft(join(outDir, "jianying"), dest);
+			if (landing.complete) {
+				jianyingDraftPath = dest;
+				log.info(`剪映草稿已落到：${dest}`);
+			} else {
+				errors["jianying:draft"] = `草稿两件套不全（缺 ${landing.missing.join("、")}），剪映列表里不会显示：${dest}`;
+				log.warn(errors["jianying:draft"]);
+			}
 		} catch (e) {
-			jianyingDraftPath = null;
 			errors["jianying:draft"] = e instanceof Error ? e.message : String(e);
 			log.warn(`剪映草稿落盘失败：${errors["jianying:draft"]}`);
 		}

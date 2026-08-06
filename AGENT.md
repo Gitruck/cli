@@ -227,7 +227,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --json
 **跑完读 `report`、验证、给用户交代**（`--json` 的 stdout 那行带 `files` / `errors` / **`report`**；别只信"成功"、别谎报三端都好）：
 - **读 `report`（因势象形的另一半）**：`duration_before`→`after`（剪了多少）；`script_source`/`final_script`（无稿 `rebuilt` 时把 `final_script` 回给用户核对）；`dropped[]`（剔了哪些、`reason` retake/misread）；`coverage`（<0.6 附 `low_coverage` = 文稿与实拍严重不符）；`uncovered_script[]`（**漏读**：文稿有、实拍没找到 → 如实说，疑似漏识别则建议 `--visual-assist` 重跑）；`review_points[]`（建议复核处）；开了 visual_assist 还有 `suspect_omissions` / `stt_recovered` / `visual_assist_degraded`。**据此因势象形**：覆盖率低 / 漏读多 → 开 `--visual-assist` 或核对文稿重跑；节奏不满意 → 调 `--preset` / 散参数重跑（同毛片可反复剪对比）。
 - **报告也在盘上、丢了能取回**：同一份 `report` 恒写在 `<产物目录>/result.json`（不必依赖 stdout）。万一 stdout 没接住或进程崩了 → 直接读 `result.json`，或 `gtrk oralcut-result <taskId> --json` 按 task_id 重新取回，**不要重跑 `oralcut`**（见 §2.1）。
-- 确认产物目录在、`gtrk/project.gtrk` 非空（>0 字节）；要剪映就确认剪映草稿根里有**同名工程目录** + `draft_meta_info.json`。
+- 确认产物目录在、`gtrk/project.gtrk` 非空（>0 字节）；要剪映就确认剪映草稿根里有**同名工程目录**，且目录里是 `draft_content.json` + `draft_meta_info.json` **两个精确文件名**——剪映只认这两个固定名，带前缀的（如 `clip0_draft_content.json`）它扫不到、草稿列表里不显示。`long2short` 逐 clip 草稿同判据。
 - 云端 `errors` 非空 → 如实告知哪个格式失败、原因。
 - 然后**回给用户**：产物目录路径 + 三端各自怎么打开（客户端选 `gtrk/project.gtrk`、剪映已在项目列表、PR 导入 `xml/premiere.xml`），并**据 `report` 给一句交代**（剪了多久 → 多久、去掉了什么、有无漏读需复核）。
 
