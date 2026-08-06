@@ -7,8 +7,8 @@
  *
  * cloud 型直调公共域 API，local 型可复用同一注册表与发现入口；infra 零改动。
  */
-import { existsSync } from "node:fs";
-import { extname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { extname, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
 import { probeGeometry } from "./media";
 
@@ -95,6 +95,12 @@ export interface ToolDescriptor {
 	 * 与 buildPayload 互斥：input.kind="images" ⇔ 声明本项且不声明 buildPayload（注册表校验）。
 	 */
 	buildPayloadMulti?: (fileIds: string[], ctx: ToolContext) => Record<string, unknown>;
+	/**
+	 * input=none 零上传直提交专用 payload 拼装（纯参数任务，如文本合成）。
+	 * none 的 cloud 工具 MUST 声明 preprocess（产上传物旧路径）或本项恰一；
+	 * 与 buildPayload/buildPayloadMulti 互斥（add-tool-audio-tts-clone）。
+	 */
+	buildPayloadNone?: (ctx: ToolContext) => Record<string, unknown>;
 	/** 把 output_result 收敛为下载清单。 */
 	mapOutputs?: (out: OutputResult, ctx: ToolContext) => DownloadItem[];
 	/**
@@ -1012,7 +1018,7 @@ const audioStretch: ToolDescriptor = {
 	taskType: "audio_stretch",
 	options: [
 		{ flag: "--semitones <n>", desc: "变调半音（升正降负；未传则不变调）" },
-		{ flag: "--speed <n>", desc: "变速倍率（必须 > 0；未传则不变速）" },
+		{ flag: "--speed <n>", desc: "变速/语速倍率（各工具范围与缺省见各自说明）" },
 	],
 	buildPayload(fileId, ctx) {
 		const payload: Record<string, unknown> = { file_id: fileId };
@@ -1380,6 +1386,67 @@ const videoSplitScreen: ToolDescriptor = {
 	},
 };
 
+// ---------------------------------------------------------------- 零上传文本工具（add-tool-audio-tts-clone）
+
+/**
+ * audio_tts_clone —— 声音克隆配音（none 零上传直提交首个成员）。
+ * 文本二选一（--text 短文本 / --text-file UTF-8 文件）+ --speaker 必填（服务端 ext_code 白名单，
+ * 传错时报错自带可用列表=发现路径）；speed/text_split_method 缺省跟随该音色服务端调好的参数（不注默认）。
+ * 计费按文本字数折算分钟（约 200 字/分钟，服务端估算）；字数上限 2000 如实转述、服务端为真相。
+ */
+const audioTtsClone: ToolDescriptor = {
+	name: "audio_tts_clone",
+	title: "声音克隆配音",
+	description:
+		"输入一段文字，用指定音色合成配音音频（--text 短文本或 --text-file 文本文件二选一，≤2000 字）。按文本字数折算分钟计费。",
+	kind: "cloud",
+	input: { kind: "none" },
+	priceKey: "audio_tts_clone",
+	outputHint: "配音音频（wav/mp3）",
+	enabled: true,
+	taskType: "audio_tts_clone",
+	options: [
+		{ flag: "--text <text>", desc: "待合成的短文本（与 --text-file 二选一）" },
+		{ flag: "--text-file <file>", desc: "待合成的文本文件（UTF-8；与 --text 二选一）" },
+		{ flag: "--speaker <code>", desc: "音色代号（必填；可用列表见官网文档「可用音色」，传错时报错会列出全部可用项）" },
+		{ flag: "--text-lang <lang>", desc: "文本语言（未传则服务端默认 zh）" },
+		{ flag: "--output-format <fmt>", desc: "输出音频格式 wav/mp3（未传则服务端默认 wav）" },
+		{ flag: "--split-method <m>", desc: "长文切分法 cut0~cut5（未传则跟随该音色调好的参数）" },
+		{ flag: "--batch-size <n>", desc: "分段并发批大小 1~16（未传则服务端默认）" },
+	],
+	buildPayloadNone(ctx) {
+		const o = ctx.opts;
+		const hasText = typeof o.text === "string" && o.text.trim() !== "";
+		const hasFile = typeof o.textFile === "string" && (o.textFile as string).trim() !== "";
+		if (hasText && hasFile) throw new Error("--text 与 --text-file 只能给其一");
+		if (!hasText && !hasFile) throw new Error("需要 --text <短文本> 或 --text-file <文本文件>（UTF-8）之一");
+		const text = hasText ? (o.text as string) : readFileSync(resolvePath(o.textFile as string), "utf8");
+		if (!text.trim()) throw new Error("文本内容为空");
+		if (!(typeof o.speaker === "string" && o.speaker.trim())) {
+			throw new Error("audio_tts_clone 需要 --speaker <音色代号>（可用列表见官网文档；传错时服务端报错会列出可用项）");
+		}
+		const p: Record<string, unknown> = { text, speaker: o.speaker };
+		if (typeof o.textLang === "string") p.text_lang = o.textLang;
+		if (typeof o.outputFormat === "string") p.output_format = o.outputFormat;
+		const speed = parseNumFlag(o.speed, "--speed");
+		if (speed != null) p.speed = speed;
+		if (typeof o.splitMethod === "string") p.text_split_method = o.splitMethod;
+		const bs = parseNumFlag(o.batchSize, "--batch-size");
+		if (bs != null) {
+			if (!Number.isInteger(bs)) throw new Error(`--batch-size 需要整数，拿到「${String(o.batchSize)}」`);
+			p.batch_size = bs;
+		}
+		return p;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["download_url"]);
+		if (!url) return [];
+		const fallback = typeof ctx.opts.outputFormat === "string" ? `.${ctx.opts.outputFormat}` : ".wav";
+		const speaker = typeof ctx.opts.speaker === "string" && ctx.opts.speaker.trim() ? ctx.opts.speaker : "voice";
+		return [{ url, filename: `tts-${speaker}${extFromUrl(url, fallback)}` }];
+	},
+};
+
 /**
  * mad —— 一键剪 MAD（local 型「纯本地工具、可选云端加料」形态首个成员，add-tool-mad）。
  * 素材文件夹（+可选 BGM）→ 自动选技法 → 生成 AE 母合成成片工程 .jsx。
@@ -1444,6 +1511,7 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	imageClassicTemplate,
 	imageVerticalStitch,
 	videoSplitScreen,
+	audioTtsClone,
 	mad,
 ];
 
@@ -1479,6 +1547,19 @@ export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): vo
 			if (d.input.maxDurationSec != null) throw new Error(`多文件工具不支持 maxDurationSec：「${d.name}」`);
 		} else if (d.buildPayloadMulti) {
 			throw new Error(`非多文件工具不得声明 buildPayloadMulti：「${d.name}」`);
+		}
+		// none 零上传双路径恰一（add-tool-audio-tts-clone）：preprocess（产上传物）或 buildPayloadNone（零上传）二选一
+		if (d.buildPayloadNone) {
+			if (d.input.kind !== "none") throw new Error(`非 none 工具不得声明 buildPayloadNone：「${d.name}」`);
+			if (d.buildPayload || d.buildPayloadMulti) {
+				throw new Error(`buildPayloadNone 与其他 payload 钩子互斥：「${d.name}」`);
+			}
+		}
+		if (d.kind === "cloud" && d.input.kind === "none") {
+			const paths = (d.preprocess ? 1 : 0) + (d.buildPayloadNone ? 1 : 0);
+			if (paths !== 1) {
+				throw new Error(`none 工具须声明 preprocess 或 buildPayloadNone 恰一：「${d.name}」`);
+			}
 		}
 	}
 }

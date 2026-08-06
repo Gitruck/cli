@@ -384,10 +384,15 @@ export async function runCloudTool(
 	// ①b 多文件必填参数前置干跑：payload 纯函数跑一遍占位 id，缺参（如 --main-title）在上传前即报错
 	if (isMulti) descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
 
+	// ②b 零上传直提交（none + buildPayloadNone，add-tool-audio-tts-clone）：纯参数任务无上传物
+	const isNoneDirect = descriptor.input.kind === "none" && !!descriptor.buildPayloadNone;
+
 	// ② 可选本地预处理（缺省=原文件直传；多文件类别不支持 preprocess，注册表已拒）
 	let uploadPath = inputAbs;
 	if (!isMulti && descriptor.preprocess) uploadPath = await descriptor.preprocess(ctx);
-	if (!uploadPath) throw new Error(`${descriptor.name} 缺上传物（input=none 的 cloud 型工具需 preprocess 产上传物）`);
+	if (!uploadPath && !isNoneDirect) {
+		throw new Error(`${descriptor.name} 缺上传物（input=none 的 cloud 型工具需 preprocess 产上传物或声明 buildPayloadNone）`);
+	}
 
 	// ③ 提交前匿名查询实时价格并提示 → 上传（失败仅提示 unavailable，不阻断能力）
 	let billingHint: string;
@@ -399,11 +404,16 @@ export async function runCloudTool(
 	emitBilling(billingHint);
 
 	// ④ 上传并提交；新 file_id 延迟可见短退避，缓存 file_id 失效则强制重传一次
+	// 零上传路径：跳过上传/6004 恢复（无上传物无失效面），payload 直提交
 	const taskType = descriptor.taskType!;
 	let taskId: string;
-	let fileId: string;
+	let fileId: string | undefined;
 	let fileIds: string[] | undefined;
-	if (isMulti) {
+	if (isNoneDirect) {
+		const p = descriptor.buildPayloadNone!(ctx);
+		mergeParams(p, extraParams);
+		taskId = await deps.submitTask(deps.cfg, taskType, p);
+	} else if (isMulti) {
 		const buildMulti = (fids: string[]): unknown => {
 			const p = descriptor.buildPayloadMulti!(fids, ctx);
 			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
@@ -423,7 +433,7 @@ export async function runCloudTool(
 		};
 		const submitted = await uploadAndSubmitTask(
 			deps.cfg,
-			uploadPath,
+			uploadPath!, // 非 isNoneDirect 分支：上方守卫已保证有上传物
 			taskType,
 			buildPayload,
 			{ force: opts.reupload },
