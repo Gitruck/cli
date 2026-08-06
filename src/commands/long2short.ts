@@ -10,12 +10,12 @@
  */
 import { Command } from "commander";
 import { resolve, join, dirname, basename, extname } from "node:path";
-import { mkdir, writeFile, cp } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../lib/config";
 import { download, type OralCutOutput } from "../lib/cloud";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
-import { resolveJianyingDraftDir } from "../lib/jianying";
+import { copyJianyingDraft, resolveJianyingDraftDir } from "../lib/jianying";
 import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
 import { materializeResult, type MaterializeResult } from "../lib/materialize";
 import { pollToolTask, parseExtraParams, mergeParams } from "../lib/tool-runner";
@@ -111,6 +111,45 @@ export function buildLong2ShortPayload(
 	if (draftTarget) p.struct_meta = { nle_draft_dir: draftTarget };
 	mergeParams(p, parseExtraParams(opts.param ?? [], opts.paramsJson));
 	return p;
+}
+
+/**
+ * 逐 clip 把剪映草稿拷进草稿根（导出供离线测试：`runLong2Short` 带上传/轮询，测不了这一段）。
+ * 目标目录名对齐服务端 `nle_draft_dir` 的 `_clip{i}` 后缀约定；文件名按命名律落成剪映固定两件套
+ * （源侧 `clip{i}_` 前缀只在这一跳剥掉，产物目录 `clip{i}/jianying/` 里的归档原名不动）。
+ * 两件套不全 = 剪映列表里不会显示，故就地记 `errors`、不静默通过。
+ */
+export async function copyClipDraftsToRoot(
+	clipDirs: string[],
+	draftTarget: string,
+	errors: Record<string, string>,
+): Promise<{ paths: Array<string | null>; complete: number; attempted: number }> {
+	const paths: Array<string | null> = [];
+	let complete = 0;
+	let attempted = 0;
+	for (const [i, dir] of clipDirs.entries()) {
+		const src = join(dir, "jianying");
+		if (!existsSync(src)) {
+			paths.push(null);
+			continue;
+		}
+		attempted++;
+		const dest = `${draftTarget}_clip${i}`;
+		try {
+			const landing = await copyJianyingDraft(src, dest);
+			if (landing.complete) {
+				complete++;
+				paths.push(dest);
+			} else {
+				paths.push(null);
+				errors[`clip${i}:jianying:draft`] = `草稿两件套不全（缺 ${landing.missing.join("、")}），剪映列表里不会显示：${dest}`;
+			}
+		} catch (e) {
+			paths.push(null);
+			errors[`clip${i}:jianying:draft`] = e instanceof Error ? e.message : String(e);
+		}
+	}
+	return { paths, complete, attempted };
 }
 
 export function registerLong2Short(program: Command): void {
@@ -247,7 +286,14 @@ async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void>
 
 	// ⑥ 逐 clip 落地（clip{i}/ 子目录：下载 gtrk/剪映/PR 工程组）；单 clip 失败记 errors 不连坐
 	log.step(`⑥ 逐 clip 拉回三方工程（共 ${clips.length} 条）…`);
-	const clipResults: Array<{ dir: string; title?: string; files: Record<string, string[]>; ok: boolean }> = [];
+	const clipResults: Array<{
+		dir: string;
+		title?: string;
+		files: Record<string, string[]>;
+		ok: boolean;
+		/** 该 clip 的剪映草稿目录（两件套齐全时为绝对路径，否则 null）——日志的「可见」声明的机读对应物。 */
+		jianyingDraftPath?: string | null;
+	}> = [];
 	for (const [i, clip] of clips.entries()) {
 		const clipDir = join(outDir, `clip${i}`);
 		const { files: clipFiles, ...clipMeta } = clip;
@@ -272,20 +318,22 @@ async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void>
 		}
 	}
 
-	// ⑦ 剪映草稿逐 clip 拷入草稿根（目标名对齐服务端 nle_draft_dir 的 _clip{i} 后缀约定）
-	if (draftRoot) {
-		for (const [i, cr] of clipResults.entries()) {
-			const src = join(cr.dir, "jianying");
-			if (!existsSync(src)) continue;
-			const dest = `${draftTarget}_clip${i}`;
-			try {
-				await mkdir(dest, { recursive: true });
-				await cp(src, dest, { recursive: true });
-			} catch (e) {
-				errors[`clip${i}:jianying:draft`] = e instanceof Error ? e.message : String(e);
-			}
-		}
-		log.info(`剪映草稿：<草稿根>/${outName}_clip{i}（剪映里直接可见）`);
+	// ⑦ 剪映草稿逐 clip 拷入草稿根（目标名对齐服务端 nle_draft_dir 的 _clip{i} 后缀约定；
+	//   文件名落成剪映固定两件套，否则草稿目录建了也扫不到）。日志按实际齐全条数说话——
+	//   原实现无条件打「剪映里直接可见」，正是这枚静默失败从真机 E2E 底下溜走的直接原因。
+	if (draftRoot && draftTarget) {
+		const landing = await copyClipDraftsToRoot(clipResults.map((c) => c.dir), draftTarget, errors);
+		landing.paths.forEach((p, i) => {
+			clipResults[i].jianyingDraftPath = p;
+		});
+		const { complete, attempted } = landing;
+		if (!attempted) log.warn("没有任何 clip 产出剪映草稿，草稿根未落地");
+		else if (complete === attempted)
+			log.info(`剪映草稿：<草稿根>/${outName}_clip{i} —— ${complete}/${attempted} 条两件套齐全（剪映里直接可见）`);
+		else if (complete) {
+			log.info(`剪映草稿：<草稿根>/${outName}_clip{i} —— ${complete}/${attempted} 条两件套齐全（剪映里可见）`);
+			log.warn(`另有 ${attempted - complete} 条草稿两件套不全，剪映里不会显示（详见 result.json errors）`);
+		} else log.warn(`${attempted} 条草稿两件套均不全，剪映里不会显示（详见 result.json errors）`);
 	}
 
 	// ⑧ 根级 report.json + result.json（恒落盘）
