@@ -502,7 +502,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 
 ## 注意
 
-- 剪映 / CapCut 草稿需 `draft_content.json` + `draft_meta_info.json` **成对**才被软件识别——要么 `gtrk init` 配好草稿目录、要么 `--jianying-draft-dir` 指定，否则只产 content、需手动导入。
+- 剪映 / CapCut 草稿需 `draft_content.json` + `draft_meta_info.json` **成对**（且必须是这两个**精确文件名**，带前缀的扫不到）才被软件识别——要么 `gtrk init` 配好草稿目录、要么 `--jianying-draft-dir` 指定，否则只产 content、需手动导入。拷进草稿根这一跳由 CLI 统一落成固定名（`long2short` 逐 clip 同），产物目录里保留带 clip 前缀的归档原名。
 - 多台机器盘符不同时，配置走 `~/.gitruck/`（用户级；旧 `~/.gtrk-cli` 首次启动自动迁移），产物默认落毛片同目录。
 - 节奏预设强度以云端为准；`--preset` 只选预设、不改源裁剪。
 

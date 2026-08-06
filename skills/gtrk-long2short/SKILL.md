@@ -53,10 +53,11 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 - 产物根 `<毛片名>-long2short/`：`report.json`（选段报告）+ `result.json` + 逐 clip 子目录 `clip0/ clip1/ …`（各含 `gtrk/` 客户端工程、`jianying/` 草稿、`xml/` PR 工程）。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
 - 开了 `--split-screen` 时：**分屏素材落在毛片旁的 `split_screen/` 子目录**（工程素材路径指向那里，别移动/删除，移动了工程会缺素材）——这点要提前告知用户。
-- 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`。
+- 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`。**判据**：草稿目录里必须是 `draft_content.json` + `draft_meta_info.json` 两个精确文件名（云端产物侧的 `clip{i}_` 前缀在拷进草稿根这一跳被剥掉，产物目录 `clip{i}/jianying/` 里保留带前缀的归档原名）。CLI 日志按实际齐全条数报「N/M 条两件套齐全」，不齐的记进 `result.json` 的 `errors`、该 clip 的 `jianyingDraftPath` 为 `null`。
 
 ## 排错
 
 - **部分 clip 失败 / 个别分屏素材 404**：单点失败不连坐，`result.json` 的 `errors` 有明细；把失败项如实告诉用户，其余产物照常可用。
 - **轮询超时/进程中断**：凭产物根 `task.json` 的 `task_id` 查询云端状态；任务在云端照常跑完，稍后可重取。
 - **clips 为空**：说明内容里没有可成片的高光段（纯语义选段），把 `report.json` 摘要给用户看原因。
+- **剪映里看不到草稿**：先看草稿目录里的**文件名**——必须是 `draft_content.json` + `draft_meta_info.json`，缺一件或带前缀剪映都不显示；`result.json` 里该 clip 的 `jianyingDraftPath` 为 `null` 即是此症。
