@@ -18,6 +18,7 @@ import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
 import { materializeResult, type MaterializeResult } from "../lib/materialize";
+import { renderClipBrief, renderClipsOverview } from "../lib/clip-brief";
 import { pollToolTask, parseExtraParams, mergeParams } from "../lib/tool-runner";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
@@ -288,7 +289,31 @@ async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void>
 		log.info(`剪映草稿：<草稿根>/${outName}_clip{i}（剪映里直接可见）`);
 	}
 
-	// ⑧ 根级 report.json + result.json（恒落盘）
+	// ⑧ 人读简报（纯增文件：clip{i}/clip.md + 根 clips.md；机读契约不动）。失败只记 errors 不阻断
+	for (const [i, cr] of clipResults.entries()) {
+		try {
+			await mkdir(cr.dir, { recursive: true });
+			await writeFile(join(cr.dir, "clip.md"), renderClipBrief(clips[i], i, cr.files));
+		} catch (e) {
+			errors[`clip${i}:brief`] = e instanceof Error ? e.message : String(e);
+		}
+	}
+	try {
+		await writeFile(
+			join(outDir, "clips.md"),
+			renderClipsOverview(clips, {
+				source: inputAbs,
+				jumpCut: opts.jumpCut !== false,
+				splitMaterials: { landed: splitLanded, total: manifest.length },
+				taskId,
+			}),
+		);
+		log.info(`总览已生成：clips.md（逐条见 clip{i}/clip.md）`);
+	} catch (e) {
+		errors["clips.md"] = e instanceof Error ? e.message : String(e);
+	}
+
+	// ⑨ 根级 report.json + result.json（恒落盘）
 	await writeFile(join(outDir, "report.json"), JSON.stringify(output.report ?? {}, null, 2));
 	const ok = Object.keys(errors).length === 0 && clipResults.some((c) => c.ok);
 	const rootResult = {
