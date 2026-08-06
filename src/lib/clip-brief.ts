@@ -34,6 +34,9 @@ export function fmtTime(ms: unknown): string {
 	return `${h ? `${h}:` : ""}${mm}:${String(s).padStart(2, "0")}`;
 }
 
+/** 取路径末段（不引 node:path，本模块保持纯字符串处理、Win/POSIX 分隔符都吃）。 */
+const baseName = (p: string): string => p.split(/[\\/]/).pop() || p;
+
 /** 表格单元格转义：竖线与换行会撑破 Markdown 表。 */
 const cell = (s: string): string => s.replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
 
@@ -121,7 +124,8 @@ export function renderClipBrief(clip: ClipMeta, index: number, files: Record<str
 	const formats = Object.keys(files).filter((f) => files[f]?.length);
 	if (formats.length) {
 		out.push("## 本条工程文件", "");
-		for (const f of formats) out.push(`- ${f}：${files[f].join("、")}`);
+		// 只列文件名：clip.md 与产物同处 clip{i}/，绝对路径在这儿是噪音
+		for (const f of formats) out.push(`- ${f}：${files[f].map(baseName).join("、")}`);
 		out.push("");
 	}
 
