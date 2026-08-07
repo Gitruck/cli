@@ -1399,32 +1399,44 @@ function filterDecls(styleDecls: string): string[] {
 	return out;
 }
 
-/** `<style>` 块里每个花括号块的**自身声明**（嵌套块整体剔除 → `@media`/`@keyframes` 不借内层声明）。 */
-function styleBlockOwnDecls(html: string): string[] {
-	const out: string[] = [];
+/** `<style>` 块里每个花括号块的 **(选择器串, 自身声明)**（嵌套块整体剔除 → `@media`/`@keyframes` 不借内层声明）。 */
+function styleBlockRules(html: string): { selector: string; own: string }[] {
+	const out: { selector: string; own: string }[] = [];
 	for (const sm of html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)) {
 		const css = sm[1].replace(/\/\*[\s\S]*?\*\//g, " ");
 		const stack: number[] = [];
+		const selStack: string[] = [];
+		let segStart = 0; // 选择器从上一处块边界（`{` / `}` / `;`）之后起算
 		for (let i = 0; i < css.length; i++) {
 			const c = css[i];
 			if (c === '"' || c === "'") {
 				i = skipString(css, i);
 				continue;
 			}
-			if (c === "{") stack.push(i);
-			else if (c === "}") {
+			if (c === "{") {
+				stack.push(i);
+				selStack.push(css.slice(segStart, i));
+				segStart = i + 1;
+			} else if (c === "}") {
 				const open = stack.pop();
+				const sel = selStack.pop() ?? "";
+				segStart = i + 1;
 				if (open === undefined) continue;
 				let own = css.slice(open + 1, i);
 				for (let prev = ""; own !== prev; ) {
 					prev = own;
 					own = own.replace(/\{[^{}]*\}/g, " ");
 				}
-				out.push(own);
-			}
+				out.push({ selector: sel.trim(), own });
+			} else if (c === ";") segStart = i + 1;
 		}
 	}
 	return out;
+}
+
+/** `<style>` 块里每个花括号块的**自身声明**（`styleBlockRules` 的只取声明视图，既有调用点口径不变）。 */
+function styleBlockOwnDecls(html: string): string[] {
+	return styleBlockRules(html).map((r) => r.own);
 }
 
 /** 从 `from`（`:` 之后）读一个对象字面量的属性值：到顶层 `,` 或块尾为止，跳字符串与括号。 */
@@ -1480,12 +1492,150 @@ function tweenVarObjects(js: string): string[] {
 	return out;
 }
 
-/** 真卷积滤镜成本的三档命中位点（各档最多留几个样本串，供文案定位）。 */
+// ── 漏报面 ②：静态 filter + `transform` 被补间驱动（r69 实测 +42.7%，比补间 blur 的 +36.2% 还贵）──
+//
+// 机制：滤镜值本身不变，但被滤子树每帧换一个 transform ⇒ 卷积结果每帧失效、必须重算。
+// 与 `c-filter-animated` 是**同一类缓存失效**，只是驱动源从 filter 值换成了几何。
+//
+// **射程只收 `transform`，不收 `opacity`**（两条独立理由，缺一都不该扩）：
+//   ① 实测只覆盖 transform 一档（`q062_static_filter_transform_tweened` +42.7%），opacity 侧**零数据**；
+//   ② 现网唯一含 filter 的生产颗粒（B11-aux1）的两处 blur 元素**恰恰只被 opacity 补间驱动**——
+//      把 opacity 纳入射程会当场把它变成命中，而它去滤镜实测只省 10.76%（远低于本项要抓的量级）。
+//   ⇒ 收 opacity 既无实测支撑、又会把现网负样本打成命中。**要扩 MUST 先有 opacity 侧的同颗粒对照实测。**
+//
+// **`gsap.set` 不算驱动**：只设一次的 transform 不产生逐帧重卷积（同 0.6① 实测：`gsap.set` 只设一次
+// 与写死在 CSS 里产物**逐字节相同**、墙钟差 0.6% 在噪声内）。故只认 `to` / `from` / `fromTo`。
+
+/** GSAP 的 transform 类属性名（顶层键才算；`attr:{x:…}` 这类嵌套键不算）。 */
+const GSAP_TRANSFORM_KEY =
+	/^(?:transform|x|y|z|xPercent|yPercent|scale|scaleX|scaleY|scaleZ|rotate|rotation|rotationX|rotationY|rotationZ|skew|skewX|skewY|translateX|translateY|translateZ)$/;
+
+/** 会逐帧驱动的时间线方法（**不含 `set`**：只设一次不产生重卷积）。 */
+const TWEENING_METHOD = /^(?:to|from|fromTo)$/;
+
+/** 一个选择器串的**主体（最后一个复合选择器）**上的 id/class 键，如 `#a .b:hover` → `["class:b"]`。 */
+function selectorSubjectKeys(selector: string): string[] {
+	const keys: string[] = [];
+	for (const alt of selector.split(",")) {
+		// 取最后一个组合子之后的那段（后代空格 / `>` / `+` / `~`）
+		const subject = alt.trim().split(/[\s>+~]+/).filter(Boolean).pop();
+		if (!subject) continue;
+		// 只认简单的 `.class` / `#id`；伪类/伪元素/属性选择器一律截断丢弃
+		const core = subject.split(/[:\[]/)[0];
+		for (const m of core.matchAll(/([.#])([A-Za-z_][\w-]*)/g)) keys.push(`${m[1] === "#" ? "id" : "class"}:${m[2]}`);
+	}
+	return keys;
+}
+
+/** 一个开标签的 id/class 键（内联 style 带滤镜时用它对上补间目标）。 */
+function tagIdentityKeys(tag: string): string[] {
+	const keys: string[] = [];
+	const id = attr(tag, "id");
+	if (id) keys.push(`id:${id.trim()}`);
+	for (const cls of (attr(tag, "class") ?? "").trim().split(/\s+/)) if (cls) keys.push(`class:${cls}`);
+	return keys;
+}
+
+/** 时间线调用（方法名 + 首个实参原文 + 各属性对象体）。 */
+function tweenCalls(js: string): { method: string; target: string; bodies: string[] }[] {
+	const out: { method: string; target: string; bodies: string[] }[] = [];
+	const re = /\.\s*(to|from|fromTo|set)\s*\(/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(js))) {
+		const open = m.index + m[0].length - 1;
+		const args = parenArg(js, open);
+		re.lastIndex = open + 1; // 与 tweenVarObjects 同姿势：允许嵌套调用被下一轮扫到
+		if (args === null) continue;
+		const target = readObjValue(args, 0); // 首个实参 = 到顶层 `,` 为止
+		const bodies: string[] = [];
+		for (let i = 0; i < args.length; i++) {
+			const c = args[i];
+			if (c === '"' || c === "'" || c === "`") {
+				i = skipString(args, i);
+				continue;
+			}
+			if (c !== "{") continue;
+			const body = braceBlock(args, i);
+			bodies.push(body);
+			i += body.length + 1;
+		}
+		out.push({ method: m[1], target, bodies });
+	}
+	return out;
+}
+
+/**
+ * `var NAME = q('#sel')` / `document.getElementById('id')` 一类的**选择器绑定**。
+ *
+ * 只认「赋值 = 单参调用 + 字符串字面量」这一种形态，且字面量必须是 `#`/`.` 开头的选择器
+ * （或调用是 `getElementById`）。别的一律不解（判不准不报，与本组恒偏保守的姿势一致）。
+ */
+function selectorBindings(js: string): Map<string, string[]> {
+	const out = new Map<string, string[]>();
+	const re = /([A-Za-z_$][\w$]*)\s*=\s*(?:[A-Za-z_$][\w$]*\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\(\s*(["'])(.*?)\3\s*\)/g;
+	for (const m of js.matchAll(re)) {
+		const [, name, fn, , raw] = m;
+		const keys =
+			fn === "getElementById" ? [`id:${raw.trim()}`] : /^\s*[.#]/.test(raw) ? selectorSubjectKeys(raw) : [];
+		if (!keys.length) continue;
+		const prev = out.get(name) ?? [];
+		out.set(name, [...new Set([...prev, ...keys])]);
+	}
+	return out;
+}
+
+/** 一个补间目标实参能解析出的 id/class 键；解析不出返回空数组（= 不报）。 */
+function tweenTargetKeys(target: string, bindings: Map<string, string[]>): string[] {
+	const t = target.trim();
+	const lit = stringLiteral(t);
+	if (lit !== null) return /^\s*[.#]/.test(lit) ? selectorSubjectKeys(lit) : [];
+	if (/^[A-Za-z_$][\w$]*$/.test(t)) return bindings.get(t) ?? [];
+	return []; // 数组 / 成员表达式 / 函数返回 …… 判不准，保守不报
+}
+
+/** 一个属性对象体的**顶层键名**（`attr:{x:…}` 之类的嵌套键不计入）。 */
+function topLevelObjKeys(body: string): string[] {
+	const keys: string[] = [];
+	let depth = 0;
+	let expectKey = true;
+	for (let i = 0; i < body.length; i++) {
+		const c = body[i];
+		if (c === '"' || c === "'" || c === "`") {
+			if (depth === 0 && expectKey) {
+				const end = skipString(body, i);
+				const name = body.slice(i + 1, end);
+				const rest = body.slice(end + 1);
+				if (/^\s*:/.test(rest)) {
+					keys.push(name);
+					expectKey = false;
+				}
+			}
+			i = skipString(body, i);
+			continue;
+		}
+		if (c === "(" || c === "[" || c === "{") depth++;
+		else if (c === ")" || c === "]" || c === "}") depth = Math.max(0, depth - 1);
+		else if (c === "," && depth === 0) expectKey = true;
+		else if (depth === 0 && expectKey && /[A-Za-z_$]/.test(c)) {
+			const m = /^([A-Za-z_$][\w$]*)\s*:/.exec(body.slice(i));
+			if (m) {
+				keys.push(m[1]);
+				expectKey = false;
+				i += m[1].length;
+			}
+		}
+	}
+	return keys;
+}
+
+/** 真卷积滤镜成本的命中位点（各档最多留几个样本串，供文案定位）。 */
 export interface FilterCostFindings {
 	/** 补间 / `gsap.set` 直接驱动 `filter`（或驱动被引用 SVG 滤镜的 `stdDeviation`）。 */
 	animated: string[];
 	/** 静态声明含真卷积，**且该声明自身**判为全幅。 */
 	staticFullBleed: string[];
+	/** 静态真卷积滤镜的元素，其 **`transform` 被 `to`/`from`/`fromTo` 驱动** → 每帧重卷积。 */
+	staticTransformed: string[];
 	/** 补间值非字符串字面量 → 静态判不了。 */
 	indeterminate: string[];
 }
@@ -1506,16 +1656,23 @@ export function detectFilterCost(html: string): FilterCostFindings {
 	const svgConvIds = svgConvolutionFilterIds(src);
 	const animated: string[] = [];
 	const staticFullBleed: string[] = [];
+	const staticTransformed: string[] = [];
 	const indeterminate: string[] = [];
 	const add = (bucket: string[], site: string) => {
 		const s = site.replace(/\s+/g, " ").trim().slice(0, 120);
 		if (!bucket.includes(s)) bucket.push(s);
 	};
+	/** 携带静态真卷积滤镜的元素键（`class:x` / `id:y`）→ 该处的可读位点串。 */
+	const staticFilterSites = new Map<string, string>();
 
 	// ① `<style>` 块规则：规则体自身既含真卷积、又自陈全幅才报
-	for (const own of styleBlockOwnDecls(src)) {
+	for (const { selector, own } of styleBlockRules(src)) {
 		const hit = filterDecls(own).filter((val) => filterValueConvolves(val, svgConvIds));
-		if (hit.length && isFullBleedStyle(own)) add(staticFullBleed, `<style> 规则：filter:${hit[0]}`);
+		if (!hit.length) continue;
+		if (isFullBleedStyle(own)) add(staticFullBleed, `<style> 规则：filter:${hit[0]}`);
+		// 漏报面②的左半边：**不看全幅性**——每帧重卷积是缓存失效问题，与覆盖面积不同源
+		for (const key of selectorSubjectKeys(selector))
+			if (!staticFilterSites.has(key)) staticFilterSites.set(key, `<style> 规则 ${selector.slice(0, 60)}：filter:${hit[0]}`);
 	}
 
 	// ② 元素内联 style / SVG filter 属性：全幅性取同一开标签
@@ -1526,8 +1683,10 @@ export function detectFilterCost(html: string): FilterCostFindings {
 		const refAttr = attr(tag, "filter");
 		const byAttr = refAttr !== undefined && filterValueConvolves(refAttr, svgConvIds) ? refAttr : null;
 		if (!inline.length && byAttr === null) continue;
+		const site = inline.length ? `内联 style：filter:${inline[0]}` : `SVG 属性：filter="${byAttr}"`;
+		for (const key of tagIdentityKeys(tag)) if (!staticFilterSites.has(key)) staticFilterSites.set(key, site);
 		if (!isFullBleedStyle(style)) continue;
-		add(staticFullBleed, inline.length ? `内联 style：filter:${inline[0]}` : `SVG 属性：filter="${byAttr}"`);
+		add(staticFullBleed, site);
 	}
 
 	// ③ 时间线补间属性对象：filter/webkitFilter 键，或驱动 SVG 滤镜基元的 stdDeviation
@@ -1542,7 +1701,21 @@ export function detectFilterCost(html: string): FilterCostFindings {
 		if (svgConvIds.size && /(?:^|[{,])\s*["']?stdDeviation["']?\s*:/.test(body))
 			add(animated, "补间驱动 SVG 滤镜基元的 stdDeviation");
 	}
-	return { animated, staticFullBleed, indeterminate };
+
+	// ④ 漏报面②：带静态真卷积滤镜的元素，其 transform 被 to/from/fromTo 驱动 → 每帧重卷积
+	if (staticFilterSites.size) {
+		const bindings = selectorBindings(js);
+		for (const { method, target, bodies } of tweenCalls(js)) {
+			if (!TWEENING_METHOD.test(method)) continue; // `set` 只设一次，不产生重卷积
+			const driven = bodies.some((b) => topLevelObjKeys(b).some((k) => GSAP_TRANSFORM_KEY.test(k)));
+			if (!driven) continue;
+			for (const key of tweenTargetKeys(target, bindings)) {
+				const site = staticFilterSites.get(key);
+				if (site) add(staticTransformed, `${site} —— 而 \`.${method}(${target.trim().slice(0, 30)}, …)\` 驱动了它的 transform`);
+			}
+		}
+	}
+	return { animated, staticFullBleed, staticTransformed, indeterminate };
 }
 
 export function lintParticle(
@@ -1765,6 +1938,19 @@ export function lintParticle(
 				"次选把静态滤镜结果**预烘成图**，且 MUST 用 **RGBA PNG**（透明叠加颗粒的 alpha 是成片合成的必需通道，" +
 				"烘成 JPEG 或任何无 alpha 格式会在成片里塌成不透明色块），但预烘只消得掉卷积、消不掉整幅逐帧合成，收益有上限、必有残差。" +
 				"去不去滤镜属审美取值，判断权在作者：本项只给信息与改法，**恒非致命**、不拦铺轨；未报 ≠ 便宜，真判据是真渲染出片计时",
+		);
+	if (cost.staticTransformed.length)
+		push(
+			"c-filter-static-transformed",
+			false,
+			`静态真卷积滤镜的元素，其 transform 被补间驱动（${cost.staticTransformed.slice(0, 3).join("；")}）——` +
+				"滤镜值本身不变，但被滤子树**每帧换一个几何**，卷积结果每帧失效、必须重算，" +
+				"与 `c-filter-animated` 是**同一类缓存失效**，只是驱动源从滤镜值换成了 transform。" +
+				"r69 真渲实测：同颗粒对照下这一档 **+42.7%**，比「补间驱动 blur」的 +36.2% **还贵**——它是本组里最容易被忽略的一档。" +
+				"改法（按优先级）：① 把滤镜移到**不参与位移/缩放**的那一层（滤镜层与运动层拆开，运动交给外层容器）；" +
+				"② 缩小被滤元素的几何覆盖面积；③ 把静态滤镜结果**预烘成 RGBA PNG** 再让它随 transform 走（预烘图平移是零卷积）。" +
+				"⚠️ 射程只收 `transform`：`opacity` 被补间驱动**不在本项射程**（opacity 侧尚无对照实测，不凭推测扩）。" +
+				"本项恒非致命、不拦铺轨；未报 ≠ 便宜，真判据是真渲染出片计时",
 		);
 	if (cost.indeterminate.length)
 		push(
