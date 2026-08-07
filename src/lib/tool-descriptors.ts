@@ -8,9 +8,10 @@
  * cloud 型直调公共域 API，local 型可复用同一注册表与发现入口；infra 零改动。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { extname, resolve as resolvePath } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
-import { probeGeometry } from "./media";
+import { assFontNames, burnSubtitle, extractAudio, probeFontAvailable, probeGeometry } from "./media";
 
 // ---------------------------------------------------------------- 类型
 
@@ -104,6 +105,14 @@ export interface ToolDescriptor {
 	/** 把 output_result 收敛为下载清单。 */
 	mapOutputs?: (out: OutputResult, ctx: ToolContext) => DownloadItem[];
 	/**
+	 * 下载落地之后、结果收敛之前的本地加工钩子（align-ai-subtitle-audio-only）：收已落地文件绝对路径，
+	 * 返回本地新产出的文件路径（追加进产物清单）。让「云端只出轻产物、重加工留在本地」成为工具族一等能力，
+	 * 不必为此把工具提升为独立命令。
+	 * 失败由 runner 记 `errors[<name>:postprocess]` 并**保留云端已落地产物**——本地加工失败
+	 * MUST NOT 丢弃已经付费取得的云端结果。
+	 */
+	postprocess?: (ctx: ToolContext, landed: string[]) => Promise<string[] | void> | string[] | void;
+	/**
 	 * 把 output_result 收敛为一个可 JSON 序列化的结构对象，供 runner 落 `result-output.json`。
 	 * 只读纯函数、只返回结构、不负责落盘（落盘归 runner）；与 mapOutputs 相互独立——
 	 * 一个能力可以既下载文件（mapOutputs）又落结构化 JSON（mapResult）。分析型能力（分镜/运镜）只声明本项。
@@ -124,6 +133,9 @@ export interface ToolDescriptor {
 const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif", ".avif"];
 const VIDEO_EXTS = [".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".m2ts"];
 const AUDIO_EXTS = [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"];
+
+/** 输入本身是否已是音频文件（音频输入无画面可探、也不必再抽一遍）。 */
+const isAudioFile = (p: string): boolean => AUDIO_EXTS.includes(extname(p).toLowerCase());
 
 /** 公共视频原子能力当前实际接受的 utils.base.video_ext；与宽松的通用 VIDEO_EXTS 分开维护。 */
 const PUBLIC_VIDEO_EXTS = [
@@ -1166,15 +1178,42 @@ const videoAiSubtitle: ToolDescriptor = {
 		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（未传则用服务端默认）` },
 		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（未传则用服务端默认）` },
 	],
+	/**
+	 * 默认只传抽出音频（毛片永不上传，对齐 oralcut / long2short）：字幕主产物是 .ass 文本，画面对
+	 * 生成字幕本身无用。例外只有 --need-pure——去原字幕是画面操作，音频路径下服务端无从执行，
+	 * 故回退整片上传并明说原因（别让用户付了钱、传了参数、什么都没发生）。
+	 */
+	async preprocess(ctx) {
+		const inputAbs = ctx.inputAbs!;
+		if (ctx.opts.needPure === true) {
+			ctx.warn("--need-pure 需要画面（去原字幕是画面操作），本次整片上传；只要字幕文件时去掉该 flag 即可只传音频");
+			return inputAbs;
+		}
+		if (isAudioFile(inputAbs)) return inputAbs; // 用户本来就传的音频，不重复抽
+		const audio = await extractAudio(inputAbs, ctx.ffmpegPath);
+		return audio;
+	},
 	buildPayload(fileId, ctx) {
 		const language = ctx.opts.language == null ? "" : String(ctx.opts.language).trim();
 		if (!language) throw new Error("--language 必填：请指定源语种代码（具体取值见云端 API 文档 / 服务端支持列表）");
 		const payload: Record<string, unknown> = { file_id: fileId, language };
+		// 上传物是抽出音频时，画布几何须由客户端回传（服务端音频分支否则退 1920x1080 兜底，
+		// 宽高比不一致会落错样式档）。服务端未支持该字段时被忽略，客户端不因此失败。
+		const inputAbs = ctx.inputAbs;
+		if (inputAbs && !isAudioFile(inputAbs)) {
+			try {
+				const geo = probeGeometry(inputAbs, ctx.ffmpegPath);
+				if (geo.width > 0 && geo.height > 0) payload.video_size = [geo.width, geo.height];
+			} catch {
+				ctx.warn("探原片几何失败，本次不回传 video_size（服务端将按 1920x1080 兜底出字幕）");
+			}
+		}
 		if (ctx.opts.translateLanguage != null) {
 			const t = String(ctx.opts.translateLanguage).trim();
 			if (t) payload.translate_language = t;
 		}
-		if (ctx.opts.needRender === true) payload.need_render = true;
+		// need_render 不再提交给服务端：烧录改在本地做（见 postprocess），否则云端白烧一遍
+		// 还要把大成片下行回来。--need-pure 仍走服务端（它必须有画面，且已回退整片上传）。
 		if (ctx.opts.needPure === true) payload.need_pure = true;
 		if (ctx.opts.subtitleType != null) {
 			const v = String(ctx.opts.subtitleType);
@@ -1197,6 +1236,36 @@ const videoAiSubtitle: ToolDescriptor = {
 		const pure = pickUrl(out, ["pure_file_download_url"]);
 		if (pure) files.push({ url: pure, filename: `${ctx.baseName}-pure${extFromUrl(pure, ".mp4")}` });
 		return files;
+	},
+	/**
+	 * --need-render 的本地烧录：拿拉回的 .ass 烧本地原片，毛片不出本地、成片也不从云端下行。
+	 * 缺模板字体一律硬失败——替代字体烧出来的东西「看着正常」但与模板设计不符，用户无从察觉
+	 * （与 ffmpeg 不自分发同一口径：不自带字体，也不假装能用别的顶）。
+	 */
+	async postprocess(ctx, landed) {
+		if (ctx.opts.needRender !== true) return;
+		const inputAbs = ctx.inputAbs!;
+		if (isAudioFile(inputAbs)) {
+			throw new Error("--need-render 需要视频输入：本次输入是音频文件，无画面可烧");
+		}
+		const ass = landed.find((p) => p.toLowerCase().endsWith(".ass"));
+		if (!ass) throw new Error("未拉回 .ass 字幕文件，无法本地烧录");
+
+		const fonts = assFontNames(await readFile(ass, "utf8"));
+		const missing: string[] = [];
+		for (const f of fonts) {
+			if ((await probeFontAvailable(f, ctx.ffmpegPath)) === false) missing.push(f);
+		}
+		if (missing.length) {
+			throw new Error(
+				`本机缺字幕模板所需字体：${missing.join("、")}。` +
+					`装上后重跑即可（字幕文件已落地，无需重新提交任务）。CLI 不自带字体、也不用替代字体顶——` +
+					`替代字体烧出来的成片观感与模板设计不符且难以察觉。`,
+			);
+		}
+		const out = join(dirname(ass), `${ctx.baseName}-subtitled.mp4`);
+		await burnSubtitle(inputAbs, ass, out, { ffmpegPath: ctx.ffmpegPath });
+		return [out];
 	},
 	mapResult(out) {
 		return { summary: typeof out.summary === "string" ? out.summary : "", asr: out.asr ?? null };

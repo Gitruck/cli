@@ -500,6 +500,17 @@ export async function runCloudTool(
 		}
 	}
 
+	// (a2) 本地加工路径：postprocess 在下载落地后跑（如本地烧录字幕）。失败只记 errors，
+	// 云端已落地产物一律保留——付过费的东西不能因本地一步失手而丢。
+	if (descriptor.postprocess) {
+		try {
+			const extra = await descriptor.postprocess(ctx, [...files]);
+			if (Array.isArray(extra)) files.push(...extra);
+		} catch (e) {
+			errors[`${descriptor.name}:postprocess`] = e instanceof Error ? e.message : String(e);
+		}
+	}
+
 	// (b) 结构化结果路径：mapResult 收敛结构对象，落 result-output.json 面包屑。
 	let resultFile: string | undefined;
 	const structured = descriptor.mapResult ? descriptor.mapResult(outputResult, ctx) : undefined;

@@ -34,7 +34,11 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `video_speaker_detect` | 「谁在说话 / 说话人检测 / 检测画面里谁在何时开口」 | 单条本地视频；可选 `--language`、`--max-faces-per-frame`、`--detect-body`、`--track-sample-fps`。**重 GPU、按分钟计费较高，长片先想清楚** | 可见说话人结构 `result-output.json`（时间字段时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_split_screen` | 「分屏 / reaction 同框 / 对比视频 / 多画面合成」 | **2~16 段视频**（多 positional，顺序有语义）；精确档 `--clips-json`：条目 `{input:0 起序号, begin_time_ms, end_time_ms, crop 归一化}`（**毫秒时基**、`input` 指第几个输入文件、同文件可多窗口）；可选 `--layout-mode/--layout-id/--seed/--output-ratio/--quality/--fit-mode/--audio-mode/--gap-ratio/--background-color`。**成片时长对齐最短段** | 一条分屏成片视频 | 运行前实时查询 | 已上线 |
 | `video_face_track` | 「人脸追踪 / 人物出场时间段 / 视频里有哪几个人」 | 单条本地视频；可选 `--sample-fps`、`--max-faces`、`--min-face-ratio`、`--enable-body-match`、`--similarity-threshold`；`time_ranges` 经 `--params-json` 传（**单位毫秒**，如 `{"begin_time":0,"end_time":30000}`）。**重 GPU、按分钟计费较高** | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
-| `video_ai_subtitle` | 「智能字幕 / 给视频加字幕 / 视频翻译字幕 / 烧录字幕 / 去原字幕」 | 单条视频或音频；**`--language <码>` 必填**；可选 `--translate-language`、`--need-render`（烧录）、`--need-pure`（去原字幕）、`--subtitle-type`、`--subtitle-color` | `.ass` 字幕文件 + 可选烧录/去字幕 `.mp4` + `result-output.json`（LLM 摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
+| `video_ai_subtitle` | 「智能字幕 / 给视频加字幕 / 视频翻译字幕 / 烧录字幕 / 去原字幕」 | 单条视频或音频；**`--language <码>` 必填**；可选 `--translate-language`、`--need-render`（烧录）、`--need-pure`（去原字幕）、`--subtitle-type`、`--subtitle-color`。**默认只上传本地抽出的音频、毛片不出本地**（几何随请求回传，字幕按原片画布出） | `.ass` 字幕文件 + 可选烧录/去字幕 `.mp4` + `result-output.json`（LLM 摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
+
+> **字幕这两条要提前讲给用户**（`video_ai_subtitle` 专属）：
+> - `--need-render`（烧录）**在本地跑 ffmpeg**，成片不从云端下行。字幕模板用 `思源黑体 CN Bold`，**本机没装就直接报错**（不拿替代字体顶——观感会与模板设计不符且用户难以察觉）。装上后重跑即可，字幕文件已落地、无需重新提交任务。4K/长片本地烧录要重编码，耗时可观，先跟用户打招呼。
+> - `--need-pure`（去原字幕）是画面操作，**加了这个 flag 就会整片上传**（CLI 会打一行说明）。只要字幕文件时别加。
 | `audio_separation` | 「分离人声和伴奏 / 提取人声 / 提取伴奏」 | 单条音频 | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_speaker_split` | 「按说话人分轨 / 把不同人的声音分开 / 谁在什么时候说话」 | 单条音频；可选 `--only-struct` 只出结构 | 各说话人 `.wav` 分轨 + `spoken_list` 时间线（`result-output.json`） | 运行前实时查询 | 已上线 |
 | `audio_stretch` | 「变调 / 变速 / 升降 key / 加快放慢音频」 | 单条音频；可选 `--semitones`、`--speed`（>0） | 变调变速音频 | 运行前实时查询 | 已上线 |
