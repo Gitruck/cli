@@ -157,3 +157,121 @@ export function renderClipsOverview(clips: ClipMeta[], ctx: OverviewContext): st
 	out.push("", "> 逐条入选理由、跳剪说明、高光词见各 `clip{i}/clip.md`。");
 	return `${out.join("\n")}\n`;
 }
+
+// ---------------------------------------------------------------- 精剪报告（add-tool-video-long2short-pro）
+
+/** 精剪润色项英文键 → 人话。未知键原样透出（服务端新增项不至于渲成空白）。 */
+const POLISH_LABEL: Record<string, string> = {
+	split_screen: "智能分屏",
+	camera: "克制运镜",
+	speed: "整体调速",
+	seam: "接缝过渡",
+	subtitle: "智能字幕",
+	subtitle_remap: "字幕时轴重映射",
+	purify_source: "去除原字幕",
+	unknown: "未具名润色项",
+};
+
+export interface ProReportContext {
+	source: string;
+	taskId?: string;
+	/** 逐条成片的落地文件名（按 clip 序），缺则该行不渲文件名。 */
+	clipFiles?: Array<string | undefined>;
+}
+
+/**
+ * 渲染精剪报告（单份 `clips.md`）：任务级事实 + 总览表 + 逐条小节 + 降级明细。
+ *
+ * 与粗剪有意不同形态：精剪产物是平铺的 `clip{i}.mp4`、没有逐条子目录，散成 N 份反而更难读。
+ * 字段抽取复用本模块既有纯函数（粗剪渲染路径一行未动，产物逐字节不变）。
+ */
+export function renderProReport(clips: ClipMeta[], report: ClipMeta, ctx: ProReportContext): string {
+	const name = ctx.source.split(/[\/]/).pop() || ctx.source;
+	const out: string[] = [`# ${name} · 长剪短精剪报告`, ""];
+
+	out.push(`- 源片：\`${ctx.source}\``);
+	out.push(`- 成片：${clips.length} 条`);
+	const jc = report?.jump_cut;
+	if (typeof jc === "boolean") out.push(`- 跳剪：${jc ? "开" : "关"}`);
+	if (ctx.taskId) out.push(`- task_id：\`${ctx.taskId}\``);
+	out.push("");
+
+	// 总览表：一眼选出先看哪条
+	out.push("| # | 标题 | 时长 | 评分 | 简介 |", "| --- | --- | --- | --- | --- |");
+	for (const [i, clip] of clips.entries()) {
+		const dur = clipDurationMs(clip);
+		const score = num(clip.score);
+		out.push(
+			`| clip${i} | ${cell(str(clip.title) ?? "—")} | ${dur != null ? fmtTime(dur) : "—"} | ${score ?? "—"} | ${cell(str(clip.summary) ?? "—")} |`,
+		);
+	}
+	out.push("");
+
+	// 降级明细：润色是 best-effort，成片照出但某些效果没做成——不点名用户无从察觉
+	const degraded = report?.degraded_items;
+	const degRows: string[] = [];
+	if (degraded && typeof degraded === "object" && !Array.isArray(degraded)) {
+		for (const [k, v] of Object.entries(degraded as Record<string, unknown>)) {
+			const names = list(v).map((x) => POLISH_LABEL[x] ?? x);
+			if (names.length) degRows.push(`- **${k}**：${names.join("、")}`);
+		}
+	}
+	if (degRows.length) {
+		out.push("## ⚠️ 润色降级", "");
+		out.push("以下片子照常出片，但列出的润色项**没有做成**——效果与预期不同，别当成完整成片直接发布。", "");
+		out.push(...degRows, "");
+	}
+
+	// 逐条小节
+	for (const [i, clip] of clips.entries()) {
+		const title = str(clip.title);
+		out.push("---", "", `## clip${i}${title ? `「${title}」` : ""}`, "");
+
+		const bits: string[] = [];
+		const dur = clipDurationMs(clip);
+		if (dur != null) bits.push(`时长 ${fmtTime(dur)}`);
+		const segCount = clipSegmentCount(clip);
+		if (segCount != null) bits.push(`${segCount} 个保留片段`);
+		const span = sourceSpan(clip);
+		if (span) bits.push(`源片 ${fmtTime(span[0])}–${fmtTime(span[1])}`);
+		const f = ctx.clipFiles?.[i];
+		if (f) bits.push(`成片 ${baseName(f)}`);
+		if (bits.length) out.push(`- ${bits.join(" · ")}`, "");
+
+		const score = num(clip.score);
+		const reason = str(clip.score_reason);
+		if (score != null || reason) {
+			out.push("### 入选理由", "");
+			out.push([score != null ? `**评分 ${score}**` : null, reason].filter(Boolean).join(" — "), "");
+		}
+
+		const summary = str(clip.summary);
+		if (summary) out.push("### 简介", "", summary, "");
+
+		const note = str(clip.jumpcut_note);
+		if (note) out.push("### 跳剪", "", jumpcutText(note), "");
+
+		const cats: Array<[string, string[]]> = [
+			["主题", list(clip.themes)],
+			["标签", list(clip.tags)],
+			["类型", list(clip.genres)],
+			["调性", list(clip.moods)],
+		];
+		const shown = cats.filter(([, v]) => v.length);
+		if (shown.length) {
+			out.push("### 分类与调性", "");
+			for (const [k, v] of shown) out.push(`- ${k}：${v.join("、")}`);
+			out.push("");
+		}
+
+		const hl = Array.isArray(clip.highlight_words) ? (clip.highlight_words as ClipMeta[]) : [];
+		const hlRows = hl.map((h) => ({ text: str(h?.text), at: num(h?.begin_time) })).filter((h) => h.text);
+		if (hlRows.length) {
+			out.push("### 高光词（源片时码）", "");
+			for (const h of hlRows) out.push(`- ${h.at != null ? `${fmtTime(h.at)} ` : ""}「${h.text}」`);
+			out.push("");
+		}
+	}
+
+	return `${out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+}

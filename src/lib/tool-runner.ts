@@ -504,7 +504,7 @@ export async function runCloudTool(
 	// 云端已落地产物一律保留——付过费的东西不能因本地一步失手而丢。
 	if (descriptor.postprocess) {
 		try {
-			const extra = await descriptor.postprocess(ctx, [...files]);
+			const extra = await descriptor.postprocess(ctx, [...files], outputResult);
 			if (Array.isArray(extra)) files.push(...extra);
 		} catch (e) {
 			errors[`${descriptor.name}:postprocess`] = e instanceof Error ? e.message : String(e);
