@@ -8,10 +8,11 @@
  * cloud 型直调公共域 API，local 型可复用同一注册表与发现入口；infra 零改动。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
 import { assFontNames, burnSubtitle, extractAudio, probeFontAvailable, probeGeometry } from "./media";
+import { renderProReport } from "./clip-brief";
 
 // ---------------------------------------------------------------- 类型
 
@@ -105,13 +106,19 @@ export interface ToolDescriptor {
 	/** 把 output_result 收敛为下载清单。 */
 	mapOutputs?: (out: OutputResult, ctx: ToolContext) => DownloadItem[];
 	/**
-	 * 下载落地之后、结果收敛之前的本地加工钩子（align-ai-subtitle-audio-only）：收已落地文件绝对路径，
-	 * 返回本地新产出的文件路径（追加进产物清单）。让「云端只出轻产物、重加工留在本地」成为工具族一等能力，
+	 * 下载落地之后、结果收敛之前的本地加工钩子（align-ai-subtitle-audio-only）：收已落地文件绝对路径
+	 * **与云端出参 output_result**，返回本地新产出的文件路径（追加进产物清单）。
+	 * 之所以也收云端出参：本地加工既可能是对已落地文件的再处理（烧录字幕），也可能是把云端返回的结构
+	 * 渲成人读产物（精剪的切片报告），后者只靠文件路径无从下手（add-tool-video-long2short-pro）。让「云端只出轻产物、重加工留在本地」成为工具族一等能力，
 	 * 不必为此把工具提升为独立命令。
 	 * 失败由 runner 记 `errors[<name>:postprocess]` 并**保留云端已落地产物**——本地加工失败
 	 * MUST NOT 丢弃已经付费取得的云端结果。
 	 */
-	postprocess?: (ctx: ToolContext, landed: string[]) => Promise<string[] | void> | string[] | void;
+	postprocess?: (
+		ctx: ToolContext,
+		landed: string[],
+		out: OutputResult,
+	) => Promise<string[] | void> | string[] | void;
 	/**
 	 * 把 output_result 收敛为一个可 JSON 序列化的结构对象，供 runner 落 `result-output.json`。
 	 * 只读纯函数、只返回结构、不负责落盘（落盘归 runner）；与 mapOutputs 相互独立——
@@ -1272,6 +1279,119 @@ const videoAiSubtitle: ToolDescriptor = {
 	},
 };
 
+// ---------------------------------------------------------------- 长剪短·精剪（add-tool-video-long2short-pro）
+
+/** 精剪成片画幅枚举（与服务端 _OUTPUT_SIZE_RATIOS 同源；自定义 WxH 由服务端校验）。 */
+const PRO_DURATION_PREFS = ["auto", "short", "medium", "long"];
+
+/**
+ * video_long2short_pro —— 长剪短·精剪，一键直接出成片。
+ *
+ * 与粗剪 `gtrk long2short`（独立命令）分工明确：粗剪出**可编辑工程**（gtrk/剪映/PR）、与客户端打配合、
+ * 毛片不上传；精剪**只直接出成片 mp4**、不给编辑面、整片上传（服务端要渲染，input_ext 亦只收视频）。
+ * 服务端拒收 outputs/source_path，正是「直接结果型能力」的形状，故入驻工具族而非另开命令。
+ * 产物：逐条 clip{i}.mp4 + result-output.json + 人读报告 clips.md（含润色降级明细）。
+ */
+const videoLong2ShortPro: ToolDescriptor = {
+	name: "video_long2short_pro",
+	title: "长剪短·精剪（直接出片）",
+	description:
+		"长内容按语义抽多条高光短片并一键出成品：选段+跳剪+分屏内核，叠加模糊底画布适配/克制运镜/调速保音高/智能字幕。只出成片，不产工程文件——要可编辑工程请用 gtrk long2short（粗剪）。",
+	kind: "cloud",
+	input: { kind: "video", exts: PUBLIC_VIDEO_EXTS },
+	priceKey: "video_long2short_pro",
+	outputHint: "逐条高光成片 mp4 + 切片报告 clips.md",
+	enabled: true,
+	taskType: "video_long2short_pro",
+	pollTimeoutMs: 4 * 60 * 60 * 1000, // 内含 ASR + 选段 + 逐 clip 润色渲染，长片耗时可观
+	options: [
+		{ flag: "--language <code>", desc: "源语种代码（精剪必填；取值以服务端支持列表为准）" },
+		{ flag: "--output-language <code>", desc: "选段/文案的输出语种（未传则同源语种）" },
+		{ flag: "--main-topic <text>", desc: "主题引导（影响选段偏好）" },
+		{ flag: "--output-size <s>", desc: "成片画幅 9:16|16:9|1:1 或自定义 WxH（未传则服务端默认）" },
+		{ flag: "--no-jump-cut", desc: "关闭跳剪（默认开：片内去水词/冗余，只删不重排）" },
+		{ flag: "--duration-pref <p>", desc: `成片时长偏好 ${PRO_DURATION_PREFS.join("/")}（成片条数由内容语义决定、不可指定）` },
+		{ flag: "--max-clip-sec <n>", desc: "单条成片时长安全上限（秒；未传则服务端默认）" },
+		{ flag: "--split-screen", desc: "开启智能分屏（多人同框段合成分屏画面）" },
+		{ flag: "--split-orientation <o>", desc: "分屏方向 auto|lr|tb（未传则服务端默认）" },
+		{ flag: "--speed-factor <n>", desc: "整体调速倍率（保音高；未传则服务端默认）" },
+		{ flag: "--no-camera-move", desc: "关闭克制运镜（默认开：亚像素推/拉）" },
+		{ flag: "--no-subtitle", desc: "关闭智能字幕（默认开：成片内烧录字幕）" },
+		{ flag: "--subtitle-translate-language <code>", desc: "字幕译文语种（未传则单语字幕）" },
+	],
+	buildPayload(fileId, ctx) {
+		const o = ctx.opts;
+		const language = o.language == null ? "" : String(o.language).trim();
+		if (!language) throw new Error("--language 必填：请指定源语种代码（具体取值见云端 API 文档 / 服务端支持列表）");
+		const p: Record<string, unknown> = { file_id: fileId, language };
+
+		if (o.outputLanguage != null && String(o.outputLanguage).trim()) p.output_language = String(o.outputLanguage).trim();
+		if (o.mainTopic != null && String(o.mainTopic).trim()) p.main_topic = String(o.mainTopic).trim();
+		if (o.outputSize != null && String(o.outputSize).trim()) p.output_size = String(o.outputSize).trim();
+		if (o.jumpCut === false) p.jump_cut = false;
+
+		const duration: Record<string, unknown> = {};
+		if (o.durationPref != null && String(o.durationPref).trim()) duration.pref = String(o.durationPref).trim();
+		const mcs = parseCountFlag(o.maxClipSec, "--max-clip-sec");
+		if (mcs != null) duration.max_clip_sec = mcs;
+		if (Object.keys(duration).length) p.duration = duration;
+
+		if (o.splitScreen === true) {
+			const ss: Record<string, unknown> = { enable: true };
+			if (o.splitOrientation != null && String(o.splitOrientation).trim()) ss.orientation = String(o.splitOrientation).trim();
+			p.split_screen = ss;
+		}
+
+		if (o.speedFactor != null) {
+			const n = Number(o.speedFactor);
+			if (!Number.isFinite(n)) throw new Error(`--speed-factor 需要有限数值，拿到「${o.speedFactor}」`);
+			p.speed = { factor: n };
+		}
+		if (o.cameraMove === false) p.camera_move = { enable: false };
+
+		const sub: Record<string, unknown> = {};
+		if (o.subtitle === false) sub.enable = false;
+		if (o.subtitleTranslateLanguage != null && String(o.subtitleTranslateLanguage).trim()) {
+			sub.translate_language = String(o.subtitleTranslateLanguage).trim();
+		}
+		if (Object.keys(sub).length) p.subtitle = sub;
+
+		return p;
+	},
+	mapOutputs(out, _ctx) {
+		const clips = Array.isArray(out.clips) ? (out.clips as Record<string, unknown>[]) : [];
+		const files: DownloadItem[] = [];
+		for (const [i, clip] of clips.entries()) {
+			const f = clip?.file as Record<string, unknown> | undefined;
+			const url = typeof f?.download_url === "string" ? f.download_url : undefined;
+			if (!url) continue; // 该条渲染失败（file 为 null）→ 不产伪条目，降级明细由报告点名
+			files.push({ url, filename: `clip${i}${extFromUrl(url, ".mp4")}` });
+		}
+		return files;
+	},
+	mapResult(out) {
+		// clips 原样保留（含 file 的 file_id/download_url）：download_url 有时效，但它同时是
+		// 「这条渲出来了没有」的唯一机读证据，抹掉反而让面包屑失去价值。
+		return { clips: out.clips ?? [], report: out.report ?? {} };
+	},
+	async postprocess(ctx, landed, out) {
+		const clips = Array.isArray(out.clips) ? (out.clips as Record<string, unknown>[]) : [];
+		if (!clips.length) return;
+		const mp4s = landed.filter((p) => p.toLowerCase().endsWith(".mp4"));
+		const byIndex = clips.map((_c, i) => mp4s.find((p) => new RegExp(`clip${i}\.[a-z0-9]+$`, "i").test(p)));
+		const dest = join(dirname(landed[0] ?? "."), "clips.md");
+		await writeFile(
+			dest,
+			renderProReport(clips, (out.report ?? {}) as Record<string, unknown>, {
+				source: ctx.inputAbs ?? ctx.baseName,
+				clipFiles: byIndex,
+			}),
+			"utf8",
+		);
+		return [dest];
+	},
+};
+
 // ---------------------------------------------------------------- 多文件图片工具（add-tool-multifile-images）
 
 /** 数值 flag 解析：显式给出时须为有限非负整数，否则提交前人话报错；缺省返回 undefined。 */
@@ -1580,6 +1700,7 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	imageClassicTemplate,
 	imageVerticalStitch,
 	videoSplitScreen,
+	videoLong2ShortPro,
 	audioTtsClone,
 	mad,
 ];

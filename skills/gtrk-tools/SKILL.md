@@ -33,6 +33,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `video_motion_cut` | 「运镜高光 / 提取运镜片段 / 找高光镜头」 | 单条本地视频 | 运镜/高光片段结构 `result-output.json`（非下载文件） | 运行前实时查询 | 已上线 |
 | `video_speaker_detect` | 「谁在说话 / 说话人检测 / 检测画面里谁在何时开口」 | 单条本地视频；可选 `--language`、`--max-faces-per-frame`、`--detect-body`、`--track-sample-fps`。**重 GPU、按分钟计费较高，长片先想清楚** | 可见说话人结构 `result-output.json`（时间字段时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_split_screen` | 「分屏 / reaction 同框 / 对比视频 / 多画面合成」 | **2~16 段视频**（多 positional，顺序有语义）；精确档 `--clips-json`：条目 `{input:0 起序号, begin_time_ms, end_time_ms, crop 归一化}`（**毫秒时基**、`input` 指第几个输入文件、同文件可多窗口）；可选 `--layout-mode/--layout-id/--seed/--output-ratio/--quality/--fit-mode/--audio-mode/--gap-ratio/--background-color`。**成片时长对齐最短段** | 一条分屏成片视频 | 运行前实时查询 | 已上线 |
+| `video_long2short_pro` | 「长视频剪成多条高光短片 / 一键出成片 / 长剪短精剪 / 播客切片直接出片」 | 单条长视频（**整片上传**，云端要渲成片）；**`--language <码>` 必填**；可选 `--output-language`、`--main-topic`、`--output-size`、`--no-jump-cut`、`--duration-pref`、`--max-clip-sec`、`--split-screen`、`--split-orientation`、`--speed-factor`、`--no-camera-move`、`--no-subtitle`、`--subtitle-translate-language`；润色细颗粒走 `--params-json` | 逐条成片 `clip{i}.mp4` + 人读报告 `clips.md`（含**润色降级明细**）+ `result-output.json` | 运行前实时查询（**约为粗剪两倍**） | 已上线 |
 | `video_face_track` | 「人脸追踪 / 人物出场时间段 / 视频里有哪几个人」 | 单条本地视频；可选 `--sample-fps`、`--max-faces`、`--min-face-ratio`、`--enable-body-match`、`--similarity-threshold`；`time_ranges` 经 `--params-json` 传（**单位毫秒**，如 `{"begin_time":0,"end_time":30000}`）。**重 GPU、按分钟计费较高** | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 「智能字幕 / 给视频加字幕 / 视频翻译字幕 / 烧录字幕 / 去原字幕」 | 单条视频或音频；**`--language <码>` 必填**；可选 `--translate-language`、`--need-render`（烧录）、`--need-pure`（去原字幕）、`--subtitle-type`、`--subtitle-color`。**默认只上传本地抽出的音频、毛片不出本地**（几何随请求回传，字幕按原片画布出） | `.ass` 字幕文件 + 可选烧录/去字幕 `.mp4` + `result-output.json`（LLM 摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 
@@ -64,6 +65,22 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - **产物只有 `.jsx`、只支持 AE**：完成后引导「装 AE 2020+ → 文件›脚本›运行脚本文件 选它」。**不承诺 `.amproj`/Alight Motion 等本命令未产出的形态**。
 - **可复现**：`--seed <n>` 固定选窗序列（同素材同种子同数据版本 → 同结果）；`result.json` 记录 seed、数据版本、降级档位、选中技法清单。
 - 常用：`gtrk tool mad ./素材 --bgm 歌.mp3 --duration 20 --json`。
+
+### ⚠️ 长剪短有两条线，别选错（名字很像，产物完全不同）
+
+用户说「把这条长视频剪成短片」时，**先问清他要工程还是要成片**——选错一次的代价是白花积分重来。
+
+| | `gtrk long2short`（粗剪，**独立命令、不在本 skill**） | `gtrk tool video_long2short_pro`（精剪，本 skill） |
+|---|---|---|
+| 产物 | **可编辑工程**：gtrk（客户端）+ 剪映草稿 + PR xml，逐 clip 一套 | **直接出成片 mp4**，一条一个文件 |
+| 上传 | 只传抽出音频 / 720p 代理，**毛片不出本地** | **整片上传**（云端要渲染） |
+| 适合谁 | 要自己再剪、要调时间轴、要换素材 | 要能直接发布的成品，不打算二次编辑 |
+| 计费 | 按分钟 | 按分钟，**约为粗剪两倍** |
+| 驱动 skill | `/gtrk-long2short` | 本 skill |
+
+判断句：**「剪完还要不要再动？」要动 → 粗剪；不动 → 精剪。**
+
+精剪的润色（运镜 / 调速 / 接缝 / 分屏 / 字幕）都是 best-effort——**单项失败会降级，成片照出**。跑完 MUST 看一眼产物根的 `clips.md`，里面有「⚠️ 润色降级」小节点名哪条片的哪些效果没做成；有降级就如实告诉用户，别让他拿着不完整的效果去发布。
 
 ## 调用纪律（每次都照做）
 
