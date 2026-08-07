@@ -105,3 +105,61 @@ export function assertDurationConsistent(
 		);
 	}
 }
+
+// ---------------------------------------------------------------- 本地字幕烧录（align-ai-subtitle-audio-only）
+
+/** 从 .ass 的 `Style:` 行取出所声明的字体名集合（第 2 个字段）。 */
+export function assFontNames(assText: string): string[] {
+	const names = new Set<string>();
+	for (const line of assText.split(/\r?\n/)) {
+		if (!line.startsWith("Style:")) continue;
+		const font = line.slice("Style:".length).split(",")[1]?.trim();
+		if (font) names.add(font);
+	}
+	return [...names];
+}
+
+/**
+ * 本机是否装了指定字体。走 ffmpeg 的 fontconfig 视角以外的路径不可靠，故直接查系统字体目录的
+ * 名称表代价高——这里用 ffmpeg 自带的 `-f lavfi drawtext` 探测：字体不可解析时 ffmpeg 会报错。
+ * 返回 true=可用。探测失败（ffmpeg 无 drawtext 等）一律返回 null 表示「测不出来」，由调用方决定。
+ */
+export async function probeFontAvailable(font: string, ffmpegPath?: string): Promise<boolean | null> {
+	const { ffmpeg } = requireFfmpeg(ffmpegPath);
+	try {
+		await runFfmpeg(ffmpeg, [
+			"-v", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04",
+			"-vf", `drawtext=font='${font}':text=A`, "-frames:v", "1", "-f", "null", "-",
+		]);
+		return true;
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		// 字体缺失时 fontconfig 报 "Cannot find a valid font for the family ..."；
+		// 其余错误（滤镜不可用等）说明探测本身失效，回 null 而不是误判成缺字体。
+		if (/valid font|font.*not found|Fontconfig error/i.test(msg)) return false;
+		return null;
+	}
+}
+
+/**
+ * 本地把 .ass 烧进视频（毛片不出本地、烧好的成片也不从云端下行）。
+ * 字幕滤镜按 ffmpeg `ass` 滤镜走（自带样式，不做二次覆写）；音轨直拷不重编码。
+ */
+export async function burnSubtitle(
+	videoAbs: string,
+	assAbs: string,
+	outAbs: string,
+	opts: { ffmpegPath?: string; crf?: number; codec?: string } = {},
+): Promise<string> {
+	const { ffmpeg } = requireFfmpeg(opts.ffmpegPath);
+	// ass 滤镜的路径参数要转义 Windows 盘符冒号与反斜杠，否则被当成滤镜参数分隔符
+	const filterPath = assAbs.replace(/\\/g, "/").replace(/:/g, "\\:");
+	await runFfmpeg(ffmpeg, [
+		"-y", "-v", "error", "-i", videoAbs,
+		"-vf", `ass='${filterPath}'`,
+		"-c:v", opts.codec ?? "libx264", "-crf", String(opts.crf ?? 18), "-preset", "medium",
+		"-c:a", "copy", "-movflags", "+faststart",
+		outAbs,
+	]);
+	return outAbs;
+}

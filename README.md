@@ -415,7 +415,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `video_speaker_detect` | 单条本地视频；可选 `--language`/`--max-faces-per-frame`/`--detect-body`/`--track-sample-fps`（重 GPU） | 可见说话人结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_face_track` | 单条本地视频；可选 `--sample-fps`/`--max-faces`/`--min-face-ratio`/`--enable-body-match`/`--similarity-threshold`；`time_ranges` 走 `--params-json`（重 GPU） | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤2000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法 | 配音音频 wav/mp3（按文本字数折算分钟计费） | 运行前实时查询 | 已上线 |
-| `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color` | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
+| `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color`。默认只传本地抽出的音频（毛片不上传） | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `audio_separation` | 单条音频；可选 `--mode fast|turbo` | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_speaker_split` | 单条音频；可选 `--only-struct` | 各说话人 `.wav` 分轨 + `spoken_list` 时间线（`result-output.json`） | 运行前实时查询 | 已上线 |
 | `audio_stretch` | 单条音频；可选 `--semitones <n>`、`--speed <n>`（>0） | 变调变速音频 | 运行前实时查询 | 已上线 |
@@ -451,7 +451,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 - `gtrk tool video_segment ./clip.mp4 [--detector adaptive] [--threshold 27] [--json]` — 机械分镜；产**结构化** `result-output.json`（`scene_list` 各段起止/时长），非下载文件。
 - `gtrk tool video_ai_segment ./clip.mp4 [--segment-mode shot_type] [--json]` — 智能语义分镜；产 `result-output.json`（`categories[].shots[]` 含景别/标签/描述/秒级时码）。
 - `gtrk tool video_motion_cut ./clip.mp4 [--json]` — 运镜/高光片段；产 `result-output.json`（`cut_points[]` 含帧号、秒级时码与运动特征）。
-- `gtrk tool video_ai_subtitle ./clip.mp4 --language zh [--translate-language en] [--need-render] [--subtitle-color 湖蓝]` — 智能字幕：`--language` 必填，产 `.ass` 字幕（`--need-render` 时另出烧录 `.mp4`）+ `result-output.json`（LLM 摘要 + 字级时间轴）；`subtitle_type`/`subtitle_color` 枚举与 `content` 详见云端 API 文档，`--params-json '{"content":{...}}'` 可透传。
+- `gtrk tool video_ai_subtitle ./clip.mp4 --language zh [--translate-language en] [--need-render] [--subtitle-color 湖蓝]` — 智能字幕：`--language` 必填，产 `.ass` 字幕 + `result-output.json`（LLM 摘要 + 字级时间轴）。**默认只上传本地抽出的音频**（毛片不出本地，几何随请求回传）；`--need-render` 改由**本地 ffmpeg 烧录**（缺 `思源黑体 CN Bold` 直接报错，不用替代字体顶）；`--need-pure` 需要画面，加了会整片上传。`subtitle_type`/`subtitle_color` 枚举与 `content` 详见云端 API 文档，`--params-json '{"content":{...}}'` 可透传。
 - 上面三个是**分析型工具**：产物是结构化数据 `result-output.json`（非下载媒体），`result.json` 的 `resultFile` 指向它、`files` 为空且 `ok=true` 属正常。
 - `gtrk tool audio_separation ./song.mp3 [--mode turbo]` — 人声伴奏分离；`--param need_vocals=false` 等低频字段仍可透传。
 - `gtrk tool audio_speaker_split ./meeting.mp3 [--only-struct]` — 按说话人分轨：默认产各说话人 `.wav` + `result-output.json`（`spoken_list` 时间线）；`--only-struct` 只出结构不切文件。
