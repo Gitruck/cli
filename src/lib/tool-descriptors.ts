@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
-import { assFontNames, burnSubtitle, extractAudio, probeFontAvailable, probeGeometry } from "./media";
+import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, probeGeometry } from "./media";
 import { renderProReport } from "./clip-brief";
 
 // ---------------------------------------------------------------- 类型
@@ -1246,8 +1246,9 @@ const videoAiSubtitle: ToolDescriptor = {
 	},
 	/**
 	 * --need-render 的本地烧录：拿拉回的 .ass 烧本地原片，毛片不出本地、成片也不从云端下行。
-	 * 缺模板字体一律硬失败——替代字体烧出来的东西「看着正常」但与模板设计不符，用户无从察觉
-	 * （与 ffmpeg 不自分发同一口径：不自带字体，也不假装能用别的顶）。
+	 * 缺模板字体一律硬失败——替代字体烧出来的东西「看着正常」但与模板设计不符，用户无从察觉。
+	 * 字体供给见 add-runtime-asset-mirror：`gtrk deps install --font` 落 ~/.gitruck/fonts，
+	 * 经 ass 滤镜 fontsdir 供给 libass，**不装进系统字体表**；两处任一命中即可。
 	 */
 	async postprocess(ctx, landed) {
 		if (ctx.opts.needRender !== true) return;
@@ -1261,12 +1262,14 @@ const videoAiSubtitle: ToolDescriptor = {
 		const fonts = assFontNames(await readFile(ass, "utf8"));
 		const missing: string[] = [];
 		for (const f of fonts) {
-			if ((await probeFontAvailable(f, ctx.ffmpegPath)) === false) missing.push(f);
+			// ~/.gitruck/fonts 与系统字体表任一命中即可（前者经 ass 滤镜 fontsdir 供给）
+			if (!(await fontUsableForBurn(f, ctx.ffmpegPath))) missing.push(f);
 		}
 		if (missing.length) {
 			throw new Error(
 				`本机缺字幕模板所需字体：${missing.join("、")}。` +
-					`装上后重跑即可（字幕文件已落地，无需重新提交任务）。CLI 不自带字体、也不用替代字体顶——` +
+					`装它：gtrk deps install --font（落 ~/.gitruck/fonts，不写系统字体表）。\n` +
+					`  装上后重跑即可（字幕文件已落地，无需重新提交任务）。不用替代字体顶——` +
 					`替代字体烧出来的成片观感与模板设计不符且难以察觉。`,
 			);
 		}

@@ -3,8 +3,13 @@
  *
  * 定位优先级：--ffmpeg-path 显式覆盖 → ~/.gitruck/ffmpeg/{ffmpeg,ffprobe}[.exe] → 系统 PATH。
  * 一律**绝对路径** spawn（系统档除外，用裸名依赖既有 PATH）；**绝不修改用户系统环境变量/PATH**——
- * 尊重用户自装的 ffmpeg。CLI 不下载不分发 ffmpeg（我方非分发主体 → 零 GPL 义务）；缺失时给委托 agent
- * 安装的指引（先查本地、缺失才拉、国内加速站点 + sha256），不自行下载。
+ * 尊重用户自装的 ffmpeg。
+ *
+ * 供给方式（change: add-runtime-asset-mirror，2026-08-08 推翻旧「不自分发」口径）：
+ * 可经 `gtrk deps install --ffmpeg` 从同合云自建镜像拉取，落 ~/.gitruck/ffmpeg——
+ * **只填第二格，不改变上面的优先级、不越过用户自装的 ffmpeg**。
+ * 仍**禁止静默自动下载**：缺失时只报错 + 指引，不自行开始下载。
+ * GPL 射程见分发点 SOURCE.md：义务只覆盖被分发的二进制本身，绝对路径 spawn 独立子进程不构成衍生作品。
  */
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -21,11 +26,11 @@ export interface FfmpegResolution {
 const isWin = process.platform === "win32";
 const bin = (base: string) => (isWin ? `${base}.exe` : base);
 
-/** 委托 agent 安装 ffmpeg 的可执行指引（缺失时对用户/agent 展示）。 */
+/** ffmpeg 缺失时的可执行指引（对用户/agent 展示）。**不自动下载**，指向显式安装入口。 */
 export const FFMPEG_INSTALL_HINT =
-	`未找到 ffmpeg/ffprobe。请把二者放到 ${ffmpegDir()}（agent 可代办：先查本地确实缺失才拉，` +
-	`面向国内用户优先国内加速站点——GitHub 代理 pass-through 拉 BtbN/gyan.dev 官方静态构建，或同合云自建镜像，` +
-	`并做 sha256 校验），或用 --ffmpeg-path <目录> 指定已装位置。`;
+	`未找到 ffmpeg/ffprobe。装它：gtrk deps install --ffmpeg` +
+	`（从同合云镜像拉，自动过 sha256 校验，落 ${ffmpegDir()}；agent 可代办）。\n` +
+	`  也可自行把 ffmpeg/ffprobe 放到该目录，或用 --ffmpeg-path <目录> 指定已装位置。`;
 
 const _cache = new Map<string, FfmpegResolution | null>();
 

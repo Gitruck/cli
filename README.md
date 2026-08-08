@@ -28,6 +28,7 @@
 | ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单；`--column <id>` 按栏目词表校验 |
 | ⚙️ | `gtrk init` | 引导式一次性配置（API Key + 剪映草稿目录），之后免管 |
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
+| 📦 | `gtrk deps` | 运行时资产：`status` 查 ffmpeg/字体的来源与授权，`install` 从同合云镜像装（**须显式触发，绝不静默自动下载**） |
 | 🤖 | `gtrk skills install` | 通过通用 `skills` 适配器和 gtrk 补充层，把 10 个 CLI 自带 skill 装进本机检测到的主流 Agent；`--all` 可覆盖全部已登记宿主 |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
 | 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg） |
@@ -484,6 +485,13 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 - `gtrk install [--api-key … -y --skill-agents codex,cursor --all-agents --copy-skills --skills-dir …]` — 一条命令装全（skill + 配置 + 体检），对标飞书 `lark-cli install`。
 - `gtrk init [--api-key … --api-base … --jianying-draft-dir … -y]` — 仅配置（交互 / 非交互）。
 - `gtrk doctor` — 体检（含 CLI 版本 / 有无新版）。
+- `gtrk deps status` — 查 ffmpeg/ffprobe 与渲染字体的**当前来源**（`--ffmpeg-path` / `~/.gitruck` / 系统 / 缺失）、版本、授权与源码地址。
+- `gtrk deps install [--ffmpeg] [--font] [--force]` — 从同合云镜像安装运行时资产，**已存在则跳过**。
+  - **不会静默自动下载**：任何缺失路径只报错并指向本命令（包体 30–90 MB，且分发物涉及授权，须由用户/agent 显式触发）。
+  - 下载一律 https + **sha256 强校验**，校验不过即丢弃、不落地；解包调**系统 tar**（Win10+/macOS/Linux 自带），不引第三方解压依赖。
+  - 定位优先级不变：`--ffmpeg-path` → `~/.gitruck/ffmpeg` → 系统 PATH。镜像只填中间那一格，**不越过你自己装的 ffmpeg**。
+  - 字体落 `~/.gitruck/fonts`，烧录时经 ffmpeg `ass` 滤镜的 `fontsdir` 供给——**不装进系统字体表、不写注册表、不要管理员权限**。
+  - 分发的 ffmpeg 为 GPLv3 构建，对应源码与二进制同处提供（见分发点 `SOURCE.md`）；**下载不附加任何使用限制**。
 - `gtrk upgrade [--check]` — 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装。
 - `gtrk skills install [--agents codex,workbuddy,comate,…] [--all] [--copy] [--dir <skills 目录>]` — 单独安装/刷新 Agent Skills；缺省由通用适配器与 gtrk 补充层自动检测。
 
