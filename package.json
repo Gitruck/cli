@@ -23,6 +23,7 @@
     "contracts",
     "AGENT.md",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "engines": {
