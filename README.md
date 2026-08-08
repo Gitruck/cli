@@ -422,7 +422,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤2000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法 | 配音音频 wav/mp3（按文本字数折算分钟计费） | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color`。默认只传本地抽出的音频（毛片不上传） | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `video_long2short_pro` | 单条长视频（整片上传）；`--language <码>` 必填；可选 `--output-language`、`--main-topic`、`--output-size`、`--no-jump-cut`、`--duration-pref`、`--max-clip-sec`、`--split-screen`、`--split-orientation`、`--speed-factor`、`--no-camera-move`、`--no-subtitle`、`--subtitle-translate-language` | 逐条成片 `clip{i}.mp4` + 人读报告 `clips.md`（含润色降级明细） + `result-output.json` | 运行前实时查询 | 已上线 |
-| `audio_separation` | 单条音频；可选 `--mode fast|turbo` | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
+| `audio_separation` | 单条音频；可选 `--mode fast\|turbo` | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_speaker_split` | 单条音频；可选 `--only-struct` | 各说话人 `.wav` 分轨 + `spoken_list` 时间线（`result-output.json`） | 运行前实时查询 | 已上线 |
 | `audio_stretch` | 单条音频；可选 `--semitones <n>`、`--speed <n>`（>0） | 变调变速音频 | 运行前实时查询 | 已上线 |
 | `audio_noise_reduce` | 单条音频或视频；可选 `--prop-decrease 0..1` | 降噪后的音频 | 运行前实时查询 | 已上线 |
