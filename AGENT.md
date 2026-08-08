@@ -48,6 +48,20 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
 > agent 自检：没配 Key 时任何命令会明确报「缺 API Key —— 先跑 `gtrk init`」。剪映目录没配只影响剪映直开，不挡 gtrk/PR。
 > `init` 是**人手一次性**交互配置（会弹提示）；agent 日常只跑非交互的 `oralcut`。
 
+5. **按需装运行时资产**（只有用到本地渲染/烧录才需要）：
+
+   ```
+   gtrk deps status                    # 先查：ffmpeg / 字体各自的来源与授权
+   gtrk deps install --ffmpeg --font   # 缺什么装什么，已存在自动跳过
+   ```
+
+   - **agent 纪律：CLI 绝不静默自动下载**。遇到「未找到 ffmpeg/ffprobe」或「本机缺字幕模板所需字体」，
+     **先跑 `gtrk deps status` 确认真缺**，再跑 `install`——不要看到报错就无脑装（先查后拉）。
+   - 包体 30–90 MB（按平台），走同合云镜像；下载自动过 sha256 校验，解包用系统 tar，无第三方依赖。
+   - **不越过用户自装的 ffmpeg**：定位仍是 `--ffmpeg-path` → `~/.gitruck/ffmpeg` → 系统 PATH。
+   - 字体落 `~/.gitruck/fonts`，经 `ass` 滤镜 `fontsdir` 供给——**不动用户的系统字体表**。
+   - 平台未覆盖时（如 linux-arm64）会明确报错并指引手工安装，**不会错装其他架构的包**。
+
 ---
 
 ## 2. 核心命令：`gtrk oralcut <毛片>`

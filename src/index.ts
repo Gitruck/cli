@@ -15,6 +15,7 @@
  *   gtrk split [拆分稿]   视觉拆分派单器（transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch）
  *   gtrk tool <name>      单点工具族（image_move/image_matting/video_matting…）；gtrk tool list 查全部
  *   gtrk doctor           体检（配置 / 云端连通 / 剪映目录 / 运行时 / 版本）
+ *   gtrk deps             运行时资产：status 查来源/授权、install 显式装 ffmpeg 与渲染字体
  *   gtrk upgrade          升级 CLI 到最新版 + 刷新 skill（配置保留）
  *   gtrk skills install   通过通用 skills 适配器安装到各类 Agent
  */
@@ -37,6 +38,7 @@ import { registerMg } from "./commands/mg";
 import { registerTool } from "./commands/tool";
 import { registerTranscript } from "./commands/transcript";
 import { registerMusicVisualizer } from "./commands/music-visualizer";
+import { registerDeps } from "./commands/deps";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -78,6 +80,7 @@ registerMg(program); // MG 颗粒铺轨：dispatch.mg → 定位颗粒 HTML → 
 registerTool(program); // 单点工具族：gtrk tool <name> [input]（image_move/image_matting/video_matting…）+ gtrk tool list
 registerTranscript(program); // 本地视频 → 只传抽取音频 → 单个含总结/时码记录/纯文本的 Markdown
 registerMusicVisualizer(program); // 音乐可视化：主音频 + 可选背景/封面 → 频谱可视化成片（独立命令 + driver skill）
+registerDeps(program); // 运行时资产：gtrk deps status / install（显式触发，绝不静默自动下载）
 
 program.parseAsync(process.argv).catch((e: unknown) => {
 	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);

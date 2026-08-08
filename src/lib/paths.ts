@@ -38,6 +38,14 @@ export function ffmpegDir(): string {
 export function audioCacheDir(): string {
 	return join(GITRUCK_HOME, "audio-cache");
 }
+/** 渲染字体目录 ~/.gitruck/fonts。**不装进系统字体表**，由 ass 滤镜的 fontsdir 供给 libass。 */
+export function fontsDir(): string {
+	return join(GITRUCK_HOME, "fonts");
+}
+/** 下载暂存目录 ~/.gitruck/tmp：先落此处、校验通过后原子改名到目标位，避免中断产生半成品。 */
+export function tmpDir(): string {
+	return join(GITRUCK_HOME, "tmp");
+}
 /** 旧目录 ~/.gtrk-cli（仅迁移用途）。 */
 export function legacyHome(): string {
 	return LEGACY_HOME;
