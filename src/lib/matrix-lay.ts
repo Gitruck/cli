@@ -40,12 +40,30 @@ import {
 } from "./solid-png";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
+/** 本地素材封面目录（工程内相对路径；铺轨时 ffmpeg 现抽 best 帧落此，add-matrix-local-search 4.2）。 */
+export const BROLL_COVER_DIR = "assets/broll-cover";
 export const BROLL_MATERIAL_PREFIX = "broll-";
 /**
  * 客户端「确认原片」后把 clip 的 material 切成的前缀（`broll-` 的子集，见姊妹仓
  * `broll-actions.ts:460-464`）。CLI 自己从不写它——它出现即证明用户在客户端做过确认动作。
  */
 export const BROLL_RAW_MATERIAL_PREFIX = "broll-raw-";
+/**
+ * 本地素材身份前缀（add-matrix-local-search D6）：material id = `broll-local-<blake3-16>`
+ * （文件内容 blake3 前 16 hex，改名/移动不变身份）。以 `broll-` 开头 ⇒ 既有 L1 剥旧判据、
+ * 垫片保护与零引用保护**天然覆盖**（spec 硬性：MUST NOT 为它引入与 `broll-` 不同的剥旧分支）；
+ * 不以 `broll-raw-` 开头 ⇒ 「确认原片优先条款」不受影响。
+ * plan 侧 clip_id = `local-<blake3-16>`（**不带** broll-，broll-plan-contract 2026-08-12 收口）——
+ * 材料 id 由下方既有拼接得出本前缀形态，同构且杜绝 `broll-broll-` 双前缀。
+ */
+export const BROLL_LOCAL_MATERIAL_PREFIX = "broll-local-";
+
+/** 素材登记 id：既有拼接 `broll-`+clip_id，本地/云端同构——本地 clip_id=`local-<hash>` →
+ * `broll-local-<hash>`；云端雪花 id → `broll-<clip_id>`。clip_id MUST NOT 预置 `broll-`
+ * 前缀（broll-plan-contract「材料 id 拼接同构无双前缀」）。 */
+export function brollMaterialIdFor(clipId: string): string {
+	return `${BROLL_MATERIAL_PREFIX}${clipId}`;
+}
 /** struct_meta.broll 每 beat 候选精简集上限（全集回 plan 文件）。 */
 export const BROLL_META_CANDIDATE_CAP = 12;
 /** 目标镜头长缺省（秒）。 */
@@ -59,9 +77,10 @@ export const SCORE_FLOOR_DEFAULT = 0.2;
 export const MAX_SLOTS_PER_BEAT = 32;
 
 export interface DownloadedProxy {
-	/** 相对 gtrk 目录路径（assets/broll-preview/<clip_id>.mp4）。 */
+	/** 相对 gtrk 目录路径（assets/broll-preview/<clip_id>.mp4）；
+	 * 本地素材（source:"local"）为**素材绝对路径**——免下载免代理，直指原文件。 */
 	rel: string;
-	source: "preview" | "raw";
+	source: "preview" | "raw" | "local";
 }
 
 /** 平铺槽位（laid.slots 条目；双时基窗口）。 */
@@ -78,11 +97,16 @@ export interface FillSlot {
 export interface BrollMetaCandidate {
 	clip_id: string;
 	score: number;
-	cover_url: string;
+	/** 云端候选封面 url；本地候选恒 null（封面走 cover_path，MUST NOT 推导远程 URL）。 */
+	cover_url: string | null;
 	preview_path: string | null;
-	source: "preview" | "raw" | null;
-	raw_url: string;
+	source: "preview" | "raw" | "local" | null;
+	raw_url: string | null;
 	seg: { start: number; end: number; best: number } | null;
+	/** 本地候选附加：素材绝对路径。云端候选不出现该键（云端产物逐字节不变）。 */
+	local_path?: string;
+	/** 本地候选附加：工程内封面相对路径（assets/broll-cover/<id>.jpg；抽取失败为 null）。 */
+	cover_path?: string | null;
 }
 
 export interface BrollMetaBeat {
@@ -681,6 +705,8 @@ export function layBrollTracks(opts: {
 	blackBed?: boolean;
 	/** `--force-relay`：把「自产内容但已被编辑」的轨并入剥离集**并解除拒铺**（②-B 的逃生门）。 */
 	forceRelay?: boolean;
+	/** 本地候选封面登记（clip_id → 工程内相对路径）；命令层现抽后传入，纯函数只登记不做 IO。 */
+	covers?: Map<string, string>;
 }): LayResult {
 	const { gtrk, plan, lay, fills, downloads } = opts;
 	const blackBedOn = opts.blackBed !== false;
@@ -831,13 +857,19 @@ export function layBrollTracks(opts: {
 			const trackIndex = baseIndex + k;
 			const bucket = trackClips.get(trackIndex) ?? [];
 			slots.forEach((s, i) => {
-				const materialId = `${BROLL_MATERIAL_PREFIX}${s.clip_id}`;
+				const materialId = brollMaterialIdFor(s.clip_id);
 				if (!newMaterialsById.has(materialId)) {
 					const cand = candById.get(s.clip_id);
-					const dims = previewDims(cand?.width, cand?.height);
-					const mat: LooseMaterial = { id: materialId, path: downloads.get(s.clip_id)!.rel };
+					const dl = downloads.get(s.clip_id)!;
+					const mat: LooseMaterial = { id: materialId, path: dl.rel };
 					if (typeof cand?.duration === "number") mat.duration = cand.duration;
-					if (dims) mat.video_size = dims;
+					if (dl.source === "local") {
+						// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）
+						if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
+					} else {
+						const dims = previewDims(cand?.width, cand?.height);
+						if (dims) mat.video_size = dims;
+					}
 					if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
 					newMaterialsById.set(materialId, mat);
 				}
@@ -863,15 +895,23 @@ export function layBrollTracks(opts: {
 			candidates: merged.slice(0, BROLL_META_CANDIDATE_CAP).map((c) => {
 				const dl = downloads.get(c.clip_id);
 				const seg = c.segments?.[0];
-				return {
+				const isLocal = c.source === "local" || typeof c.local_path === "string";
+				const entry: BrollMetaCandidate = {
 					clip_id: c.clip_id,
 					score: c.score,
-					cover_url: c.cover_url,
-					preview_path: dl?.rel ?? null,
-					source: dl?.source ?? null,
-					raw_url: c.url,
+					cover_url: c.cover_url ?? null,
+					// 本地素材无 preview 代理概念（dl.rel 是素材绝对路径），preview_path 恒 null，消费方走 local_path
+					preview_path: isLocal ? null : (dl?.rel ?? null),
+					source: dl?.source ?? (isLocal ? "local" : null),
+					raw_url: c.url ?? null,
 					seg: seg ? { start: seg.start, end: seg.end, best: seg.best } : null,
 				};
+				// 本地附加键仅本地候选出现（云端 struct_meta 产物逐字节不变）
+				if (isLocal) {
+					if (typeof c.local_path === "string") entry.local_path = c.local_path;
+					entry.cover_path = opts.covers?.get(c.clip_id) ?? null;
+				}
+				return entry;
 			}),
 			laid,
 			pinned: null,

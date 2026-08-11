@@ -1,12 +1,14 @@
 /**
- * gtrk matrix —— B-roll 双口检索（Wave2 Change C）。
+ * gtrk matrix —— B-roll 检索（Wave2 Change C + add-matrix-local-search 第三路）。
  *
- * 双模式（沿 split 的「顶层命令 + 可选 positional」范式，避免父子命令吞选项）：
- *   - `gtrk matrix --project <dir>`      派单消费：读 split/dispatch.json 的 film_broll 队列 → split/broll-plan.json
- *   - `gtrk matrix search "<query>"`     ad-hoc 通用检索：同路由同注入，--out 落文件 / 缺省 stdout
+ * 三模式（沿 split 的「顶层命令 + 可选 positional」范式，避免父子命令吞选项）：
+ *   - `gtrk matrix --project <dir>`        派单消费：读 split/dispatch.json 的 film_broll 队列 → split/broll-plan.json
+ *   - `gtrk matrix search "<query>"`       ad-hoc 检索：同路由同注入，--out 落文件 / 缺省 stdout
+ *   - `gtrk matrix index --dirs <a,b,...>` 本地素材免切片索引（场景边界 → 自适应抽帧 → 自建端点 embed → SQLite）
  *
- * 身份路由每次运行探一次（不缓存不降级）；栏目配置（--column / defaultColumn）只在 internal 口注入；
- * v1 只出候选清单不下载（cover_url 预览，url 24h 过期重跑重签）；单 query 失败局部化。
+ * 云端双口：身份路由每次运行探一次（不缓存不降级）；栏目配置只在 internal 口注入；单 query 失败局部化。
+ * 本地第三路（--local）：显式开关 + 必带 --dirs；**跳过身份探针**、不触任何云端检索端点；
+ * 检索域用户可见、本地与云端结果绝不静默混合；与仅云端语义的参数（--column/--material-class）互斥。
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
@@ -17,8 +19,11 @@ import { readUserConfig } from "../lib/user-config";
 import { resolveColumnConfig } from "../lib/column-config";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 import {
+	BROLL_COVER_DIR,
+	BROLL_META_CANDIDATE_CAP,
 	BROLL_PREVIEW_DIR,
 	SCORE_FLOOR_DEFAULT,
+	brollMaterialIdFor,
 	layBrollTracks,
 	mergedCandidates,
 	planBeatFills,
@@ -42,13 +47,38 @@ import {
 	buildPlan,
 	buildPlanBeat,
 	buildSearchBody,
+	isLocalPlanResult,
 	probeMemberType,
 	searchOnce,
 	type BrollPlan,
 	type QueryOutcome,
+	type SearchRespData,
 	type Tier,
 } from "../lib/matrix";
 import type { PlanResult } from "../lib/matrix";
+import {
+	BALANCE_INSUFFICIENT_CODE,
+	EMBED_CREDITS_PER_IMAGE,
+	EMBED_UNREACHABLE_CODE,
+	QUOTA_INSUFFICIENT_CODE,
+	closeEmbedSession,
+	embedInputs,
+	openEmbedSession,
+	resolveEmbedUrl,
+	type EmbedEndpoint,
+} from "../lib/embed-client";
+import { CloudError, cloudErrorCode } from "../lib/cloud";
+import {
+	SCENE_THRESHOLD_DEFAULT,
+	extractFrameJpg,
+	indexLocalMaterials,
+	localIndexDbPath,
+	openLocalIndexDb,
+	type IndexRunResult,
+	type IndexSessionHooks,
+} from "../lib/local-index";
+import { loadLocalIndex, searchLoadedIndex, type LoadedIndex } from "../lib/local-search";
+import { resolveFfmpeg } from "../lib/ffmpeg";
 import { log, routeLogsToStderr } from "../lib/log";
 
 interface MatrixOpts {
@@ -65,24 +95,37 @@ interface MatrixOpts {
 	blackBed?: boolean;
 	/** `--force-relay`：候选轨已被用户编辑时仍强制剥离重铺（②-B 拒铺的逃生门）。 */
 	forceRelay?: boolean;
+	// ── 本地第三路（add-matrix-local-search）──
+	/** `--local`：本地索引检索模式（显式开关，跳过身份探针，不触任何云端检索端点）。 */
+	local?: boolean;
+	/** `--dirs a,b`：本地素材文件夹（index 的索引范围 / --local 的检索域）。 */
+	dirs?: string;
+	/** `--scene-threshold`：matrix index 场景检测阈值（默认 0.3）。 */
+	sceneThreshold?: string;
+	/** `--rebuild`：matrix index 忽略指纹强制全量重建。 */
+	rebuild?: boolean;
 }
 
 export function registerMatrix(program: Command): void {
 	program
 		.command("matrix [words...]")
 		.description(
-			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 检索",
+			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 检索；`matrix index --dirs <a,b>`=本地素材索引",
 		)
 		.option("--project <dir>", "oralcut 产物目录（定位 split/dispatch.json 与产物落点）")
 		.option("--dispatch <path>", "显式指定 dispatch.json（非标准布局兜底）")
-		.option("--column <id>", "栏目配置 id（缺省取 config defaultColumn，再缺省内置默认栏目）")
-		.option("--top-k <n>", "每 query 候选数上限（覆盖派单 shots 翻译；服务端上限 50）")
+		.option("--column <id>", "栏目配置 id（缺省取 config defaultColumn，再缺省内置默认栏目；仅云端模式）")
+		.option("--top-k <n>", "每 query 候选数上限（覆盖派单 shots 翻译；云端服务端上限 50）")
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
+		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
+		.option("--dirs <a,b,...>", "本地素材文件夹（逗号分隔）——matrix index 的索引范围 / --local 的检索域")
+		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
+		.option("--rebuild", "matrix index：忽略 size:mtime 指纹，强制全量重建索引")
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
 			"--score-floor <f>",
 			"填充置信度地板：segment score 低于此值不采纳，槽位留空——黑底垫轨默认开，留空处露的是黑底（要露主轨口播画面得配 --no-black-bed）。" +
-				"调高会收缩取材池、可能整段无槽位铺成纯黑，调完先看铺轨输出的空洞告警（默认 0.2）",
+				"调高会收缩取材池、可能整段无槽位铺成纯黑，调完先看铺轨输出的空洞告警（默认 0.2；--local 模式同为该段的候选池准入地板）",
 		)
 		.option("--no-black-bed", "不铺纯黑底垫轨（默认铺一条，垫在候选轨之下、口播主轨之上，用于 B-roll 期间遮住口播画面）")
 		.option(
@@ -93,25 +136,66 @@ export function registerMatrix(program: Command): void {
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
-			await runMatrix(parseAdhocQuery(words), opts);
+			await runMatrix(parseMatrixPositional(words), opts);
 		});
 }
 
-/** positional 解析：空 = 派单消费模式；`search <query…>` = ad-hoc；其他开头 = 报错给正确用法。 */
-export function parseAdhocQuery(words: string[] | undefined): string | undefined {
-	if (!words || words.length === 0) return undefined;
+/** positional 解析结果：plan（派单消费）/ search（ad-hoc）/ index（本地索引）。 */
+export type MatrixPositional = { kind: "plan" } | { kind: "search"; query: string } | { kind: "index" };
+
+/** positional 解析：空 = 派单消费；`search <query…>`；`index`；其他开头 = 报错给正确用法。 */
+export function parseMatrixPositional(words: string[] | undefined): MatrixPositional {
+	if (!words || words.length === 0) return { kind: "plan" };
+	if (words[0] === "index") {
+		if (words.length > 1) throw new Error(`matrix index 不接受多余参数「${words.slice(1).join(" ")}」——用法：gtrk matrix index --dirs <a,b,...>`);
+		return { kind: "index" };
+	}
 	if (words[0] !== "search") {
-		throw new Error(`未知子命令「${words[0]}」——ad-hoc 检索用法：gtrk matrix search "<query>"；派单消费用法：gtrk matrix --project <dir>`);
+		throw new Error(
+			`未知子命令「${words[0]}」——ad-hoc 检索：gtrk matrix search "<query>"；派单消费：gtrk matrix --project <dir>；本地索引：gtrk matrix index --dirs <a,b,...>`,
+		);
 	}
 	const query = words.slice(1).join(" ").trim();
 	if (!query) throw new Error('检索词不能为空：gtrk matrix search "<query>"');
-	return query;
+	return { kind: "search", query };
+}
+
+/** `--dirs a,b` 解析（去空、resolve 绝对化）。 */
+export function parseDirsOption(raw: string | undefined): string[] {
+	return (raw ?? "")
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.map((s) => resolve(s));
+}
+
+/**
+ * 三路参数互斥校验（spec「互斥参数」：参数错误退出并明示原因，不做静默忽略）。
+ *   - index / --local 必带 --dirs；
+ *   - --local 与仅云端语义参数（--column / --material-class）互斥；
+ *   - 云端模式反向拒绝本地专属参数（--dirs / --scene-threshold / --rebuild）。
+ */
+export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void {
+	const dirs = parseDirsOption(opts.dirs);
+	if (pos.kind === "index") {
+		if (!dirs.length) throw new Error("matrix index 需要 --dirs <a,b,...> 指定素材文件夹（索引范围永远显式可见）");
+		return;
+	}
+	if (opts.local) {
+		if (!dirs.length) throw new Error("--local 需要 --dirs <a,b,...> 圈定检索域（检索域永远用户可见，不静默复用）");
+		if (opts.column) throw new Error("--local 与 --column 互斥：栏目检索偏好（column_tag_ids/facets）是云端语义，本地索引不适用");
+		if (opts.materialClass) throw new Error("--local 与 --material-class 互斥：素材类型过滤是云端素材库语义，本地索引不适用");
+		return;
+	}
+	if (dirs.length) throw new Error("--dirs 仅用于 --local 检索或 matrix index（云端检索不接受该参数，不做静默忽略）");
+	if (opts.sceneThreshold !== undefined) throw new Error("--scene-threshold 仅用于 matrix index（不做静默忽略）");
+	if (opts.rebuild) throw new Error("--rebuild 仅用于 matrix index（不做静默忽略）");
 }
 
 export interface MatrixResult {
 	ok: boolean;
 	mode: "plan" | "search";
-	memberType: Tier;
+	memberType: Tier | "local";
 	columnId?: string;
 	planPath?: string;
 	results?: PlanResult[];
@@ -119,10 +203,57 @@ export interface MatrixResult {
 	[k: string]: unknown;
 }
 
-export async function runMatrix(searchQuery: string | undefined, opts: MatrixOpts): Promise<MatrixResult> {
+/** 计量会话账面（--json 机读；infra 计费细案第 6 条：0.1 积分/张、文本免费、internal 豁免、预扣-实结）。 */
+export interface MatrixIndexBilling {
+	/** internal 矩阵成员豁免：true 时零计费无会话（其余积分字段缺席）。 */
+	exempt: boolean;
+	/** 本轮抽帧计划总数（= 会话 planned_units；0 = 纯增量跳过零新帧，未开会话）。 */
+	planned_units: number;
+	pre_deducted_credits?: number;
+	used_units?: number;
+	settled_credits?: number;
+	refunded_credits?: number;
+	/** 会话 close 调用失败：结算由服务端 /internal/quota/reconcile 15min cron 兜底。 */
+	reconcile_pending?: boolean;
+}
+
+export interface MatrixIndexResult {
+	ok: boolean;
+	mode: "index";
+	dirs: string[];
+	dbPath: string;
+	materials: { total: number; indexed: number; skipped: number; rebuilt: number; failed: number };
+	scenes: number;
+	frames: number;
+	billing: MatrixIndexBilling;
+	elapsedSec: number;
+	[k: string]: unknown;
+}
+
+/** 检索上下文：plan/adhoc 两模式共用的「一 query 一答」抽象（云端=双口 HTTP；本地=索引点积）。 */
+interface SearchCtx {
+	memberType: Tier | "local";
+	columnId?: string;
+	search: (query: string, entry?: FilmDispatch) => Promise<SearchRespData>;
+}
+
+export async function runMatrix(pos: MatrixPositional, opts: MatrixOpts): Promise<MatrixResult | MatrixIndexResult> {
 	if (opts.json) routeLogsToStderr();
+	assertModeOptions(pos, opts);
 	const cfg = loadConfig();
 
+	// ── 本地索引模式（matrix index）──
+	if (pos.kind === "index") return withEmbedJsonGuard("index", opts, () => runIndexMode(cfg, opts));
+
+	// ── 本地检索模式（--local）：跳过身份探针，不触任何云端检索端点 ──
+	if (opts.local) {
+		return withEmbedJsonGuard(pos.kind, opts, async () => {
+			const ctx = await buildLocalSearchCtx(cfg, opts);
+			return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts);
+		});
+	}
+
+	// ── 云端双口（行为与 add-matrix-local-search 之前逐字节一致）──
 	// ① 身份探针（每次运行探一次，不缓存；探针失败=整体失败）
 	log.step("▶ 身份探针（matrix_member_type）…");
 	const tier = await probeMemberType(cfg);
@@ -151,21 +282,190 @@ export async function runMatrix(searchQuery: string | undefined, opts: MatrixOpt
 	const topK = opts.topK ? Number(opts.topK) : undefined;
 	const overrides = { topK, materialClass: opts.materialClass };
 	const brollForTier = tier === "internal" ? broll : undefined;
+	const ctx: SearchCtx = {
+		memberType: tier,
+		columnId: effectiveColumnId,
+		search: (q, entry) => searchOnce(cfg, tier, buildSearchBody(tier, q, entry, brollForTier, overrides)),
+	};
+	return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts);
+}
 
-	return searchQuery !== undefined
-		? runAdhoc(searchQuery, cfg, tier, brollForTier, overrides, effectiveColumnId, opts)
-		: runPlanMode(cfg, tier, brollForTier, overrides, effectiveColumnId, opts);
+/** 带机读 code 错误的 --json 统一出口（embed_endpoint_unreachable / 6033 会话拒绝 /
+ * 6201·6202 积分不足等一律 `{ok:false, code, msg}`；退出码非 0 由顶层 catch 收口）。 */
+async function withEmbedJsonGuard<T>(mode: string, opts: MatrixOpts, fn: () => Promise<T>): Promise<T> {
+	try {
+		return await fn();
+	} catch (e) {
+		const code = (e as { code?: unknown } | null)?.code;
+		if (opts.json && (typeof code === "string" || typeof code === "number")) {
+			console.log(JSON.stringify({ ok: false, mode, code, msg: (e as Error).message }));
+		}
+		throw e;
+	}
+}
+
+/** 自建 embed 端点（Authorization 直传 apikey，非 Bearer）。 */
+function embedEndpointFor(cfg: ReturnType<typeof loadConfig>): EmbedEndpoint {
+	return { url: resolveEmbedUrl(cfg.base), apiKey: cfg.apiKey };
+}
+
+/** internal 矩阵成员计费豁免探测（计费细案第 6 条：既有 matrix_member_type 探针方式）。
+ * 探针失败按非豁免继续——真正的失败面留给会话 open/embed（有明确机读 code）。
+ * 注：这是 `matrix index` 的行为；`--local` 检索的「零身份探针」承诺不受影响（检索文本 embed 免费免会话）。 */
+async function probeIndexBillingExempt(cfg: ReturnType<typeof loadConfig>): Promise<boolean> {
+	try {
+		return (await probeMemberType(cfg)) === "internal";
+	} catch (e) {
+		log.warn(
+			`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（计量会话计费）继续；internal 矩阵成员本可免会话零计费`,
+		);
+		return false;
+	}
+}
+
+/** 计量会话钩子（回显预扣、积分不足补「所需积分」文案后上抛）。 */
+export function buildIndexSessionHooks(endpoint: EmbedEndpoint): IndexSessionHooks {
+	return {
+		open: async (plannedUnits) => {
+			const need = Math.ceil(plannedUnits * EMBED_CREDITS_PER_IMAGE);
+			log.step(
+				`▶ 计量会话预扣：计划 ${plannedUnits} 帧 → 预扣 ${need} 积分（${EMBED_CREDITS_PER_IMAGE} 积分/张、文本免费；结算按实际用量多退少不补）…`,
+			);
+			try {
+				return await openEmbedSession(endpoint, plannedUnits);
+			} catch (e) {
+				const code = cloudErrorCode(e);
+				if (code === QUOTA_INSUFFICIENT_CODE || code === BALANCE_INSUFFICIENT_CODE) {
+					// 余额不足：明示所需积分退出（统一 ok:false + 非 0 退出码口径，withEmbedJsonGuard 出机读 JSON）
+					throw new CloudError(
+						code,
+						`积分不足，计量会话未开：本次索引计划 ${plannedUnits} 帧，需预扣 ${need} 积分（${EMBED_CREDITS_PER_IMAGE} 积分/张）——` +
+							`${e instanceof Error ? e.message : String(e)}。充值后重跑本命令即可（指纹增量：已索引素材零重算）`,
+					);
+				}
+				throw e;
+			}
+		},
+		close: (token) => closeEmbedSession(endpoint, token),
+	};
+}
+
+/** 编排账面 → --json billing 字段（snake_case 机读口径）。 */
+export function composeIndexBilling(exempt: boolean, run: Pick<IndexRunResult, "plannedFrames" | "billing">): MatrixIndexBilling {
+	if (exempt) return { exempt: true, planned_units: run.plannedFrames };
+	const b = run.billing;
+	if (!b) return { exempt: false, planned_units: run.plannedFrames }; // 零新帧：未开会话零计费
+	return {
+		exempt: false,
+		planned_units: b.plannedUnits,
+		pre_deducted_credits: b.preDeductedCredits,
+		...(b.usedUnits !== undefined ? { used_units: b.usedUnits } : {}),
+		...(b.settledCredits !== undefined ? { settled_credits: b.settledCredits } : {}),
+		...(b.refundedCredits !== undefined ? { refunded_credits: b.refundedCredits } : {}),
+		...(b.reconcilePending ? { reconcile_pending: true } : {}),
+	};
+}
+
+/** matrix index：本地素材免切片索引（进度行 + 计量会话 + --json 机读 summary）。 */
+async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts): Promise<MatrixIndexResult> {
+	const dirs = parseDirsOption(opts.dirs);
+	const threshold = parseSceneThreshold(opts.sceneThreshold);
+	const endpoint = embedEndpointFor(cfg);
+	log.step(`▶ 本地素材索引：${dirs.join("、")}（场景阈值 ${threshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`);
+	log.info("免切片：只记场景时间戳，不产生任何切片文件；抽帧图 embed 后即删（素材本体不上云）。");
+	// internal 矩阵成员豁免：无 token 也放行图像且零计费 → 直接不开会话
+	const exempt = await probeIndexBillingExempt(cfg);
+	if (exempt) log.info("internal 矩阵成员：图像 embed 计费豁免（免会话零积分；文本 embed 本就免费）。");
+	const run = await indexLocalMaterials({
+		dirs,
+		sceneThreshold: threshold,
+		rebuild: opts.rebuild === true,
+		embed: (inputs, sessionToken) => embedInputs(endpoint, inputs, { sessionToken }),
+		session: exempt ? undefined : buildIndexSessionHooks(endpoint),
+		onProgress: (line) => log.info(line),
+	});
+	const m = run.materials;
+	const billing = composeIndexBilling(exempt, run);
+	const billNote = exempt
+		? " · 计费豁免（internal）"
+		: billing.settled_credits !== undefined
+			? ` · 实结 ${billing.settled_credits} 积分（预扣 ${billing.pre_deducted_credits} · 退还 ${billing.refunded_credits}）`
+			: billing.reconcile_pending
+				? ` · 计费待服务端对账（预扣 ${billing.pre_deducted_credits} 积分）`
+				: billing.planned_units === 0
+					? " · 零新帧零计费"
+					: "";
+	log.ok(
+		`索引完成：${m.indexed}/${m.total} 个素材（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
+			`场景 ${run.scenes} · 帧 ${run.frames} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
+	);
+	log.info(`索引落点：${run.dbPath}（绝对路径为键，跨机不可移植；属本机缓存，可随时重建）`);
+	const result: MatrixIndexResult = {
+		ok: true,
+		mode: "index",
+		dirs: run.dirs,
+		dbPath: run.dbPath,
+		materials: run.materials,
+		scenes: run.scenes,
+		frames: run.frames,
+		billing,
+		elapsedSec: Math.round(run.elapsedMs / 100) / 10,
+	};
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
+}
+
+/** --scene-threshold 解析：(0,1) 浮点，非法值按默认（告警）。 */
+function parseSceneThreshold(raw: string | undefined): number {
+	if (raw === undefined) return SCENE_THRESHOLD_DEFAULT;
+	const n = Number(raw);
+	if (Number.isFinite(n) && n > 0 && n < 1) return n;
+	log.warn(`--scene-threshold 取值非法（${raw}），按默认 ${SCENE_THRESHOLD_DEFAULT} 处理`);
+	return SCENE_THRESHOLD_DEFAULT;
+}
+
+/** 构建本地检索上下文：载入索引（--dirs 圈定 + 消失文件过滤）+ 查询 embed（去重缓存）→ 点积检索闭包。 */
+async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts): Promise<SearchCtx> {
+	const dirs = parseDirsOption(opts.dirs);
+	const endpoint = embedEndpointFor(cfg);
+	const dbPath = localIndexDbPath();
+	if (!existsSync(dbPath)) {
+		throw new Error(`本地索引不存在（${dbPath}）——先跑 gtrk matrix index --dirs ${dirs.join(",")} 建索引`);
+	}
+	log.step(`▶ 本地检索模式：载入索引（域：${dirs.join("、")}）…`);
+	const db = await openLocalIndexDb(dbPath);
+	let index: LoadedIndex;
+	try {
+		index = loadLocalIndex(db, dirs);
+	} finally {
+		db.close();
+	}
+	if (index.frames.length === 0) {
+		throw new Error(
+			`索引里没有该检索域的素材帧（域：${dirs.join("、")}）——先跑 gtrk matrix index --dirs ${dirs.join(",")}（文件消失/未索引的素材不参与检索）`,
+		);
+	}
+	log.info(`索引就绪：${index.materials.length} 个素材 · ${index.frames.length} 帧（消失文件已过滤）`);
+	const floor = parseScoreFloor(opts.scoreFloor);
+	const topK = opts.topK ? Number(opts.topK) : undefined;
+	const qvecCache = new Map<string, Float32Array>();
+	return {
+		memberType: "local",
+		search: async (query) => {
+			let vec = qvecCache.get(query);
+			if (!vec) {
+				[vec] = await embedInputs(endpoint, [{ text: query }]); // 除此一请求外零网络
+				qvecCache.set(query, vec!);
+			}
+			const { recalled, results } = searchLoadedIndex(index, vec!, { scoreFloor: floor });
+			return { recalled, results: topK && topK > 0 ? results.slice(0, topK) : results };
+		},
+	};
 }
 
 /** 派单消费模式：dispatch.film_broll → split/broll-plan.json。 */
-async function runPlanMode(
-	cfg: ReturnType<typeof loadConfig>,
-	tier: Tier,
-	broll: Parameters<typeof buildSearchBody>[3],
-	overrides: { topK?: number; materialClass?: string },
-	columnId: string | undefined,
-	opts: MatrixOpts,
-): Promise<MatrixResult> {
+async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts): Promise<MatrixResult> {
+	const isLocal = ctx.memberType === "local";
 	// 定位 dispatch：--dispatch 显式 > <project>/split/dispatch.json
 	let dispatchPath: string;
 	let baseDir: string;
@@ -183,7 +483,7 @@ async function runPlanMode(
 	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch;
 	const rawQueue: FilmDispatch[] = Array.isArray(dispatch.film_broll) ? dispatch.film_broll : [];
 
-	// ── 现场重投影（add-consume-side-reprojection 6.1）：在**发起第一次云端检索之前**完成 ──
+	// ── 现场重投影（add-consume-side-reprojection 6.1）：在**发起第一次检索之前**完成 ──
 	// 窗口长度直接决定检索的镜头切分与时长诉求；用过期窗口检索 = 先烧掉整轮配额再拿错料。
 	// 工程读取因此从 layIntoProject 提前到这里；读失败按 D6 ①a **门内吞掉**（既有失败面不挪：
 	// assertGtrkV1 仍留在 layIntoProject 里、在 plan 落盘之后 —— 「非 v1 仍能拿到 plan」不变）。
@@ -212,7 +512,7 @@ async function runPlanMode(
 			const win = reproj.windows.get(e.beat);
 			return win ? { ...e, track_st: win.track_st, track_ed: win.track_ed } : e;
 		});
-	log.step(`▶ B-roll 检索：${queue.length} 个 beat（${tier} 口）…`);
+	log.step(`▶ B-roll 检索：${queue.length} 个 beat（${isLocal ? "本地索引" : `${ctx.memberType} 口`}）…`);
 
 	const beats = [];
 	let okCount = 0;
@@ -222,13 +522,14 @@ async function runPlanMode(
 		const outcomes: QueryOutcome[] = [];
 		for (const q of entry.queries) {
 			try {
-				const body = buildSearchBody(tier, q, entry, broll, overrides);
-				const data = await searchOnce(cfg, tier, body);
+				const data = await ctx.search(q, entry);
 				outcomes.push({ query: q, data });
 				okCount++;
 				resultCount += data.results?.length ?? 0;
 				log.info(`${entry.beat}「${q}」→ ${data.results?.length ?? 0} 条候选（召回 ${data.recalled ?? "?"}）`);
 			} catch (e) {
+				// embed 端点硬失败绝不局部化吞掉：本地模式没有查询向量=整体不可用（MUST NOT 静默降级）
+				if ((e as { code?: unknown } | null)?.code === EMBED_UNREACHABLE_CODE) throw e;
 				// 单 query 失败局部化：记 error 继续其余（网络/超时/6401/6402 都不拖垮整个 plan）
 				const code = (e as { code?: number }).code;
 				const msg = e instanceof Error ? e.message : String(e);
@@ -250,9 +551,9 @@ async function runPlanMode(
 	const projectSlug = slugify(basename(baseDir));
 	const plan = buildPlan({
 		generatedAt: new Date().toISOString(),
-		memberType: tier,
+		memberType: ctx.memberType,
 		projectSlug,
-		columnId,
+		columnId: ctx.columnId,
 		beats,
 	});
 	const splitDir = join(baseDir, "split");
@@ -260,10 +561,14 @@ async function runPlanMode(
 	const planPath = join(splitDir, "broll-plan.json");
 	await writeFile(planPath, JSON.stringify(plan, null, 2));
 	log.ok(`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query 成功 · ${resultCount} 条候选）`);
-	log.info("清单只含引用不含素材：cover_url 可直接预览；url 带签名默认 24h 过期，过期重跑本命令即重签。");
+	if (isLocal) {
+		log.info("清单只含引用不含素材：本地素材以绝对路径直引（local_path，无 url 签名/过期语义）；封面铺轨时现抽。");
+	} else {
+		log.info("清单只含引用不含素材：cover_url 可直接预览；url 带签名默认 24h 过期，过期重跑本命令即重签。");
+	}
 
-	// ⑤ 候选铺轨（add-matrix-lay-tracks）：下载 preview 代理落地 → 幂等替换自产轨 → 原子写回。
-	//    工程缺失/非 v1 = 告警跳过（plan 已产，铺轨是增值不是门槛）。
+	// ⑤ 候选铺轨（add-matrix-lay-tracks）：下载 preview 代理落地（本地素材免下载直引）→
+	//    幂等替换自产轨 → 原子写回。工程缺失/非 v1 = 告警跳过（plan 已产，铺轨是增值不是门槛）。
 	const layN = parseLay(opts.lay);
 	let laid: LayOutcome | undefined;
 	if (layN > 0) {
@@ -286,8 +591,8 @@ async function runPlanMode(
 	const result: MatrixResult = {
 		ok: refused === undefined,
 		mode: "plan",
-		memberType: tier,
-		...(columnId ? { columnId } : {}),
+		memberType: ctx.memberType,
+		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		planPath,
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
@@ -333,7 +638,46 @@ interface LayOutcome {
 }
 
 /**
- * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 下载代理（preview 优先 → 推导 → 404 回落 raw）
+ * 本地候选封面现抽（add-matrix-local-search 4.2）：对进 struct_meta.broll 的本地候选（每 beat 前
+ * BROLL_META_CANDIDATE_CAP 条），ffmpeg 在首段 best 时刻抽一帧落 assets/broll-cover/<id>.jpg
+ * （<id> = 材料 id `broll-local-<hash>`，spec D6 口径；clip_id=`local-<hash>` 经既有拼接得出）。
+ * 同名已存在即复用（id 随内容，封面天然幂等）；ffmpeg 缺失/抽取失败仅告警（封面是增值不是门槛）。
+ */
+async function extractLocalCovers(plan: BrollPlan, gtrkDir: string): Promise<Map<string, string>> {
+	const covers = new Map<string, string>();
+	const locals = new Map<string, PlanResult>();
+	for (const beat of plan.beats) {
+		for (const c of mergedCandidates(beat).slice(0, BROLL_META_CANDIDATE_CAP)) {
+			if (isLocalPlanResult(c) && !locals.has(c.clip_id)) locals.set(c.clip_id, c);
+		}
+	}
+	if (locals.size === 0) return covers;
+	const ff = resolveFfmpeg();
+	if (!ff) {
+		log.warn("未找到 ffmpeg，跳过本地候选封面抽取（gtrk deps install --ffmpeg 后重跑可补）");
+		return covers;
+	}
+	await mkdir(join(gtrkDir, ...BROLL_COVER_DIR.split("/")), { recursive: true });
+	for (const [clipId, cand] of locals) {
+		const rel = `${BROLL_COVER_DIR}/${brollMaterialIdFor(clipId)}.jpg`;
+		const abs = join(gtrkDir, ...rel.split("/"));
+		if (existsSync(abs)) {
+			covers.set(clipId, rel);
+			continue;
+		}
+		const src = cand.local_path;
+		if (!src || !existsSync(src)) continue; // 素材缺失的告警由铺轨注入环节统一发
+		const seg = cand.segments?.[0];
+		const best = seg ? seg.best : (typeof cand.duration === "number" ? cand.duration / 2 : 0);
+		if (await extractFrameJpg(ff.ffmpeg, src, best, abs)) covers.set(clipId, rel);
+		else log.warn(`本地候选封面抽取失败（clip ${clipId} @ ${best}s）——候选照常可用，封面留空`);
+	}
+	return covers;
+}
+
+/**
+ * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
+ * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
  * → layBrollTracks → 原子写回 → 素材落盘自检（只读）。
  * 任何整体性失败（工程缺失/非 v1/mtime 冲突）都不影响已产出的 plan。
  */
@@ -357,10 +701,13 @@ async function layIntoProject(
 	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重
 	const { fills, clipIds } = planBeatFills(plan, layN, scoreFloor);
 	const slotCount = [...fills.values()].flat().reduce((n, s) => n + s.length, 0);
-	log.step(`▶ 候选铺轨（${layN} 轨 · 平铺 ${slotCount} 槽位 · ${clipIds.size} 个 clip，preview 代理）…`);
+	log.step(`▶ 候选铺轨（${layN} 轨 · 平铺 ${slotCount} 槽位 · ${clipIds.size} 个 clip）…`);
 	const gtrkDir = dirname(gtrkPath);
 	const previewDir = join(gtrkDir, ...BROLL_PREVIEW_DIR.split("/"));
 	await mkdir(previewDir, { recursive: true });
+
+	// 本地候选封面现抽（覆盖 struct_meta 候选全集，不只槽位 clip）
+	const covers = await extractLocalCovers(plan, gtrkDir);
 
 	// 复用时的 source 继承：旧 broll 记录里该 clip 是 raw 回落的,复用后仍标 raw(内容来源不因复用改变)
 	const prevSource = new Map<string, "preview" | "raw">();
@@ -375,14 +722,26 @@ async function layIntoProject(
 		}
 	}
 
-	// 下载全部槽位 clip 的代理（按 clip_id 幂等复用）
+	// 备好全部槽位 clip 的素材引用（按 clip_id 幂等复用）
 	const candById = new Map<string, PlanResult>();
 	for (const beat of plan.beats) for (const c of mergedCandidates(beat)) if (!candById.has(c.clip_id)) candById.set(c.clip_id, c);
 	const downloads = new Map<string, DownloadedProxy>();
-	const dlStats = { preview: 0, raw: 0, reused: 0, failed: 0 };
+	const dlStats = { preview: 0, raw: 0, reused: 0, failed: 0, local: 0 };
 	for (const clipId of clipIds) {
 		const cand = candById.get(clipId);
 		if (!cand) continue;
+		// ── 本地候选（4.1）：免下载免代理，rel 直指素材绝对路径 ──
+		if (isLocalPlanResult(cand)) {
+			const src = cand.local_path;
+			if (!src || !existsSync(src)) {
+				log.warn(`本地素材缺失（clip ${clipId}）：${src ?? "无 local_path"}——该候选槽位跳过（素材可能在未挂载的可移动盘上，重建索引或挂回后重跑）`);
+				dlStats.failed++;
+				continue;
+			}
+			downloads.set(clipId, { rel: src, source: "local" });
+			dlStats.local++;
+			continue;
+		}
 		const rel = `${BROLL_PREVIEW_DIR}/${clipId}.mp4`;
 		const abs = join(gtrkDir, ...rel.split("/"));
 		if (existsSync(abs)) {
@@ -419,6 +778,7 @@ async function layIntoProject(
 		lay: layN,
 		fills,
 		downloads,
+		covers,
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
 		blackBed,
@@ -479,6 +839,7 @@ async function layIntoProject(
 				lay: layN,
 				fills,
 				downloads,
+				covers,
 				generatedAt: new Date().toISOString(),
 				planPath: "split/broll-plan.json",
 				blackBed: false,
@@ -511,7 +872,7 @@ async function layIntoProject(
 		: "";
 	log.ok(
 		`铺轨完成：${stripNote}${summary.laidTracks.length} 条候选轨（track_index ${summary.laidTracks.join("/") || "-"}）· 平铺 ${summary.laidClips} 个颗粒 / ${clipIds.size} 个 clip` +
-			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）${bedNote}${keptNote}`,
+			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.local ? ` · 本地直引 ${dlStats.local}` : ""}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）${bedNote}${keptNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
 	for (const w of warnings) log.warn(w);
@@ -562,37 +923,30 @@ async function downloadProxy(
 		}
 	}
 	if (opts.previewOnly) return null;
-	const raw = await tryFetch(cand.url);
-	if (raw) {
-		await writeFile(absPath, raw);
-		log.warn(`clip ${cand.clip_id} 无 preview 代理，已回落原片（${(raw.length / 1048576).toFixed(1)}MB）`);
-		return "raw";
+	if (typeof cand.url === "string" && cand.url) {
+		const raw = await tryFetch(cand.url);
+		if (raw) {
+			await writeFile(absPath, raw);
+			log.warn(`clip ${cand.clip_id} 无 preview 代理，已回落原片（${(raw.length / 1048576).toFixed(1)}MB）`);
+			return "raw";
+		}
 	}
 	log.warn(`clip ${cand.clip_id} 代理与原片均下载失败，该候选槽位跳过`);
 	return null;
 }
 
 /** ad-hoc 模式：单 query，--out 落文件 / 缺省 stdout。 */
-async function runAdhoc(
-	query: string,
-	cfg: ReturnType<typeof loadConfig>,
-	tier: Tier,
-	broll: Parameters<typeof buildSearchBody>[3],
-	overrides: { topK?: number; materialClass?: string },
-	columnId: string | undefined,
-	opts: MatrixOpts,
-): Promise<MatrixResult> {
-	log.step(`▶ ad-hoc 检索「${query}」（${tier} 口）…`);
-	const body = buildSearchBody(tier, query, undefined, broll, overrides);
-	const data = await searchOnce(cfg, tier, body);
+async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promise<MatrixResult> {
+	log.step(`▶ ad-hoc 检索「${query}」（${ctx.memberType === "local" ? "本地索引" : `${ctx.memberType} 口`}）…`);
+	const data = await ctx.search(query);
 	const results = data.results ?? [];
 	log.ok(`${results.length} 条候选（召回 ${data.recalled ?? "?"}）`);
 
 	const result: MatrixResult = {
 		ok: true,
 		mode: "search",
-		memberType: tier,
-		...(columnId ? { columnId } : {}),
+		memberType: ctx.memberType,
+		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		results,
 		counts: { beats: 0, queries: 1, results: results.length, errors: 0 },
 	};
@@ -605,7 +959,8 @@ async function runAdhoc(
 		// 人读模式且未落盘：给精简候选摘要
 		for (const r of results.slice(0, 10)) {
 			const seg = r.segments?.[0];
-			log.info(`clip ${r.clip_id} · score ${r.score}${seg ? ` · 最佳段 ${seg.start}s–${seg.end}s（锚点 ${seg.best}s）` : ""}${r.note ? ` · ${String(r.note).slice(0, 40)}` : ""}`);
+			const where = r.local_path ? ` · ${r.local_path}` : "";
+			log.info(`clip ${r.clip_id} · score ${r.score}${seg ? ` · 最佳段 ${seg.start}s–${seg.end}s（锚点 ${seg.best}s）` : ""}${where}${r.note ? ` · ${String(r.note).slice(0, 40)}` : ""}`);
 		}
 	}
 	if (opts.json) console.log(JSON.stringify(result));

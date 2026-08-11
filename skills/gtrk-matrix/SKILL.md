@@ -1,6 +1,6 @@
 ---
 name: gtrk-matrix
-description: B-roll 检索铺轨器——成片管线里第一个铺的车道（SOP ③）。消费拆分派单的 FILM_BROLL 队列（`dispatch.film_broll`），双口向量检索 + 下载 preview 代理，在工程里平铺 N 条候选 B-roll 轨，供用户在 opencut 里用轨道小眼睛切换对比、挑选/调整；确认后交棒 ④ 铺 MG。当用户想「铺 B-roll / 检索素材 / 找空镜 / 给空镜配画面 / 填 B-roll 候选 / 单独搜个词补个空槽」时使用本 skill。凡涉及把拆分派单里的影视素材段落检索并铺进工程，优先用本 skill 驱动 gtrk CLI 的 `matrix` 命令，别让用户自己去终端敲、也别手搓检索。
+description: B-roll 检索铺轨器——成片管线里第一个铺的车道（SOP ③）。消费拆分派单的 FILM_BROLL 队列（`dispatch.film_broll`），双口向量检索 + 下载 preview 代理，在工程里平铺 N 条候选 B-roll 轨，供用户在 opencut 里用轨道小眼睛切换对比、挑选/调整；确认后交棒 ④ 铺 MG。另支持**本地素材模式**：`matrix index` 给用户自己的素材文件夹建免切片索引、`--local` 在本地索引上检索铺轨（素材本体不上云）。当用户想「铺 B-roll / 检索素材 / 找空镜 / 给空镜配画面 / 填 B-roll 候选 / 单独搜个词补个空槽 / 用我自己的素材（本地素材夹）铺 B-roll / 给素材文件夹建索引」时使用本 skill。凡涉及把拆分派单里的影视素材段落检索并铺进工程，优先用本 skill 驱动 gtrk CLI 的 `matrix` 命令，别让用户自己去终端敲、也别手搓检索。
 ---
 
 # B-roll 检索铺轨器（gtrk-matrix）
@@ -52,6 +52,51 @@ description: B-roll 检索铺轨器——成片管线里第一个铺的车道（
 | 机读（你必带） | `--json` | 开关 · 关 | 人读日志转 stderr，stdout 只出一行结果 JSON |
 
 > **因势象形举例**：「B-roll 多铺几条候选让我挑」→ `--lay 3`；「这段填得太杂、卡严点」→ **先别急着改地板**：按默认 `0.2` 跑一遍，看铺轨输出的空洞告警与 `lay.blackBedHoleSec`，再决定要不要调严——调严会砍掉大半取材池，铺不满的地方是**纯黑压口播**（黑底默认铺，留空处露黑底而非主轨），真要调就小步试、每次都对着空洞告警看；「每段多给点候选」→ `--top-k 12`；「先只出清单别铺轨」→ `--lay 0`；「别给我垫那条黑底」→ `--no-black-bed`；「单独给『深夜地铁失神』搜一组」→ `gtrk matrix search "exhausted commuter staring blankly on a late night subway" --project <目录> --json`。
+
+## 本地素材检索模式（`--local` / `matrix index`）——用户自己的素材夹当素材库
+
+云端双口之外的**第三条路**：用户本地有现成素材（影视解说素材夹、美食空镜、客户自有物料），不想上传也不该上传——先 `matrix index` 给文件夹建索引，再 `--local` 在索引上检索铺轨。**素材本体永不上云**（只把 512px 抽帧图送同合云自建 embed 端点向量化、即传即弃），检索/铺轨产物**以绝对路径直引原文件**（免下载免代理，无 url 签名/过期语义）。
+
+**两步走**：
+
+```bash
+# ① 建索引（首次/素材有增删改时；增量：指纹未变的素材零重算）
+gtrk matrix index --dirs "D:/素材库A,D:/素材库B" --json
+# ② 本地检索铺轨（plan 模式；ad-hoc search 同样支持 --local）
+gtrk matrix --local --dirs "D:/素材库A,D:/素材库B" --project <目录> --json
+```
+
+### 本地模式参数表
+
+| 用户想要 | CLI 怎么传 | 取值 · 默认 | 说明 |
+|---|---|---|---|
+| 给素材夹建索引 | `gtrk matrix index --dirs <a,b,...>` | 逗号分隔目录 · — | 免切片：场景检测只记时间戳、不产生任何切片文件；素材粒度断点续传，中断重跑零重算 |
+| 本地检索模式 | `--local` | 开关 · 关 | 必配 `--dirs`；**跳过身份探针、不触任何云端检索端点**；与 `--column`/`--material-class` 互斥（云端语义），传了直接参数错误、不静默忽略 |
+| 圈定检索域 | `--dirs <a,b,...>` | 逗号分隔目录 · — | 索引范围 / 检索域**永远显式可见**，不静默复用上次；结果全部来自这些目录，绝不与云端结果混合 |
+| 本地候选卡门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | 与云端同名参数**同段生效**但校准假设独立（见下方「score 地板观察」） |
+| 场景切分调粒度 | `--scene-threshold <f>` | 浮点 (0,1) · `0.3` | 仅 `matrix index`：ffmpeg `gt(scene,X)` 检测阈值，素材切换镜头快可调高、长镜头素材可调低 |
+| 索引强制全量重建 | `--rebuild` | 开关 · 关 | 仅 `matrix index`：忽略 size:mtime 指纹全部重算（索引疑似损坏/参数大改时用） |
+
+### 本地模式处置表
+
+| 情况 | 怎么做 |
+|---|---|
+| **score 地板观察（重要）** | 本地域的 score 量纲与云端不同：**完美命中可低至 0.246**，默认 `0.2` 是「兜底靠查询内相对排名」的松地板——同一查询内高分自然排前，地板只挡明显噪声。**别按云端直觉调高**（0.3 就可能把正确命中砍光）；填充太杂先看排序前几条质量，再小步调 |
+| 报「本地索引不存在」/「索引里没有该检索域的素材帧」 | 先跑 `gtrk matrix index --dirs <...>`；已建过则检查 `--dirs` 是否与建索引时的目录一致、可移动盘是否挂载（文件消失的素材索引行保留但不参与检索） |
+| **换电脑用不了索引** | **索引跨机不可移植**（键是绝对路径，三机盘符各异）：它是机器本地缓存（`~/.gitruck/local-broll-index/`），不进 git 不同步；换机在新机重跑 `matrix index` 即可（分钟级重建） |
+| 素材改名/移动后 | 身份随内容不随路径（blake3 内容哈希）：重跑 `matrix index` 后同一素材同一 id，工程引用不重复 |
+| 含本地 B-roll 的工程想云渲 | **会被提交口直接拒绝**（机读 code `local_broll_cloud_render_rejected`）：本地素材本体不上云是硬承诺，不会静默上传归一化——走客户端本地出片（或 `gtrk render` 本地渲染） |
+| embed 端点连不通（`embed_endpoint_unreachable`） | 自建端点未上线/网络不通/配置指错：确认 `~/.gitruck` config `embedUrl` 或环境变量 `GITRUCK_EMBED_URL`；**CLI 绝不回落第三方端点**，修好配置重跑即可（索引断点续传零重算） |
+| 报会话失效（code `6033`） | 计量会话 Redis TTL 2h，超长索引跑穿了会话：重跑 `matrix index` 自动重开会话续跑，已完成素材零重算 |
+
+### 计费口径（`matrix index` 计量会话，2026-08-12 钉死）
+
+- **图像 0.1 积分/张，文本 embed 免费**（检索查询是文本——`--local` 检索本身零积分；花积分的只有建索引的抽帧图）。
+- **internal 矩阵成员全豁免**：零计费免会话（结果 JSON `billing.exempt:true`）。
+- **预扣-实结**：索引开跑前按抽帧计划总数预扣 `ceil(计划帧数×0.1)` 积分，跑完按实际用量结算**多退少不补**（实际用量>0 最低 1 积分；一帧没 embed 全额退）。结果 JSON `billing` 给全账面：`planned_units / pre_deducted_credits / used_units / settled_credits / refunded_credits`（`reconcile_pending:true` = 结算调用没打通，服务端 15 分钟内自动对账，不会多扣）。
+- **积分不足**：索引在开会话时即失败退出（`ok:false` + 明示所需积分），一帧都不会 embed 也不扣费；充值后重跑即可。跟用户交代量级：全量索引 5000 帧 ≈ 500 积分 ≈ 5 元，增量只按新增帧算。
+
+> 本地模式产物差异：`broll-plan.json` 无 `url_ttl_note`（没有签名过期概念）；候选带 `local_path`（素材绝对路径）与 `cover_path`（工程内 `assets/broll-cover/` 封面，铺轨时 ffmpeg 现抽）；`--json` 结果 `memberType:"local"`。挑选/调整的检查点流程与云端模式完全一致。
 
 ## 执行（每次都带 `--json`）
 
