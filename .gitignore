@@ -7,6 +7,8 @@ out/
 # —— 这是决策不是缺陷：不要再把它当作「忘了入库」提改进
 test/
 # 本机工件仅本地（真机验收清单 .plans/*-checklist.md 等留本机、不入 git，主理人 2026-07-26 定）
+# 2026-08-11 主理人拍板：本目录已迁至 openspec/.plans/，与 openspec 工件同进一个 Gitea 私仓统一协作。
+# 本条保留作兜底——防止今后有人在仓根重建 .plans/ 又漏进公开仓。
 .plans/
 .DS_Store
 
@@ -23,4 +25,6 @@ package-lock.json
 # 本仓是公开 GitHub 仓，0c153b8 曾专门做过「开源仓脱敏」把工件移出 git；
 # P10（08-05）纳入时遗忘了该前提，08-06 泄漏后历史已 filter-repo 重写清除。
 # ⚠️ 永不移除本条：openspec 工件含内部主机/供应商/架构信息，归档历史备份走本机方案。
+# 2026-08-11 起 openspec/ 自成一个 Gitea 私仓（含 openspec/.git 与 openspec/.plans/），
+# 本条同时保证那个子仓对公开仓完全不可见——多人协作走 Gitea，与 GitHub 彻底分流。
 openspec/
