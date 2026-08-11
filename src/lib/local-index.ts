@@ -1,0 +1,614 @@
+/**
+ * 本地素材免切片索引（add-matrix-local-search · local-material-index spec）。
+ *
+ * 链路：ffmpeg 场景边界检测（select gt(scene,θ)+showinfo，**只记时间戳不产生任何切片文件**）
+ * → 场景自适应抽帧（≤4s 场景中点 1 帧；>4s 每 2s 加密；512px 最长边 jpg，抽到 ~/.gitruck/tmp）
+ * → 自建 embed 端点向量化（批 ≤16，embed-client）→ SQLite 三表落库（帧图 embed 成功即删，即传即弃）。
+ *
+ * 存储（D1）：~/.gitruck/local-broll-index/index.db，materials/scenes/frames 三表，
+ * vec = float32 **小端** BLOB。检索时全量载入内存点积（local-search.ts），不引向量库。
+ *
+ * 增量（D2）：素材粒度 (绝对路径, size, mtime) 指纹——未变跳过；变了级联删旧行重建；
+ * 文件消失行**保留**（可移动盘场景，检索时过滤）；`--rebuild` 强制全量。
+ * 断点续传 = 每素材一个事务：中断不留半素材，重跑从未完成素材继续、已完成零重算。
+ * 索引键是绝对路径 ⇒ **跨机不可移植**（三机盘符各异），属机器本地缓存，可随时重建，不进 git 不同步。
+ *
+ * 计量会话（infra 计费细案第 6 条，2026-08-12）：编排两阶段化——阶段一先对全部待索引素材做
+ * 场景检测+抽帧计划（零 embed 请求），得**抽帧计划总数** → session open（预扣）；阶段二逐素材
+ * 抽帧+embed（批请求带 session_token）+ 事务落库；完成/失败均 close 结算实际用量（失败也结算，
+ * close 自身失败由服务端 /internal/quota/reconcile 15min cron 兜底）。internal 矩阵成员豁免
+ * （无会话零计费）由命令层探身份后以「不传 session hooks」表达。
+ *
+ * SQLite 运行时（tasks 1.2/2.1 注记）：Bun 下用内置 bun:sqlite；发布产物跑在 node（bin=dist/index.js，
+ * engines>=20.6 实际需 22.5+）时退 node:sqlite（同为内置，零新依赖）——二者经统一 SqlDb 薄适配。
+ */
+import { mkdirSync, existsSync, readdirSync, statSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { dirname, extname, join, resolve, basename } from "node:path";
+import { createBLAKE3 } from "hash-wasm";
+import { homeFile, tmpDir } from "./paths";
+import { requireFfmpeg, runFfmpeg, type FfmpegResolution } from "./ffmpeg";
+import { probeGeometry } from "./media";
+import { BROLL_LOCAL_MATERIAL_PREFIX } from "./matrix-lay";
+import { EMBED_BATCH_MAX, EMBED_UNREACHABLE_CODE, type EmbedInput } from "./embed-client";
+
+// ── 参数基线（POC 标定值，design D4；θ 经 --scene-threshold 暴露）──────────
+export const SCENE_THRESHOLD_DEFAULT = 0.3;
+/** 比这短的边界间隔并入前段（秒）。 */
+export const MIN_SCENE_SEC = 0.5;
+/** >4s 场景的加密抽帧间隔（秒）。 */
+export const FRAME_LONG_INTERVAL_SEC = 2.0;
+/** 抽帧最长边（px）。 */
+export const FRAME_MAX_EDGE = 512;
+
+/** 索引可收录的视频扩展名。 */
+const VIDEO_EXT = /\.(mp4|mov|m4v|mkv|webm|avi|wmv|mpg|mpeg|ts|mts|m2ts|flv)$/i;
+
+/** 索引目录 ~/.gitruck/local-broll-index（env GITRUCK_LOCAL_INDEX_DIR 可覆盖，测试/多机隔离用）。 */
+export function localIndexDir(): string {
+	return process.env.GITRUCK_LOCAL_INDEX_DIR?.trim() || homeFile("local-broll-index");
+}
+export function localIndexDbPath(): string {
+	return join(localIndexDir(), "index.db");
+}
+
+// ── 身份（task 1.2）：broll-local-<blake3-16>，文件**全量内容**哈希，改名/移动不变身份 ──
+
+/** 文件内容 blake3 全量哈希（流式，8MiB/块；与 chunk-upload 的 fast_mode 秒传指纹**不是**同一口径）。 */
+export async function fileBlake3Hex(path: string): Promise<string> {
+	const hasher = await createBLAKE3();
+	hasher.init();
+	const fh = await open(path, "r");
+	try {
+		const buf = Buffer.alloc(8 * 1024 * 1024);
+		for (;;) {
+			const { bytesRead } = await fh.read(buf, 0, buf.length, -1);
+			if (bytesRead === 0) break;
+			hasher.update(buf.subarray(0, bytesRead));
+		}
+		return hasher.digest("hex") as string;
+	} finally {
+		await fh.close();
+	}
+}
+
+/** 本地素材身份：`broll-local-` + 内容 blake3 前 16 hex（免碰撞、同内容改名同 id）。 */
+export async function brollLocalIdForFile(path: string): Promise<string> {
+	return `${BROLL_LOCAL_MATERIAL_PREFIX}${(await fileBlake3Hex(path)).slice(0, 16)}`;
+}
+
+// ── SQLite 薄适配（bun:sqlite / node:sqlite 双内置，统一到 SqlDb）──────────
+
+export interface SqlDb {
+	exec(sql: string): void;
+	run(sql: string, params?: unknown[]): void;
+	all<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[];
+	get<T = Record<string, unknown>>(sql: string, params?: unknown[]): T | undefined;
+	close(): void;
+}
+
+export async function openSqlite(path: string): Promise<SqlDb> {
+	mkdirSync(dirname(path), { recursive: true });
+	if (typeof (globalThis as { Bun?: unknown }).Bun !== "undefined") {
+		const { Database } = await import("bun:sqlite");
+		const db = new Database(path, { create: true });
+		return {
+			exec: (sql) => db.exec(sql),
+			run: (sql, params = []) => void db.query(sql).run(...(params as never[])),
+			all: <T>(sql: string, params: unknown[] = []) => db.query(sql).all(...(params as never[])) as T[],
+			get: <T>(sql: string, params: unknown[] = []) => (db.query(sql).get(...(params as never[])) ?? undefined) as T | undefined,
+			close: () => db.close(),
+		};
+	}
+	const { DatabaseSync } = await import("node:sqlite");
+	const db = new DatabaseSync(path);
+	return {
+		exec: (sql) => db.exec(sql),
+		run: (sql, params = []) => void db.prepare(sql).run(...(params as never[])),
+		all: <T>(sql: string, params: unknown[] = []) => db.prepare(sql).all(...(params as never[])) as T[],
+		get: <T>(sql: string, params: unknown[] = []) => (db.prepare(sql).get(...(params as never[])) ?? undefined) as T | undefined,
+		close: () => db.close(),
+	};
+}
+
+/** 事务包裹（跨适配统一 BEGIN/COMMIT/ROLLBACK；素材粒度断点续传的原子性来源）。 */
+export function withTransaction(db: SqlDb, fn: () => void): void {
+	db.exec("BEGIN IMMEDIATE");
+	try {
+		fn();
+		db.exec("COMMIT");
+	} catch (e) {
+		try {
+			db.exec("ROLLBACK");
+		} catch {
+			/* 回滚失败不掩盖原错误 */
+		}
+		throw e;
+	}
+}
+
+const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS materials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  material_id TEXT NOT NULL,            -- broll-local-<blake3-16>（身份随内容不随路径）
+  path TEXT NOT NULL UNIQUE,            -- 绝对路径（索引键；跨机不可移植）
+  size INTEGER NOT NULL,                -- 指纹：size
+  mtime_ms INTEGER NOT NULL,            -- 指纹：mtime（毫秒取整）
+  duration_ms INTEGER NOT NULL,
+  width INTEGER,
+  height INTEGER,
+  fps REAL,
+  indexed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_materials_material_id ON materials(material_id);
+CREATE TABLE IF NOT EXISTS scenes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
+  st_ms INTEGER NOT NULL,
+  ed_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scenes_material ON scenes(material_id);
+CREATE TABLE IF NOT EXISTS frames (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scene_id INTEGER NOT NULL,            -- → scenes.id
+  material_id INTEGER NOT NULL,         -- → materials.id（检索载入免二跳）
+  ts_ms INTEGER NOT NULL,
+  vec BLOB NOT NULL                     -- float32 小端 1024 维
+);
+CREATE INDEX IF NOT EXISTS idx_frames_material ON frames(material_id);
+`;
+
+/** 打开（或初建）索引库：建三表 + schema 版本登记。 */
+export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Promise<SqlDb> {
+	const db = await openSqlite(dbPath);
+	db.exec(SCHEMA_SQL);
+	db.run("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')");
+	return db;
+}
+
+export interface MaterialRow {
+	id: number;
+	material_id: string;
+	path: string;
+	size: number;
+	mtime_ms: number;
+	duration_ms: number;
+	width: number | null;
+	height: number | null;
+	fps: number | null;
+	indexed_at: string;
+}
+
+/** 级联删一个素材的全部行（frames → scenes → materials；显式删，不依赖外键 pragma）。 */
+export function deleteMaterialRows(db: SqlDb, materialRowId: number): void {
+	db.run("DELETE FROM frames WHERE material_id = ?", [materialRowId]);
+	db.run("DELETE FROM scenes WHERE material_id = ?", [materialRowId]);
+	db.run("DELETE FROM materials WHERE id = ?", [materialRowId]);
+}
+
+// ── 向量编解码（float32 小端 BLOB；平台字节序无关的确定性写读）──────────────
+
+const IS_LE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+export function encodeVec(vec: Float32Array): Uint8Array {
+	if (IS_LE) return new Uint8Array(vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength));
+	const out = new Uint8Array(vec.length * 4);
+	const dv = new DataView(out.buffer);
+	for (let i = 0; i < vec.length; i++) dv.setFloat32(i * 4, vec[i]!, true);
+	return out;
+}
+
+export function decodeVec(blob: Uint8Array): Float32Array {
+	// 拷贝一份保证 4 字节对齐（SQLite 驱动返回的 view 可能带任意 byteOffset）
+	const bytes = new Uint8Array(blob);
+	if (IS_LE) return new Float32Array(bytes.buffer, 0, bytes.byteLength / 4);
+	const n = bytes.byteLength / 4;
+	const dv = new DataView(bytes.buffer);
+	const out = new Float32Array(n);
+	for (let i = 0; i < n; i++) out[i] = dv.getFloat32(i * 4, true);
+	return out;
+}
+
+// ── 场景边界检测（D4：ffmpeg select+showinfo；只记时间戳，MUST NOT 产生切片文件）──
+
+/** 从 ffmpeg showinfo stderr 提取 pts_time（升序，即场景切换时间点）。 */
+export function parseSceneCuts(stderr: string): number[] {
+	const out: number[] = [];
+	for (const m of stderr.matchAll(/pts_time:([0-9]+(?:\.[0-9]+)?)/g)) out.push(Number(m[1]));
+	return out;
+}
+
+/** 切点 → 场景区间（秒）：<0.5s 的边界间隔并入前段（POC detect_scenes 逐行对齐）。 */
+export function buildScenes(cuts: number[], durationSec: number, minSceneSec: number = MIN_SCENE_SEC): { st: number; ed: number }[] {
+	const bounds = [0];
+	for (const t of cuts) {
+		if (t - bounds[bounds.length - 1]! >= minSceneSec) bounds.push(t);
+	}
+	if (durationSec - bounds[bounds.length - 1]! >= minSceneSec) bounds.push(durationSec);
+	else bounds[bounds.length - 1] = durationSec;
+	const scenes: { st: number; ed: number }[] = [];
+	for (let i = 0; i < bounds.length - 1; i++) scenes.push({ st: bounds[i]!, ed: bounds[i + 1]! });
+	return scenes;
+}
+
+/** 跑 ffmpeg 抓全量 stderr（runFfmpeg 只留尾 4000 字，场景多时会截断，故独立实现）。 */
+function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<string> {
+	return new Promise((resolvePromise, reject) => {
+		const p = spawn(bin, args, { env: process.env });
+		let err = "";
+		p.stderr.on("data", (b: Buffer) => {
+			err += b.toString("utf8");
+		});
+		p.on("error", (e) => reject(e));
+		// select+showinfo 到 -f null 正常退 0；异常码也先回 stderr（调用方解析不出切点自然为空）
+		p.on("close", () => resolvePromise(err));
+	});
+}
+
+/** 场景边界检测：返回场景区间（秒）。源文件与其所在目录不产生任何新媒体文件。 */
+export async function detectScenes(
+	ffmpeg: string,
+	path: string,
+	durationSec: number,
+	threshold: number = SCENE_THRESHOLD_DEFAULT,
+): Promise<{ st: number; ed: number }[]> {
+	const stderr = await runFfmpegCaptureStderr(ffmpeg, [
+		"-i", path,
+		"-vf", `select='gt(scene,${threshold})',showinfo`,
+		"-f", "null", "-",
+	]);
+	return buildScenes(parseSceneCuts(stderr), durationSec);
+}
+
+// ── 场景自适应抽帧计划（POC plan_frames 逐行对齐）──────────────────────────
+
+/** ≤4s 场景取中点 1 帧；>4s 场景自 st+1.0 起每 2s 一帧（t < ed-0.5 为界）。 */
+export function planFrames(scenes: { st: number; ed: number }[]): { sceneIdx: number; ts: number }[] {
+	const plan: { sceneIdx: number; ts: number }[] = [];
+	for (let si = 0; si < scenes.length; si++) {
+		const { st, ed } = scenes[si]!;
+		const dur = ed - st;
+		if (dur <= 4.0) {
+			plan.push({ sceneIdx: si, ts: st + dur / 2 });
+		} else {
+			let t = st + 1.0;
+			while (t < ed - 0.5) {
+				plan.push({ sceneIdx: si, ts: t });
+				t += FRAME_LONG_INTERVAL_SEC;
+			}
+		}
+	}
+	return plan;
+}
+
+/** 抽单帧 512px jpg（POC 同款 scale 表达式；-q:v 3）。 */
+export async function extractFrameJpg(ffmpeg: string, path: string, tsSec: number, outJpg: string): Promise<boolean> {
+	try {
+		await runFfmpeg(ffmpeg, [
+			"-y", "-v", "error", "-ss", tsSec.toFixed(3), "-i", path, "-vframes", "1",
+			"-vf", `scale='if(gte(iw,ih),min(${FRAME_MAX_EDGE},iw),-2)':'if(lt(iw,ih),min(${FRAME_MAX_EDGE},ih),-2)'`,
+			"-q:v", "3", outJpg,
+		]);
+	} catch {
+		return false;
+	}
+	return existsSync(outJpg);
+}
+
+// ── 素材处理与索引编排（2.3/2.4/2.5 + 计量会话联动）────────────────────────
+
+/** 阶段一产物：单素材抽帧**计划**（零 embed 请求；注入面 planMaterial 可整体替换，免 ffmpeg 依赖）。 */
+export interface PlannedMaterial {
+	materialId: string;
+	durationMs: number;
+	width: number;
+	height: number;
+	fps: number;
+	/** 场景区间（毫秒取整）。 */
+	scenes: { st_ms: number; ed_ms: number }[];
+	/** 抽帧计划（sceneIdx 指向 scenes 下标）——计划总数即计量会话 planned_units。 */
+	framePlan: { sceneIdx: number; ts_ms: number }[];
+}
+
+/** 阶段二产物：帧向量（sceneIdx 指向 PlannedMaterial.scenes 下标）。 */
+export interface FrameVec {
+	sceneIdx: number;
+	ts_ms: number;
+	vec: Float32Array;
+}
+
+/** 计量会话钩子（命令层接 embed-client 的 open/close；internal 豁免 = 不传本钩子）。 */
+export interface IndexSessionHooks {
+	open(plannedUnits: number): Promise<{ sessionToken: string; preDeductedCredits: number }>;
+	close(sessionToken: string): Promise<{ usedUnits: number; settledCredits: number; refundedCredits: number }>;
+}
+
+/** 计量会话账面（仅会话真开过时出现在结果里）。 */
+export interface IndexBillingOutcome {
+	plannedUnits: number;
+	preDeductedCredits: number;
+	usedUnits?: number;
+	settledCredits?: number;
+	refundedCredits?: number;
+	/** close 调用失败：结算交由服务端 /internal/quota/reconcile 兜底（15min cron），用量不丢。 */
+	reconcilePending?: boolean;
+}
+
+export interface IndexRunOptions {
+	/** 索引范围（--dirs，绝对/相对均可，内部 resolve）。 */
+	dirs: string[];
+	dbPath?: string;
+	sceneThreshold?: number;
+	rebuild?: boolean;
+	/** embed 客户端（命令层注入 embedInputs 闭包；测试注入假端点）。图像批请求带会话 token。 */
+	embed: (inputs: EmbedInput[], sessionToken?: string) => Promise<Float32Array[]>;
+	/** 计量会话钩子：缺省/计划帧数为 0 时不开会话（internal 豁免、纯增量跳过场景零计费）。 */
+	session?: IndexSessionHooks;
+	ffmpegPath?: string;
+	/** 逐素材进度行（人读，命令层接 log.info）。 */
+	onProgress?: (line: string) => void;
+	/** 测试注入：整体替换阶段一（探测/场景检测/抽帧计划）。 */
+	planMaterial?: (path: string, ctx: { sceneThreshold: number }) => Promise<PlannedMaterial>;
+	/** 测试注入：整体替换阶段二（抽帧/embed；sessionToken 透传）。 */
+	embedFrames?: (path: string, planned: PlannedMaterial, sessionToken?: string) => Promise<FrameVec[]>;
+	/** 测试注入：文件枚举。 */
+	listFiles?: (dirs: string[]) => string[];
+}
+
+export interface IndexRunResult {
+	dbPath: string;
+	dirs: string[];
+	materials: { total: number; indexed: number; skipped: number; rebuilt: number; failed: number };
+	scenes: number;
+	frames: number;
+	/** 本轮抽帧计划总数（= 计量会话 planned_units 口径；豁免/零新帧时也如实报）。 */
+	plannedFrames: number;
+	/** 计量会话账面：仅会话真开过时出现（豁免/零计划帧 = 无本键）。 */
+	billing?: IndexBillingOutcome;
+	elapsedMs: number;
+}
+
+/** 枚举文件夹内视频文件（递归，深度上限 4；隐藏目录跳过）。 */
+export function listVideoFiles(dirs: string[]): string[] {
+	const out: string[] = [];
+	const walk = (dir: string, depth: number): void => {
+		if (depth > 4) return;
+		let entries: ReturnType<typeof readdirSync>;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true }) as never;
+		} catch {
+			return;
+		}
+		for (const e of entries as unknown as Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>) {
+			if (e.name.startsWith(".")) continue;
+			const p = join(dir, e.name);
+			if (e.isDirectory()) walk(p, depth + 1);
+			else if (e.isFile() && VIDEO_EXT.test(e.name)) out.push(resolve(p));
+		}
+	};
+	for (const d of dirs) walk(resolve(d), 0);
+	return out.sort();
+}
+
+/** 默认阶段一：ffprobe 几何 → 内容哈希身份 → 场景检测 → 抽帧计划（零 embed 请求，不落任何文件）。 */
+async function planMaterialDefault(
+	path: string,
+	ctx: { sceneThreshold: number },
+	ff: FfmpegResolution,
+	ffmpegPathOpt: string | undefined,
+): Promise<PlannedMaterial> {
+	const geo = probeGeometry(path, ffmpegPathOpt);
+	if (!(geo.duration > 0)) throw new Error("探测不到有效时长（疑似损坏/非视频文件）");
+	const materialId = await brollLocalIdForFile(path);
+	const scenes = await detectScenes(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold);
+	const plan = planFrames(scenes);
+	return {
+		materialId,
+		durationMs: Math.round(geo.duration * 1000),
+		width: geo.width,
+		height: geo.height,
+		fps: geo.fps,
+		scenes: scenes.map((s) => ({ st_ms: Math.round(s.st * 1000), ed_ms: Math.round(s.ed * 1000) })),
+		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: Math.round(p.ts * 1000) })),
+	};
+}
+
+/** 默认阶段二：按计划抽帧（~/.gitruck/tmp）→ embed（批 ≤16，带 session_token）→ 删帧图（即传即弃）。 */
+async function embedFramesDefault(
+	path: string,
+	planned: PlannedMaterial,
+	ff: FfmpegResolution,
+	embed: IndexRunOptions["embed"],
+	sessionToken: string | undefined,
+): Promise<FrameVec[]> {
+	// 抽帧到 ~/.gitruck/tmp/broll-index-<pid>（工作目录/素材目录零残留），embed 成功即删（即传即弃）
+	const frameDir = join(tmpDir(), `broll-index-${process.pid}`);
+	mkdirSync(frameDir, { recursive: true });
+	const frames: FrameVec[] = [];
+	try {
+		let batch: { sceneIdx: number; ts_ms: number; jpg: string }[] = [];
+		const flush = async (): Promise<void> => {
+			if (!batch.length) return;
+			const inputs: EmbedInput[] = batch.map((b) => ({ image: readFileSync(b.jpg).toString("base64") }));
+			const vecs = await embed(inputs, sessionToken); // 失败即 EmbedError/EmbedRejectedError 上抛（硬失败不降级）
+			batch.forEach((b, i) => frames.push({ sceneIdx: b.sceneIdx, ts_ms: b.ts_ms, vec: vecs[i]! }));
+			for (const b of batch) {
+				try {
+					unlinkSync(b.jpg);
+				} catch {
+					/* 删失败由 finally 的整目录清理兜底 */
+				}
+			}
+			batch = [];
+		};
+		for (const { sceneIdx, ts_ms } of planned.framePlan) {
+			const jpg = join(frameDir, `${basename(path, extname(path))}_${ts_ms}.jpg`);
+			if (!(await extractFrameJpg(ff.ffmpeg, path, ts_ms / 1000, jpg))) continue; // 个别坏帧跳过
+			batch.push({ sceneIdx, ts_ms, jpg });
+			if (batch.length >= EMBED_BATCH_MAX) await flush();
+		}
+		await flush();
+	} finally {
+		rmSync(frameDir, { recursive: true, force: true }); // 即传即弃兜底：无论成败不留抽帧图
+	}
+	return frames;
+}
+
+/** 端点级失败判据：unreachable（string code）或业务拒绝（rejected 标记）——两者都该中止整轮。
+ * 按属性判而非 instanceof：测试多 bundle 下类身份不唯一。 */
+function isEndpointFatal(e: unknown): boolean {
+	const err = e as { code?: unknown; rejected?: unknown } | null;
+	return err?.code === EMBED_UNREACHABLE_CODE || err?.rejected === true;
+}
+
+/**
+ * 索引编排（gtrk matrix index 的纯逻辑面）：指纹增量 + 素材粒度断点续传 + --rebuild + 计量会话。
+ * 两阶段：①全量场景检测/抽帧计划（零 embed）→ session open（planned_units=计划帧总数）→
+ * ②逐素材抽帧+embed（带 token）+ 事务落库。embed 端点级失败（unreachable/业务拒绝）原样上抛
+ * 中止整轮（已完成素材已各自落库，重跑零重算）；其余单素材错误局部化（failed 计数 + 告警行）。
+ * 会话**完成/失败均 close**（finally；失败也结算已用量），close 自身失败标 reconcilePending。
+ */
+export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexRunResult> {
+	const t0 = Date.now();
+	const dbPath = opts.dbPath ?? localIndexDbPath();
+	const sceneThreshold = opts.sceneThreshold ?? SCENE_THRESHOLD_DEFAULT;
+	const files = (opts.listFiles ?? listVideoFiles)(opts.dirs);
+	const db = await openLocalIndexDb(dbPath);
+	const stats = { total: files.length, indexed: 0, skipped: 0, rebuilt: 0, failed: 0 };
+	let sceneCount = 0;
+	let frameCount = 0;
+	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）
+	const ff = opts.planMaterial && opts.embedFrames ? null : requireFfmpeg(opts.ffmpegPath);
+	const planOne =
+		opts.planMaterial ?? ((p: string, ctx: { sceneThreshold: number }) => planMaterialDefault(p, ctx, ff!, opts.ffmpegPath));
+	const embedOne =
+		opts.embedFrames ??
+		((p: string, planned: PlannedMaterial, token?: string) => embedFramesDefault(p, planned, ff!, opts.embed, token));
+
+	interface Pending {
+		path: string;
+		name: string;
+		size: number;
+		mtimeMs: number;
+		prev: MaterialRow | undefined;
+		planned: PlannedMaterial;
+	}
+	let opened: { sessionToken: string; preDeductedCredits: number } | undefined;
+	let billing: IndexBillingOutcome | undefined;
+	let plannedFrames = 0;
+	try {
+		// ── 阶段一：指纹增量筛选 + 场景检测/抽帧计划（零 embed 请求）──
+		const pending: Pending[] = [];
+		for (const path of files) {
+			const name = basename(path);
+			let st: { size: number; mtimeMs: number };
+			try {
+				st = statSync(path);
+			} catch {
+				stats.failed++;
+				opts.onProgress?.(`[${name}] 读不到文件（跳过）`);
+				continue;
+			}
+			const size = st.size;
+			const mtimeMs = Math.round(st.mtimeMs);
+			const prev = db.get<MaterialRow>("SELECT * FROM materials WHERE path = ?", [path]);
+			if (prev && !opts.rebuild && prev.size === size && prev.mtime_ms === mtimeMs) {
+				stats.skipped++;
+				opts.onProgress?.(`[${name}] 指纹未变，跳过`);
+				continue;
+			}
+			try {
+				pending.push({ path, name, size, mtimeMs, prev, planned: await planOne(path, { sceneThreshold }) });
+			} catch (e) {
+				stats.failed++;
+				opts.onProgress?.(`[${name}] 探测/场景检测失败：${e instanceof Error ? e.message : String(e)}（跳过）`);
+			}
+		}
+		plannedFrames = pending.reduce((n, p) => n + p.planned.framePlan.length, 0);
+		if (pending.length) {
+			opts.onProgress?.(`抽帧计划就绪：${pending.length} 个素材待索引 · 计划 ${plannedFrames} 帧`);
+		}
+
+		// ── 计量会话 open（planned_units = 抽帧计划总数；无钩子/零计划帧不开会话）──
+		if (opts.session && plannedFrames > 0) {
+			opened = await opts.session.open(plannedFrames); // 积分不足即在此失败（CloudError 上抛）
+			billing = { plannedUnits: plannedFrames, preDeductedCredits: opened.preDeductedCredits };
+		}
+
+		// ── 阶段二：抽帧 + embed（批请求带 session_token）+ 素材粒度事务落库 ──
+		for (const p of pending) {
+			let frames: FrameVec[];
+			try {
+				frames = await embedOne(p.path, p.planned, opened?.sessionToken);
+			} catch (e) {
+				// 端点级失败：中止整轮（spec「整体失败」；已完成素材已各自落库，finally 仍会 close 结算）
+				if (isEndpointFatal(e)) throw e;
+				stats.failed++;
+				opts.onProgress?.(`[${p.name}] 处理失败：${e instanceof Error ? e.message : String(e)}（跳过）`);
+				continue;
+			}
+			// 素材粒度事务：旧行级联删 + 新行整批入，一把落库（中断不留半素材 = 断点续传）
+			withTransaction(db, () => {
+				if (p.prev) deleteMaterialRows(db, p.prev.id);
+				db.run(
+					"INSERT INTO materials(material_id, path, size, mtime_ms, duration_ms, width, height, fps, indexed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+					[p.planned.materialId, p.path, p.size, p.mtimeMs, p.planned.durationMs, p.planned.width, p.planned.height, p.planned.fps, new Date().toISOString()],
+				);
+				const matRowId = Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id);
+				const sceneIds: number[] = [];
+				for (const s of p.planned.scenes) {
+					db.run("INSERT INTO scenes(material_id, st_ms, ed_ms) VALUES (?,?,?)", [matRowId, s.st_ms, s.ed_ms]);
+					sceneIds.push(Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id));
+				}
+				for (const f of frames) {
+					const sceneId = sceneIds[f.sceneIdx];
+					if (sceneId === undefined) continue;
+					db.run("INSERT INTO frames(scene_id, material_id, ts_ms, vec) VALUES (?,?,?,?)", [sceneId, matRowId, f.ts_ms, encodeVec(f.vec)]);
+				}
+			});
+			if (p.prev) stats.rebuilt++;
+			stats.indexed++;
+			sceneCount += p.planned.scenes.length;
+			frameCount += frames.length;
+			opts.onProgress?.(
+				`[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
+			);
+		}
+	} finally {
+		db.close();
+		// 完成/失败均 close：失败也要结算已用量（infra 计费细案第 6 条）
+		if (opened && opts.session) {
+			try {
+				const closed = await opts.session.close(opened.sessionToken);
+				if (billing) {
+					billing.usedUnits = closed.usedUnits;
+					billing.settledCredits = closed.settledCredits;
+					billing.refundedCredits = closed.refundedCredits;
+				}
+				opts.onProgress?.(
+					`计量会话已结算：实际用量 ${closed.usedUnits} 帧 → 实结 ${closed.settledCredits} 积分 · 退还 ${closed.refundedCredits} 积分（预扣 ${opened.preDeductedCredits}）`,
+				);
+			} catch (e) {
+				if (billing) billing.reconcilePending = true;
+				opts.onProgress?.(
+					`计量会话结算调用失败（${e instanceof Error ? e.message : String(e)}）——服务端 15 分钟内自动对账兜底结算，已用量不会丢`,
+				);
+			}
+		}
+	}
+	return {
+		dbPath,
+		dirs: opts.dirs.map((d) => resolve(d)),
+		materials: stats,
+		scenes: sceneCount,
+		frames: frameCount,
+		plannedFrames,
+		...(billing ? { billing } : {}),
+		elapsedMs: Date.now() - t0,
+	};
+}

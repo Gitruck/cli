@@ -19,6 +19,8 @@ export interface UserConfig {
 	jianyingDraftDir?: string;
 	/** 缺省栏目配置 id（gtrk split --column 未传时取此；再缺省 = 内置默认栏目）。 */
 	defaultColumn?: string;
+	/** 自建 embed 端点完整 URL 覆盖（add-matrix-local-search；缺省 = apiBase 推导，env GITRUCK_EMBED_URL 优先级更高）。 */
+	embedUrl?: string;
 }
 
 export function configPath(): string {

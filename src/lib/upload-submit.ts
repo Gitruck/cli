@@ -8,6 +8,7 @@
  */
 import type { CloudConfig } from "./config";
 import { cloudErrorCode, submitTask } from "./cloud";
+import { guardGtrkCloudSubmit } from "./cloud-render-guard";
 import { invalidateUpload, uploadCached } from "./upload-cache";
 
 const MATERIAL_NOT_FOUND = 6004;
@@ -66,6 +67,10 @@ export async function uploadAndSubmitTask(
 	options: UploadSubmitOptions = {},
 	deps: UploadSubmitDeps = defaultDeps,
 ): Promise<UploadSubmitResult> {
+	// 云渲提交防线（add-matrix-local-search 4.4）：.gtrk 工程含本地 B-roll（broll-local- /
+	// 工程外绝对 path）→ 在**上传发生前**拒绝（code=local_broll_cloud_render_rejected），
+	// MUST NOT 静默上传素材归一化为 file_id。
+	if (/\.gtrk$/i.test(path)) await guardGtrkCloudSubmit(path);
 	let uploaded = await deps.uploadCached(cfg, path, { force: options.force });
 	options.onUploaded?.(uploaded);
 	const backoffMs = options.visibilityBackoffMs ?? DEFAULT_VISIBILITY_BACKOFF_MS;

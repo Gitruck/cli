@@ -15,12 +15,20 @@ import { parseJson, CloudError, type ApiResp } from "./cloud";
 
 /** 服务端 result 原样字段 + 本地附加（仅 excluded_hint / also_matched_queries 两个）。
  * clip_id 一律**字符串**：服务端返回雪花大整数（>2^53），JSON.parse 成 number 必丢精度
- * （真机实测 …141 被砸成 …140，两个不同 clip 撞成同一 id）——解析层引号化，契约统一字符串。 */
+ * （真机实测 …141 被砸成 …140，两个不同 clip 撞成同一 id）——解析层引号化，契约统一字符串。
+ *
+ * 本地形态（add-matrix-local-search · broll-plan-contract，2026-08-12 联测收口）：`source:"local"` 标记，
+ * `clip_id`=`local-<blake3-16>`——**与云端同构：材料 id 由消费方既有拼接 `broll-`+clip_id 得出
+ * `broll-local-<blake3-16>`，MUST NOT 在 clip_id 里预置 `broll-` 前缀（否则拼出 `broll-broll-` 双前缀）**；
+ * `local_path`/`cover_path` 替代 `url`/`cover_url`（无 24h 签名过期语义，url 系字段 MUST NOT 出现）；
+ * `segments` 结构与云端形态逐字段一致。云端形态字段与语义不变（无 source 键即云端）。 */
 export interface PlanResult {
 	clip_id: string;
 	score: number;
-	url: string;
-	cover_url: string;
+	/** 云端形态必有；本地形态（source:"local"）MUST NOT 出现。 */
+	url?: string;
+	/** 云端形态必有；本地形态 MUST NOT 出现（封面走 cover_path）。 */
+	cover_url?: string;
 	duration?: number;
 	width?: number;
 	height?: number;
@@ -34,10 +42,59 @@ export interface PlanResult {
 	material_class?: string;
 	level?: string;
 	is_copyright?: boolean;
+	// 本地检索形态（local-material-search spec）
+	source?: "local";
+	/** 本地素材绝对路径（免下载免上传，消费方按它/asset:// 直读，MUST NOT 推导远程 preview URL）。 */
+	local_path?: string;
+	/** 工程内封面相对路径（assets/broll-cover/<id>.jpg），可缺省待铺轨时现抽。 */
+	cover_path?: string;
 	// 本地附加
 	excluded_hint?: true;
 	also_matched_queries?: string[];
 	[k: string]: unknown;
+}
+
+/** 本地形态 clip_id 前缀（broll-plan-contract 2026-08-12 收口）：`local-<blake3-16>`。
+ * 材料 id 前缀 `broll-local-` 是消费方拼 `broll-` 之后的产物，MUST NOT 出现在 clip_id 里
+ * （此处独立声明避免与 matrix-lay 环依赖）。 */
+const LOCAL_CLIP_PREFIX = "local-";
+
+/** result 是否本地形态（消费方分流判据：source 标记或 local_path 存在性）。 */
+export function isLocalPlanResult(r: Pick<PlanResult, "source" | "local_path">): boolean {
+	return r.source === "local" || typeof r.local_path === "string";
+}
+
+/**
+ * 本地形态 result 轻校验（broll-plan-contract「本地结果形态」逐条）：返回违约描述数组（空=合规）。
+ * 仓内无 zod，按既有 validateSplitDoc 先例做手写校验，供组装侧/测试对拍 spec。
+ */
+export function validateLocalResult(r: PlanResult): string[] {
+	const errs: string[] = [];
+	if (r.source !== "local") errs.push('本地 result 必须带 source:"local" 标记');
+	// `broll-local-…` 不以 `local-` 开头 → 双前缀形态（预置了 broll-）在此同被拦下
+	if (!r.clip_id.startsWith(LOCAL_CLIP_PREFIX)) {
+		errs.push(
+			`clip_id 必须为 ${LOCAL_CLIP_PREFIX}<blake3-16> 且 MUST NOT 预置 broll- 前缀（得到 ${r.clip_id}）——材料 id 由消费方拼 broll-+clip_id 得出`,
+		);
+	}
+	if (typeof r.local_path !== "string" || !r.local_path) errs.push("本地 result 缺 local_path（素材绝对路径）");
+	for (const k of ["url", "cover_url", "url_ttl_note"] as const) {
+		if (k in r) errs.push(`本地 result MUST NOT 出现 ${k}（无签名过期语义）`);
+	}
+	const segs = r.segments ?? [];
+	for (let i = 1; i < segs.length; i++) {
+		if (segs[i]!.score > segs[i - 1]!.score) {
+			errs.push("segments 必须按 score 降序");
+			break;
+		}
+	}
+	for (const s of segs) {
+		if (!(s.start <= s.best && s.best <= s.end)) {
+			errs.push(`segment best 必须落在 [start,end] 内（${s.start}–${s.end} best=${s.best}）`);
+			break;
+		}
+	}
+	return errs;
 }
 
 export interface PlanQuery {
@@ -61,9 +118,11 @@ export interface PlanBeat {
 export interface BrollPlan {
 	plan_version: "v1";
 	generated_at: string;
-	member_type: "internal" | "external";
-	/** 常量注记（必含）：结果 url 带签名默认 24h 过期，重跑 gtrk matrix 即重签。 */
-	url_ttl_note: string;
+	/** 云端双口沿用 internal/external；本地检索（--local）为 "local"。 */
+	member_type: "internal" | "external" | "local";
+	/** 常量注记（云端形态必含）：结果 url 带签名默认 24h 过期，重跑 gtrk matrix 即重签。
+	 * 本地形态 MUST NOT 出现（无签名过期语义，broll-plan-contract）。 */
+	url_ttl_note?: string;
 	project_slug?: string;
 	column_id?: string;
 	beats: PlanBeat[];
@@ -251,7 +310,7 @@ export function buildPlanBeat(entry: FilmDispatch, outcomes: QueryOutcome[]): Pl
 
 export function buildPlan(opts: {
 	generatedAt: string;
-	memberType: Tier;
+	memberType: Tier | "local";
 	projectSlug?: string;
 	columnId?: string;
 	beats: PlanBeat[];
@@ -260,7 +319,8 @@ export function buildPlan(opts: {
 		plan_version: "v1",
 		generated_at: opts.generatedAt,
 		member_type: opts.memberType,
-		url_ttl_note: URL_TTL_NOTE,
+		// 本地 plan 无 url 签名语义 → url_ttl_note MUST NOT 出现；云端形态与本 change 之前逐字节一致
+		...(opts.memberType === "local" ? {} : { url_ttl_note: URL_TTL_NOTE }),
 		beats: opts.beats,
 	};
 	if (opts.projectSlug) plan.project_slug = opts.projectSlug;
