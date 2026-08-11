@@ -25,6 +25,10 @@ package-lock.json
 # 本仓是公开 GitHub 仓，0c153b8 曾专门做过「开源仓脱敏」把工件移出 git；
 # P10（08-05）纳入时遗忘了该前提，08-06 泄漏后历史已 filter-repo 重写清除。
 # ⚠️ 永不移除本条：openspec 工件含内部主机/供应商/架构信息，归档历史备份走本机方案。
-# 2026-08-11 起 openspec/ 自成一个 Gitea 私仓（含 openspec/.git 与 openspec/.plans/），
-# 本条同时保证那个子仓对公开仓完全不可见——多人协作走 Gitea，与 GitHub 彻底分流。
+#
+# 2026-08-11 起 openspec/ 是本仓的 submodule（见 .gitmodules），指向 Gitea 私仓
+# Gitruck/cli-openspec。本条对那个 gitlink 条目**无效**（它是 `submodule add -f` 加的），
+# 但工件内容照旧零外泄——submodule 机制下父仓只存一个 commit hash，不存任何内容。
+# 保留本条是兜底：万一哪天 submodule 被 deinit，openspec/ 变回普通目录时仍有屏蔽。
+# 真正的硬闸是 .git/hooks/pre-commit（装法见 openspec/hooks/install.sh）。
 openspec/
