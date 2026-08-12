@@ -1,20 +1,24 @@
 /**
  * 素材理解零件（add-matrix-describe-and-window · matrix-describe spec）。
  *
- * 服务端客户端对齐 embed-client.ts 模式（infra add-material-describe-api 互锁）：
- *   - `POST <url>`，body `{input:[{image:<base64>}...]}`——理解口**只吃图**（text 形态服务端拒绝，
- *     客户端根本不产生）；
- *   - 响应兼容两形态：裸 `{data:[{index?, desc, tags, mark, usable_flags}]}` 与 infra 包络
- *     `{code, msg, data:{data:[…]}}`；逐图对位（带 index 按 index 排，缺 index 按原序）；
+ * 服务端契约（infra add-material-describe-api，2026-08-12 原地修订为**异步任务**）：
+ *   - 提交：`POST <url>`，body `{input:[{image:<base64>}...]}`——理解口**只吃图**（text 形态服务端拒绝，
+ *     客户端根本不产生）；响应 `{code:200, msg, data:{task_id, status:"queued"}}`（兼容裸 `{task_id}` 形态）；
+ *   - 轮询：`GET <url>/<task_id>`，同 headers；响应 `{code:200, data:{status, progress, output_result}}`
+ *     （兼容裸形态）；status 终态 completed/failed/cancelled；completed 时 output_result 即原同步版结果体
+ *     `{data:[{index?, desc, tags, mark, usable_flags}...], usage}`——**结果契约逐字段不变**，
+ *     逐图对位（带 index 按 index 排，缺 index 按原序）；
  *   - 鉴权沿 cloud-link 口径：`Authorization: <apikey>`（**非 Bearer**）；
- *   - 批 ≤8/请求（VLM 成本高批更小，infra D2）；
- *   - 传输失败/5xx/429 指数退避重试 3 次后硬失败（机读 code `describe_endpoint_unreachable`）；
+ *   - 批 ≤32/请求（异步化后批上限 8→32）；
+ *   - 提交阶段传输失败/5xx/429 指数退避重试 3 次后硬失败（机读 code `describe_endpoint_unreachable`）；
  *     业务拒绝（4xx 业务码：6030 超批 / 6201·6202 积分不足等）立抛 DescribeRejectedError 不进退避；
- *   - 超时 120s（infra 设计：豆包 VLM 秒级-十秒级，批 8 张同步在此量级内）。
+ *   - 轮询阶段照 cloud.ts pollTask 范式：5s 间隔、30min 墙钟、网络瞬断 continue 不计入重试；
+ *     failed/cancelled 抛 DescribeError（带服务端 error 文案；上游失败服务端已自动退款，客户端只报错）；
+ *   - 单请求超时 120s（AbortSignal 对提交/轮询的每次 fetch 各自生效）。
  *
- * 计费（infra 拍板 2026-08-12）：**1 积分/张、每请求同步计费**（无会话机制，与 embed 的会话计量不同）；
- * 同合云内部成员（gc_member_type=internal）豁免。CLI 侧护栏：单次将调用 >20 张时提示预估积分并确认
- * （--yes 跳过；internal 豁免免确认仅提示——豁免探测复用 probeGcMemberType）。
+ * 计费（infra 拍板 2026-08-12，异步化修订）：**1 积分/张、异步任务计费**（提交预扣→完成结算，失败自动退款；
+ * 无会话机制，与 embed 的会话计量不同）；同合云内部成员（gc_member_type=internal）豁免。CLI 侧护栏：
+ * 单次将调用 >20 张时提示预估积分并确认（--yes 跳过；internal 豁免免确认仅提示——豁免探测复用 probeGcMemberType）。
  *
  * 缓存（design D1）：理解产物写本地索引库 describes 表，键=(材料 id, ts_ms)——同帧免重复调用
  * （VLM 1 积分/张，缓存就是钱）；素材 size:mtime 指纹变化按材料级联清除（local-index 编排负责）；
@@ -30,16 +34,20 @@ import type { MaterialDescribeMeta } from "./matrix";
 import type { SqlDb } from "./local-index";
 
 export const DESCRIBE_UNREACHABLE_CODE = "describe_endpoint_unreachable";
-/** 计费单价（infra 拍板）：1 积分/张，每请求同步计费（无会话）。 */
+/** 计费单价（infra 拍板）：1 积分/张，异步任务计费（提交预扣→完成结算，失败自动退款；无会话）。 */
 export const DESCRIBE_CREDITS_PER_IMAGE = 1;
-/** 单请求批上限（infra D2：VLM 成本高批更小）。 */
-export const DESCRIBE_BATCH_MAX = 8;
+/** 单请求批上限（infra 异步化修订：8→32）。 */
+export const DESCRIBE_BATCH_MAX = 32;
 /** 确认护栏阈值：单次**将实际调用**（缓存命中不计）超过此张数才提示确认。 */
 export const DESCRIBE_CONFIRM_THRESHOLD = 20;
-/** HTTP 超时（infra 设计：120s 容豆包 VLM 批处理）。 */
+/** 单次 HTTP 请求超时（对提交 POST 与轮询 GET 的每次 fetch 各自生效）。 */
 export const DESCRIBE_TIMEOUT_MS = 120_000;
-/** 指数退避重试次数（同 embed：1 次首发 + 3 次重试后硬失败）。 */
+/** 指数退避重试次数（同 embed：1 次首发 + 3 次重试后硬失败；仅作用于提交阶段）。 */
 export const DESCRIBE_RETRIES = 3;
+/** 轮询间隔（照 cloud.ts pollTask 范式）。 */
+export const DESCRIBE_POLL_INTERVAL_MS = 5000;
+/** 轮询墙钟上限（30 分钟兜底，照 pollTask 范式）。 */
+export const DESCRIBE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 const BACKOFF_BASE_MS = 1000;
 
 /** 理解产物（服务端契约 D1 裁剪版）：flags 缺失键按 false 语义消费（宁放行勿误杀）。 */
@@ -91,6 +99,12 @@ export interface DescribeDeps {
 	sleep?: (ms: number) => Promise<void>;
 	backoffBaseMs?: number;
 	timeoutMs?: number;
+	/** 轮询间隔（默认 5000ms；测试注入假 sleep 秒过）。 */
+	pollIntervalMs?: number;
+	/** 轮询墙钟上限（默认 30 分钟）。 */
+	pollTimeoutMs?: number;
+	/** 时钟（轮询墙钟判定用；测试注入假 now）。 */
+	now?: () => number;
 }
 
 /** 4xx 业务拒绝判据（同 embed 口径）：429/5xx 属传输面走重试，其余 4xx 携业务码即拒绝。 */
@@ -123,19 +137,41 @@ function parseDescribeRow(raw: unknown): MaterialDescribe {
 	};
 }
 
-/** 单批请求（不重试）；业务拒绝抛 DescribeRejectedError，其余异常抛给上层重试逻辑。 */
-async function describeOnce(
+/** 公共请求头（提交与轮询同口径）：裸 apikey，非 Bearer（cloud-link 口径）。 */
+function authHeaders(endpoint: DescribeEndpoint): Record<string, string> {
+	return {
+		accept: "application/json",
+		Authorization: endpoint.apiKey, // 裸 apikey，非 Bearer（cloud-link 口径）
+	};
+}
+
+/**
+ * completed 产物解析：output_result 即原同步版结果体（结果契约逐字段不变）。
+ * 双形态容错沿旧口径（{data:[…]} 或再套一层 {data:{data:[…]}}）；带 index 按 index 对位（服务端可乱序），
+ * 缺 index 按原序。契约破坏（缺 data 数组/条数不符）在任务已 completed 后发生，重试无意义 → 直接 DescribeError。
+ */
+function parseDescribeRows(outputResult: unknown, expectedCount: number): MaterialDescribe[] {
+	let rows: unknown = (outputResult as { data?: unknown } | null | undefined)?.data;
+	if (rows && typeof rows === "object" && !Array.isArray(rows)) rows = (rows as { data?: unknown }).data;
+	if (!Array.isArray(rows)) throw new DescribeError("任务完成但 output_result 缺 data 数组（非 material_describe 契约响应）");
+	if (rows.length !== expectedCount) {
+		throw new DescribeError(`任务完成但结果条数 ${rows.length} 与输入 ${expectedCount} 不符`);
+	}
+	const indexed = rows.every((r) => typeof (r as { index?: unknown })?.index === "number")
+		? [...rows].sort((a, b) => (a as { index: number }).index - (b as { index: number }).index)
+		: rows;
+	return indexed.map(parseDescribeRow);
+}
+
+/** 提交阶段单发（不重试）：POST 提交批任务解析出 task_id；业务拒绝抛 DescribeRejectedError，其余异常抛给上层重试逻辑。 */
+async function submitDescribeTask(
 	endpoint: DescribeEndpoint,
 	imagesBase64: string[],
 	deps: Required<Pick<DescribeDeps, "fetchFn" | "timeoutMs">>,
-): Promise<MaterialDescribe[]> {
+): Promise<string> {
 	const res = await deps.fetchFn(endpoint.url, {
 		method: "POST",
-		headers: {
-			accept: "application/json",
-			"Content-Type": "application/json",
-			Authorization: endpoint.apiKey, // 裸 apikey，非 Bearer（cloud-link 口径）
-		},
+		headers: { ...authHeaders(endpoint), "Content-Type": "application/json" },
 		body: JSON.stringify({ input: imagesBase64.map((image) => ({ image })) }),
 		signal: AbortSignal.timeout(deps.timeoutMs),
 	});
@@ -149,23 +185,86 @@ async function describeOnce(
 	if (typeof body.code === "number" && body.code !== 200) {
 		throw new DescribeRejectedError(body.code, typeof body.msg === "string" ? body.msg : `code=${body.code}`);
 	}
-	// 双形态兼容：裸 {data:[…]} 或 infra 包络 {code,msg,data:{data:[…]}}
-	let rows: unknown = body.data;
-	if (rows && typeof rows === "object" && !Array.isArray(rows)) rows = (rows as { data?: unknown }).data;
-	if (!Array.isArray(rows)) throw new Error("响应缺 data 数组（非 material_describe 契约响应）");
-	if (rows.length !== imagesBase64.length) {
-		throw new Error(`响应条数 ${rows.length} 与输入 ${imagesBase64.length} 不符`);
+	// 双形态兼容：infra 包络 {code,msg,data:{task_id}} 或裸 {task_id}
+	const data =
+		body.data && typeof body.data === "object" && !Array.isArray(body.data)
+			? (body.data as { task_id?: unknown })
+			: (body as { task_id?: unknown });
+	const taskId = data.task_id;
+	if (typeof taskId !== "string" || !taskId) {
+		throw new Error("提交响应缺 task_id（非 material_describe 异步任务契约响应）");
 	}
-	// 带 index 按 index 对位（服务端可乱序）；缺 index 按原序
-	const indexed = rows.every((r) => typeof (r as { index?: unknown })?.index === "number")
-		? [...rows].sort((a, b) => (a as { index: number }).index - (b as { index: number }).index)
-		: rows;
-	return indexed.map(parseDescribeRow);
+	return taskId;
 }
 
 /**
- * 批量理解：按 ≤8/请求切批，逐批指数退避重试，任一批 3 次重试仍失败 → DescribeError 整体硬失败；
- * 服务端业务拒绝（DescribeRejectedError）不进重试立抛。返回与 imagesBase64 一一对位。
+ * 轮询阶段（照 cloud.ts pollTask 范式）：先查墙钟 → sleep(间隔) → GET `<url>/<task_id>`；
+ * 网络瞬断/5xx/解析失败 continue 不计入重试（墙钟兜底）；真业务码（异账号/任务不存在等）鸭子透传；
+ * completed 解析 output_result 返回；failed/cancelled 抛 DescribeError（带服务端 error 文案）；
+ * 墙钟超时抛 DescribeError（文案含 task_id，提示可稍后再查）。
+ */
+async function pollDescribeTask(
+	endpoint: DescribeEndpoint,
+	taskId: string,
+	expectedCount: number,
+	deps: Required<Pick<DescribeDeps, "fetchFn" | "timeoutMs" | "sleep" | "pollIntervalMs" | "pollTimeoutMs" | "now">>,
+): Promise<MaterialDescribe[]> {
+	const pollUrl = `${endpoint.url.replace(/\/+$/, "")}/${taskId}`;
+	const start = deps.now();
+	for (;;) {
+		if (deps.now() - start > deps.pollTimeoutMs) {
+			throw new DescribeError(
+				`素材理解任务轮询超时（超过 ${Math.round(deps.pollTimeoutMs / 60000)} 分钟，task_id=${taskId}）。` +
+					`任务可能仍在云端执行，可稍后重跑查询——未落缓存的帧会重新提交，已完成帧走缓存零重复计费`,
+			);
+		}
+		await deps.sleep(deps.pollIntervalMs);
+		let body: { code?: unknown; msg?: unknown; data?: unknown };
+		try {
+			const res = await deps.fetchFn(pollUrl, {
+				headers: authHeaders(endpoint),
+				signal: AbortSignal.timeout(deps.timeoutMs),
+			});
+			if (!res.ok) {
+				const text = await res.text().catch(() => "");
+				const rejected = parseBusinessRejection(res.status, text);
+				if (rejected) throw rejected;
+				continue; // 5xx/429 传输面：瞬断容忍续轮（墙钟兜底）
+			}
+			body = (await res.json()) as { code?: unknown; msg?: unknown; data?: unknown };
+		} catch (e) {
+			if ((e as { rejected?: unknown } | null)?.rejected === true) throw e; // 业务拒绝（跨 bundle 鸭子判定）：透传
+			continue; // 网络瞬断/解析失败不致命也不计入重试，下次再试（照 pollTask 范式）
+		}
+		if (typeof body.code === "number" && body.code !== 200) {
+			// 真错误码（异账号/任务不存在等）：透传不续轮（照 pollTask 对 CloudError 的口径）
+			throw new DescribeRejectedError(body.code, typeof body.msg === "string" && body.msg ? body.msg : `code=${body.code}`);
+		}
+		// 双形态兼容：infra 包络 {code,data:{status,…}} 或裸 {status,…}
+		const data =
+			body.data && typeof body.data === "object" && !Array.isArray(body.data)
+				? (body.data as Record<string, unknown>)
+				: (body as Record<string, unknown>);
+		const status = String(data.status ?? "");
+		if (status === "completed") return parseDescribeRows(data.output_result, expectedCount);
+		if (status === "failed" || status === "cancelled") {
+			const out = data.output_result as { error?: unknown } | null | undefined;
+			const serverErr = out && typeof out.error === "string" && out.error ? `：${out.error}` : "";
+			throw new DescribeError(
+				status === "failed"
+					? `素材理解任务失败（task_id=${taskId}）${serverErr}——预扣积分已由服务端自动退款`
+					: `素材理解任务已取消（task_id=${taskId}）${serverErr}`,
+			);
+		}
+		// queued / processing 等非终态：续轮
+	}
+}
+
+/**
+ * 批量理解（异步任务形态）：按 ≤32/请求切批；每批「提交 + 轮询」——提交阶段指数退避重试
+ * （仅网络/5xx/429；业务拒绝短路），任一批 3 次重试仍提交失败 → DescribeError 整体硬失败；
+ * 轮询阶段不进退避重试（瞬断续轮、墙钟兜底，终态失败直接上抛——预扣已由服务端退款，重试=重复扣费）。
+ * 返回与 imagesBase64 一一对位。
  */
 export async function describeImages(
 	endpoint: DescribeEndpoint,
@@ -177,29 +276,39 @@ export async function describeImages(
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;
 	const timeoutMs = deps.timeoutMs ?? DESCRIBE_TIMEOUT_MS;
+	const pollDeps = {
+		fetchFn,
+		sleep,
+		timeoutMs,
+		pollIntervalMs: deps.pollIntervalMs ?? DESCRIBE_POLL_INTERVAL_MS,
+		pollTimeoutMs: deps.pollTimeoutMs ?? DESCRIBE_POLL_TIMEOUT_MS,
+		now: deps.now ?? Date.now,
+	};
 
 	const out: MaterialDescribe[] = [];
 	for (let off = 0; off < imagesBase64.length; off += DESCRIBE_BATCH_MAX) {
 		const batch = imagesBase64.slice(off, off + DESCRIBE_BATCH_MAX);
+		// ── 提交阶段：指数退避重试（1s → 2s → 4s；仅传输面，业务拒绝短路）──
+		let taskId: string | undefined;
 		let lastErr = "";
-		let done = false;
 		for (let attempt = 0; attempt <= DESCRIBE_RETRIES; attempt++) {
 			if (attempt > 0) await sleep(backoffBase * 2 ** (attempt - 1)); // 1s → 2s → 4s
 			try {
-				out.push(...(await describeOnce(endpoint, batch, { fetchFn, timeoutMs })));
-				done = true;
+				taskId = await submitDescribeTask(endpoint, batch, { fetchFn, timeoutMs });
 				break;
 			} catch (e) {
 				if ((e as { rejected?: unknown } | null)?.rejected === true) throw e; // 业务拒绝：重试无意义
 				lastErr = e instanceof Error ? e.message : String(e);
 			}
 		}
-		if (!done) {
+		if (taskId === undefined) {
 			throw new DescribeError(
 				`素材理解端点不可达或响应异常（${endpoint.url}）：${lastErr}——已指数退避重试 ${DESCRIBE_RETRIES} 次。` +
 					`请确认同合云 material_describe API 已上线、~/.gitruck 配置 describeUrl / 环境变量 GITRUCK_DESCRIBE_URL 指向正确`,
 			);
 		}
+		// ── 轮询阶段：不进退避重试（瞬断续轮由 pollDescribeTask 内部兜底；终态失败/墙钟超时直接上抛）──
+		out.push(...(await pollDescribeTask(endpoint, taskId, batch.length, pollDeps)));
 	}
 	return out;
 }
@@ -255,7 +364,7 @@ export interface DescribeWorkItem {
 export interface DescribeRunDeps {
 	/** 索引库连接（describes 缓存宿主；openLocalIndexDb 产物）。 */
 	db: SqlDb;
-	/** 服务端批调用（≤8/批的切批在 describeImages 内部；测试注入假端点/mock）。 */
+	/** 服务端批调用（≤32/批的切批与提交+轮询在 describeImages 内部；测试注入假端点/mock）。 */
 	describeBatch: (imagesBase64: string[]) => Promise<MaterialDescribe[]>;
 	/** 抽帧（复用 local-index 的 ffmpeg 链 extractFrameJpg；测试注入替身免 ffmpeg）。 */
 	extractFrame: (src: string, tsSec: number, outJpg: string) => Promise<boolean>;
@@ -322,7 +431,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 		exempt = await deps.probeExempt();
 		const hint =
 			`本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
-			`预估 ${estimatedCredits} 积分（${DESCRIBE_CREDITS_PER_IMAGE} 积分/张，每请求同步计费）`;
+			`预估 ${estimatedCredits} 积分（${DESCRIBE_CREDITS_PER_IMAGE} 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）`;
 		if (exempt) {
 			log(`${hint}——同合云内部成员（gc_member_type=internal）计费豁免，免确认继续`);
 		} else if (deps.yes) {
