@@ -102,6 +102,7 @@ import {
 import { CloudError, cloudErrorCode } from "../lib/cloud";
 import {
 	SCENE_THRESHOLD_DEFAULT,
+	STABILITY_THRESHOLD_DEFAULT,
 	brollLocalIdForFile,
 	detectScenes,
 	extractFrameJpg,
@@ -137,6 +138,8 @@ interface MatrixOpts {
 	dirs?: string;
 	/** `--scene-threshold`：matrix index 场景检测阈值（默认 0.3）。 */
 	sceneThreshold?: string;
+	/** `--stability-threshold`：matrix index 场景稳定性判定阈值（默认 0.05，保守值待标定）。 */
+	stabilityThreshold?: string;
 	/** `--rebuild`：matrix index 忽略指纹强制全量重建。 */
 	rebuild?: boolean;
 	// ── 图片候选（add-matrix-local-image-broll）──
@@ -185,6 +188,10 @@ export function registerMatrix(program: Command): void {
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
 		.option("--dirs <a,b,...>", "本地素材文件夹（逗号分隔）——matrix index 的索引范围 / --local 的检索域")
 		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
+		.option(
+			"--stability-threshold <f>",
+			"matrix index：场景稳定性判定阈值——场景内最大帧间 scene score 低于此值判 stable（固定机位），抽帧收敛为中点 1 帧（默认 0.05，保守值待标定；误判 stable 丢检索粒度、误判 unstable 只是不省钱，宁严勿松）",
+		)
 		.option("--rebuild", "matrix index：忽略 size:mtime 指纹，强制全量重建索引")
 		.option(
 			"--plan <path>",
@@ -309,6 +316,7 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	}
 	if (dirs.length) throw new Error("--dirs 仅用于 --local 检索或 matrix index（云端检索不接受该参数，不做静默忽略）");
 	if (opts.sceneThreshold !== undefined) throw new Error("--scene-threshold 仅用于 matrix index（不做静默忽略）");
+	if (opts.stabilityThreshold !== undefined) throw new Error("--stability-threshold 仅用于 matrix index（不做静默忽略）");
 	if (opts.rebuild) throw new Error("--rebuild 仅用于 matrix index（不做静默忽略）");
 	if (opts.sourceWindow !== undefined) {
 		throw new Error("--source-window 仅用于 --local 检索（云端检索无源时间窗语义，不做静默忽略）");
@@ -363,6 +371,9 @@ export interface MatrixIndexResult {
 	kinds: { video: { total: number; indexed: number }; image: { total: number; indexed: number } };
 	scenes: number;
 	frames: number;
+	/** 稳定性收敛账面（add-index-stability-sampling：分列 stable/unstable 场景数与收敛省帧数；
+	 * 图片不参与，只计本轮实际入库的视频素材）。 */
+	stability: { stable_scenes: number; unstable_scenes: number; frames_saved: number };
 	billing: MatrixIndexBilling;
 	elapsedSec: number;
 	[k: string]: unknown;
@@ -525,8 +536,11 @@ export function composeIndexBilling(exempt: boolean, run: Pick<IndexRunResult, "
 async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts): Promise<MatrixIndexResult> {
 	const dirs = parseDirsOption(opts.dirs);
 	const threshold = parseSceneThreshold(opts.sceneThreshold);
+	const stabilityThreshold = parseStabilityThreshold(opts.stabilityThreshold);
 	const endpoint = embedEndpointFor(cfg);
-	log.step(`▶ 本地素材索引：${dirs.join("、")}（场景阈值 ${threshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`);
+	log.step(
+		`▶ 本地素材索引：${dirs.join("、")}（场景阈值 ${threshold} · 稳定阈值 ${stabilityThreshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`,
+	);
 	log.info("免切片：只记场景时间戳，不产生任何切片文件；抽帧图 embed 后即删（素材本体不上云）。");
 	// 同合云内部成员（gc_member_type=internal）豁免：无 token 也放行图像且零计费 → 直接不开会话
 	const exempt = await probeIndexBillingExempt(cfg);
@@ -534,6 +548,7 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	const run = await indexLocalMaterials({
 		dirs,
 		sceneThreshold: threshold,
+		stabilityThreshold,
 		rebuild: opts.rebuild === true,
 		embed: (inputs, sessionToken) => embedInputs(endpoint, inputs, { sessionToken }),
 		session: exempt ? undefined : buildIndexSessionHooks(endpoint),
@@ -551,9 +566,14 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 					? " · 零新帧零计费"
 					: "";
 	const kindNote = run.kinds.image.total > 0 ? `（视频 ${run.kinds.video.indexed}/${run.kinds.video.total} · 图片 ${run.kinds.image.indexed}/${run.kinds.image.total}）` : "";
+	const stab = run.stability;
+	const stabNote =
+		stab.stableScenes + stab.unstableScenes > 0
+			? ` · stable 场景 ${stab.stableScenes} / unstable ${stab.unstableScenes}${stab.framesSaved ? `（收敛省 ${stab.framesSaved} 帧）` : ""}`
+			: "";
 	log.ok(
 		`索引完成：${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
-			`场景 ${run.scenes} · 帧 ${run.frames} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
+			`场景 ${run.scenes} · 帧 ${run.frames}${stabNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
 	);
 	log.info(`索引落点：${run.dbPath}（绝对路径为键，跨机不可移植；属本机缓存，可随时重建）`);
 	const result: MatrixIndexResult = {
@@ -565,6 +585,7 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 		kinds: run.kinds,
 		scenes: run.scenes,
 		frames: run.frames,
+		stability: { stable_scenes: stab.stableScenes, unstable_scenes: stab.unstableScenes, frames_saved: stab.framesSaved },
 		billing,
 		elapsedSec: Math.round(run.elapsedMs / 100) / 10,
 	};
@@ -579,6 +600,15 @@ function parseSceneThreshold(raw: string | undefined): number {
 	if (Number.isFinite(n) && n > 0 && n < 1) return n;
 	log.warn(`--scene-threshold 取值非法（${raw}），按默认 ${SCENE_THRESHOLD_DEFAULT} 处理`);
 	return SCENE_THRESHOLD_DEFAULT;
+}
+
+/** --stability-threshold 解析：(0,1) 浮点，非法值按默认（告警；口径与 --scene-threshold 一致）。 */
+function parseStabilityThreshold(raw: string | undefined): number {
+	if (raw === undefined) return STABILITY_THRESHOLD_DEFAULT;
+	const n = Number(raw);
+	if (Number.isFinite(n) && n > 0 && n < 1) return n;
+	log.warn(`--stability-threshold 取值非法（${raw}），按默认 ${STABILITY_THRESHOLD_DEFAULT} 处理`);
+	return STABILITY_THRESHOLD_DEFAULT;
 }
 
 // ── matrix describe（add-matrix-describe-and-window · matrix-describe spec）──────────
@@ -678,7 +708,10 @@ async function collectMaterialDescribeItems(
 }
 
 /** 缺省视频场景抽帧计划：ffprobe 时长 → 场景边界检测 → 每场景中点一帧（「按场景抽帧」口径，
- * 与索引期加密抽帧不同——理解按场景一帧足量且省钱）。 */
+ * 与索引期加密抽帧不同——理解按场景一帧足量且省钱）。
+ * stable 场景联动（add-index-stability-sampling spec）：「对 stable 场景 SHALL 同样仅理解中点帧」
+ * 由本口径**天然满足**——describe 对所有场景（stable/unstable 一视同仁）本就恒中点 1 帧，
+ * MUST NOT 改成 stable 加帧/unstable 加帧。 */
 async function defaultVideoSceneFrames(path: string): Promise<{ materialId: string; frameTsSec: number[] }> {
 	const ff = requireFfmpeg();
 	const geo = probeGeometry(path);

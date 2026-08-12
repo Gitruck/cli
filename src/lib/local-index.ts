@@ -1,8 +1,11 @@
 /**
  * 本地素材免切片索引（add-matrix-local-search · local-material-index spec）。
  *
- * 链路：ffmpeg 场景边界检测（select gt(scene,θ)+showinfo，**只记时间戳不产生任何切片文件**）
- * → 场景自适应抽帧（≤4s 场景中点 1 帧；>4s 每 2s 加密；512px 最长边 jpg，抽到 ~/.gitruck/tmp）
+ * 链路：ffmpeg 场景边界检测（select gte(scene,0)+metadata=print 单趟解码双产物——切点=score>θ
+ * 客户端判定，与旧 select gt(scene,θ)+showinfo 链切点逐字节一致（真机对拍 35/35）；每帧 scene score
+ * 顺手供场景稳定性判定，add-index-stability-sampling；**只记时间戳不产生任何切片文件**）
+ * → 场景自适应抽帧（≤4s 场景中点 1 帧；>4s 每 2s 加密；**stable 场景收敛为中点 1 帧**；
+ *   512px 最长边 jpg，抽到 ~/.gitruck/tmp）
  * → 自建 embed 端点向量化（批 ≤16，embed-client）→ SQLite 三表落库（帧图 embed 成功即删，即传即弃）。
  *
  * 存储（D1）：~/.gitruck/local-broll-index/index.db，materials/scenes/frames 三表，
@@ -35,6 +38,10 @@ import { EMBED_BATCH_MAX, EMBED_UNREACHABLE_CODE, type EmbedInput } from "./embe
 
 // ── 参数基线（POC 标定值，design D4；θ 经 --scene-threshold 暴露）──────────
 export const SCENE_THRESHOLD_DEFAULT = 0.3;
+/** 场景稳定性判定阈值（--stability-threshold，add-index-stability-sampling）：场景内最大帧间
+ * scene score 低于此值 → stable（固定机位）。默认取保守值 0.05——**待 2.2 验证批次标定**；
+ * 宁严勿松（误判 unstable 只是不省钱，误判 stable 丢检索粒度）。 */
+export const STABILITY_THRESHOLD_DEFAULT = 0.05;
 /** 比这短的边界间隔并入前段（秒）。 */
 export const MIN_SCENE_SEC = 0.5;
 /** >4s 场景的加密抽帧间隔（秒）。 */
@@ -163,7 +170,8 @@ CREATE TABLE IF NOT EXISTS scenes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
   st_ms INTEGER NOT NULL,
-  ed_ms INTEGER NOT NULL
+  ed_ms INTEGER NOT NULL,
+  stable INTEGER                        -- 1=stable（固定机位，中点单帧）；NULL/0=unstable（旧行/图片行按 unstable 语义）
 );
 CREATE INDEX IF NOT EXISTS idx_scenes_material ON scenes(material_id);
 CREATE TABLE IF NOT EXISTS frames (
@@ -186,21 +194,27 @@ CREATE TABLE IF NOT EXISTS describes (
 );
 `;
 
-/** 打开（或初建）索引库：建三表 + kind 列幂等迁移 + schema 版本登记。 */
+/** 打开（或初建）索引库：建三表 + kind/stable 列幂等迁移 + schema 版本登记。 */
 export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Promise<SqlDb> {
 	const db = await openSqlite(dbPath);
 	db.exec(SCHEMA_SQL);
 	// kind 列幂等迁移（add-matrix-local-image-broll 2.1）：图片能力引入前的旧库以 ALTER 补列，
 	// 旧行 DEFAULT 'video' 天然回填（旧视频行为零影响）；新库由 CREATE TABLE 直接带列，两路都幂等。
+	// scenes.stable 列幂等迁移（add-index-stability-sampling）：旧行 NULL 按 unstable 语义消费
+	// （检索聚合只对 stable=1 走整场景对齐），增量素材按新逻辑判定；--rebuild 全量重判。
 	try {
 		const cols = db.all<{ name: string }>("PRAGMA table_info(materials)");
 		if (!cols.some((c) => c.name === "kind")) {
 			db.exec("ALTER TABLE materials ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'");
 		}
+		const sceneCols = db.all<{ name: string }>("PRAGMA table_info(scenes)");
+		if (!sceneCols.some((c) => c.name === "stable")) {
+			db.exec("ALTER TABLE scenes ADD COLUMN stable INTEGER");
+		}
 	} catch (e) {
 		db.close();
 		throw new Error(
-			`索引库 kind 列迁移失败（${e instanceof Error ? e.message : String(e)}）——索引是可随时重建的本机缓存，` +
+			`索引库列迁移失败（${e instanceof Error ? e.message : String(e)}）——索引是可随时重建的本机缓存，` +
 				`建议跑 gtrk matrix index --dirs <...> --rebuild 重建（或删除 ${dbPath} 后重跑索引）`,
 		);
 	}
@@ -260,12 +274,36 @@ export function decodeVec(blob: Uint8Array): Float32Array {
 	return out;
 }
 
-// ── 场景边界检测（D4：ffmpeg select+showinfo；只记时间戳，MUST NOT 产生切片文件）──
+// ── 场景边界检测（D4 + add-index-stability-sampling：单趟解码双产物；只记时间戳，MUST NOT 产生切片文件）──
 
-/** 从 ffmpeg showinfo stderr 提取 pts_time（升序，即场景切换时间点）。 */
+/** 从 ffmpeg showinfo stderr 提取 pts_time（升序，即场景切换时间点）。
+ * 旧 select gt(scene,θ)+showinfo 链的解析器——生产链已换 metadata=print（parseSceneScores），
+ * 保留本函数供切点回归对拍（新旧链切点必须逐字节一致）。 */
 export function parseSceneCuts(stderr: string): number[] {
 	const out: number[] = [];
 	for (const m of stderr.matchAll(/pts_time:([0-9]+(?:\.[0-9]+)?)/g)) out.push(Number(m[1]));
+	return out;
+}
+
+/** 从 ffmpeg `select='gte(scene,0)',metadata=print` stderr 提取每帧 (pts_time, scene score)。
+ * metadata=print 每帧两行：帧头行（frame:N pts:P pts_time:T）+ 键值行（lavfi.scene_score=S），
+ * 逐行配对（真机验证格式，ffmpeg n8.1）；首帧 score 恒 0（无前帧）。 */
+export function parseSceneScores(stderr: string): { ts: number; score: number }[] {
+	const out: { ts: number; score: number }[] = [];
+	let ts: number | undefined;
+	for (const line of stderr.split(/\r?\n/)) {
+		if (!line.includes("Parsed_metadata")) continue;
+		const head = line.match(/frame:\d+\s.*\bpts_time:([0-9]+(?:\.[0-9]+)?)/);
+		if (head) {
+			ts = Number(head[1]);
+			continue;
+		}
+		const kv = line.match(/lavfi\.scene_score=([0-9]+(?:\.[0-9]+)?)/);
+		if (kv && ts !== undefined) {
+			out.push({ ts, score: Number(kv[1]) });
+			ts = undefined;
+		}
+	}
 	return out;
 }
 
@@ -282,7 +320,9 @@ export function buildScenes(cuts: number[], durationSec: number, minSceneSec: nu
 	return scenes;
 }
 
-/** 跑 ffmpeg 抓全量 stderr（runFfmpeg 只留尾 4000 字，场景多时会截断，故独立实现）。 */
+/** 跑 ffmpeg 抓全量 stderr（runFfmpeg 只留尾 4000 字会截断，故独立实现）。
+ * metadata=print 逐帧两行 ⇒ stderr 体量 O(帧数)（~170B/帧，1h@30fps ≈ 18MB 字符串）——CLI 单素材
+ * 串行处理下可接受；若未来撑不住再换流式逐行消费。 */
 function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<string> {
 	return new Promise((resolvePromise, reject) => {
 		const p = spawn(bin, args, { env: process.env });
@@ -296,30 +336,68 @@ function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<string> {
 	});
 }
 
-/** 场景边界检测：返回场景区间（秒）。源文件与其所在目录不产生任何新媒体文件。 */
+/** 场景区间 + 稳定性注记（add-index-stability-sampling）。 */
+export interface SceneSpan {
+	st: number;
+	ed: number;
+	/** 场景内最大帧间 scene score（不含场景起点切帧本身——它量的是切入该场景的跳变；无内点=0）。 */
+	maxScore: number;
+	/** maxScore < stabilityThreshold ⇒ 固定机位类稳定场景（抽帧收敛为中点 1 帧）。 */
+	stable: boolean;
+}
+
+/** 场景区间 → 稳定性注记（双指针单趟；scenes 与 frameScores 均按时间升序）。
+ * 每场景取 (st, ed) **开区间内**帧的最大 score：ts==st 是切入本场景的切帧（跳变分不算场内运动）、
+ * ts==ed 是切入下一场景的切帧；<0.5s 并段丢弃的切点留在段内 ⇒ 其高分自然把该段判 unstable（正确语义）。 */
+export function annotateSceneStability(
+	scenes: { st: number; ed: number }[],
+	frameScores: { ts: number; score: number }[],
+	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
+): SceneSpan[] {
+	const out: SceneSpan[] = scenes.map((s) => ({ st: s.st, ed: s.ed, maxScore: 0, stable: true }));
+	let si = 0;
+	for (const f of frameScores) {
+		while (si < out.length && f.ts >= out[si]!.ed) si++;
+		if (si >= out.length) break;
+		const s = out[si]!;
+		if (f.ts > s.st && f.score > s.maxScore) s.maxScore = f.score;
+	}
+	for (const s of out) s.stable = s.maxScore < stabilityThreshold;
+	return out;
+}
+
+/** 场景边界检测：返回场景区间（秒）+ 稳定性注记。源文件与其所在目录不产生任何新媒体文件。
+ * 单趟解码双产物（spec MUST NOT 为判定新增解码 pass）：select 表达式放到 gte(scene,0)（全帧通过，
+ * scene score 本就逐帧计算，解码量不变），metadata=print 打出每帧 score——切点改为客户端按
+ * score>θ 判定，与旧 select gt(scene,θ) 的选帧集合定义相同（真机对拍切点逐字节一致）。 */
 export async function detectScenes(
 	ffmpeg: string,
 	path: string,
 	durationSec: number,
 	threshold: number = SCENE_THRESHOLD_DEFAULT,
-): Promise<{ st: number; ed: number }[]> {
+	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
+): Promise<SceneSpan[]> {
 	const stderr = await runFfmpegCaptureStderr(ffmpeg, [
 		"-i", path,
-		"-vf", `select='gt(scene,${threshold})',showinfo`,
+		"-vf", "select='gte(scene,0)',metadata=print",
 		"-f", "null", "-",
 	]);
-	return buildScenes(parseSceneCuts(stderr), durationSec);
+	const frames = parseSceneScores(stderr);
+	const cuts = frames.filter((f) => f.score > threshold).map((f) => f.ts);
+	return annotateSceneStability(buildScenes(cuts, durationSec), frames, stabilityThreshold);
 }
 
 // ── 场景自适应抽帧计划（POC plan_frames 逐行对齐）──────────────────────────
 
-/** ≤4s 场景取中点 1 帧；>4s 场景自 st+1.0 起每 2s 一帧（t < ed-0.5 为界）。 */
-export function planFrames(scenes: { st: number; ed: number }[]): { sceneIdx: number; ts: number }[] {
+/** ≤4s 场景取中点 1 帧；>4s 场景自 st+1.0 起每 2s 一帧（t < ed-0.5 为界）。
+ * stable 场景（add-index-stability-sampling）：无论长短收敛为中点 1 帧——固定机位 60s 场景
+ * 从 30 帧收敛到 1 帧；不带 stable 标记（旧调用/旧注入面）行为与之前逐字节一致。 */
+export function planFrames(scenes: { st: number; ed: number; stable?: boolean }[]): { sceneIdx: number; ts: number }[] {
 	const plan: { sceneIdx: number; ts: number }[] = [];
 	for (let si = 0; si < scenes.length; si++) {
-		const { st, ed } = scenes[si]!;
+		const { st, ed, stable } = scenes[si]!;
 		const dur = ed - st;
-		if (dur <= 4.0) {
+		if (dur <= 4.0 || stable === true) {
 			plan.push({ sceneIdx: si, ts: st + dur / 2 });
 		} else {
 			let t = st + 1.0;
@@ -357,8 +435,10 @@ export interface PlannedMaterial {
 	width: number;
 	height: number;
 	fps: number;
-	/** 场景区间（毫秒取整）；图片恒统一形态一行 0..0（无场景轴，D1）。 */
-	scenes: { st_ms: number; ed_ms: number }[];
+	/** 场景区间（毫秒取整）；图片恒统一形态一行 0..0（无场景轴，D1）。
+	 * stable（add-index-stability-sampling）：缺省 undefined = unstable 语义（旧注入面零改动）；
+	 * 图片行不参与判定（本就单帧），恒不带该标记。 */
+	scenes: { st_ms: number; ed_ms: number; stable?: boolean }[];
 	/** 抽帧计划（sceneIdx 指向 scenes 下标）——计划总数即计量会话 planned_units；图片恒单帧 ts_ms=0。 */
 	framePlan: { sceneIdx: number; ts_ms: number }[];
 }
@@ -392,6 +472,8 @@ export interface IndexRunOptions {
 	dirs: string[];
 	dbPath?: string;
 	sceneThreshold?: number;
+	/** 场景稳定性判定阈值（--stability-threshold，默认 STABILITY_THRESHOLD_DEFAULT——保守值待标定）。 */
+	stabilityThreshold?: number;
 	rebuild?: boolean;
 	/** embed 客户端（命令层注入 embedInputs 闭包；测试注入假端点）。图像批请求带会话 token。 */
 	embed: (inputs: EmbedInput[], sessionToken?: string) => Promise<Float32Array[]>;
@@ -401,7 +483,7 @@ export interface IndexRunOptions {
 	/** 逐素材进度行（人读，命令层接 log.info）。 */
 	onProgress?: (line: string) => void;
 	/** 测试注入：整体替换阶段一（探测/场景检测/抽帧计划）。 */
-	planMaterial?: (path: string, ctx: { sceneThreshold: number }) => Promise<PlannedMaterial>;
+	planMaterial?: (path: string, ctx: { sceneThreshold: number; stabilityThreshold: number }) => Promise<PlannedMaterial>;
 	/** 测试注入：整体替换阶段二（抽帧/embed；sessionToken 透传）。 */
 	embedFrames?: (path: string, planned: PlannedMaterial, sessionToken?: string) => Promise<FrameVec[]>;
 	/** 测试注入：文件枚举。 */
@@ -418,6 +500,9 @@ export interface IndexRunResult {
 	frames: number;
 	/** 本轮抽帧计划总数（= 计量会话 planned_units 口径；豁免/零新帧时也如实报）。 */
 	plannedFrames: number;
+	/** 稳定性收敛账面（add-index-stability-sampling；只计本轮实际入库的视频素材，图片不参与）：
+	 * framesSaved = 同场景集不带 stable 标记的旧策略计划帧数 − 带标记的实际计划帧数（降本透明）。 */
+	stability: { stableScenes: number; unstableScenes: number; framesSaved: number };
 	/** 计量会话账面：仅会话真开过时出现（豁免/零计划帧 = 无本键）。 */
 	billing?: IndexBillingOutcome;
 	elapsedMs: number;
@@ -459,7 +544,7 @@ export function listMaterialFiles(dirs: string[]): string[] {
  * 图片素材（add-matrix-local-image-broll D1）：单帧向量 ts=0 + 统一形态 scenes 一行 0..0，无场景轴。 */
 async function planMaterialDefault(
 	path: string,
-	ctx: { sceneThreshold: number },
+	ctx: { sceneThreshold: number; stabilityThreshold: number },
 	ff: FfmpegResolution,
 	ffmpegPathOpt: string | undefined,
 ): Promise<PlannedMaterial> {
@@ -488,8 +573,8 @@ async function planMaterialDefault(
 	}
 	const geo = probeGeometry(path, ffmpegPathOpt);
 	if (!(geo.duration > 0)) throw new Error("探测不到有效时长（疑似损坏/非视频文件）");
-	const scenes = await detectScenes(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold);
-	const plan = planFrames(scenes);
+	const scenes = await detectScenes(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold, ctx.stabilityThreshold);
+	const plan = planFrames(scenes); // stable 场景在此收敛为中点 1 帧
 	return {
 		materialId,
 		kind,
@@ -497,7 +582,7 @@ async function planMaterialDefault(
 		width: geo.width,
 		height: geo.height,
 		fps: geo.fps,
-		scenes: scenes.map((s) => ({ st_ms: Math.round(s.st * 1000), ed_ms: Math.round(s.ed * 1000) })),
+		scenes: scenes.map((s) => ({ st_ms: Math.round(s.st * 1000), ed_ms: Math.round(s.ed * 1000), stable: s.stable })),
 		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: Math.round(p.ts * 1000) })),
 	};
 }
@@ -574,17 +659,20 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	const t0 = Date.now();
 	const dbPath = opts.dbPath ?? localIndexDbPath();
 	const sceneThreshold = opts.sceneThreshold ?? SCENE_THRESHOLD_DEFAULT;
+	const stabilityThreshold = opts.stabilityThreshold ?? STABILITY_THRESHOLD_DEFAULT;
 	// 缺省枚举口 = 视频 + 图片（--no-image-broll 下索引仍收录图片：索引是缓存，排除发生在检索/铺轨侧）
 	const files = (opts.listFiles ?? listMaterialFiles)(opts.dirs);
 	const db = await openLocalIndexDb(dbPath);
 	const stats = { total: files.length, indexed: 0, skipped: 0, rebuilt: 0, failed: 0 };
 	const kinds = { video: { total: 0, indexed: 0 }, image: { total: 0, indexed: 0 } };
+	const stability = { stableScenes: 0, unstableScenes: 0, framesSaved: 0 };
 	let sceneCount = 0;
 	let frameCount = 0;
 	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）
 	const ff = opts.planMaterial && opts.embedFrames ? null : requireFfmpeg(opts.ffmpegPath);
 	const planOne =
-		opts.planMaterial ?? ((p: string, ctx: { sceneThreshold: number }) => planMaterialDefault(p, ctx, ff!, opts.ffmpegPath));
+		opts.planMaterial ??
+		((p: string, ctx: { sceneThreshold: number; stabilityThreshold: number }) => planMaterialDefault(p, ctx, ff!, opts.ffmpegPath));
 	const embedOne =
 		opts.embedFrames ??
 		((p: string, planned: PlannedMaterial, token?: string) => embedFramesDefault(p, planned, ff!, opts.embed, token));
@@ -623,7 +711,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				continue;
 			}
 			try {
-				pending.push({ path, name, size, mtimeMs, prev, planned: await planOne(path, { sceneThreshold }) });
+				pending.push({ path, name, size, mtimeMs, prev, planned: await planOne(path, { sceneThreshold, stabilityThreshold }) });
 			} catch (e) {
 				stats.failed++;
 				opts.onProgress?.(`[${name}] 探测/场景检测失败：${e instanceof Error ? e.message : String(e)}（跳过）`);
@@ -680,7 +768,13 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				const matRowId = Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id);
 				const sceneIds: number[] = [];
 				for (const s of p.planned.scenes) {
-					db.run("INSERT INTO scenes(material_id, st_ms, ed_ms) VALUES (?,?,?)", [matRowId, s.st_ms, s.ed_ms]);
+					// stable：video 按判定写 1/0；无标记（旧注入面/图片行）写 NULL——消费侧 NULL 恒按 unstable
+					db.run("INSERT INTO scenes(material_id, st_ms, ed_ms, stable) VALUES (?,?,?,?)", [
+						matRowId,
+						s.st_ms,
+						s.ed_ms,
+						s.stable === undefined ? null : s.stable ? 1 : 0,
+					]);
 					sceneIds.push(Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id));
 				}
 				for (const f of frames) {
@@ -694,10 +788,20 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 			kinds[kind].indexed++;
 			sceneCount += p.planned.scenes.length;
 			frameCount += frames.length;
+			// 稳定性收敛账面（图片不参与——本就单帧无场景轴）：省帧数 = 同场景集去掉 stable 标记
+			// 重算旧策略计划 − 带标记的实际计划（同在 ms 域重算，与 float→ms 取整漂移解耦）
+			let stableNote = "";
+			if (kind === "video") {
+				const secs = p.planned.scenes.map((s) => ({ st: s.st_ms / 1000, ed: s.ed_ms / 1000, stable: s.stable }));
+				for (const s of secs) (s.stable === true ? stability.stableScenes++ : stability.unstableScenes++);
+				const saved = planFrames(secs.map(({ st, ed }) => ({ st, ed }))).length - planFrames(secs).length;
+				stability.framesSaved += saved;
+				if (saved > 0) stableNote = ` · stable 收敛省 ${saved} 帧`;
+			}
 			opts.onProgress?.(
 				kind === "image"
 					? `[${p.name}] 图片 · 单帧向量${p.prev ? "（指纹变化，已级联重建）" : ""}`
-					: `[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
+					: `[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${stableNote}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
 			);
 		}
 	} finally {
@@ -730,6 +834,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 		scenes: sceneCount,
 		frames: frameCount,
 		plannedFrames,
+		stability,
 		...(billing ? { billing } : {}),
 		elapsedMs: Date.now() - t0,
 	};
