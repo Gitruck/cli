@@ -9,6 +9,8 @@
  * 以 POC pipeline.py 的 aggregate() 为黄金样本逐条对拍（单测 fixture 由该 Python 函数原样跑出）：
  * gap≤3000ms 归窗 → ±750ms buffer → 窗分 top3 加权 0.5/0.3/0.2（不足 3 帧取最高分）
  * → best=窗内最高分帧 → 场景边界对齐裁剪 → 窗宽 <1500ms 丢弃（CLI 侧增量）。
+ * stable 场景（add-index-stability-sampling）：best 帧所在场景 stable=1 时对齐**无条件**扩到整场景
+ * 边界（中点单帧代表整场景；gap 守卫只约束 unstable 多帧窗），unstable 路径与 POC 黄金样本零改动。
  * 丢弃判定放在**对齐之后**：对齐只会扩窗，先丢会把 POC 保留的「素材端点碎窗被场景对齐救回」
  * 的段错杀——黄金样本对拍（spec SHALL）优先于参数罗列顺序。
  */
@@ -36,6 +38,9 @@ export interface FrameHit {
 	scene_ed_ms: number;
 	duration_ms: number;
 	score: number;
+	/** 所在场景为 stable（add-index-stability-sampling；中点单帧代表整场景）。
+	 * 缺省/false = unstable，聚合行为与本 change 之前逐字节一致。 */
+	stable?: boolean;
 }
 
 /** 聚合产物（素材内命中段，毫秒；按 score 降序）。 */
@@ -87,9 +92,17 @@ export function aggregateFrameHits(
 		// best = 窗内最高分帧（分数并列取先到者，与 Python max() 一致）
 		let best = w[0]!;
 		for (const h of w) if (h.score > best.score) best = h;
-		// 场景边界对齐裁剪：向 best 帧所在场景扩（越界 ≤gap 才扩，POC 同款守卫）
-		if (best.scene_st_ms >= st - gapMs) st = Math.min(st, best.scene_st_ms);
-		if (best.scene_ed_ms <= ed + gapMs) ed = Math.max(ed, best.scene_ed_ms);
+		if (best.stable === true) {
+			// stable 场景单帧命中（add-index-stability-sampling spec「检索语义不变」）：中点 1 帧代表
+			// 整场景，无条件对齐整场景边界——gap 守卫是多帧窗语义（防越到无关场景），stable 长场景
+			// （如 60s 固定机位）中点距边界远超 gap，套守卫会把整场景错杀成 ±buffer 碎窗
+			st = Math.min(st, best.scene_st_ms);
+			ed = Math.max(ed, best.scene_ed_ms);
+		} else {
+			// 场景边界对齐裁剪：向 best 帧所在场景扩（越界 ≤gap 才扩，POC 同款守卫）
+			if (best.scene_st_ms >= st - gapMs) st = Math.min(st, best.scene_st_ms);
+			if (best.scene_ed_ms <= ed + gapMs) ed = Math.max(ed, best.scene_ed_ms);
+		}
 		// 窗宽丢弃（CLI 侧增量）：对齐后仍窄于下限（只可能是素材端点钳出的碎窗且场景没救回）才丢
 		if (ed - st < minWidthMs) continue;
 		segs.push({
@@ -112,6 +125,8 @@ interface LoadedFrame {
 	ts_ms: number;
 	scene_st_ms: number;
 	scene_ed_ms: number;
+	/** 所在场景 stable=1（旧库 NULL/0 恒 false —— unstable 语义）。 */
+	stable: boolean;
 }
 
 export interface LoadedMaterial {
@@ -151,6 +166,8 @@ interface FrameJoinRow {
 	vec: Uint8Array;
 	st_ms: number;
 	ed_ms: number;
+	/** scenes.stable（1=stable；NULL/0=unstable）。 */
+	scene_stable: number | null;
 	mkey: number;
 	material_id: string;
 	path: string;
@@ -172,7 +189,7 @@ export function loadLocalIndex(
 ): LoadedIndex {
 	const fileExists = deps.fileExists ?? existsSync;
 	const rows = db.all<FrameJoinRow>(
-		`SELECT f.ts_ms, f.vec, s.st_ms, s.ed_ms,
+		`SELECT f.ts_ms, f.vec, s.st_ms, s.ed_ms, s.stable AS scene_stable,
 		        m.id AS mkey, m.material_id, m.path, m.kind, m.duration_ms, m.width, m.height, m.fps
 		 FROM frames f
 		 JOIN scenes s ON f.scene_id = s.id
@@ -209,7 +226,7 @@ export function loadLocalIndex(
 		const v = decodeVec(r.vec);
 		if (dim === 0) dim = v.length;
 		else if (v.length !== dim) throw new Error(`索引向量维度不一致（${v.length} vs ${dim}）——索引损坏，请 gtrk matrix index --rebuild`);
-		frames.push({ matIdx, ts_ms: r.ts_ms, scene_st_ms: r.st_ms, scene_ed_ms: r.ed_ms });
+		frames.push({ matIdx, ts_ms: r.ts_ms, scene_st_ms: r.st_ms, scene_ed_ms: r.ed_ms, stable: r.scene_stable === 1 });
 		vecs.push(v);
 	}
 	const flat = new Float32Array(vecs.length * dim);
@@ -299,6 +316,7 @@ export function searchLoadedIndex(
 			scene_ed_ms: f.scene_ed_ms,
 			duration_ms: mat.durationMs,
 			score: sims[idx]!,
+			...(f.stable ? { stable: true } : {}),
 		});
 		byMat.set(f.matIdx, list);
 	}
