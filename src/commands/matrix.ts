@@ -14,6 +14,7 @@ import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
 import { resolveColumnConfig } from "../lib/column-config";
@@ -28,8 +29,28 @@ import {
 	mergedCandidates,
 	planBeatFills,
 	previewUrlFor,
+	type DedupScope,
 	type DownloadedProxy,
+	type FillSlot,
+	type SourceLayer,
 } from "../lib/matrix-lay";
+import {
+	BROLL_MOVE_DIR,
+	IMAGE_MOVE_CONCURRENCY,
+	IMAGE_MOVE_CREDITS_PER_IMAGE,
+	generateImageMoveAsset,
+	imageHash16FromClipId,
+	imageMoveDurationForSlot,
+	imageMoveMaterialId,
+	imageMoveParamFingerprint,
+	imageMoveRelPath,
+	imageStaticMaterialId,
+	type ImageMoveParams,
+} from "../lib/image-move";
+import { probeGeometry } from "../lib/media";
+import { uploadCached, invalidateUpload } from "../lib/upload-cache";
+import { submitTask, getTaskResult } from "../lib/cloud";
+import type { CloudFileTaskDeps } from "../lib/tool-runner";
 import { BLACK_BED_HEX, encodeSolidPng, solidRelPath } from "../lib/solid-png";
 import {
 	reportMaterialIntegrity,
@@ -105,6 +126,20 @@ interface MatrixOpts {
 	sceneThreshold?: string;
 	/** `--rebuild`：matrix index 忽略指纹强制全量重建。 */
 	rebuild?: boolean;
+	// ── 图片候选（add-matrix-local-image-broll）──
+	/** commander `--no-image-broll` → 缺省 true，传参即 false：检索与铺轨完全排除图片候选（零图片上云）。 */
+	imageBroll?: boolean;
+	/** `--yes`：跳过图片运镜生成前的积分预估确认。 */
+	yes?: boolean;
+	// ── 去重（add-broll-dedup-and-layering）──
+	/** `--dedup-scope scene|material`：铺轨去重粒度（缺省 scene）。 */
+	dedupScope?: string;
+}
+
+/** 测试注入面（MUST NOT 真调云端）：图片运镜生成与计费确认；缺省 = 真实云链 / stdin 确认。 */
+export interface MatrixRunDeps {
+	generateImageMove?: (args: { imageAbs: string; destAbs: string; params: ImageMoveParams }) => Promise<void>;
+	confirm?: (msg: string) => Promise<boolean>;
 }
 
 export function registerMatrix(program: Command): void {
@@ -122,6 +157,15 @@ export function registerMatrix(program: Command): void {
 		.option("--dirs <a,b,...>", "本地素材文件夹（逗号分隔）——matrix index 的索引范围 / --local 的检索域")
 		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
 		.option("--rebuild", "matrix index：忽略 size:mtime 指纹，强制全量重建索引")
+		.option(
+			"--no-image-broll",
+			"--local 模式：完全排除图片候选（不出检索结果、不进铺轨候选池、零图片上云）——图片候选默认参与，被选中时经云端 image_move 转运镜视频入轨（图片本体会上云做运镜）",
+		)
+		.option("--yes", "跳过交互确认（当前用于：图片运镜生成前的积分预估确认）")
+		.option(
+			"--dedup-scope <scope>",
+			"铺轨去重粒度：scene=场景级（默认；同素材不同场景可分配，相邻槽位按跳剪豁免避让）| material=严格档（同一素材文件整轮只用一次）",
+		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
 			"--score-floor <f>",
@@ -191,6 +235,9 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	if (dirs.length) throw new Error("--dirs 仅用于 --local 检索或 matrix index（云端检索不接受该参数，不做静默忽略）");
 	if (opts.sceneThreshold !== undefined) throw new Error("--scene-threshold 仅用于 matrix index（不做静默忽略）");
 	if (opts.rebuild) throw new Error("--rebuild 仅用于 matrix index（不做静默忽略）");
+	if (opts.imageBroll === false) {
+		throw new Error("--no-image-broll 仅用于 --local 检索/铺轨（云端检索结果恒为视频切片，不做静默忽略）");
+	}
 }
 
 export interface MatrixResult {
@@ -224,6 +271,8 @@ export interface MatrixIndexResult {
 	dirs: string[];
 	dbPath: string;
 	materials: { total: number; indexed: number; skipped: number; rebuilt: number; failed: number };
+	/** kind 分列计数（add-matrix-local-image-broll：图片/视频各自 total/indexed）。 */
+	kinds: { video: { total: number; indexed: number }; image: { total: number; indexed: number } };
 	scenes: number;
 	frames: number;
 	billing: MatrixIndexBilling;
@@ -235,10 +284,17 @@ export interface MatrixIndexResult {
 interface SearchCtx {
 	memberType: Tier | "local";
 	columnId?: string;
+	/** 本轮铺轨来源层（add-broll-dedup-and-layering D2）：--local → local；
+	 * 云端按检索口判——internal 且 material_class=concept → concept，其余云端 → common。 */
+	sourceLayer: SourceLayer;
 	search: (query: string, entry?: FilmDispatch) => Promise<SearchRespData>;
 }
 
-export async function runMatrix(pos: MatrixPositional, opts: MatrixOpts): Promise<MatrixResult | MatrixIndexResult> {
+export async function runMatrix(
+	pos: MatrixPositional,
+	opts: MatrixOpts,
+	deps: MatrixRunDeps = {},
+): Promise<MatrixResult | MatrixIndexResult> {
 	if (opts.json) routeLogsToStderr();
 	assertModeOptions(pos, opts);
 	const cfg = loadConfig();
@@ -250,7 +306,7 @@ export async function runMatrix(pos: MatrixPositional, opts: MatrixOpts): Promis
 	if (opts.local) {
 		return withEmbedJsonGuard(pos.kind, opts, async () => {
 			const ctx = await buildLocalSearchCtx(cfg, opts);
-			return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts);
+			return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts, deps);
 		});
 	}
 
@@ -283,12 +339,15 @@ export async function runMatrix(pos: MatrixPositional, opts: MatrixOpts): Promis
 	const topK = opts.topK ? Number(opts.topK) : undefined;
 	const overrides = { topK, materialClass: opts.materialClass };
 	const brollForTier = tier === "internal" ? broll : undefined;
+	// 来源层判定（add-broll-dedup-and-layering D2）：custom 口 + concept → concept 层；其余云端 → common 层
+	const effectiveMc = tier === "internal" ? (opts.materialClass ?? broll?.material_class_policy) : undefined;
 	const ctx: SearchCtx = {
 		memberType: tier,
 		columnId: effectiveColumnId,
+		sourceLayer: tier === "internal" && effectiveMc === "concept" ? "concept" : "common",
 		search: (q, entry) => searchOnce(cfg, tier, buildSearchBody(tier, q, entry, brollForTier, overrides)),
 	};
-	return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts);
+	return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts, deps);
 }
 
 /** 带机读 code 错误的 --json 统一出口（embed_endpoint_unreachable / 6033 会话拒绝 /
@@ -397,8 +456,9 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 				: billing.planned_units === 0
 					? " · 零新帧零计费"
 					: "";
+	const kindNote = run.kinds.image.total > 0 ? `（视频 ${run.kinds.video.indexed}/${run.kinds.video.total} · 图片 ${run.kinds.image.indexed}/${run.kinds.image.total}）` : "";
 	log.ok(
-		`索引完成：${m.indexed}/${m.total} 个素材（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
+		`索引完成：${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
 			`场景 ${run.scenes} · 帧 ${run.frames} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
 	);
 	log.info(`索引落点：${run.dbPath}（绝对路径为键，跨机不可移植；属本机缓存，可随时重建）`);
@@ -408,6 +468,7 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 		dirs: run.dirs,
 		dbPath: run.dbPath,
 		materials: run.materials,
+		kinds: run.kinds,
 		scenes: run.scenes,
 		frames: run.frames,
 		billing,
@@ -450,23 +511,25 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	log.info(`索引就绪：${index.materials.length} 个素材 · ${index.frames.length} 帧（消失文件已过滤）`);
 	const floor = parseScoreFloor(opts.scoreFloor);
 	const topK = opts.topK ? Number(opts.topK) : undefined;
+	const includeImages = opts.imageBroll !== false; // --no-image-broll：检索侧完全排除图片候选
 	const qvecCache = new Map<string, Float32Array>();
 	return {
 		memberType: "local",
+		sourceLayer: "local",
 		search: async (query) => {
 			let vec = qvecCache.get(query);
 			if (!vec) {
 				[vec] = await embedInputs(endpoint, [{ text: query }]); // 除此一请求外零网络
 				qvecCache.set(query, vec!);
 			}
-			const { recalled, results } = searchLoadedIndex(index, vec!, { scoreFloor: floor });
+			const { recalled, results } = searchLoadedIndex(index, vec!, { scoreFloor: floor, includeImages });
 			return { recalled, results: topK && topK > 0 ? results.slice(0, topK) : results };
 		},
 	};
 }
 
 /** 派单消费模式：dispatch.film_broll → split/broll-plan.json。 */
-async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts): Promise<MatrixResult> {
+async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps = {}): Promise<MatrixResult> {
 	const isLocal = ctx.memberType === "local";
 	// 定位 dispatch：--dispatch 显式 > <project>/split/dispatch.json
 	let dispatchPath: string;
@@ -582,6 +645,13 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts): Promise<MatrixResu
 			opts.blackBed ?? true,
 			opts.forceRelay === true,
 			reproj,
+			{
+				imageBroll: opts.imageBroll !== false,
+				yes: opts.yes === true,
+				deps,
+				sourceLayer: ctx.sourceLayer,
+				dedupScope: parseDedupScope(opts.dedupScope),
+			},
 		);
 	}
 	const laySummary = laid?.lay;
@@ -590,13 +660,18 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts): Promise<MatrixResu
 	// 退出码口径已拍板取**非 0**（`ok:false` 一律连带非 0 退出码，与 `gtrk mg` 的 done() 同调）——
 	// 本 CLI 的主要消费者是 agent，「ok:false + 退出码 0」是静默错判的源头。plan 仍已产出、可复用。
 	const refused = laySummary?.refused === true ? (laySummary.keptEditedTracks as number[]) : undefined;
+	// 图片运镜计费确认被拒（add-matrix-local-image-broll D5）：整轮铺轨中止、工程零改动、零云端调用
+	const declined = laid?.declined === true;
 	const result: MatrixResult = {
-		ok: refused === undefined,
+		ok: refused === undefined && !declined,
 		mode: "plan",
 		memberType: ctx.memberType,
 		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		planPath,
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
+		...(declined ? { reason: "image_move_billing_declined", planReusable: true } : {}),
+		// 图片运镜计费账面（仅本轮真有图片候选参与时出现；纯视频候选行为与图片能力引入前一致）
+		...(laid?.imageBilling ? { image_move_billing: laid.imageBilling } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
 		// 素材落盘自检（material-integrity-check）：只在**真写回过**的路径上出现。
 		// 字段缺席 = 「本次没查」，MUST NOT 用空结果冒充「查过且干净」；与 `gtrk mg` 同名同形。
@@ -618,6 +693,13 @@ function parseLay(raw: string | undefined): number {
 	return 1;
 }
 
+/** --dedup-scope 解析：scene（默认）| material；越界即参数错误（不做静默忽略）。 */
+export function parseDedupScope(raw: string | undefined): DedupScope {
+	if (raw === undefined || raw === "scene") return "scene";
+	if (raw === "material") return "material";
+	throw new Error(`--dedup-scope 只支持 scene 或 material（得到「${raw}」）`);
+}
+
 /** --score-floor 解析：[0,1] 浮点，非法值按默认（告警）。 */
 function parseScoreFloor(raw: string | undefined): number {
 	if (raw === undefined) return SCORE_FLOOR_DEFAULT;
@@ -633,10 +715,202 @@ function locateGtrk(baseDir: string): string | undefined {
 	return cands.find((p) => existsSync(p));
 }
 
-/** 铺轨返回：`lay` = 既有铺轨摘要（进 `--json` 的 `lay`）；`integrity` 仅在真写回过时才有。 */
+/** 铺轨返回：`lay` = 既有铺轨摘要（进 `--json` 的 `lay`）；`integrity` 仅在真写回过时才有；
+ * `declined` = 图片运镜计费确认被拒（整轮中止、工程零改动）；`imageBilling` 仅图片候选参与时出现。 */
 interface LayOutcome {
 	lay: Record<string, unknown>;
 	integrity?: IntegrityReport;
+	declined?: boolean;
+	imageBilling?: { generated: number; reused: number; estimated_credits: number };
+}
+
+/** 图片运镜准备产物（3.2/3.3/3.4）。 */
+interface ImageMovePrep {
+	/** 本轮是否有图片候选进入槽位（false = 纯视频候选，行为与图片能力引入前一致）。 */
+	hasImage: boolean;
+	/** 计费确认被拒：整轮铺轨中止（零云端调用）。 */
+	declined: boolean;
+	/** 材料 id → materials 条目（运镜视频 ffprobe 实测 / 静态兜底图片形态）。 */
+	injected: Map<string, Record<string, unknown>>;
+	billing: { generated: number; reused: number; estimated_credits: number };
+	/** 单张运镜失败明细（机读 summary；失败槽位已静态兜底，不阻断整轮）。 */
+	failures: { image: string; reason: string }[];
+}
+
+/** stdin 计费确认（--yes 跳过；测试经 MatrixRunDeps.confirm 注入）。 */
+async function confirmViaStdin(question: string): Promise<boolean> {
+	const rl = createInterface({ input: process.stdin, output: process.stderr });
+	try {
+		const a = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+		return a === "y" || a === "yes";
+	} finally {
+		rl.close();
+	}
+}
+
+/** 真实云链生成器（缺省注入面）：懒构建——纯视频候选/缓存全命中/确认被拒时零 loadConfig 零云端触达。 */
+function buildDefaultImageMoveGenerator(): NonNullable<MatrixRunDeps["generateImageMove"]> {
+	const cfg = loadConfig();
+	const deps: CloudFileTaskDeps = { cfg, uploadCached, invalidateUpload, submitTask, getTaskResult };
+	return async ({ imageAbs, destAbs, params }) => {
+		await generateImageMoveAsset({ deps, imageAbs, destAbs, params });
+	};
+}
+
+const r3num = (n: number): number => Math.round(n * 1000) / 1000;
+
+/** 运镜产物材料条目：ffprobe 实测（matrix-lay-tracks spec）；探测失败按生成参数兜底登记。 */
+function mvMaterialEntry(
+	materialId: string,
+	gtrkDir: string,
+	fallback: { duration: number; canvas: [number, number] },
+): Record<string, unknown> {
+	const rel = imageMoveRelPath(materialId);
+	let geo: { width: number; height: number; fps: number; duration: number } | undefined;
+	try {
+		geo = probeGeometry(join(gtrkDir, ...rel.split("/")));
+	} catch {
+		/* ffprobe 缺失/产物异常：duration=生成档、几何=画布（生成参数即产物参数的兜底登记） */
+	}
+	return {
+		id: materialId,
+		path: rel,
+		duration: geo && geo.duration > 0 ? r3num(geo.duration) : fallback.duration,
+		video_size: geo && geo.width > 0 && geo.height > 0 ? [geo.width, geo.height] : [fallback.canvas[0], fallback.canvas[1]],
+		...(geo && geo.fps > 0 ? { video_rate: r3num(geo.fps) } : {}),
+	};
+}
+
+/** 静态兜底材料条目（D6）：path=图片绝对路径、MUST NOT 带 duration（image 元素按槽长铺，黑底垫片同款口径）。 */
+function staticImageMaterialEntry(materialId: string, imageAbs: string): Record<string, unknown> {
+	let dims: [number, number] | undefined;
+	try {
+		const g = probeGeometry(imageAbs);
+		if (g.width > 0 && g.height > 0) dims = [g.width, g.height];
+	} catch {
+		/* best-effort */
+	}
+	return { id: materialId, path: imageAbs, ...(dims ? { video_size: dims } : {}) };
+}
+
+/**
+ * 图片运镜准备（3.2/3.3/3.4）：扫描槽位里的图片候选 → 参数推导（duration 统一档 + 工程画布几何）
+ * → 缓存查询（工程 assets/broll-move/ 同名即复用，零重复计费）→ 计费预估确认（--yes 跳过、
+ * 拒绝零云端调用中止）→ 生成（并发 ≤2、逐张进度）→ 失败静态兜底（改写槽位 material_id、不阻断整轮）。
+ * 会就地改写 FillSlot.material_id（运镜材料 id / 静态兜底 id），材料实体收进 injected 供 layBrollTracks 登记。
+ */
+async function prepareImageMoveAssets(args: {
+	fills: Map<string, FillSlot[][]>;
+	candById: Map<string, PlanResult>;
+	gtrkDir: string;
+	canvas: [number, number];
+	yes: boolean;
+	deps: MatrixRunDeps;
+}): Promise<ImageMovePrep> {
+	const injected = new Map<string, Record<string, unknown>>();
+	const failures: ImageMovePrep["failures"] = [];
+	const none: ImageMovePrep = { hasImage: false, declined: false, injected, billing: { generated: 0, reused: 0, estimated_credits: 0 }, failures };
+
+	// ── 归组：材料 id（图hash+参数指纹）→ 槽位集（同图同参多槽复用同一产物）──
+	interface Group {
+		materialId: string;
+		imageAbs: string;
+		hash16: string;
+		duration: number;
+		slots: FillSlot[];
+	}
+	const groups = new Map<string, Group>();
+	for (const perTrack of args.fills.values()) {
+		for (const slots of perTrack) {
+			for (const s of slots) {
+				const cand = args.candById.get(s.clip_id);
+				if (cand?.kind !== "image") continue;
+				const imageAbs = cand.local_path;
+				if (!imageAbs || !existsSync(imageAbs)) {
+					log.warn(`图片素材缺失（clip ${s.clip_id}）：${imageAbs ?? "无 local_path"}——该槽位跳过`);
+					continue;
+				}
+				const duration = imageMoveDurationForSlot(s.track_ed - s.track_st);
+				const fp = await imageMoveParamFingerprint({ duration, width: args.canvas[0], height: args.canvas[1] });
+				const hash16 = imageHash16FromClipId(s.clip_id);
+				const materialId = imageMoveMaterialId(hash16, fp);
+				s.material_id = materialId;
+				const g = groups.get(materialId) ?? { materialId, imageAbs, hash16, duration, slots: [] };
+				g.slots.push(s);
+				groups.set(materialId, g);
+			}
+		}
+	}
+	if (groups.size === 0) return none;
+
+	// ── 缓存查询（D3）：工程内产物存在即复用，MUST NOT 重复调云端 ──
+	const pending: Group[] = [];
+	let reused = 0;
+	for (const g of groups.values()) {
+		if (existsSync(join(args.gtrkDir, ...imageMoveRelPath(g.materialId).split("/")))) {
+			reused++;
+			injected.set(g.materialId, mvMaterialEntry(g.materialId, args.gtrkDir, { duration: g.duration, canvas: args.canvas }));
+		} else {
+			pending.push(g);
+		}
+	}
+	const estimated = pending.length * IMAGE_MOVE_CREDITS_PER_IMAGE;
+	const billing = { generated: 0, reused, estimated_credits: estimated };
+	if (pending.length === 0) {
+		log.info(`图片运镜：${reused} 张全部缓存命中（工程 assets/broll-move/ 复用，零云端调用零计费）`);
+		return { hasImage: true, declined: false, injected, billing, failures };
+	}
+
+	// ── 计费预估确认护栏（D5）：N 张 × 2 积分；--yes 跳过；拒绝 = 整轮铺轨中止（零云端调用）──
+	const hint =
+		`${pending.length} 张图片将生成运镜视频，约 ${estimated} 积分` +
+		`（${IMAGE_MOVE_CREDITS_PER_IMAGE} 积分/张${reused ? ` · 另 ${reused} 张缓存命中不计费` : ""}；` +
+		`注意：图片本体将上云做运镜——与视频素材「本体不上云」不同，不愿图片上云可用 --no-image-broll 排除）`;
+	if (args.yes) {
+		log.info(`${hint}——已按 --yes 跳过确认`);
+	} else {
+		log.warn(hint);
+		const go = await (args.deps.confirm ?? confirmViaStdin)("确认继续生成？");
+		if (!go) return { hasImage: true, declined: true, injected, billing, failures };
+	}
+
+	// ── 生成（D4：并发 ≤2、逐张进度）；单张失败静态兜底（D6，不阻断整轮）──
+	await mkdir(join(args.gtrkDir, ...BROLL_MOVE_DIR.split("/")), { recursive: true });
+	const gen = args.deps.generateImageMove ?? buildDefaultImageMoveGenerator();
+	const queue = [...pending];
+	const total = pending.length;
+	let done = 0;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const g = queue.shift();
+			if (!g) return;
+			const destAbs = join(args.gtrkDir, ...imageMoveRelPath(g.materialId).split("/"));
+			try {
+				await gen({
+					imageAbs: g.imageAbs,
+					destAbs,
+					params: { width: args.canvas[0], height: args.canvas[1], duration: g.duration },
+				});
+				billing.generated++;
+				log.info(
+					`[${++done}/${total}] ${basename(g.imageAbs)} 运镜就绪（${g.duration}s · ${args.canvas[0]}x${args.canvas[1]}）`,
+				);
+				injected.set(g.materialId, mvMaterialEntry(g.materialId, args.gtrkDir, { duration: g.duration, canvas: args.canvas }));
+			} catch (e) {
+				const reason = e instanceof Error ? e.message : String(e);
+				failures.push({ image: g.imageAbs, reason });
+				// 失败降级 D6：该槽以图片静态上轨兜底（不换内容不留黑）；重铺时缓存无产物自然重试运镜
+				const staticId = imageStaticMaterialId(g.hash16);
+				if (!injected.has(staticId)) injected.set(staticId, staticImageMaterialEntry(staticId, g.imageAbs));
+				for (const s of g.slots) s.material_id = staticId;
+				log.warn(
+					`[${++done}/${total}] ${basename(g.imageAbs)} 运镜失败（${reason}）——该图以静态图片上轨兜底，重铺本命令会自动重试运镜`,
+				);
+			}
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(IMAGE_MOVE_CONCURRENCY, queue.length) }, () => worker()));
+	return { hasImage: true, declined: false, injected, billing, failures };
 }
 
 /**
@@ -691,7 +965,15 @@ async function layIntoProject(
 	blackBed: boolean,
 	forceRelay: boolean,
 	reproj: ReprojectResult,
+	layOpts: {
+		imageBroll: boolean;
+		yes: boolean;
+		deps: MatrixRunDeps;
+		sourceLayer?: SourceLayer;
+		dedupScope?: DedupScope;
+	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
+	const imageOpts = layOpts;
 	const gtrkPath = locateGtrk(baseDir);
 	if (!gtrkPath) {
 		log.warn(`未找到工程文件（${join(baseDir, "gtrk", "project.gtrk")}），跳过铺轨——plan 已产出，可后续在有工程的目录重跑`);
@@ -700,13 +982,52 @@ async function layIntoProject(
 	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 
-	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重
-	const { fills, clipIds } = planBeatFills(plan, layN, scoreFloor);
+	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重；--no-image-broll 时图片不进池；
+	// 全局不二用消费集与跳剪豁免避让在此生效（add-broll-dedup-and-layering D1/D4）
+	const { fills, clipIds, stats: fillStats } = planBeatFills(plan, layN, scoreFloor, {
+		noImage: !layOpts.imageBroll,
+		dedupScope: layOpts.dedupScope,
+	});
 	const slotCount = [...fills.values()].flat().reduce((n, s) => n + s.length, 0);
 	log.step(`▶ 候选铺轨（${layN} 轨 · 平铺 ${slotCount} 槽位 · ${clipIds.size} 个 clip）…`);
 	const gtrkDir = dirname(gtrkPath);
 	const previewDir = join(gtrkDir, ...BROLL_PREVIEW_DIR.split("/"));
 	await mkdir(previewDir, { recursive: true });
+
+	// 候选速查表（图片运镜准备与素材引用共用）
+	const candById = new Map<string, PlanResult>();
+	for (const beat of plan.beats) for (const c of mergedCandidates(beat)) if (!candById.has(c.clip_id)) candById.set(c.clip_id, c);
+
+	// ── 图片运镜准备（3.2/3.3/3.4）：在**任何云端调用之前**过计费确认门——拒绝 = 整轮中止零调用 ──
+	const canvasArr = Array.isArray(gtrk.video_size) ? (gtrk.video_size as number[]) : [1920, 1080];
+	const prep = await prepareImageMoveAssets({
+		fills,
+		candById,
+		gtrkDir,
+		canvas: [canvasArr[0]!, canvasArr[1]!],
+		yes: imageOpts.yes,
+		deps: imageOpts.deps,
+	});
+	if (prep.declined) {
+		log.err(
+			"已取消：图片运镜计费确认被拒绝——本轮铺轨中止，工程文件零改动、零云端调用（broll-plan.json 照常可用）。" +
+				"可用 --yes 跳过确认，或 --no-image-broll 排除图片候选后重跑。",
+		);
+		return {
+			declined: true,
+			imageBilling: prep.billing,
+			lay: {
+				declined: true,
+				laidTracks: [],
+				laidClips: 0,
+				removedTracks: [],
+				keptEditedTracks: [],
+				blackTrack: null,
+				blackBedHoleSec: 0,
+				blackBedHoles: [],
+			},
+		};
+	}
 
 	// 本地候选封面现抽（覆盖 struct_meta 候选全集，不只槽位 clip）
 	const covers = await extractLocalCovers(plan, gtrkDir);
@@ -725,13 +1046,13 @@ async function layIntoProject(
 	}
 
 	// 备好全部槽位 clip 的素材引用（按 clip_id 幂等复用）
-	const candById = new Map<string, PlanResult>();
-	for (const beat of plan.beats) for (const c of mergedCandidates(beat)) if (!candById.has(c.clip_id)) candById.set(c.clip_id, c);
 	const downloads = new Map<string, DownloadedProxy>();
 	const dlStats = { preview: 0, raw: 0, reused: 0, failed: 0, local: 0 };
 	for (const clipId of clipIds) {
 		const cand = candById.get(clipId);
 		if (!cand) continue;
+		// ── 图片候选：素材引用由运镜准备阶段备好（injectedMaterials + FillSlot.material_id），此处零动作 ──
+		if (cand.kind === "image") continue;
 		// ── 本地候选（4.1）：免下载免代理，rel 直指素材绝对路径 ──
 		if (isLocalPlanResult(cand)) {
 			const src = cand.local_path;
@@ -781,6 +1102,8 @@ async function layIntoProject(
 		fills,
 		downloads,
 		covers,
+		injectedMaterials: prep.injected,
+		sourceLayer: layOpts.sourceLayer,
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
 		blackBed,
@@ -815,6 +1138,8 @@ async function layIntoProject(
 				blackBedHoles: [],
 				downloads: dlStats,
 			},
+			// 拒铺前运镜可能已生成（产物留在 assets/broll-move/ 供下轮复用）——账面如实报
+			...(prep.hasImage ? { imageBilling: prep.billing } : {}),
 		};
 	}
 
@@ -842,6 +1167,8 @@ async function layIntoProject(
 				fills,
 				downloads,
 				covers,
+				injectedMaterials: prep.injected,
+				sourceLayer: layOpts.sourceLayer,
 				generatedAt: new Date().toISOString(),
 				planPath: "split/broll-plan.json",
 				blackBed: false,
@@ -872,9 +1199,12 @@ async function layIntoProject(
 	const keptNote = summary.keptEditedTracks.length
 		? ` · 保留 ${summary.keptEditedTracks.length} 条已被你编辑的轨（track_index ${summary.keptEditedTracks.join("/")}，本次未剥，因由见下方告警）`
 		: "";
+	const imageNote = prep.hasImage
+		? ` · 图片运镜 生成 ${prep.billing.generated} / 复用 ${prep.billing.reused}${prep.failures.length ? ` / 静态兜底 ${prep.failures.length}` : ""}`
+		: "";
 	log.ok(
 		`铺轨完成：${stripNote}${summary.laidTracks.length} 条候选轨（track_index ${summary.laidTracks.join("/") || "-"}）· 平铺 ${summary.laidClips} 个颗粒 / ${clipIds.size} 个 clip` +
-			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.local ? ` · 本地直引 ${dlStats.local}` : ""}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}）${bedNote}${keptNote}`,
+			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.local ? ` · 本地直引 ${dlStats.local}` : ""}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}${imageNote}）${bedNote}${keptNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
 	for (const w of warnings) log.warn(w);
@@ -885,6 +1215,13 @@ async function layIntoProject(
 	return {
 		lay: {
 			refused: false,
+			sourceLayer: summary.sourceLayer,
+			// 全局不二用统计（add-broll-dedup-and-layering）：宁空不重复的空槽事件数 + 跳剪避让枯竭放行数
+			dedup: {
+				scope: layOpts.dedupScope ?? "scene",
+				emptySlots: fillStats.emptySlots,
+				adjacentWaived: fillStats.adjacentWaived,
+			},
 			laidTracks: summary.laidTracks,
 			laidClips: summary.laidClips,
 			removedTracks: summary.removedTracks,
@@ -895,8 +1232,11 @@ async function layIntoProject(
 			blackBedHoleSec: summary.blackBedHoleSec,
 			blackBedHoles: summary.blackBedHoles,
 			downloads: dlStats,
+			// 运镜失败明细（D6 机读 summary）：仅图片候选参与本轮时出现；失败槽位已静态兜底
+			...(prep.hasImage ? { image_move_failures: prep.failures } : {}),
 		},
 		...(integrity ? { integrity } : {}),
+		...(prep.hasImage ? { imageBilling: prep.billing } : {}),
 	};
 }
 

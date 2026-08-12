@@ -242,6 +242,62 @@ function isCloudErrorCode(e: unknown): number | undefined {
 	return typeof c === "number" ? c : undefined;
 }
 
+// ---------------------------------------------------------------- 单文件 cloud 任务执行核（add-matrix-local-image-broll D4 抽取）
+
+/** runCloudFileTask 的依赖面（CloudToolDeps 的子集——tool 命令与铺轨运镜联动都能直接喂）。 */
+export interface CloudFileTaskDeps {
+	cfg: CloudConfig;
+	uploadCached: typeof uploadCached;
+	invalidateUpload: typeof invalidateUpload;
+	submitTask: typeof submitTask;
+	getTaskResult: typeof getTaskResult;
+	sleep?: (ms: number) => Promise<void>;
+	pollIntervalMs?: number;
+	now?: () => number;
+}
+
+/**
+ * 单文件 cloud 任务执行核：上传（缓存/6004 失效恢复）→ 提交 → 轮询到完成，返回 output_result。
+ * 从 `gtrk tool` 执行链抽取（add-matrix-local-image-broll 3.1）：tool 命令（runCloudTool 单文件分支）
+ * 与铺轨图片运镜联动（image-move.ts）共用本函数，MUST NOT 各自复制「上传→提交→轮询」链。
+ * `onSubmitted` 在提交成功、轮询开始之前回调（tool 命令在此落 task.json 面包屑——崩溃可凭 task_id 恢复）。
+ */
+export async function runCloudFileTask(opts: {
+	deps: CloudFileTaskDeps;
+	uploadPath: string;
+	taskType: string;
+	buildPayload: (fileId: string) => Record<string, unknown>;
+	forceReupload?: boolean;
+	pollTimeoutMs?: number;
+	onSubmitted?: (info: { taskId: string; fileId: string }) => Promise<void> | void;
+	onTick?: (status: string, progress?: number) => void;
+}): Promise<{ taskId: string; fileId: string; output: OralCutOutput }> {
+	const d = opts.deps;
+	const submitted = await uploadAndSubmitTask(
+		d.cfg,
+		opts.uploadPath,
+		opts.taskType,
+		opts.buildPayload,
+		{ force: opts.forceReupload },
+		{
+			uploadCached: d.uploadCached,
+			invalidateUpload: d.invalidateUpload,
+			submitTask: d.submitTask,
+			sleep: d.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+		},
+	);
+	await opts.onSubmitted?.(submitted);
+	const output = await pollToolTask(d.cfg, opts.taskType, submitted.taskId, {
+		timeoutMs: opts.pollTimeoutMs,
+		intervalMs: d.pollIntervalMs,
+		getResult: d.getTaskResult,
+		sleep: d.sleep,
+		now: d.now,
+		onTick: opts.onTick,
+	});
+	return { taskId: submitted.taskId, fileId: submitted.fileId, output };
+}
+
 // ---------------------------------------------------------------- 多文件上传 + 提交（add-tool-multifile-images / add-tool-video-split-screen）
 
 /** 与 upload-submit 同义的服务端错误码：素材暂不可见/已失效。 */
@@ -403,16 +459,53 @@ export async function runCloudTool(
 	}
 	emitBilling(billingHint);
 
-	// ④ 上传并提交；新 file_id 延迟可见短退避，缓存 file_id 失效则强制重传一次
-	// 零上传路径：跳过上传/6004 恢复（无上传物无失效面），payload 直提交
+	// ④–⑥ 上传并提交 → 面包屑 → 轮询。新 file_id 延迟可见短退避，缓存 file_id 失效则强制重传一次；
+	// 零上传路径：跳过上传/6004 恢复（无上传物无失效面），payload 直提交。
+	// 面包屑口径不变：submit 一成功就落盘 task.json（目录延后到此刻才建、轮询之前），崩溃可凭 task_id 恢复。
+	// 多文件类别输入时 source/fingerprint 为与输入同序的数组；单输入维持字符串形态逐字节不变。
 	const taskType = descriptor.taskType!;
-	let taskId: string;
+	let taskId = "";
 	let fileId: string | undefined;
 	let fileIds: string[] | undefined;
+	const writeBreadcrumb = async (): Promise<void> => {
+		await mkdir(outDir, { recursive: true });
+		const fingerprint = inputList
+			? await Promise.all(inputList.map((p) => safeFingerprint(p)))
+			: inputAbs
+				? await safeFingerprint(inputAbs)
+				: undefined;
+		await writeFile(
+			join(outDir, "task.json"),
+			JSON.stringify(
+				{
+					tool: descriptor.name,
+					taskType,
+					taskId,
+					fileId,
+					...(fileIds ? { fileIds } : {}),
+					source: inputList ?? inputAbs,
+					fingerprint,
+					createdAt: new Date().toISOString(),
+				},
+				null,
+				2,
+			),
+		);
+	};
+	const pollOpts = {
+		timeoutMs: descriptor.pollTimeoutMs,
+		intervalMs: deps.pollIntervalMs,
+		getResult: deps.getTaskResult,
+		sleep: deps.sleep,
+		now: deps.now,
+	};
+	let output: OralCutOutput;
 	if (isNoneDirect) {
 		const p = descriptor.buildPayloadNone!(ctx);
 		mergeParams(p, extraParams);
 		taskId = await deps.submitTask(deps.cfg, taskType, p);
+		await writeBreadcrumb();
+		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
 	} else if (isMulti) {
 		const buildMulti = (fids: string[]): unknown => {
 			const p = descriptor.buildPayloadMulti!(fids, ctx);
@@ -424,64 +517,34 @@ export async function runCloudTool(
 		taskId = submitted.taskId;
 		fileIds = submitted.fileIds;
 		fileId = submitted.fileIds[0]!;
+		await writeBreadcrumb();
+		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
 	} else {
+		// 单文件分支委托共享执行核（add-matrix-local-image-broll 3.1 抽取；行为逐步等价：
+		// 上传/6004 恢复 → onSubmitted 落面包屑 → 轮询，poll 选项与旧实现逐字段一致）
 		const buildPayload = (fid: string): Record<string, unknown> => {
 			const p = descriptor.buildPayload ? descriptor.buildPayload(fid, ctx) : { file_id: fid };
 			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
 			mergeParams(p, extraParams);
 			return p;
 		};
-		const submitted = await uploadAndSubmitTask(
-			deps.cfg,
-			uploadPath!, // 非 isNoneDirect 分支：上方守卫已保证有上传物
+		const run = await runCloudFileTask({
+			deps,
+			uploadPath: uploadPath!, // 非 isNoneDirect 分支：上方守卫已保证有上传物
 			taskType,
 			buildPayload,
-			{ force: opts.reupload },
-			{
-				uploadCached: deps.uploadCached,
-				invalidateUpload: deps.invalidateUpload,
-				submitTask: deps.submitTask,
-				sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+			forceReupload: opts.reupload === true,
+			pollTimeoutMs: descriptor.pollTimeoutMs,
+			onSubmitted: async (s) => {
+				taskId = s.taskId;
+				fileId = s.fileId;
+				await writeBreadcrumb();
 			},
-		);
-		taskId = submitted.taskId;
-		fileId = submitted.fileId;
+		});
+		taskId = run.taskId;
+		fileId = run.fileId;
+		output = run.output;
 	}
-
-	// ⑤ 面包屑：submit 一成功就落盘 task.json（目录延后到此刻才建），后续任何崩溃都能据 task_id 恢复
-	// 多文件类别输入时 source/fingerprint 为与输入同序的数组；单输入维持字符串形态逐字节不变。
-	await mkdir(outDir, { recursive: true });
-	const fingerprint = inputList
-		? await Promise.all(inputList.map((p) => safeFingerprint(p)))
-		: inputAbs
-			? await safeFingerprint(inputAbs)
-			: undefined;
-	await writeFile(
-		join(outDir, "task.json"),
-		JSON.stringify(
-			{
-				tool: descriptor.name,
-				taskType,
-				taskId,
-				fileId,
-				...(fileIds ? { fileIds } : {}),
-				source: inputList ?? inputAbs,
-				fingerprint,
-				createdAt: new Date().toISOString(),
-			},
-			null,
-			2,
-		),
-	);
-
-	// ⑥ 轮询到完成（墙钟 per-tool 可覆盖）
-	const output = await pollToolTask(deps.cfg, taskType, taskId, {
-		timeoutMs: descriptor.pollTimeoutMs,
-		intervalMs: deps.pollIntervalMs,
-		getResult: deps.getTaskResult,
-		sleep: deps.sleep,
-		now: deps.now,
-	});
 
 	// ⑦ 产物落地（两条独立路径，均由 descriptor 声明驱动）+ result.json 恒落盘（不受 --json 约束）
 	const outputResult = output as unknown as OutputResult;

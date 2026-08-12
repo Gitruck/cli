@@ -44,6 +44,10 @@ export interface PlanResult {
 	is_copyright?: boolean;
 	// 本地检索形态（local-material-search spec）
 	source?: "local";
+	/** 素材形态（broll-plan-contract · add-matrix-local-image-broll）：可选、缺省 video；
+	 * `"image"` = 本地图片候选（零区间 segments + local_path）。云端形态 MUST NOT 出现本字段；
+	 * 消费方对未知取值按 video 兜底（前向兼容）。 */
+	kind?: "video" | "image";
 	/** 本地素材绝对路径（免下载免上传，消费方按它/asset:// 直读，MUST NOT 推导远程 preview URL）。 */
 	local_path?: string;
 	/** 工程内封面相对路径（assets/broll-cover/<id>.jpg），可缺省待铺轨时现抽。 */
