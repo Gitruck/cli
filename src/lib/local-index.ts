@@ -45,6 +45,18 @@ export const FRAME_MAX_EDGE = 512;
 /** 索引可收录的视频扩展名。 */
 const VIDEO_EXT = /\.(mp4|mov|m4v|mkv|webm|avi|wmv|mpg|mpeg|ts|mts|m2ts|flv)$/i;
 
+/** 索引可收录的图片扩展名（add-matrix-local-image-broll · image_ext 白名单，与 tool 族图片白名单同族）。 */
+const IMAGE_EXT = /\.(jpg|jpeg|png|webp|bmp|gif|tif|tiff|heic|heif|avif)$/i;
+
+export type MaterialKind = "video" | "image";
+
+/** 按扩展名判素材 kind（白名单外返回 null，不收录）。 */
+export function materialKindForPath(path: string): MaterialKind | null {
+	if (VIDEO_EXT.test(path)) return "video";
+	if (IMAGE_EXT.test(path)) return "image";
+	return null;
+}
+
 /** 索引目录 ~/.gitruck/local-broll-index（env GITRUCK_LOCAL_INDEX_DIR 可覆盖，测试/多机隔离用）。 */
 export function localIndexDir(): string {
 	return process.env.GITRUCK_LOCAL_INDEX_DIR?.trim() || homeFile("local-broll-index");
@@ -137,6 +149,7 @@ CREATE TABLE IF NOT EXISTS materials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   material_id TEXT NOT NULL,            -- broll-local-<blake3-16>（身份随内容不随路径）
   path TEXT NOT NULL UNIQUE,            -- 绝对路径（索引键；跨机不可移植）
+  kind TEXT NOT NULL DEFAULT 'video',   -- video|image（add-matrix-local-image-broll；旧库 ALTER 迁移）
   size INTEGER NOT NULL,                -- 指纹：size
   mtime_ms INTEGER NOT NULL,            -- 指纹：mtime（毫秒取整）
   duration_ms INTEGER NOT NULL,
@@ -163,10 +176,24 @@ CREATE TABLE IF NOT EXISTS frames (
 CREATE INDEX IF NOT EXISTS idx_frames_material ON frames(material_id);
 `;
 
-/** 打开（或初建）索引库：建三表 + schema 版本登记。 */
+/** 打开（或初建）索引库：建三表 + kind 列幂等迁移 + schema 版本登记。 */
 export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Promise<SqlDb> {
 	const db = await openSqlite(dbPath);
 	db.exec(SCHEMA_SQL);
+	// kind 列幂等迁移（add-matrix-local-image-broll 2.1）：图片能力引入前的旧库以 ALTER 补列，
+	// 旧行 DEFAULT 'video' 天然回填（旧视频行为零影响）；新库由 CREATE TABLE 直接带列，两路都幂等。
+	try {
+		const cols = db.all<{ name: string }>("PRAGMA table_info(materials)");
+		if (!cols.some((c) => c.name === "kind")) {
+			db.exec("ALTER TABLE materials ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'");
+		}
+	} catch (e) {
+		db.close();
+		throw new Error(
+			`索引库 kind 列迁移失败（${e instanceof Error ? e.message : String(e)}）——索引是可随时重建的本机缓存，` +
+				`建议跑 gtrk matrix index --dirs <...> --rebuild 重建（或删除 ${dbPath} 后重跑索引）`,
+		);
+	}
 	db.run("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')");
 	return db;
 }
@@ -175,6 +202,8 @@ export interface MaterialRow {
 	id: number;
 	material_id: string;
 	path: string;
+	/** video|image（迁移后旧行恒 video）。 */
+	kind: string;
 	size: number;
 	mtime_ms: number;
 	duration_ms: number;
@@ -305,13 +334,15 @@ export async function extractFrameJpg(ffmpeg: string, path: string, tsSec: numbe
 /** 阶段一产物：单素材抽帧**计划**（零 embed 请求；注入面 planMaterial 可整体替换，免 ffmpeg 依赖）。 */
 export interface PlannedMaterial {
 	materialId: string;
+	/** 素材 kind（缺省按 video 兜底——旧注入面/旧调用零改动）。 */
+	kind?: MaterialKind;
 	durationMs: number;
 	width: number;
 	height: number;
 	fps: number;
-	/** 场景区间（毫秒取整）。 */
+	/** 场景区间（毫秒取整）；图片恒统一形态一行 0..0（无场景轴，D1）。 */
 	scenes: { st_ms: number; ed_ms: number }[];
-	/** 抽帧计划（sceneIdx 指向 scenes 下标）——计划总数即计量会话 planned_units。 */
+	/** 抽帧计划（sceneIdx 指向 scenes 下标）——计划总数即计量会话 planned_units；图片恒单帧 ts_ms=0。 */
 	framePlan: { sceneIdx: number; ts_ms: number }[];
 }
 
@@ -364,6 +395,8 @@ export interface IndexRunResult {
 	dbPath: string;
 	dirs: string[];
 	materials: { total: number; indexed: number; skipped: number; rebuilt: number; failed: number };
+	/** kind 分列计数（add-matrix-local-image-broll：进度与 --json summary 分列图片/视频）。 */
+	kinds: { video: { total: number; indexed: number }; image: { total: number; indexed: number } };
 	scenes: number;
 	frames: number;
 	/** 本轮抽帧计划总数（= 计量会话 planned_units 口径；豁免/零新帧时也如实报）。 */
@@ -373,8 +406,8 @@ export interface IndexRunResult {
 	elapsedMs: number;
 }
 
-/** 枚举文件夹内视频文件（递归，深度上限 4；隐藏目录跳过）。 */
-export function listVideoFiles(dirs: string[]): string[] {
+/** 通用枚举（递归，深度上限 4；隐藏目录跳过）。 */
+function listFilesMatching(dirs: string[], match: (name: string) => boolean): string[] {
 	const out: string[] = [];
 	const walk = (dir: string, depth: number): void => {
 		if (depth > 4) return;
@@ -388,27 +421,61 @@ export function listVideoFiles(dirs: string[]): string[] {
 			if (e.name.startsWith(".")) continue;
 			const p = join(dir, e.name);
 			if (e.isDirectory()) walk(p, depth + 1);
-			else if (e.isFile() && VIDEO_EXT.test(e.name)) out.push(resolve(p));
+			else if (e.isFile() && match(e.name)) out.push(resolve(p));
 		}
 	};
 	for (const d of dirs) walk(resolve(d), 0);
 	return out.sort();
 }
 
-/** 默认阶段一：ffprobe 几何 → 内容哈希身份 → 场景检测 → 抽帧计划（零 embed 请求，不落任何文件）。 */
+/** 枚举文件夹内视频文件。 */
+export function listVideoFiles(dirs: string[]): string[] {
+	return listFilesMatching(dirs, (n) => VIDEO_EXT.test(n));
+}
+
+/** 枚举文件夹内视频+图片素材（add-matrix-local-image-broll：索引缺省枚举口，图片与视频一视同仁）。 */
+export function listMaterialFiles(dirs: string[]): string[] {
+	return listFilesMatching(dirs, (n) => VIDEO_EXT.test(n) || IMAGE_EXT.test(n));
+}
+
+/** 默认阶段一：ffprobe 几何 → 内容哈希身份 → 场景检测 → 抽帧计划（零 embed 请求，不落任何文件）。
+ * 图片素材（add-matrix-local-image-broll D1）：单帧向量 ts=0 + 统一形态 scenes 一行 0..0，无场景轴。 */
 async function planMaterialDefault(
 	path: string,
 	ctx: { sceneThreshold: number },
 	ff: FfmpegResolution,
 	ffmpegPathOpt: string | undefined,
 ): Promise<PlannedMaterial> {
+	const kind = materialKindForPath(path) ?? "video";
+	const materialId = await brollLocalIdForFile(path);
+	if (kind === "image") {
+		let width = 0;
+		let height = 0;
+		try {
+			const geo = probeGeometry(path, ffmpegPathOpt);
+			width = geo.width;
+			height = geo.height;
+		} catch {
+			/* 宽高探测 best-effort：失败只损失 orientation，不拦收录 */
+		}
+		return {
+			materialId,
+			kind,
+			durationMs: 0,
+			width,
+			height,
+			fps: 0,
+			scenes: [{ st_ms: 0, ed_ms: 0 }],
+			framePlan: [{ sceneIdx: 0, ts_ms: 0 }],
+		};
+	}
 	const geo = probeGeometry(path, ffmpegPathOpt);
 	if (!(geo.duration > 0)) throw new Error("探测不到有效时长（疑似损坏/非视频文件）");
-	const materialId = await brollLocalIdForFile(path);
 	const scenes = await detectScenes(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold);
 	const plan = planFrames(scenes);
 	return {
 		materialId,
+		kind,
 		durationMs: Math.round(geo.duration * 1000),
 		width: geo.width,
 		height: geo.height,
@@ -418,7 +485,8 @@ async function planMaterialDefault(
 	};
 }
 
-/** 默认阶段二：按计划抽帧（~/.gitruck/tmp）→ embed（批 ≤16，带 session_token）→ 删帧图（即传即弃）。 */
+/** 默认阶段二：按计划抽帧（~/.gitruck/tmp）→ embed（批 ≤16，带 session_token）→ 删帧图（即传即弃）。
+ * 图片素材：本体 512px 缩放为单帧 jpg 走**同一 embed 通道**即传即弃（原图不送，D1）。 */
 async function embedFramesDefault(
 	path: string,
 	planned: PlannedMaterial,
@@ -430,6 +498,18 @@ async function embedFramesDefault(
 	const frameDir = join(tmpDir(), `broll-index-${process.pid}`);
 	mkdirSync(frameDir, { recursive: true });
 	const frames: FrameVec[] = [];
+	if (planned.kind === "image") {
+		try {
+			const jpg = join(frameDir, `${basename(path, extname(path))}_0.jpg`);
+			if (!(await extractFrameJpg(ff.ffmpeg, path, 0, jpg))) {
+				throw new Error("图片 512px 缩放抽取失败（格式可能不受本机 ffmpeg 支持）");
+			}
+			const [vec] = await embed([{ image: readFileSync(jpg).toString("base64") }], sessionToken);
+			return [{ sceneIdx: 0, ts_ms: 0, vec: vec! }];
+		} finally {
+			rmSync(frameDir, { recursive: true, force: true }); // 即传即弃兜底同视频口径
+		}
+	}
 	try {
 		let batch: { sceneIdx: number; ts_ms: number; jpg: string }[] = [];
 		const flush = async (): Promise<void> => {
@@ -477,9 +557,11 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	const t0 = Date.now();
 	const dbPath = opts.dbPath ?? localIndexDbPath();
 	const sceneThreshold = opts.sceneThreshold ?? SCENE_THRESHOLD_DEFAULT;
-	const files = (opts.listFiles ?? listVideoFiles)(opts.dirs);
+	// 缺省枚举口 = 视频 + 图片（--no-image-broll 下索引仍收录图片：索引是缓存，排除发生在检索/铺轨侧）
+	const files = (opts.listFiles ?? listMaterialFiles)(opts.dirs);
 	const db = await openLocalIndexDb(dbPath);
 	const stats = { total: files.length, indexed: 0, skipped: 0, rebuilt: 0, failed: 0 };
+	const kinds = { video: { total: 0, indexed: 0 }, image: { total: 0, indexed: 0 } };
 	let sceneCount = 0;
 	let frameCount = 0;
 	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）
@@ -506,6 +588,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 		const pending: Pending[] = [];
 		for (const path of files) {
 			const name = basename(path);
+			kinds[materialKindForPath(path) ?? "video"].total++;
 			let st: { size: number; mtimeMs: number };
 			try {
 				st = statSync(path);
@@ -552,12 +635,24 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				opts.onProgress?.(`[${p.name}] 处理失败：${e instanceof Error ? e.message : String(e)}（跳过）`);
 				continue;
 			}
+			const kind = p.planned.kind ?? materialKindForPath(p.path) ?? "video";
 			// 素材粒度事务：旧行级联删 + 新行整批入，一把落库（中断不留半素材 = 断点续传）
 			withTransaction(db, () => {
 				if (p.prev) deleteMaterialRows(db, p.prev.id);
 				db.run(
-					"INSERT INTO materials(material_id, path, size, mtime_ms, duration_ms, width, height, fps, indexed_at) VALUES (?,?,?,?,?,?,?,?,?)",
-					[p.planned.materialId, p.path, p.size, p.mtimeMs, p.planned.durationMs, p.planned.width, p.planned.height, p.planned.fps, new Date().toISOString()],
+					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+					[
+						p.planned.materialId,
+						p.path,
+						kind,
+						p.size,
+						p.mtimeMs,
+						p.planned.durationMs,
+						kind === "image" ? (p.planned.width > 0 ? p.planned.width : null) : p.planned.width,
+						kind === "image" ? (p.planned.height > 0 ? p.planned.height : null) : p.planned.height,
+						kind === "image" ? null : p.planned.fps,
+						new Date().toISOString(),
+					],
 				);
 				const matRowId = Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id);
 				const sceneIds: number[] = [];
@@ -573,10 +668,13 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 			});
 			if (p.prev) stats.rebuilt++;
 			stats.indexed++;
+			kinds[kind].indexed++;
 			sceneCount += p.planned.scenes.length;
 			frameCount += frames.length;
 			opts.onProgress?.(
-				`[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
+				kind === "image"
+					? `[${p.name}] 图片 · 单帧向量${p.prev ? "（指纹变化，已级联重建）" : ""}`
+					: `[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
 			);
 		}
 	} finally {
@@ -605,6 +703,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 		dbPath,
 		dirs: opts.dirs.map((d) => resolve(d)),
 		materials: stats,
+		kinds,
 		scenes: sceneCount,
 		frames: frameCount,
 		plannedFrames,

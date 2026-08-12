@@ -76,6 +76,46 @@ export const SCORE_FLOOR_DEFAULT = 0.2;
 /** 单 beat 单轨槽位上限（防呆）。 */
 export const MAX_SLOTS_PER_BEAT = 32;
 
+// ── 全局去重与层带（add-broll-dedup-and-layering）─────────────────────────
+
+/** 跳剪豁免阈值（秒，D1 ★ 主理人 2026-08-12 拍板，常量不暴露配置）：同素材相邻槽位，两颗粒源时间
+ * 头尾差 <2s（画面几乎相同=同镜头闪现，真疲劳源）才软避让；≥2s 按跳剪论处 MUST NOT 避让
+ * （源上跳跃取段=过程/时间推进的合法叙事手法）。 */
+export const JUMP_CUT_GAP_SEC = 2;
+
+/** 去重粒度（D1）：scene=场景级（默认）；material=严格档（同一素材文件整轮只消费一次）。 */
+export type DedupScope = "scene" | "material";
+
+/** 来源层（D2 层序铁律，写死不配置）：自上而下 local > concept > common（common 最下、紧贴口播/黑底之上）。 */
+export type SourceLayer = "local" | "concept" | "common";
+/** 层带自上而下顺序（track_index 升序=渲染自上而下：local 最小号、common 最大号、黑底更下）。 */
+export const SOURCE_LAYER_ORDER: readonly SourceLayer[] = ["local", "concept", "common"];
+
+const isSourceLayer = (v: unknown): v is SourceLayer => v === "local" || v === "concept" || v === "common";
+
+/**
+ * 消费单元键（D1/D4 分配即消费）：
+ *   - 严格档（--dedup-scope material）：材料 id（整文件一次）；
+ *   - 图片：恒文件级（材料 id）；
+ *   - 本地视频：（材料 id, 场景近似）——当前 PlanResult 不带场景 idx，以 segment.start 充当场景标识
+ *     （聚合段经场景边界对齐，段起点即场景粒度近似；口径注记见 change tasks 2.1）；
+ *   - 云端候选：材料 id（云端切片本就是场景粒度，clip 级即场景级）。
+ */
+export function consumeKeyFor(cand: PlanResult, seg: { start: number }, scope: DedupScope): string {
+	if (scope === "material") return cand.clip_id;
+	if (cand.kind === "image") return cand.clip_id;
+	if (cand.source === "local" || typeof cand.local_path === "string") return `${cand.clip_id}@${seg.start}`;
+	return cand.clip_id;
+}
+
+/** 填充统计（宁空不重复+跳剪豁免的机读 summary；planBeatFills 聚合）。 */
+export interface FillStats {
+	/** 因候选枯竭（消费殆尽/避让无次优后仍无对）留空的槽位事件数。 */
+	emptySlots: number;
+	/** 跳剪避让「枯竭放行」次数（无次优候选时放行同素材近邻颗粒）。 */
+	adjacentWaived: number;
+}
+
 export interface DownloadedProxy {
 	/** 相对 gtrk 目录路径（assets/broll-preview/<clip_id>.mp4）；
 	 * 本地素材（source:"local"）为**素材绝对路径**——免下载免代理，直指原文件。 */
@@ -92,6 +132,9 @@ export interface FillSlot {
 	clip_ed: number;
 	track_st: number;
 	track_ed: number;
+	/** 图片候选（add-matrix-local-image-broll）：运镜/静态兜底材料 id 覆盖（命令层运镜准备阶段注入；
+	 * 缺省 = 既有 `broll-`+clip_id 拼接）。材料实体经 layBrollTracks 的 injectedMaterials 登记。 */
+	material_id?: string;
 }
 
 export interface BrollMetaCandidate {
@@ -107,6 +150,10 @@ export interface BrollMetaCandidate {
 	local_path?: string;
 	/** 本地候选附加：工程内封面相对路径（assets/broll-cover/<id>.jpg；抽取失败为 null）。 */
 	cover_path?: string | null;
+	/** 图片候选附加（add-matrix-local-image-broll）：图片源绝对路径——面板溯源与重生成用。 */
+	source_image_path?: string;
+	/** 来源层（add-broll-dedup-and-layering 3.1）：候选逐条继承所属层；旧登记缺席=过渡口径。 */
+	source_layer?: SourceLayer;
 }
 
 export interface BrollMetaBeat {
@@ -115,8 +162,9 @@ export interface BrollMetaBeat {
 	track_ed: number;
 	per_shot_sec?: number;
 	candidates: BrollMetaCandidate[];
-	/** 每轨一条；clip_id = 首槽 clip（兼容旧消费方），slots 为平铺明细。 */
-	laid: { order: number; clip_id: string; track_index: number; slots: FillSlot[] }[];
+	/** 每轨一条；clip_id = 首槽 clip（兼容旧消费方），slots 为平铺明细；
+	 * source_layer = 该轨来源层（add-broll-dedup-and-layering 3.1；旧登记缺席按过渡口径处置）。 */
+	laid: { order: number; clip_id: string; track_index: number; slots: FillSlot[]; source_layer?: SourceLayer }[];
 	pinned: null;
 }
 
@@ -124,8 +172,12 @@ export interface StructMetaBroll {
 	contract_version: "v1";
 	generated_at: string;
 	plan_path: string;
-	/** 本次自产轨 index 全集（候选轨 ∪ 黑底轨，升序）——黑轨在册才能被老版 CLI 一并剥掉。 */
+	/** 自产轨 index 全集（各层候选轨 ∪ 黑底轨，升序）——黑轨在册才能被老版 CLI 一并剥掉。
+	 * 形态保持 number[]（老读方 filter typeof number 的宽松解析零破坏）；层归属另见 track_layers。 */
 	lay_tracks: number[];
+	/** 层带登记（add-broll-dedup-and-layering 3.1）：track_index（字符串键）→ 来源层。
+	 * 黑底轨不在此册（black_track 单列）；缺失该键的存量登记按过渡口径处置（broll-local- 前缀推断 local）。 */
+	track_layers?: Record<string, SourceLayer>;
 	/** 黑底垫轨 track_index；未铺时 null。供消费方从 lay_tracks 中区分出黑底轨。 */
 	black_track: number | null;
 	confirmed: false;
@@ -258,34 +310,59 @@ interface Pair {
 	cand: PlanResult;
 	seg: { start: number; end: number; best: number; score: number };
 	query: string;
-	/** consumed 集键：clip + 段起点（同 clip 不同命中段是不同镜头源）。 */
+	/** 全局消费单元键（consumeKeyFor：云端/图片=材料级、本地视频=场景级、严格档=材料级）。 */
 	key: string;
 }
 
-/** 每 query 的取材池：results 展开全部 segments，score 降序；excluded_hint 与低于地板的对不进池。 */
-function buildQueryPools(beat: PlanBeat, scoreFloor: number): { query: string; pool: Pair[] }[] {
+/** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
+const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
+
+/** 每 query 的取材池：results 展开全部 segments，score 降序（严格同分视频优先 tie-break，
+ * ★ 主理人 2026-08-12 拍板）；excluded_hint 与低于地板的对不进池；noImage（--no-image-broll）
+ * 时图片候选完全不进池（不上云）。 */
+function buildQueryPools(
+	beat: PlanBeat,
+	scoreFloor: number,
+	opts: { noImage?: boolean; dedupScope?: DedupScope } = {},
+): { query: string; pool: Pair[] }[] {
+	const scope = opts.dedupScope ?? "scene";
 	const out: { query: string; pool: Pair[] }[] = [];
 	for (const q of beat.queries) {
 		const pool: Pair[] = [];
 		for (const cand of q.results ?? []) {
 			if (cand.excluded_hint) continue; // 命中派单负词：自动填充跳过（人工面板保留）
+			if (opts.noImage && cand.kind === "image") continue; // 排除开关：图片不出候选池
 			const segs = cand.segments?.length
 				? cand.segments
 				: // 无命中段的候选降级为整片伪段（少见；score 用 clip 级分）
 					[{ start: 0, end: cand.duration ?? SHOT_TARGET_DEFAULT, best: (cand.duration ?? SHOT_TARGET_DEFAULT) / 2, score: cand.score }];
 			for (const seg of segs) {
 				if (seg.score < scoreFloor) continue; // 低于阈值不采纳（主理人旧方案原则）
-				pool.push({ cand, seg, query: q.query, key: `${cand.clip_id}@${seg.start}` });
+				pool.push({ cand, seg, query: q.query, key: consumeKeyFor(cand, seg, scope) });
 			}
 		}
-		pool.sort((a, b) => b.seg.score - a.seg.score);
+		pool.sort((a, b) => b.seg.score - a.seg.score || Number(isImagePair(a)) - Number(isImagePair(b)));
 		if (pool.length) out.push({ query: q.query, pool });
 	}
 	return out;
 }
 
-/** 该对可供的最大镜头长：有素材时长则允许向段外扩（同素材相邻画面），否则只信段长。 */
+/** 颗粒源窗（选取评估与落位共用，保证避让判定用的就是将落位的窗口）：
+ * 图片=0..d（运镜分支）；视频=best 居中截 d（有素材时长钳 [0,dur]，否则钳段界）。 */
+function sourceWindowFor(p: Pair, d: number): { clipSt: number; clipEd: number } {
+	if (isImagePair(p)) return { clipSt: 0, clipEd: d };
+	const dur = typeof p.cand.duration === "number" && p.cand.duration > 0 ? p.cand.duration : undefined;
+	const lo = dur !== undefined ? 0 : p.seg.start;
+	const hi = dur ?? p.seg.end;
+	const maxSt = Math.max(lo, hi - d);
+	const clipSt = Math.min(Math.max(p.seg.best - d / 2, lo), maxSt);
+	return { clipSt, clipEd: clipSt + d };
+}
+
+/** 该对可供的最大镜头长：有素材时长则允许向段外扩（同素材相邻画面），否则只信段长。
+ * 图片候选恒不限长（运镜视频按槽长档位现生成，槽长在 shotRange 上限内必被覆盖）。 */
 function pairAvail(p: Pair): number {
+	if (isImagePair(p)) return Number.POSITIVE_INFINITY;
 	const dur = typeof p.cand.duration === "number" && p.cand.duration > 0 ? p.cand.duration : undefined;
 	return dur ?? Math.max(0, p.seg.end - p.seg.start);
 }
@@ -330,7 +407,12 @@ function shotRange(beat: PlanBeat, span: number): [number, number] {
 
 /**
  * 单 beat 单轨平铺：游标从 track_st 贪心铺到 track_ed，槽长节奏随机（区间抽取）+ 尾部整形。
- * consumed 跨轨共享（(clip,seg) 对不复用 → 轨间方案差异化）。
+ *
+ * 全局去重（add-broll-dedup-and-layering D1/D4）：consumed 跨 beat 跨轨共享，消费单元见
+ * consumeKeyFor（分配即消费、该轮不归还，宁空不重复——铁律优先于填充率）；beatOwners 为同 beat
+ * 跨轨的素材归属（同槽候选组互斥：一个素材文件在一个 beat 里至多出现在一条候选轨上，给用户真实选择面）。
+ * 相邻避让走跳剪豁免版：同素材相邻槽位（间隔 <2 槽）仅当源头尾差 <JUMP_CUT_GAP 才取次优；
+ * ≥2s 按跳剪放行；无次优时枯竭放行并计 stats.adjacentWaived。
  */
 export function fillBeatTrack(opts: {
 	beat: PlanBeat;
@@ -338,6 +420,14 @@ export function fillBeatTrack(opts: {
 	trackOrder: number;
 	consumed: Set<string>;
 	scoreFloor: number;
+	/** --no-image-broll：图片候选不进池（add-matrix-local-image-broll）。 */
+	noImage?: boolean;
+	/** 去重粒度（缺省 scene；material=严格档）。 */
+	dedupScope?: DedupScope;
+	/** 同 beat 跨轨素材归属（材料 id → 首个占用的 trackOrder）；planBeatFills 每 beat 建一份共享。 */
+	beatOwners?: Map<string, number>;
+	/** 填充统计收集器（planBeatFills 聚合进 summary）。 */
+	stats?: FillStats;
 }): FillSlot[] {
 	const { beat, trackOrder, consumed, scoreFloor } = opts;
 	const span = beat.track_ed - beat.track_st;
@@ -345,12 +435,12 @@ export function fillBeatTrack(opts: {
 	const [shotMin, shotMax] = shotRange(beat, span);
 	const rand = mulberry32(hashStr(`${beat.beat}#${trackOrder}`));
 
-	const pools = buildQueryPools(beat, scoreFloor);
+	const pools = buildQueryPools(beat, scoreFloor, { noImage: opts.noImage, dedupScope: opts.dedupScope });
 	if (!pools.length) return [];
 
 	const slots: FillSlot[] = [];
 	let cursor = beat.track_st;
-	let prevClip: string | null = null;
+	let lastPlaced: { slotIdx: number; clipId: string; clipEd: number } | null = null;
 	let lastPick: Pair | null = null;
 	let gapRun = 0;
 
@@ -365,44 +455,60 @@ export function fillBeatTrack(opts: {
 		else dTarget = shotMin + rand() * (shotMax - shotMin);
 
 		const minLen = Math.min(MIN_SHOT_SEC, remaining);
+		const dFor = (p: Pair): number => Math.min(dTarget, pairAvail(p), remaining);
+		// 基础合格：未被全局消费 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
+		const eligible = (p: Pair): boolean => {
+			if (consumed.has(p.key) || pairAvail(p) < minLen) return false;
+			const owner = opts.beatOwners?.get(p.cand.clip_id);
+			return owner === undefined || owner === trackOrder;
+		};
+		// 跳剪豁免版相邻避让（D1）：相邻槽位（间隔 <2 槽）∧ 同素材 ∧ |后颗粒 clip_st − 前颗粒 clip_ed| < 2s
+		const jumpCutBlocked = (p: Pair): boolean => {
+			if (!lastPlaced || slotIdx - lastPlaced.slotIdx >= 2) return false;
+			if (p.cand.clip_id !== lastPlaced.clipId) return false;
+			return Math.abs(sourceWindowFor(p, dFor(p)).clipSt - lastPlaced.clipEd) < JUMP_CUT_GAP_SEC;
+		};
+
 		// query 叙事序轮转：本槽位从 slotIdx 对应的 query 起，池干涸/无合格对则轮下一条
 		let pick: Pair | null = null;
 		for (let t = 0; t < pools.length && !pick; t++) {
 			const { pool } = pools[(slotIdx + t) % pools.length];
-			pick =
-				pool.find(
-					(p) => !consumed.has(p.key) && p.cand.clip_id !== prevClip && pairAvail(p) >= minLen,
-				) ?? null;
+			pick = pool.find((p) => eligible(p) && !jumpCutBlocked(p)) ?? null;
 		}
 		if (!pick) {
-			// 本槽位无合格对（可能仅因紧邻去重被挡）：留空一个镜头位继续，隔空后同 clip 可再用；连空两次视为干涸
+			// 枯竭放行（软避让）：无次优候选时放行被避让的同素材近邻颗粒，计入 summary
+			for (let t = 0; t < pools.length && !pick; t++) {
+				const { pool } = pools[(slotIdx + t) % pools.length];
+				pick = pool.find((p) => eligible(p)) ?? null;
+			}
+			if (pick && opts.stats) opts.stats.adjacentWaived++;
+		}
+		if (!pick) {
+			// 宁空不重复（铁律）：候选枯竭即留空，MUST NOT 复用已分配素材；连空两次视为干涸
+			if (opts.stats) opts.stats.emptySlots++;
 			gapRun++;
 			if (gapRun >= 2) break;
 			cursor += Math.min(dTarget, remaining);
-			prevClip = null;
 			continue;
 		}
 		gapRun = 0;
 
-		const d = Math.min(dTarget, pairAvail(pick), remaining);
-		// 源窗：best 居中截 d；有素材时长则钳 [0, dur]（允许出段），否则钳段界
-		const dur = typeof pick.cand.duration === "number" && pick.cand.duration > 0 ? pick.cand.duration : undefined;
-		const lo = dur !== undefined ? 0 : pick.seg.start;
-		const hi = dur ?? pick.seg.end;
-		const maxSt = Math.max(lo, hi - d);
-		const clipSt = Math.min(Math.max(pick.seg.best - d / 2, lo), maxSt);
+		const d = dFor(pick);
+		// 源窗：图片候选走「运镜生成/复用」分支恒 0..槽长（MUST NOT best 居中截取）；视频 best 居中截 d
+		const win = sourceWindowFor(pick, d);
 
 		slots.push({
 			clip_id: pick.cand.clip_id,
 			query: pick.query,
 			score: pick.seg.score,
-			clip_st: r3(clipSt),
-			clip_ed: r3(clipSt + d),
+			clip_st: r3(win.clipSt),
+			clip_ed: r3(win.clipSt + d),
 			track_st: r3(cursor),
 			track_ed: r3(cursor + d),
 		});
 		consumed.add(pick.key);
-		prevClip = pick.cand.clip_id;
+		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
+		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipSt + d };
 		lastPick = pick;
 		cursor += d;
 	}
@@ -416,7 +522,8 @@ export function fillBeatTrack(opts: {
 		if (tail > 1e-6 && tail < MIN_SHOT_SEC) {
 			const dur =
 				typeof lastPick.cand.duration === "number" && lastPick.cand.duration > 0 ? lastPick.cand.duration : undefined;
-			const hi = dur ?? lastPick.seg.end;
+			// 图片候选不限源界（运镜 duration 按最终槽长档位生成，吸收后仍被覆盖）
+			const hi = isImagePair(lastPick) ? Number.POSITIVE_INFINITY : (dur ?? lastPick.seg.end);
 			const ext = Math.min(tail, Math.max(0, hi - last.clip_ed));
 			if (ext > 1e-6) {
 				last.clip_ed = r3(last.clip_ed + ext);
@@ -432,20 +539,33 @@ export function planBeatFills(
 	plan: BrollPlan,
 	lay: number,
 	scoreFloor: number,
-): { fills: Map<string, FillSlot[][]>; clipIds: Set<string> } {
+	opts: { noImage?: boolean; dedupScope?: DedupScope } = {},
+): { fills: Map<string, FillSlot[][]>; clipIds: Set<string>; stats: FillStats } {
 	const fills = new Map<string, FillSlot[][]>();
 	const clipIds = new Set<string>();
+	// 全局消费集（D4）：跨 beat 跨 query 跨轨共享——分配即消费、该轮不归还（剥旧重铺后新一轮独立适用）
 	const consumed = new Set<string>();
+	const stats: FillStats = { emptySlots: 0, adjacentWaived: 0 };
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
+		const beatOwners = new Map<string, number>(); // 同槽候选组互斥：同 beat 跨轨同素材互斥
 		for (let k = 0; k < Math.max(0, lay); k++) {
-			const slots = fillBeatTrack({ beat, trackOrder: k, consumed, scoreFloor });
+			const slots = fillBeatTrack({
+				beat,
+				trackOrder: k,
+				consumed,
+				scoreFloor,
+				noImage: opts.noImage,
+				dedupScope: opts.dedupScope,
+				beatOwners,
+				stats,
+			});
 			perTrack.push(slots);
 			for (const s of slots) clipIds.add(s.clip_id);
 		}
 		fills.set(beat.beat, perTrack);
 	}
-	return { fills, clipIds };
+	return { fills, clipIds, stats };
 }
 
 // ── 落轨（剥旧 + append + struct_meta.broll）─────────────────────────────
@@ -462,8 +582,10 @@ interface LooseMaterial {
 
 export interface LayResult {
 	next: Record<string, unknown>;
-	/** laidTracks 只含**候选轨**（人读计数不把黑底算成候选轨）；黑轨另以 blackTrack 报。 */
+	/** laidTracks 只含**本轮目标层候选轨**（人读计数不把黑底/他层保留轨算进来）；黑轨另以 blackTrack 报。 */
 	summary: {
+		/** 本轮铺轨的来源层（add-broll-dedup-and-layering）。 */
+		sourceLayer: SourceLayer;
 		laidTracks: number[];
 		laidClips: number;
 		beatsWithCandidates: number;
@@ -499,6 +621,8 @@ export interface ExpectedTrack {
 	trackIndex: number;
 	/** 期望 clip 条数（候选轨 = 槽位数；黑底轨 = 复算段数）。 */
 	clipCount: number;
+	/** 来源层（laid.source_layer / track_layers 双源；旧登记缺席=undefined，按层剥旧走过渡口径）。 */
+	layer?: SourceLayer;
 }
 
 export interface TrackVerdict {
@@ -531,19 +655,27 @@ export function expectedSelfProducedTracks(prevBroll: unknown): ExpectedTrack[] 
 	if (!prevBroll || typeof prevBroll !== "object") return [];
 	const meta = prevBroll as Partial<StructMetaBroll>;
 	const beats = Array.isArray(meta.beats) ? (meta.beats as BrollMetaBeat[]) : [];
+	const trackLayers =
+		meta.track_layers && typeof meta.track_layers === "object" ? (meta.track_layers as Record<string, unknown>) : {};
 	const out: ExpectedTrack[] = [];
 
-	const byTrack = new Map<number, number>();
+	const byTrack = new Map<number, { count: number; layer?: SourceLayer }>();
 	for (const b of beats) {
 		for (const l of Array.isArray(b?.laid) ? b.laid : []) {
 			const idx = (l as { track_index?: unknown }).track_index;
 			const slots = (l as { slots?: unknown }).slots;
 			if (typeof idx !== "number" || !Array.isArray(slots) || slots.length === 0) continue;
-			byTrack.set(idx, (byTrack.get(idx) ?? 0) + slots.length);
+			const cur = byTrack.get(idx) ?? { count: 0 };
+			cur.count += slots.length;
+			const sl = (l as { source_layer?: unknown }).source_layer;
+			if (!cur.layer && isSourceLayer(sl)) cur.layer = sl;
+			byTrack.set(idx, cur);
 		}
 	}
-	for (const [trackIndex, clipCount] of [...byTrack.entries()].sort((a, b) => a[0] - b[0])) {
-		out.push({ kind: "candidate", trackIndex, clipCount });
+	for (const [trackIndex, agg] of [...byTrack.entries()].sort((a, b) => a[0] - b[0])) {
+		const registered = trackLayers[String(trackIndex)];
+		const layer = agg.layer ?? (isSourceLayer(registered) ? registered : undefined);
+		out.push({ kind: "candidate", trackIndex, clipCount: agg.count, ...(layer ? { layer } : {}) });
 	}
 
 	if (typeof meta.black_track === "number") {
@@ -689,9 +821,24 @@ export function classifyVideoTracks(
 }
 
 /**
- * 铺轨主函数（纯函数，不做 IO）：剥离上次自产物 → 按 fills 平铺 append 素材与 overlay 轨 →
- * 写 struct_meta.broll。下载失败的槽位被丢弃（留空，调用方已告警）——默认铺黑底时该处露**黑底垫轨**，
- * 仅 `--no-black-bed` / 该 beat 未铺黑底时才露 A-roll。
+ * 轨的层归属判定（add-broll-dedup-and-layering D3 双源）：登记 source_layer 优先；
+ * 无登记时按材料前缀推断——全部 clip 均 `broll-local-` 前缀 ⇒ local；其余 undefined
+ * （过渡期保守：层归属未知的存量自产轨不剥、告警）。
+ */
+export function resolveTrackLayer(track: LooseTrack, registered?: SourceLayer): SourceLayer | undefined {
+	if (registered) return registered;
+	const mats = (Array.isArray(track.track_timeline) ? track.track_timeline : []).map((c) =>
+		typeof c?.material === "string" ? c.material : "",
+	);
+	if (mats.length && mats.every((m) => m.startsWith(BROLL_LOCAL_MATERIAL_PREFIX))) return "local";
+	return undefined;
+}
+
+/**
+ * 铺轨主函数（纯函数，不做 IO）：按层剥离上次自产物 → 按 fills 平铺 append 素材与 overlay 轨 →
+ * 层带 track_index 分配（local>concept>common 自上而下写死，黑底恒在全部带区之下）→
+ * 写 struct_meta.broll（本层登记替换 + 他层登记保留平移）。下载失败的槽位被丢弃（留空，调用方已告警）
+ * ——默认铺黑底时该处露**黑底垫轨**，仅 `--no-black-bed` / 该 beat 未铺黑底时才露 A-roll。
  */
 export function layBrollTracks(opts: {
 	gtrk: Record<string, unknown>;
@@ -707,16 +854,23 @@ export function layBrollTracks(opts: {
 	forceRelay?: boolean;
 	/** 本地候选封面登记（clip_id → 工程内相对路径）；命令层现抽后传入，纯函数只登记不做 IO。 */
 	covers?: Map<string, string>;
+	/** 图片运镜/静态兜底材料实体（材料 id → materials 条目；add-matrix-local-image-broll 3.2）：
+	 * 命令层运镜准备阶段产出（ffprobe 实测），槽位以 FillSlot.material_id 指向其键；纯函数只登记不做 IO。 */
+	injectedMaterials?: Map<string, LooseMaterial>;
+	/** 本轮铺轨的来源层（add-broll-dedup-and-layering D2/D3）：按层剥旧与带区分配的目标层。
+	 * 缺省按 plan.member_type 推导（local → local；云端 → common）；概念层由命令层显式传入。 */
+	sourceLayer?: SourceLayer;
 }): LayResult {
 	const { gtrk, plan, lay, fills, downloads } = opts;
 	const blackBedOn = opts.blackBed !== false;
 	const forceRelay = opts.forceRelay === true;
+	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : "common");
 	const warnings: string[] = [];
 	const videoTracks = [...((gtrk.video_track as LooseTrack[] | undefined) ?? [])];
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}) };
 
-	// ── 剥离自产物（幂等重铺；判据 = 自产指纹，登记缺失宁留勿删）──
+	// ── 按层剥离自产物（幂等重铺；判据 = 自产指纹 + 层归属，登记缺失宁留勿删）──
 	const prevBroll = structMeta.broll as StructMetaBroll | undefined;
 	const prevIndices = new Set<number>(
 		Array.isArray(prevBroll?.lay_tracks)
@@ -729,10 +883,44 @@ export function layBrollTracks(opts: {
 	const keptEditedTracks = editedTracks
 		.map((t) => (typeof t.track_index === "number" ? t.track_index : -1))
 		.filter((n) => n >= 0);
-	const strippable = (i: number): boolean =>
-		verdicts[i]!.cls === "self-produced" || (forceRelay && verdicts[i]!.cls === "self-produced-edited");
-	const removedTracks = videoTracks.filter((_, i) => strippable(i));
-	const keptTracks = videoTracks.filter((_, i) => !strippable(i));
+	// 三分（D3 按层剥旧）：removed=目标层自产轨 ∪ 黑底轨 ∪（forceRelay 下的已编辑轨）；
+	// keptBand=他层自产轨（保留但随带区平移——L2 不比对 track_index，平移安全）；
+	// keptOther=用户轨 ∪ 层归属未知的存量自产轨（过渡口径：保守不剥 + 告警，位置不动）。
+	const removedTracks: LooseTrack[] = [];
+	const keptOtherTracks: LooseTrack[] = [];
+	const keptBandTracks: { track: LooseTrack; layer: SourceLayer; oldIndex: number }[] = [];
+	const transitionKeptIndices: number[] = [];
+	for (let i = 0; i < videoTracks.length; i++) {
+		const t = videoTracks[i]!;
+		const v = verdicts[i]!;
+		if (v.cls === "self-produced-edited") {
+			if (forceRelay) removedTracks.push(t);
+			else keptOtherTracks.push(t);
+			continue;
+		}
+		if (v.cls !== "self-produced") {
+			keptOtherTracks.push(t);
+			continue;
+		}
+		if (v.matched?.kind === "black") {
+			removedTracks.push(t); // 黑底轨恒重铺（位置=全部带区之下，随层结构平移）
+			continue;
+		}
+		const layer = resolveTrackLayer(t, v.matched?.layer);
+		if (layer === targetLayer) {
+			removedTracks.push(t);
+		} else if (layer !== undefined) {
+			keptBandTracks.push({ track: t, layer, oldIndex: typeof t.track_index === "number" ? t.track_index : 0 });
+		} else {
+			keptOtherTracks.push(t);
+			if (typeof t.track_index === "number") transitionKeptIndices.push(t.track_index);
+			warnings.push(
+				`存量自产轨 track_index=${t.track_index} 无 source_layer 层登记、也无法从材料前缀推断层归属：` +
+					`按过渡期保守口径保留不剥（本轮新轨照常追加）。要重铺它请在客户端删除该轨后重跑，或先跑一轮对应层的铺轨重建登记。`,
+			);
+		}
+	}
+	const keptTracks = [...keptOtherTracks, ...keptBandTracks.map((b) => b.track)];
 
 	// 逐轨告警：被判「自产内容但已被编辑」的轨必须带证据出场，MUST NOT 静默
 	for (let i = 0; i < videoTracks.length; i++) {
@@ -758,6 +946,7 @@ export function layBrollTracks(opts: {
 		return {
 			next: gtrk,
 			summary: {
+				sourceLayer: targetLayer,
 				laidTracks: [],
 				laidClips: 0,
 				beatsWithCandidates: beatsWithCands,
@@ -832,9 +1021,32 @@ export function layBrollTracks(opts: {
 		}
 	}
 
-	// ── 按 fills 平铺构建 ──
+	// ── 层带布局（D2 三带区间制）：baseIndex 只数「非带区保留轨」（用户轨/过渡轨），带区从其上叠放；
+	// 自上而下 local → concept → common（track_index 升序=渲染自上而下），目标层带宽=lay（保留既有
+	// baseIndex+k 的带内排布与空轨槽占位语义），他层带宽=该层保留轨数；黑底恒压全部带区之下。
 	const canvas = Array.isArray(gtrk.video_size) ? (gtrk.video_size as number[]) : [1920, 1080];
-	const baseIndex = keptTracks.reduce((mx, t) => Math.max(mx, typeof t.track_index === "number" ? t.track_index : 0), -1) + 1;
+	const baseIndex =
+		keptOtherTracks.reduce((mx, t) => Math.max(mx, typeof t.track_index === "number" ? t.track_index : 0), -1) + 1;
+	const bandCounts: Record<SourceLayer, number> = { local: 0, concept: 0, common: 0 };
+	for (const b of keptBandTracks) bandCounts[b.layer]++;
+	const bandStart = {} as Record<SourceLayer, number>;
+	let bandEnd = baseIndex;
+	for (const layer of SOURCE_LAYER_ORDER) {
+		bandStart[layer] = bandEnd;
+		bandEnd += layer === targetLayer ? Math.max(0, lay) : bandCounts[layer];
+	}
+	// 他层保留轨平移进各自带区（带内按旧号相对序；L2 判据不比对 track_index，平移安全）
+	const bandIndexRemap = new Map<number, { newIndex: number; layer: SourceLayer }>();
+	const rebasedBandTracks: LooseTrack[] = [];
+	for (const layer of SOURCE_LAYER_ORDER) {
+		if (layer === targetLayer) continue;
+		const members = keptBandTracks.filter((b) => b.layer === layer).sort((a, b) => a.oldIndex - b.oldIndex);
+		members.forEach((b, j) => {
+			const newIndex = bandStart[layer] + j;
+			bandIndexRemap.set(b.oldIndex, { newIndex, layer });
+			rebasedBandTracks.push(b.oldIndex === newIndex ? b.track : { ...b.track, track_index: newIndex });
+		});
+	}
 	const candById = new Map<string, PlanResult>();
 	for (const beat of plan.beats) for (const c of mergedCandidates(beat)) if (!candById.has(c.clip_id)) candById.set(c.clip_id, c);
 
@@ -851,27 +1063,35 @@ export function layBrollTracks(opts: {
 		const laid: BrollMetaBeat["laid"] = [];
 
 		for (let k = 0; k < perTrack.length; k++) {
-			// 下载失败的槽位丢弃（留空）；全空轨槽不建 laid 条目
-			const slots = perTrack[k].filter((s) => downloads.has(s.clip_id));
+			// 下载失败的槽位丢弃（留空）；图片槽位以 material_id 指向注入材料（运镜/静态兜底）；全空轨槽不建 laid 条目
+			const slots = perTrack[k].filter(
+				(s) => downloads.has(s.clip_id) || (s.material_id !== undefined && opts.injectedMaterials?.has(s.material_id)),
+			);
 			if (!slots.length) continue;
-			const trackIndex = baseIndex + k;
+			const trackIndex = bandStart[targetLayer] + k;
 			const bucket = trackClips.get(trackIndex) ?? [];
 			slots.forEach((s, i) => {
-				const materialId = brollMaterialIdFor(s.clip_id);
+				const materialId = s.material_id ?? brollMaterialIdFor(s.clip_id);
 				if (!newMaterialsById.has(materialId)) {
-					const cand = candById.get(s.clip_id);
-					const dl = downloads.get(s.clip_id)!;
-					const mat: LooseMaterial = { id: materialId, path: dl.rel };
-					if (typeof cand?.duration === "number") mat.duration = cand.duration;
-					if (dl.source === "local") {
-						// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）
-						if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
+					const injected = s.material_id !== undefined ? opts.injectedMaterials?.get(s.material_id) : undefined;
+					if (injected) {
+						// 图片运镜/静态兜底材料：命令层已备好实体（ffprobe 实测/静态图片形态），原样登记
+						newMaterialsById.set(materialId, { ...injected });
 					} else {
-						const dims = previewDims(cand?.width, cand?.height);
-						if (dims) mat.video_size = dims;
+						const cand = candById.get(s.clip_id);
+						const dl = downloads.get(s.clip_id)!;
+						const mat: LooseMaterial = { id: materialId, path: dl.rel };
+						if (typeof cand?.duration === "number") mat.duration = cand.duration;
+						if (dl.source === "local") {
+							// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）
+							if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
+						} else {
+							const dims = previewDims(cand?.width, cand?.height);
+							if (dims) mat.video_size = dims;
+						}
+						if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
+						newMaterialsById.set(materialId, mat);
 					}
-					if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
-					newMaterialsById.set(materialId, mat);
 				}
 				bucket.push({
 					clip_id: `${beat.beat}-broll-${k}-${i}`,
@@ -885,7 +1105,7 @@ export function layBrollTracks(opts: {
 				laidClips++;
 			});
 			trackClips.set(trackIndex, bucket);
-			laid.push({ order: k, clip_id: slots[0].clip_id, track_index: trackIndex, slots });
+			laid.push({ order: k, clip_id: slots[0].clip_id, track_index: trackIndex, slots, source_layer: targetLayer });
 		}
 
 		const metaBeat: BrollMetaBeat = {
@@ -905,11 +1125,15 @@ export function layBrollTracks(opts: {
 					source: dl?.source ?? (isLocal ? "local" : null),
 					raw_url: c.url ?? null,
 					seg: seg ? { start: seg.start, end: seg.end, best: seg.best } : null,
+					// 层登记（add-broll-dedup-and-layering 3.1）：候选逐条继承本轮来源层
+					source_layer: targetLayer,
 				};
 				// 本地附加键仅本地候选出现（云端 struct_meta 产物逐字节不变）
 				if (isLocal) {
 					if (typeof c.local_path === "string") entry.local_path = c.local_path;
 					entry.cover_path = opts.covers?.get(c.clip_id) ?? null;
+					// 图片候选保留源图路径（面板溯源与重生成，matrix-lay-tracks spec）
+					if (c.kind === "image" && typeof c.local_path === "string") entry.source_image_path = c.local_path;
 				}
 				return entry;
 			}),
@@ -930,18 +1154,58 @@ export function layBrollTracks(opts: {
 			track_timeline: clips.sort((a, b) => (a.track_st as number) - (b.track_st as number)),
 		}));
 
-	// ── 纯黑底垫轨（track_index 恒 = baseIndex + lay，即比所有候选轨都大）──
+	// ── 他层登记保留合并（3.1/3.3）：本层（targetLayer）登记由本轮 metaBeats 整体替换；
+	// 他层保留轨的 laid 条目按 bandIndexRemap 平移号后并回；过渡保留轨（无层登记）条目按原号保留
+	// ——期望指纹链路（expectedSelfProducedTracks）因此跨层跨轮闭环。老式登记（candidates 无
+	// source_layer）随本层替换语义丢弃（与旧版「整体重写」口径一致，不为过渡态发明新形态）。
+	{
+		const survivors = new Map<number, { newIndex: number; layer?: SourceLayer }>();
+		for (const [oldIndex, v] of bandIndexRemap) survivors.set(oldIndex, v);
+		for (const idx of transitionKeptIndices) if (!survivors.has(idx)) survivors.set(idx, { newIndex: idx });
+		if (prevBroll && survivors.size > 0) {
+			const beatsByName = new Map(metaBeats.map((b) => [b.beat, b]));
+			for (const pb of Array.isArray(prevBroll.beats) ? prevBroll.beats : []) {
+				if (!pb || typeof pb !== "object") continue;
+				const survivingLaid = (Array.isArray(pb.laid) ? pb.laid : [])
+					.filter((l) => typeof l?.track_index === "number" && survivors.has(l.track_index))
+					.map((l) => {
+						const s = survivors.get(l.track_index)!;
+						return { ...l, track_index: s.newIndex, ...(s.layer ? { source_layer: s.layer } : {}) };
+					});
+				const survivingCands = (Array.isArray(pb.candidates) ? pb.candidates : []).filter(
+					(c) => isSourceLayer(c?.source_layer) && c.source_layer !== targetLayer,
+				);
+				if (!survivingLaid.length && !survivingCands.length) continue;
+				const into = beatsByName.get(pb.beat);
+				if (into) {
+					into.laid.push(...survivingLaid);
+					for (const c of survivingCands) {
+						if (!into.candidates.some((x) => x.clip_id === c.clip_id && x.source_layer === c.source_layer)) {
+							into.candidates.push(c);
+						}
+					}
+				} else {
+					const carried: BrollMetaBeat = { ...pb, candidates: survivingCands, laid: survivingLaid };
+					metaBeats.push(carried);
+					beatsByName.set(carried.beat, carried);
+				}
+			}
+		}
+	}
+
+	// ── 纯黑底垫轨（track_index 恒 = 全部层带之下 bandEnd，比所有候选轨都大）──
 	// gtrk v1 里非主轨 track_index 越大越靠下（客户端 importer 升序进 overlay、overlay[0] 最上层），
-	// 故黑底恰好落在「全部候选轨之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	// 故黑底恰好落在「全部候选轨（各层带）之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	// 他层保留轨在场时即使本轮零新轨也要重铺黑底（黑轨已被恒剥，位置随层结构平移）。
 	let blackTrack: number | null = null;
 	let blackTrackObj: Record<string, unknown> | null = null;
-	if (blackBedOn && createdTracks.length > 0) {
+	if (blackBedOn && (createdTracks.length > 0 || rebasedBandTracks.length > 0)) {
 		if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
 			warnings.push(
 				`画布尺寸非法（${canvas[0]}x${canvas[1]}），跳过铺纯黑底轨（候选轨照常铺）。`,
 			);
 		} else {
-			// 时窗 = 本轮**至少落成一条候选轨**的 beat 的包络（整条铺，非槽位并集）。
+			// 时窗 = **任一层至少落成一条候选轨**的 beat 的包络（整条铺，非槽位并集；含他层保留登记）。
 			const laidBeatEnvelopes = metaBeats
 				.filter((b) => b.laid.length > 0)
 				.map((b) => ({ track_st: b.track_st, track_ed: b.track_ed }));
@@ -956,7 +1220,7 @@ export function layBrollTracks(opts: {
 					path: solidRelPath({ hex: BLACK_BED_HEX, width, height }),
 					video_size: [width, height],
 				});
-				blackTrack = baseIndex + lay;
+				blackTrack = bandEnd;
 				blackTrackObj = {
 					track_index: blackTrack,
 					track_size: [width, height],
@@ -1026,13 +1290,23 @@ export function layBrollTracks(opts: {
 	}
 
 	const laidTrackIndices = createdTracks.map((t) => t.track_index);
+	// 在册全集 = 本层新轨 ∪ 他层保留轨（平移后号）∪ 过渡保留自产轨（原号）；层归属进 track_layers。
+	const registeredIndices = [
+		...laidTrackIndices,
+		...rebasedBandTracks.map((t) => t.track_index as number),
+		...transitionKeptIndices,
+	].sort((a, b) => a - b);
+	const trackLayers: Record<string, SourceLayer> = {};
+	for (const idx of laidTrackIndices) trackLayers[String(idx)] = targetLayer;
+	for (const [, v] of bandIndexRemap) if (v.layer) trackLayers[String(v.newIndex)] = v.layer;
 	const broll: StructMetaBroll = {
 		contract_version: "v1",
 		generated_at: opts.generatedAt,
 		plan_path: opts.planPath,
 		// 黑轨也登记进 lay_tracks：老版 CLI 只读这个键剥旧，不在册就会把黑轨当用户轨保留、
 		// 顶高 baseIndex，令下次新候选轨落到黑轨之下整片黑。
-		lay_tracks: blackTrack === null ? laidTrackIndices : [...laidTrackIndices, blackTrack],
+		lay_tracks: blackTrack === null ? registeredIndices : [...registeredIndices, blackTrack],
+		track_layers: trackLayers,
 		black_track: blackTrack,
 		confirmed: false,
 		beats: metaBeats,
@@ -1047,15 +1321,20 @@ export function layBrollTracks(opts: {
 	}
 	for (const [id, m] of newMaterialsById) mergedMaterials.set(id, m);
 
+	// 带区轨（他层平移轨 + 本层新轨）按 track_index 升序落数组；黑底收尾（渲染层序=数组内号序一致）
+	const bandTracksSorted = [...rebasedBandTracks, ...createdTracks].sort(
+		(a, b) => (a.track_index as number) - (b.track_index as number),
+	);
 	const next: Record<string, unknown> = {
 		...gtrk,
 		materials: [...mergedMaterials.values()],
-		video_track: [...keptTracks, ...createdTracks, ...(blackTrackObj ? [blackTrackObj] : [])],
+		video_track: [...keptOtherTracks, ...bandTracksSorted, ...(blackTrackObj ? [blackTrackObj] : [])],
 		struct_meta: { ...structMeta, broll },
 	};
 	return {
 		next,
 		summary: {
+			sourceLayer: targetLayer,
 			laidTracks: laidTrackIndices,
 			laidClips,
 			beatsWithCandidates,

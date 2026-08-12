@@ -117,6 +117,8 @@ interface LoadedFrame {
 export interface LoadedMaterial {
 	materialId: string;
 	path: string;
+	/** video|image（add-matrix-local-image-broll；迁移后旧行恒 video）。 */
+	kind: string;
 	durationMs: number;
 	width: number | null;
 	height: number | null;
@@ -152,6 +154,7 @@ interface FrameJoinRow {
 	mkey: number;
 	material_id: string;
 	path: string;
+	kind: string | null;
 	duration_ms: number;
 	width: number | null;
 	height: number | null;
@@ -170,7 +173,7 @@ export function loadLocalIndex(
 	const fileExists = deps.fileExists ?? existsSync;
 	const rows = db.all<FrameJoinRow>(
 		`SELECT f.ts_ms, f.vec, s.st_ms, s.ed_ms,
-		        m.id AS mkey, m.material_id, m.path, m.duration_ms, m.width, m.height, m.fps
+		        m.id AS mkey, m.material_id, m.path, m.kind, m.duration_ms, m.width, m.height, m.fps
 		 FROM frames f
 		 JOIN scenes s ON f.scene_id = s.id
 		 JOIN materials m ON f.material_id = m.id
@@ -196,6 +199,7 @@ export function loadLocalIndex(
 			materials.push({
 				materialId: r.material_id,
 				path: r.path,
+				kind: r.kind === "image" ? "image" : "video",
 				durationMs: r.duration_ms,
 				width: r.width,
 				height: r.height,
@@ -233,17 +237,23 @@ export interface LocalSearchOutcome {
 	results: PlanResult[];
 }
 
+/** 排序 tie-break 键（★ 主理人 2026-08-12 拍板）：纯 score 混排、严格同分视频优先（kind video<image）。 */
+const kindRank = (r: Pick<PlanResult, "kind">): number => (r.kind === "image" ? 1 : 0);
+
 /**
  * 单查询检索：内存点积 → top 帧 → 按素材分组聚合 → score 地板过滤 → PlanResult 同构组装。
  * 零网络（查询向量由调用方 embed 好传入）。
+ * 图片素材（add-matrix-local-image-broll D7）：kind:"image"、segments 恒零区间形态；
+ * `includeImages:false`（--no-image-broll）时图片帧完全不参与点积排位（不出候选池、不占 topk）。
  */
 export function searchLoadedIndex(
 	index: LoadedIndex,
 	queryVec: Float32Array,
-	opts: { topkFrames?: number; scoreFloor?: number } = {},
+	opts: { topkFrames?: number; scoreFloor?: number; includeImages?: boolean } = {},
 ): LocalSearchOutcome {
 	const topk = opts.topkFrames ?? TOPK_FRAMES_DEFAULT;
 	const floor = opts.scoreFloor ?? LOCAL_SCORE_FLOOR_DEFAULT;
+	const includeImages = opts.includeImages !== false;
 	const n = index.frames.length;
 	if (n === 0 || queryVec.length !== index.dim) return { recalled: 0, results: [] };
 
@@ -256,7 +266,12 @@ export function searchLoadedIndex(
 		for (let j = 0; j < dim; j++) s += vectors[off + j]! * queryVec[j]!;
 		sims[i] = s;
 	}
-	const order = [...sims.keys()].sort((a, b) => sims[b]! - sims[a]!).slice(0, topk);
+	const eligible: number[] = [];
+	for (let i = 0; i < n; i++) {
+		if (!includeImages && index.materials[index.frames[i]!.matIdx]!.kind === "image") continue;
+		eligible.push(i);
+	}
+	const order = eligible.sort((a, b) => sims[b]! - sims[a]!).slice(0, topk);
 
 	// 按素材分组（组内按 ts 升序）→ 聚合
 	const byMat = new Map<number, FrameHit[]>();
@@ -276,6 +291,27 @@ export function searchLoadedIndex(
 	let recalled = 0;
 	const results: PlanResult[] = [];
 	for (const [matIdx, hits] of byMat) {
+		const matMeta = index.materials[matIdx]!;
+		// 图片素材：单帧向量、无场景轴——不走聚合，segments 恒零区间形态（消费方不特判不炸）
+		if (matMeta.kind === "image") {
+			recalled += 1;
+			const score = round4(hits.reduce((mx, h) => Math.max(mx, h.score), Number.NEGATIVE_INFINITY));
+			if (score < floor) continue;
+			results.push({
+				source: "local",
+				kind: "image",
+				clip_id: localClipIdForMaterialId(matMeta.materialId),
+				score,
+				local_path: matMeta.path,
+				...(matMeta.width != null ? { width: matMeta.width } : {}),
+				...(matMeta.height != null ? { height: matMeta.height } : {}),
+				...(matMeta.width != null && matMeta.height != null
+					? { orientation: matMeta.width >= matMeta.height ? "landscape" : "portrait" }
+					: {}),
+				segments: [{ start: 0, end: 0, best: 0, score }],
+			});
+			continue;
+		}
 		hits.sort((a, b) => a.ts_ms - b.ts_ms);
 		const segs = aggregateFrameHits(hits);
 		recalled += segs.length;
@@ -302,6 +338,7 @@ export function searchLoadedIndex(
 		};
 		results.push(r);
 	}
-	results.sort((a, b) => b.score - a.score);
+	// 纯 score 混排 + 严格同分视频优先（稳定 tie-break，不做整体降权系数）
+	results.sort((a, b) => b.score - a.score || kindRank(a) - kindRank(b));
 	return { recalled, results };
 }
