@@ -174,6 +174,16 @@ CREATE TABLE IF NOT EXISTS frames (
   vec BLOB NOT NULL                     -- float32 小端 1024 维
 );
 CREATE INDEX IF NOT EXISTS idx_frames_material ON frames(material_id);
+CREATE TABLE IF NOT EXISTS describes (
+  material_id TEXT NOT NULL,            -- broll- 家族材料 id（字符串，随内容不随行号——生命周期独立于三表）
+  ts_ms INTEGER NOT NULL,               -- 帧时刻（缓存键第二维）
+  desc_text TEXT NOT NULL,              -- VLM 一句话描述（desc 是 SQL 关键字，列名避让）
+  tags_json TEXT NOT NULL,              -- string[] JSON
+  mark INTEGER,                         -- 0-100 质量分
+  flags_json TEXT NOT NULL,             -- usable_flags JSON（watermark/text_overlay/black_border/blurry…）
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (material_id, ts_ms)
+);
 `;
 
 /** 打开（或初建）索引库：建三表 + kind 列幂等迁移 + schema 版本登记。 */
@@ -218,6 +228,13 @@ export function deleteMaterialRows(db: SqlDb, materialRowId: number): void {
 	db.run("DELETE FROM frames WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM scenes WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM materials WHERE id = ?", [materialRowId]);
+}
+
+/** 清一个素材的全部理解缓存（describes 键=字符串材料 id；add-matrix-describe-and-window D1）。
+ * 只在 size:mtime **指纹真变**时由索引编排调用（--rebuild 指纹未变 MUST NOT 清——理解产物与向量
+ * 生命周期独立，重建向量不该报废花过钱的 VLM 缓存）。 */
+export function clearDescribesForMaterial(db: SqlDb, materialId: string): void {
+	db.run("DELETE FROM describes WHERE material_id = ?", [materialId]);
 }
 
 // ── 向量编解码（float32 小端 BLOB；平台字节序无关的确定性写读）──────────────
@@ -638,7 +655,13 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 			const kind = p.planned.kind ?? materialKindForPath(p.path) ?? "video";
 			// 素材粒度事务：旧行级联删 + 新行整批入，一把落库（中断不留半素材 = 断点续传）
 			withTransaction(db, () => {
-				if (p.prev) deleteMaterialRows(db, p.prev.id);
+				if (p.prev) {
+					deleteMaterialRows(db, p.prev.id);
+					// 理解缓存级联（D1）：仅指纹真变时按材料清 describes；--rebuild（指纹未变）不清
+					if (p.prev.size !== p.size || p.prev.mtime_ms !== p.mtimeMs) {
+						clearDescribesForMaterial(db, p.prev.material_id);
+					}
+				}
 				db.run(
 					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
 					[

@@ -21,6 +21,9 @@ export interface UserConfig {
 	defaultColumn?: string;
 	/** 自建 embed 端点完整 URL 覆盖（add-matrix-local-search；缺省 = apiBase 推导，env GITRUCK_EMBED_URL 优先级更高）。 */
 	embedUrl?: string;
+	/** 素材理解端点完整 URL 覆盖（add-matrix-describe-and-window；缺省 = apiBase 推导
+	 * `/task/cli/material_describe`，env GITRUCK_DESCRIBE_URL 优先级更高）。 */
+	describeUrl?: string;
 }
 
 export function configPath(): string {
