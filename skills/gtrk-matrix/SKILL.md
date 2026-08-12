@@ -184,7 +184,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 零件 | 单价 | 计费形态 | internal 豁免 | 备注 |
 |---|---|---|---|---|
 | embed（`matrix index` 抽帧图） | **0.1 积分/张** | **会话计量**：开跑前按抽帧计划预扣 `ceil(N×0.1)`，跑完按实际用量结算多退少不补（用量>0 最低 1 积分） | ✅ gc_member_type=internal 免会话零计费 | **文本 embed 免费**——`--local` 检索本身零积分 |
-| describe（`matrix describe`） | **1 积分/张** | 每请求**同步计费**（无会话） | ✅ 同上（豁免时 >20 张护栏免确认仅提示） | 缓存命中零调用零计费；>20 张确认护栏（`--yes` 跳过） |
+| describe（`matrix describe`） | **1 积分/张** | **异步任务**（提交预扣→完成结算，失败自动退款），无会话 | ✅ 同上（豁免时 >20 张护栏免确认仅提示） | 缓存命中零调用零计费；>20 张确认护栏（`--yes` 跳过） |
 | image_move（图片运镜入轨） | **2 积分/张** | 按任务计费 | **internal 不豁免、照常计费**（已查证：走标准任务计费链路无 gc_member_type 豁免；豁免只存在于 embed/describe 两个原子口） | 工程内同图同参恒复用不再扣费；铺轨前有预估确认（`--yes` 跳过，拒绝=整轮中止零调用） |
 
 - 豁免看的是 **gc_member_type**（同合云内部成员），与检索档位 `matrix_member_type` 是两个维度——`memberType:"internal"`（检索口）≠ 计费豁免，别混。
@@ -300,7 +300,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | raw 原片回落 / 体积大 | 提示用户；服务端 backfill 后重跑可换回轻量代理 |
 | `reprojection.degraded:true` | 不是故障：命令算不出当刻窗口退回快照。`transcript_missing` → 补回 transcript.json 或新版 oralcut 重出；`no_project`/`gtrk_unreadable` → 工程放回位或 `--project` 指对 |
 | 期望 concept 却报 external 限制 | 如实说明当前身份只出 real_shot 有版权素材，concept 需矩阵成员口 |
-| describe 报 `describe_endpoint_unreachable` | 服务端未上线/网络/配置指错：查 `describeUrl` / `GITRUCK_DESCRIBE_URL`；缓存与 plan 都在，修好重跑 |
+| describe 报 `describe_endpoint_unreachable` | 服务端未上线/网络/配置指错：查 `describeUrl` / `GITRUCK_DESCRIBE_URL`；缓存与 plan 都在，修好重跑。describe 走异步任务（提交后轮询取结果）：任务提交成功后即便中途断网结果也不丢（服务端照跑），可重新轮询/稍后重跑取回；上游失败服务端自动退款，只需重跑 |
 
 > **搜词规范**（ad-hoc `search` 与理解派单 queries 通用）：英文长句场景描述（5–12 词，谁+在哪+做什么），一条只装一个场景意象，避多义/字面强的动词（"pointing"/"hunting" 会召回特写/猎人，改用 "giving suggestions in a meeting" 这类场景语义）。
 
