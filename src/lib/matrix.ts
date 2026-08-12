@@ -55,6 +55,23 @@ export interface PlanResult {
 	// 本地附加
 	excluded_hint?: true;
 	also_matched_queries?: string[];
+	/** 理解产物（broll-plan-contract · add-matrix-describe-and-window）：`matrix describe` 注入的
+	 * 可选字段，随 plan 流转；消费方（lay/客户端 parseBrollMeta）宽松兼容不识别不炸；云端检索产出
+	 * 的 plan 不含本字段（注入是 CLI 后处理）。usable_flags 是给 agent 的**信号**——CLI MUST NOT
+	 * 依据它自动剔除候选（零件不裁定，剔除与否是裁定层的事）。 */
+	describe?: MaterialDescribeMeta;
+	/** agent 编辑钉选（plan 可编辑契约）：true = 分配器优先满足、强制入选（覆盖 score 排序）；
+	 * pinned 间冲突（消费键/同 beat 归属互斥）后到让位并在 summary 明示。缺省缺失。 */
+	pinned?: boolean;
+	[k: string]: unknown;
+}
+
+/** 理解产物形态（matrix-describe spec：desc/tags/mark/usable_flags）——各键宽松可选。 */
+export interface MaterialDescribeMeta {
+	desc?: string;
+	tags?: string[];
+	mark?: number;
+	usable_flags?: Record<string, boolean>;
 	[k: string]: unknown;
 }
 
@@ -107,6 +124,121 @@ export interface PlanQuery {
 	recalled?: number;
 	results?: PlanResult[];
 	error?: { code?: number; msg: string };
+}
+
+// ── plan 可编辑通路契约（matrix-command spec · add-matrix-describe-and-window D4）──────
+//
+// plan 是一等可编辑中间产物（agent 裁定注入铺轨的法定通道）。
+// 可编辑面（白名单）：results 删条/重排、segments 删段、describe 字段增删、result 级 pinned:true。
+// 不可编辑面：clip_id / local_path / url / 几何字段（duration/width/height/fps）——没有「原件」可
+// 对拍，防线走**结构完整性校验**（类型/格式/一致性），改坏即拒并明示字段；lay 消费编辑后 plan
+// 一律按 plan 现值执行，MUST NOT 因「与原始检索结果不一致」拒绝（我们从不做原件比对）。
+
+/** 几何键（不可编辑面）：存在即须为正有限数。 */
+const GEOMETRY_KEYS = ["duration", "width", "height", "fps"] as const;
+
+function validatePlanResultForLay(r: PlanResult, where: string, errs: string[]): void {
+	if (typeof r.clip_id !== "string" || !r.clip_id) {
+		errs.push(`${where}：clip_id 不可编辑——必须为非空字符串（得到 ${JSON.stringify(r.clip_id)}）`);
+		return; // clip_id 都没了，后续定位信息不可信
+	}
+	if (!(typeof r.score === "number" && Number.isFinite(r.score))) {
+		errs.push(`${where}：score 必须为有限数字（得到 ${JSON.stringify(r.score)}）`);
+	}
+	for (const k of GEOMETRY_KEYS) {
+		const v = r[k];
+		if (v !== undefined && !(typeof v === "number" && Number.isFinite(v) && v > 0)) {
+			errs.push(`${where}：几何字段 ${k} 不可编辑——须为正数（得到 ${JSON.stringify(v)}）`);
+		}
+	}
+	if (r.segments !== undefined) {
+		if (!Array.isArray(r.segments)) {
+			errs.push(`${where}：segments 须为数组（可删段，但不可改形态）`);
+		} else {
+			for (const s of r.segments) {
+				const nums = [s?.start, s?.end, s?.best, s?.score];
+				if (!nums.every((n) => typeof n === "number" && Number.isFinite(n))) {
+					errs.push(`${where}：segment 四键（start/end/best/score）须为有限数字`);
+					break;
+				}
+				if (!(s.start <= s.best && s.best <= s.end)) {
+					errs.push(`${where}：segment 几何不可编辑——best 必须落在 [start,end] 内（${s.start}–${s.end} best=${s.best}）`);
+					break;
+				}
+			}
+		}
+	}
+	if (r.pinned !== undefined && typeof r.pinned !== "boolean") {
+		errs.push(`${where}：pinned 只能是布尔（钉选写 pinned:true；得到 ${JSON.stringify(r.pinned)}）`);
+	}
+	if (r.describe !== undefined) {
+		const d = r.describe;
+		if (!d || typeof d !== "object" || Array.isArray(d)) {
+			errs.push(`${where}：describe 须为对象（{desc,tags,mark,usable_flags} 宽松形态）`);
+		} else {
+			if (d.desc !== undefined && typeof d.desc !== "string") errs.push(`${where}：describe.desc 须为字符串`);
+			if (d.tags !== undefined && !(Array.isArray(d.tags) && d.tags.every((t) => typeof t === "string"))) {
+				errs.push(`${where}：describe.tags 须为字符串数组`);
+			}
+			if (d.mark !== undefined && !(typeof d.mark === "number" && Number.isFinite(d.mark))) {
+				errs.push(`${where}：describe.mark 须为数字`);
+			}
+			if (d.usable_flags !== undefined && (!d.usable_flags || typeof d.usable_flags !== "object" || Array.isArray(d.usable_flags))) {
+				errs.push(`${where}：describe.usable_flags 须为对象`);
+			}
+		}
+	}
+	// 本地形态整包复检（clip_id 前缀 / url 系禁键 / local_path 在位 / segments 降序）
+	if (isLocalPlanResult(r)) {
+		for (const v of validateLocalResult(r)) errs.push(`${where}：${v}`);
+	}
+}
+
+/**
+ * `--lay` 消费前的 plan 白名单校验（纯函数零 IO；local_path 的**路径有效性**属命令层职责）。
+ * 返回违约描述数组（空=可消费）；坏 plan 明示拒绝，MUST NOT 静默跳过或猜测修复。
+ */
+export function validatePlanForLay(planRaw: unknown): string[] {
+	const errs: string[] = [];
+	if (!planRaw || typeof planRaw !== "object" || Array.isArray(planRaw)) return ["plan 不是 JSON 对象"];
+	const plan = planRaw as Partial<BrollPlan> & Record<string, unknown>;
+	if (plan.plan_version !== "v1") errs.push(`plan_version 必须为 "v1"（得到 ${JSON.stringify(plan.plan_version)}）`);
+	if (!Array.isArray(plan.beats)) {
+		errs.push("beats 必须为数组");
+		return errs;
+	}
+	for (const beat of plan.beats as PlanBeat[]) {
+		if (!beat || typeof beat !== "object" || typeof beat.beat !== "string" || !beat.beat) {
+			errs.push("存在缺 beat 名的 beat 条目");
+			continue;
+		}
+		if (!(typeof beat.track_st === "number" && typeof beat.track_ed === "number" && Number.isFinite(beat.track_st) && Number.isFinite(beat.track_ed))) {
+			errs.push(`beat ${beat.beat}：track_st/track_ed 须为有限数字`);
+		}
+		if (!Array.isArray(beat.queries)) {
+			errs.push(`beat ${beat.beat}：queries 必须为数组`);
+			continue;
+		}
+		for (const q of beat.queries) {
+			if (!q || typeof q !== "object" || typeof q.query !== "string") {
+				errs.push(`beat ${beat.beat}：存在缺 query 文本的 query 条目`);
+				continue;
+			}
+			if (q.results === undefined) continue;
+			if (!Array.isArray(q.results)) {
+				errs.push(`beat ${beat.beat}/「${q.query}」：results 须为数组（可删条/重排，不可改形态）`);
+				continue;
+			}
+			for (const r of q.results) {
+				if (!r || typeof r !== "object") {
+					errs.push(`beat ${beat.beat}/「${q.query}」：存在非对象 result 条目`);
+					continue;
+				}
+				validatePlanResultForLay(r, `beat ${beat.beat}/「${q.query}」/clip ${String((r as PlanResult).clip_id ?? "?")}`, errs);
+			}
+		}
+	}
+	return errs;
 }
 
 export interface PlanBeat {

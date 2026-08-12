@@ -114,6 +114,10 @@ export interface FillStats {
 	emptySlots: number;
 	/** 跳剪避让「枯竭放行」次数（无次优候选时放行同素材近邻颗粒）。 */
 	adjacentWaived: number;
+	/** pinned 槽位落成数（plan 可编辑契约：agent 钉选被分配器满足的槽位事件数）。 */
+	pinnedPlaced: number;
+	/** pinned 候选未能入选数（冲突后到让位/候选枯竭/被排除——按候选 clip 计，summary 明示）。 */
+	pinnedYielded: number;
 }
 
 export interface DownloadedProxy {
@@ -312,6 +316,8 @@ interface Pair {
 	query: string;
 	/** 全局消费单元键（consumeKeyFor：云端/图片=材料级、本地视频=场景级、严格档=材料级）。 */
 	key: string;
+	/** agent 钉选（plan 可编辑契约）：排序置顶（覆盖 score 排序）+ 免 score 地板（强制入选语义）。 */
+	pinned: boolean;
 }
 
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
@@ -319,7 +325,9 @@ const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
 
 /** 每 query 的取材池：results 展开全部 segments，score 降序（严格同分视频优先 tie-break，
  * ★ 主理人 2026-08-12 拍板）；excluded_hint 与低于地板的对不进池；noImage（--no-image-broll）
- * 时图片候选完全不进池（不上云）。 */
+ * 时图片候选完全不进池（不上云）。
+ * pinned（plan 可编辑契约）：钉选候选**置顶**（覆盖 score 排序）且免 excluded_hint / score 地板
+ * （agent 显式裁定 > 自动护栏）；noImage 例外——「零图片上云」是用户级硬承诺，pinned 不豁免。 */
 function buildQueryPools(
 	beat: PlanBeat,
 	scoreFloor: number,
@@ -330,18 +338,24 @@ function buildQueryPools(
 	for (const q of beat.queries) {
 		const pool: Pair[] = [];
 		for (const cand of q.results ?? []) {
-			if (cand.excluded_hint) continue; // 命中派单负词：自动填充跳过（人工面板保留）
-			if (opts.noImage && cand.kind === "image") continue; // 排除开关：图片不出候选池
+			const pinned = cand.pinned === true;
+			if (!pinned && cand.excluded_hint) continue; // 命中派单负词：自动填充跳过（人工面板保留）
+			if (opts.noImage && cand.kind === "image") continue; // 排除开关：图片不出候选池（pinned 也不豁免）
 			const segs = cand.segments?.length
 				? cand.segments
 				: // 无命中段的候选降级为整片伪段（少见；score 用 clip 级分）
 					[{ start: 0, end: cand.duration ?? SHOT_TARGET_DEFAULT, best: (cand.duration ?? SHOT_TARGET_DEFAULT) / 2, score: cand.score }];
 			for (const seg of segs) {
-				if (seg.score < scoreFloor) continue; // 低于阈值不采纳（主理人旧方案原则）
-				pool.push({ cand, seg, query: q.query, key: consumeKeyFor(cand, seg, scope) });
+				if (!pinned && seg.score < scoreFloor) continue; // 低于阈值不采纳（pinned=强制入选，免地板）
+				pool.push({ cand, seg, query: q.query, key: consumeKeyFor(cand, seg, scope), pinned });
 			}
 		}
-		pool.sort((a, b) => b.seg.score - a.seg.score || Number(isImagePair(a)) - Number(isImagePair(b)));
+		pool.sort(
+			(a, b) =>
+				Number(b.pinned) - Number(a.pinned) ||
+				b.seg.score - a.seg.score ||
+				Number(isImagePair(a)) - Number(isImagePair(b)),
+		);
 		if (pool.length) out.push({ query: q.query, pool });
 	}
 	return out;
@@ -506,6 +520,7 @@ export function fillBeatTrack(opts: {
 			track_st: r3(cursor),
 			track_ed: r3(cursor + d),
 		});
+		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++; // pinned 落成计数（summary 明示）
 		consumed.add(pick.key);
 		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
 		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipSt + d };
@@ -534,18 +549,20 @@ export function fillBeatTrack(opts: {
 	return slots;
 }
 
-/** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。 */
+/** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。
+ * pinned 结算（plan 可编辑契约）：铺完统计 plan 内钉选候选的入选/让位（冲突后到让位不报错，
+ * summary 明示——stats.pinnedYielded；yielded 名单由 pinnedOutcome 给出供告警指名）。 */
 export function planBeatFills(
 	plan: BrollPlan,
 	lay: number,
 	scoreFloor: number,
 	opts: { noImage?: boolean; dedupScope?: DedupScope } = {},
-): { fills: Map<string, FillSlot[][]>; clipIds: Set<string>; stats: FillStats } {
+): { fills: Map<string, FillSlot[][]>; clipIds: Set<string>; stats: FillStats; pinnedOutcome: { requested: string[]; yielded: string[] } } {
 	const fills = new Map<string, FillSlot[][]>();
 	const clipIds = new Set<string>();
 	// 全局消费集（D4）：跨 beat 跨 query 跨轨共享——分配即消费、该轮不归还（剥旧重铺后新一轮独立适用）
 	const consumed = new Set<string>();
-	const stats: FillStats = { emptySlots: 0, adjacentWaived: 0 };
+	const stats: FillStats = { emptySlots: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
 		const beatOwners = new Map<string, number>(); // 同槽候选组互斥：同 beat 跨轨同素材互斥
@@ -565,7 +582,14 @@ export function planBeatFills(
 		}
 		fills.set(beat.beat, perTrack);
 	}
-	return { fills, clipIds, stats };
+	// pinned 结算：requested = plan 内全部钉选候选（去重）；yielded = 未落任何槽位者（后到让位/枯竭/被排除）
+	const pinnedRequested = new Set<string>();
+	for (const beat of plan.beats) {
+		for (const q of beat.queries) for (const r of q.results ?? []) if (r.pinned === true) pinnedRequested.add(r.clip_id);
+	}
+	const yielded = [...pinnedRequested].filter((id) => !clipIds.has(id));
+	stats.pinnedYielded = yielded.length;
+	return { fills, clipIds, stats, pinnedOutcome: { requested: [...pinnedRequested], yielded } };
 }
 
 // ── 落轨（剥旧 + append + struct_meta.broll）─────────────────────────────

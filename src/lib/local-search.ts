@@ -245,15 +245,29 @@ const kindRank = (r: Pick<PlanResult, "kind">): number => (r.kind === "image" ? 
  * 零网络（查询向量由调用方 embed 好传入）。
  * 图片素材（add-matrix-local-image-broll D7）：kind:"image"、segments 恒零区间形态；
  * `includeImages:false`（--no-image-broll）时图片帧完全不参与点积排位（不出候选池、不占 topk）。
+ *
+ * 源时间窗（add-matrix-describe-and-window · search-source-window spec）：`sourceWindowSec`
+ * 显式传入时——过滤发生在**聚合后段级**：段与窗口有交集（闭区间相触即交）即保留，段边界原样
+ * 不裁剪（裁剪归铺轨槽长逻辑）；与 scoreFloor/includeImages 等过滤器 AND 叠加；图片素材（无时间轴）
+ * 整体排除（不占 topk 不出候选池）；窗口无命中返回 ok 空结果（recalled=窗内召回口径），
+ * 扩窗重试是配方层（agent）逻辑，MUST NOT 由本函数自动扩窗。
  */
 export function searchLoadedIndex(
 	index: LoadedIndex,
 	queryVec: Float32Array,
-	opts: { topkFrames?: number; scoreFloor?: number; includeImages?: boolean } = {},
+	opts: {
+		topkFrames?: number;
+		scoreFloor?: number;
+		includeImages?: boolean;
+		/** 源时间窗（秒，[start,end]）：仅返回与窗口有交集的 segments。 */
+		sourceWindowSec?: readonly [number, number];
+	} = {},
 ): LocalSearchOutcome {
 	const topk = opts.topkFrames ?? TOPK_FRAMES_DEFAULT;
 	const floor = opts.scoreFloor ?? LOCAL_SCORE_FLOOR_DEFAULT;
-	const includeImages = opts.includeImages !== false;
+	const win = opts.sourceWindowSec;
+	// 显式传窗口 = 图片素材整体排除（无时间轴，谈不上「落在窗内」）——与 includeImages AND 叠加
+	const includeImages = opts.includeImages !== false && !win;
 	const n = index.frames.length;
 	if (n === 0 || queryVec.length !== index.dim) return { recalled: 0, results: [] };
 
@@ -313,7 +327,13 @@ export function searchLoadedIndex(
 			continue;
 		}
 		hits.sort((a, b) => a.ts_ms - b.ts_ms);
-		const segs = aggregateFrameHits(hits);
+		let segs = aggregateFrameHits(hits);
+		// 源时间窗过滤（段级交集，闭区间相触即交；段边界原样不裁剪）——先于 recalled 计数：
+		// 窗口是检索域限定（同 includeImages 语义），recalled 报的是**窗内**真实召回
+		if (win) {
+			const [stMs, edMs] = [win[0] * 1000, win[1] * 1000];
+			segs = segs.filter((s) => s.end_ms >= stMs && s.start_ms <= edMs);
+		}
 		recalled += segs.length;
 		const kept = segs.filter((s) => s.score >= floor); // 低于地板不进候选池
 		if (!kept.length) continue;
