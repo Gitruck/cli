@@ -48,6 +48,7 @@ import {
 	buildPlanBeat,
 	buildSearchBody,
 	isLocalPlanResult,
+	probeGcMemberType,
 	probeMemberType,
 	searchOnce,
 	type BrollPlan,
@@ -203,9 +204,9 @@ export interface MatrixResult {
 	[k: string]: unknown;
 }
 
-/** 计量会话账面（--json 机读；infra 计费细案第 6 条：0.1 积分/张、文本免费、internal 豁免、预扣-实结）。 */
+/** 计量会话账面（--json 机读；infra 计费细案第 6 条：0.1 积分/张、文本免费、同合云内部成员豁免、预扣-实结）。 */
 export interface MatrixIndexBilling {
-	/** internal 矩阵成员豁免：true 时零计费无会话（其余积分字段缺席）。 */
+	/** 同合云内部成员（gc_member_type=internal）豁免：true 时零计费无会话（其余积分字段缺席）。 */
 	exempt: boolean;
 	/** 本轮抽帧计划总数（= 会话 planned_units；0 = 纯增量跳过零新帧，未开会话）。 */
 	planned_units: number;
@@ -309,15 +310,16 @@ function embedEndpointFor(cfg: ReturnType<typeof loadConfig>): EmbedEndpoint {
 	return { url: resolveEmbedUrl(cfg.base), apiKey: cfg.apiKey };
 }
 
-/** internal 矩阵成员计费豁免探测（计费细案第 6 条：既有 matrix_member_type 探针方式）。
+/** 同合云内部成员计费豁免探测（add-gc-user-member-type D5：读 gc_member_type，MUST NOT 复用 matrix_member_type——
+ * 素材矩阵成员身份只影响云端检索路由，与本地索引计费无关）。旧服务端无该字段按 external 兜底（probeGcMemberType 内建）。
  * 探针失败按非豁免继续——真正的失败面留给会话 open/embed（有明确机读 code）。
  * 注：这是 `matrix index` 的行为；`--local` 检索的「零身份探针」承诺不受影响（检索文本 embed 免费免会话）。 */
 async function probeIndexBillingExempt(cfg: ReturnType<typeof loadConfig>): Promise<boolean> {
 	try {
-		return (await probeMemberType(cfg)) === "internal";
+		return (await probeGcMemberType(cfg)) === "internal";
 	} catch (e) {
 		log.warn(
-			`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（计量会话计费）继续；internal 矩阵成员本可免会话零计费`,
+			`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（计量会话计费）继续；同合云内部成员（gc_member_type=internal）本可免会话零计费`,
 		);
 		return false;
 	}
@@ -373,9 +375,9 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	const endpoint = embedEndpointFor(cfg);
 	log.step(`▶ 本地素材索引：${dirs.join("、")}（场景阈值 ${threshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`);
 	log.info("免切片：只记场景时间戳，不产生任何切片文件；抽帧图 embed 后即删（素材本体不上云）。");
-	// internal 矩阵成员豁免：无 token 也放行图像且零计费 → 直接不开会话
+	// 同合云内部成员（gc_member_type=internal）豁免：无 token 也放行图像且零计费 → 直接不开会话
 	const exempt = await probeIndexBillingExempt(cfg);
-	if (exempt) log.info("internal 矩阵成员：图像 embed 计费豁免（免会话零积分；文本 embed 本就免费）。");
+	if (exempt) log.info("同合云内部成员（gc_member_type=internal）：图像 embed 计费豁免（免会话零积分；文本 embed 本就免费）。");
 	const run = await indexLocalMaterials({
 		dirs,
 		sceneThreshold: threshold,
@@ -387,7 +389,7 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	const m = run.materials;
 	const billing = composeIndexBilling(exempt, run);
 	const billNote = exempt
-		? " · 计费豁免（internal）"
+		? " · 计费豁免（同合云内部成员）"
 		: billing.settled_credits !== undefined
 			? ` · 实结 ${billing.settled_credits} 积分（预扣 ${billing.pre_deducted_credits} · 退还 ${billing.refunded_credits}）`
 			: billing.reconcile_pending

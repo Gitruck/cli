@@ -352,17 +352,29 @@ export function classifyApiError(code: number | undefined, msg?: string): string
 
 export const SEARCH_TIMEOUT_MS = 25_000;
 
-/** 身份探针：POST /user/get_user_info（无 body 参数）。探针失败 = 整体失败（没有身份就没有正确的口）。 */
-export async function probeMemberType(cfg: CloudConfig): Promise<Tier> {
+/** POST /user/get_user_info（无 body 参数）——两路身份探针共用取数（业务码非 200 即抛）。 */
+async function fetchUserInfo(cfg: CloudConfig): Promise<Record<string, unknown> | undefined> {
 	const res = await fetch(`${cfg.base}/user/get_user_info`, {
 		method: "POST",
 		headers: { accept: "application/json", Authorization: cfg.apiKey },
 		body: "",
 		signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
 	});
-	const r = await parseJson<{ matrix_member_type?: unknown }>(res);
+	const r = await parseJson<Record<string, unknown>>(res);
 	if (r.code !== 200) throw new CloudError(r.code, classifyApiError(r.code, r.msg));
-	return decideRoute(r.data?.matrix_member_type).tier;
+	return r.data;
+}
+
+/** 身份探针（素材矩阵维度）：读 matrix_member_type——**只管云端检索双口路由**。探针失败 = 整体失败（没有身份就没有正确的口）。 */
+export async function probeMemberType(cfg: CloudConfig): Promise<Tier> {
+	return decideRoute((await fetchUserInfo(cfg))?.matrix_member_type).tier;
+}
+
+/** gc 侧身份探针（add-gc-user-member-type D5）：同一 get_user_info 响应读**独立同级字段** `gc_member_type`
+ * （同合云内部成员维度——embed 计费豁免等平台能力看它，MUST NOT 复用 matrix_member_type）。
+ * 旧服务端无该字段 / 无值 / 未知取值 → 一律兜底 external（非错误）；业务码非 200 仍抛（同 probeMemberType）。 */
+export async function probeGcMemberType(cfg: CloudConfig): Promise<Tier> {
+	return (await fetchUserInfo(cfg))?.gc_member_type === "internal" ? "internal" : "external";
 }
 
 /** 把响应文本里的大整数 clip_id 引号化后再 JSON.parse——JSON.parse 对 >2^53 的 number 丢精度且不可逆,

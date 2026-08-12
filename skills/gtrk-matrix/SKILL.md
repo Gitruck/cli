@@ -92,7 +92,7 @@ gtrk matrix --local --dirs "D:/素材库A,D:/素材库B" --project <目录> --js
 ### 计费口径（`matrix index` 计量会话，2026-08-12 钉死）
 
 - **图像 0.1 积分/张，文本 embed 免费**（检索查询是文本——`--local` 检索本身零积分；花积分的只有建索引的抽帧图）。
-- **internal 矩阵成员全豁免**：零计费免会话（结果 JSON `billing.exempt:true`）。
+- **同合云内部成员（gc_member_type=internal）豁免**：零计费免会话（结果 JSON `billing.exempt:true`）。素材矩阵成员身份（matrix_member_type）只影响云端检索路由、与本地索引计费无关——矩阵成员≠计费豁免，别拿 `memberType:"internal"`（检索档位）推断豁免。
 - **预扣-实结**：索引开跑前按抽帧计划总数预扣 `ceil(计划帧数×0.1)` 积分，跑完按实际用量结算**多退少不补**（实际用量>0 最低 1 积分；一帧没 embed 全额退）。结果 JSON `billing` 给全账面：`planned_units / pre_deducted_credits / used_units / settled_credits / refunded_credits`（`reconcile_pending:true` = 结算调用没打通，服务端 15 分钟内自动对账，不会多扣）。
 - **积分不足**：索引在开会话时即失败退出（`ok:false` + 明示所需积分），一帧都不会 embed 也不扣费；充值后重跑即可。跟用户交代量级：全量索引 5000 帧 ≈ 500 积分 ≈ 5 元，增量只按新增帧算。
 
