@@ -14,6 +14,7 @@ import {
 	configPath,
 	type UserConfig,
 } from "../lib/user-config";
+import { noticeOnce } from "../lib/compliance-notice";
 import { probeJianyingDraftDir } from "../lib/jianying";
 import { openFile } from "../lib/open";
 import { packageRoot } from "../lib/paths";
@@ -121,6 +122,8 @@ export async function runInit(opts: InitOpts): Promise<void> {
 	writeUserConfig(patch);
 
 	log.ok(`配置已写入 ${configPath()}`);
+	// 合规告知（add-compliance-notice 2.3）：配置**写盘成功之后**告知一次（写盘失败会先抛，走不到这里）
+	noticeOnce();
 	if (!jianyingDraftDir) {
 		log.warn("未配剪映草稿目录：要剪映直接打开，之后可重跑 gtrk init，或单次加 --jianying-draft-dir");
 	}
@@ -173,6 +176,9 @@ async function runInitNonInteractive(opts: InitOpts): Promise<void> {
 	writeUserConfig(patch);
 
 	log.ok(`配置已写入 ${configPath()}`);
+	// 合规告知（add-compliance-notice 2.3）：`-y` 是非交互开关，**不是「跳过告知」开关**——
+	// 与交互式路径同一份文案、同样在写盘成功之后；上面缺 Key 提前 return 的分支 MUST NOT 告知。
+	noticeOnce();
 	log.info(`剪映草稿目录：${jianyingDraftDir ?? "未配（剪映需手动导入，可加 --jianying-draft-dir）"}`);
 	await runDoctor();
 }

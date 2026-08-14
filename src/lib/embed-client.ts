@@ -27,6 +27,7 @@
  * （infra 实际落点：cli 域，2026-08-12 失配修正——原 `/gc/embed` 推导已废）。
  */
 import { CloudError } from "./cloud";
+import { noticeOnce } from "./compliance-notice";
 import { readUserConfig } from "./user-config";
 
 export const EMBED_UNREACHABLE_CODE = "embed_endpoint_unreachable";
@@ -179,6 +180,9 @@ export async function embedInputs(
 	deps: EmbedDeps = {},
 ): Promise<Float32Array[]> {
 	if (inputs.length === 0) return [];
+	// 合规告知（add-compliance-notice 2.2）：抽帧/检索词由此离机（matrix index / --local），
+	// 名字里带 local 也一样——判据是内容是否离机，不是命令名。零输入不算出口，故在早退之后。
+	noticeOnce();
 	const fetchFn = deps.fetchFn ?? fetch;
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;

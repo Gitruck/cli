@@ -48,6 +48,12 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
 > agent 自检：没配 Key 时任何命令会明确报「缺 API Key —— 先跑 `gtrk init`」。剪映目录没配只影响剪映直开，不挡 gtrk/PR。
 > `init` 是**人手一次性**交互配置（会弹提示）；agent 日常只跑非交互的 `oralcut`。
 
+> **合规告知（只告知、不是闸门）**：`init` 配好、以及首次把内容送上云之前，CLI 会往 **stderr** 打一次条款告知
+> （用户协议 / 隐私政策链接 + 「你是所处理内容合法性的第一责任人」），**恰好一次**、之后不再复读。
+> 它**不阻断命令、不等任何输入、没有 `--accept-terms` 之类开关**，也不写 stdout（`--json` 机读面照旧干净）——
+> agent 见到它照常往下跑即可，**MUST NOT** 去改 `~/.gitruck/config.json` 的 `termsNoticeVersion` 来「绕过」它。
+> 内容不出本机的命令（`render` 本地渲染 / 工程互转 / `mg` 铺轨 / `doctor` / `deps install`）**不会**出现这条。
+
 5. **按需装运行时资产**（只有用到本地渲染/烧录才需要）：
 
    ```

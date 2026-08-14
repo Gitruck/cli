@@ -8,7 +8,7 @@
 >
 > One command turns a raw talking-head recording into an editable, re-cuttable project. The cloud does the heavy lifting, your machine only assembles, and the source video never leaves it.
 
-**🔗 [Website](https://cloud.ai-mcn.tv/zh-CN/cli) · [Tutorial](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [Quick start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [Desktop client](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli)**
+**🔗 [Website](https://cloud.ai-mcn.tv/zh-CN/cli) · [Tutorial](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [Quick start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [Desktop client](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli) · [User agreement](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [Privacy policy](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf)**
 
 ![Put AI creation capabilities into your local agent](assets/gtrk-agent-intro.png)
 
@@ -51,6 +51,8 @@ The CLI calls Gitruck Cloud capabilities, so you need an API key first (it looks
 2. Go to the **[console](https://cloud.ai-mcn.tv/zh-CN/dashboard)** and create/copy your key under "API keys / key management".
 3. The next step, `gtrk install`, will prompt you to paste it (configure once, reuse locally forever).
 
+> Terms of record: [User agreement for the "OpenCut Gitruck Edition" client and the "gtrk CLI"](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [Privacy policy](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf) — **signing in or completing registration on the website constitutes your acceptance**; when you call cloud capabilities from the CLI, you are the party primarily responsible for the legality of the content you process.
+>
 > Quick-start docs: [cloud.ai-mcn.tv/zh-CN/docs/quick-start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · Business enquiries: business@migotimes.com
 
 ## Install & first run

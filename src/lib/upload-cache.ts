@@ -14,6 +14,7 @@ import {
 	type SessionStore,
 } from "./chunk-upload";
 import { uploadFile } from "./cloud";
+import { noticeOnce } from "./compliance-notice";
 import type { CloudConfig } from "./config";
 
 const CACHE_DIR = gitruckHome();
@@ -126,6 +127,12 @@ export async function uploadCached(
 	opts?: { force?: boolean },
 	deps: UploadCacheDeps = defaultUploadCacheDeps,
 ): Promise<{ fileId: string; cached: boolean }> {
+	// 合规告知（add-compliance-notice 2.1）：本函数是**文件上传的唯一咽喉**——uploadChunked 只被这里调用，
+	// 三个调用方（uploadAndSubmitTask / uploadManyAndSubmit / music-visualizer 的背景封面直调）全数经过。
+	// 挂在这里而非各调用方，是为守住 spec「MUST NOT 由各命令各自复制告知逻辑」；
+	// 位置在 stat 与缓存判定**之前**，确保任何情况下告知都早于内容离机。
+	// 幂等靠留痕，已告知过即静默返回；只告知不设闸——不阻断、不等输入、不改退出码（恒走 stderr）。
+	noticeOnce();
 	const s0 = await deps.stat(path);
 	const fp = fingerprintFromStat(s0);
 	const cache = await deps.cacheStore.load();

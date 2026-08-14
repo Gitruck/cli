@@ -8,7 +8,7 @@
 >
 > 一条命令，把口播毛片变成可二次精修的剪辑工程。云端做重活，本地只装配，源视频不出本地。
 
-**🔗 [官网](https://cloud.ai-mcn.tv/zh-CN/cli) · [使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [快速开始](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [客户端下载](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli)**
+**🔗 [官网](https://cloud.ai-mcn.tv/zh-CN/cli) · [使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [快速开始](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [客户端下载](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli) · [用户协议](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [隐私政策](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf)**
 
 ![把智能创作 AI 能力，装进你的本地 Agent](assets/gtrk-agent-intro.png)
 
@@ -51,6 +51,8 @@ CLI 要调用同合云云端能力，需先拿一个 API Key（形如 `gc_xxxxxx
 2. 进入 **[控制台](https://cloud.ai-mcn.tv/zh-CN/dashboard)**，在「API 密钥 / 密钥管理」处生成并复制你的 Key。
 3. 下一步 `gtrk install` 会让你把它粘进去（一次配好、本地长期复用）。
 
+> 条款正本：[《"OpenCut Gitruck Edition 客户端"与"gtrk CLI"用户协议》](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [隐私政策](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf) —— 官网**登录或完成注册即代表你已同意**；用 CLI 调用云端能力时，你是所处理内容合法性的第一责任人。
+>
 > 快速开始文档：[cloud.ai-mcn.tv/zh-CN/docs/quick-start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · 对接咨询：business@migotimes.com
 
 ## 安装 & 快速上手
