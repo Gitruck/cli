@@ -24,6 +24,12 @@ export interface UserConfig {
 	/** 素材理解端点完整 URL 覆盖（add-matrix-describe-and-window；缺省 = apiBase 推导
 	 * `/task/cli/material_describe`，env GITRUCK_DESCRIBE_URL 优先级更高）。 */
 	describeUrl?: string;
+	/** 合规告知留痕（add-compliance-notice）：已告知的条款版本标识。缺失 = 未告知；
+	 * 与 CLI 常量 TERMS_VERSION 不一致（条款实质更新后 bump）⇒ 重新告知一次。
+	 * **纯本地留痕**，MUST NOT 上报服务端；它 MUST NOT 被当作任何命令的执行前置条件。 */
+	termsNoticeVersion?: string;
+	/** 合规告知留痕（add-compliance-notice）：告知时间戳（ISO 8601）。 */
+	termsNoticeAt?: string;
 }
 
 export function configPath(): string {

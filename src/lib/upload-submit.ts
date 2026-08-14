@@ -71,6 +71,8 @@ export async function uploadAndSubmitTask(
 	// 工程外绝对 path）→ 在**上传发生前**拒绝（code=local_broll_cloud_render_rejected），
 	// MUST NOT 静默上传素材归一化为 file_id。
 	if (/\.gtrk$/i.test(path)) await guardGtrkCloudSubmit(path);
+	// 合规告知不在此挂载：已下沉到 uploadCached（文件上传的唯一咽喉），本函数经其转发即被覆盖。
+	// 见 src/lib/upload-cache.ts 的 noticeOnce() —— 挂在原语层才能连 music-visualizer 的直调一并收口。
 	let uploaded = await deps.uploadCached(cfg, path, { force: options.force });
 	options.onUploaded?.(uploaded);
 	const backoffMs = options.visibilityBackoffMs ?? DEFAULT_VISIBILITY_BACKOFF_MS;

@@ -333,6 +333,7 @@ async function uploadManyAndSubmit(
 	force: boolean,
 ): Promise<{ taskId: string; fileIds: string[]; cached: boolean }> {
 	const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+	// 合规告知不在此挂载：已下沉到 uploadCached（文件上传的唯一咽喉），本编排经其转发即被覆盖。
 	const uploads: Array<{ fileId: string; cached: boolean }> = [];
 	for (const p of paths) uploads.push(await deps.uploadCached(deps.cfg, p, { force }));
 	const trySubmit = () => deps.submitTask(deps.cfg, taskType, buildPayload(uploads.map((u) => u.fileId)));
