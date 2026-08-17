@@ -403,7 +403,7 @@ Standalone single-request capabilities, kept separate from the pipeline's lane c
 
 | Tool | Input | Output | Billing | Status |
 |---|---|---|---|---|
-| `image_move` | One image | Camera-move video (geometry derived from the source orientation: landscape 1920×1080 / portrait 1080×1920) | Queried live before the run | Live |
+| `image_move` | One image; optional `--motion` picks one of 26 camera moves | Camera-move video (geometry derived from the source orientation: landscape 1920×1080 / portrait 1080×1920) | Queried live before the run | Live |
 | `image_matting` | One image | Transparent-background png (`--param` can request a backing plate) | Queried live before the run | Live |
 | `image_blackborder_remove` | One local image | Image with black borders removed | Queried live before the run | Live |
 | `image_canvas_adapt` | One local image; optional target width/height and `normal` / `rectangle` / `square` | Aspect-adapted image | Queried live before the run | Live |
@@ -444,7 +444,7 @@ Standalone single-request capabilities, kept separate from the pipeline's lane c
 The seven shared video tools — black-border removal, aspect adaptation, stabilization, vaporwave, cleanup, upscaling and interpolation — accept only the server's current `video_ext`: `.mp4`, `.avi`, `.mpg`, `.mov`, `.flv`, `.mxf`, `.mpeg`, `.ogg`, `.3gp`, `.wmv`, `.h264`, `.m4v`, `.ts`; `.mkv` and `.webm` are rejected locally. Inputs must be local file paths — the CLI does not download remote videos.
 
 - `gtrk tool list [--json]` — list every tool (name/description/input/output/live price/status); `--json` emits a single-line machine-readable array (including dynamic `billingHint`/`pricing`). **Works without an API key**; prices are queried anonymously through a public endpoint, and on failure the full list is still shown with an unavailable marker.
-- `gtrk tool image_move ./photo.jpg [--json]` — image to camera move; artifacts land in `photo-image_move/`. `--param width=1080 --param height=1920` overrides the derived geometry.
+- `gtrk tool image_move ./photo.jpg [--motion zoom_in_center] [--json]` — image to camera move; artifacts land in `photo-image_move/`. `--motion` picks the camera move explicitly (26 values: 8 pans `up_to_down`/`down_to_up`/`left_to_right`/`right_to_left` plus four diagonals, 9 zoom-in anchors `zoom_in_{up,down,left,right,left_up,right_up,left_down,right_down,center}`, 9 zoom-out anchors `zoom_out_` at the same positions); when omitted the server picks one automatically. `--param width=1080 --param height=1920` overrides the derived geometry.
 - `gtrk tool image_matting ./portrait.jpg` / `gtrk tool video_matting ./clip.mp4` — image/video matting.
 - `gtrk tool image_blackborder_remove ./photo.jpg [--json]` — automatically crops black borders from one image.
 - `gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle [--json]` — image aspect conversion; omitting the canvas parameters uses the server defaults. Per the actual runtime contract the canvas mode accepts only `normal`, `rectangle` and `square`, not the `fit` from older docs.

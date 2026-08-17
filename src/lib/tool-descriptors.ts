@@ -224,6 +224,42 @@ export function probeImageDims(
 
 // ---------------------------------------------------------------- 图片/视频首批 descriptor
 
+/** image_move 的 --motion 白名单（26 值 = 平移 8 + 放大锚点 9 + 缩小锚点 9）。
+ * 源 = gitruck-infra `utils/process/media/vision/image_move.py` 的 `user_selectable_motion_set`；
+ * 透视缩放（zoom_in/out_perspective）留云端自动挡，刻意不入集。
+ * infra 侧扩枚举 MUST 联动更新本白名单与 skills/gtrk-tools/SKILL.md 枚举表（link-image-move-motion-param）。 */
+export const IMAGE_MOVE_MOTIONS = new Set([
+	// 平移 8（运动朝向）
+	"up_to_down",
+	"down_to_up",
+	"left_to_right",
+	"right_to_left",
+	"right_up_to_left_down",
+	"left_up_to_right_down",
+	"right_down_to_left_up",
+	"left_down_to_right_up",
+	// 放大 9（画布锚点方位）
+	"zoom_in_up",
+	"zoom_in_down",
+	"zoom_in_left",
+	"zoom_in_right",
+	"zoom_in_left_up",
+	"zoom_in_right_up",
+	"zoom_in_left_down",
+	"zoom_in_right_down",
+	"zoom_in_center",
+	// 缩小 9（同九方位）
+	"zoom_out_up",
+	"zoom_out_down",
+	"zoom_out_left",
+	"zoom_out_right",
+	"zoom_out_left_up",
+	"zoom_out_right_up",
+	"zoom_out_left_down",
+	"zoom_out_right_down",
+	"zoom_out_center",
+]);
+
 /** image_move —— 图转运镜（公共域 /task/image_move，价格运行时查公开价格表）。 */
 const imageMove: ToolDescriptor = {
 	name: "image_move",
@@ -235,8 +271,30 @@ const imageMove: ToolDescriptor = {
 	outputHint: "运镜视频",
 	enabled: true,
 	taskType: "image_move",
+	options: [
+		{
+			flag: "--motion <value>",
+			desc:
+				"运镜方式（未传则云端自动选择；显式指定后同图同参重跑结果一致）。" +
+				"平移 8：up_to_down/down_to_up/left_to_right/right_to_left 及四条对角线；" +
+				"放大锚点 9：zoom_in_{up,down,left,right,left_up,right_up,left_down,right_down,center}；" +
+				"缩小锚点 9：zoom_out_ 同九方位",
+		},
+	],
 	buildPayload(fileId, ctx) {
 		const p: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.motion != null) {
+			const value = String(ctx.opts.motion);
+			if (!IMAGE_MOVE_MOTIONS.has(value)) {
+				throw new Error(
+					`--motion 不支持「${value}」。合法值：平移 8（up_to_down/down_to_up/left_to_right/right_to_left/` +
+						"right_up_to_left_down/left_up_to_right_down/right_down_to_left_up/left_down_to_right_up）、" +
+						"放大锚点 9（zoom_in_{up,down,left,right,left_up,right_up,left_down,right_down,center}）、" +
+						"缩小锚点 9（zoom_out_ 同九方位）",
+				);
+			}
+			p.motion = value;
+		}
 		// 几何按原图朝向推导（best-effort）；用户显式给了 width/height 则不推导也不提示（runner 会合并覆盖）。
 		const explicit = ctx.extraParams.width != null || ctx.extraParams.height != null;
 		if (!explicit && ctx.inputAbs) {
