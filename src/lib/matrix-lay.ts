@@ -1221,9 +1221,22 @@ export function layBrollTracks(opts: {
 	// gtrk v1 里非主轨 track_index 越大越靠下（客户端 importer 升序进 overlay、overlay[0] 最上层），
 	// 故黑底恰好落在「全部候选轨（各层带）之下、口播主轨之上」，B-roll 期间遮住 A-roll。
 	// 他层保留轨在场时即使本轮零新轨也要重铺黑底（黑轨已被恒剥，位置随层结构平移）。
+	//
+	// ★ fix-broll-black-bed-regression：黑底在场不变量 —— **剥后仍有任何自产 B-roll 内容轨在场，
+	//   黑底就必须重铺**。黑轨剥离是无条件先行的（见上方 removedTracks 分支 `v.matched?.kind === "black"`），
+	//   所以这个条件漏掉任何一类「留下来的内容轨」，那一轮就会把黑底剥光而不重铺，
+	//   存量 B-roll 期间直接露出口播 A-roll。三类必须全含：
+	//     ① createdTracks        本轮新铺的目标层候选轨
+	//     ② rebasedBandTracks    他层自产轨（有层登记，随带区平移）
+	//     ③ transitionKeptIndices 存量自产轨但**无层登记也推不出层**（add-broll-dedup-and-layering
+	//        之前铺的老工程），按过渡口径保留不剥 —— 原实现漏了这一支，就是本回归的根因。
+	//   注：「已被你编辑」的自产轨（keptEditedTracks）走不到这里 —— 那种情形上方 ②-B 已整轮拒铺、
+	//   `next: gtrk` 原样返回，黑底因此天然保住，不需要也不应在此重复兜。
+	const hasSelfProducedContentInPlace =
+		createdTracks.length > 0 || rebasedBandTracks.length > 0 || transitionKeptIndices.length > 0;
 	let blackTrack: number | null = null;
 	let blackTrackObj: Record<string, unknown> | null = null;
-	if (blackBedOn && (createdTracks.length > 0 || rebasedBandTracks.length > 0)) {
+	if (blackBedOn && hasSelfProducedContentInPlace) {
 		if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
 			warnings.push(
 				`画布尺寸非法（${canvas[0]}x${canvas[1]}），跳过铺纯黑底轨（候选轨照常铺）。`,
@@ -1261,6 +1274,22 @@ export function layBrollTracks(opts: {
 				};
 			}
 		}
+	}
+
+	// ★ fix-broll-black-bed-regression：静默兜底断言。
+	// 本次回归之所以能瞒过客户与我们，是因为它在 CLI 输出上**双重静默**：
+	//   ① BUG 态只在绿色 ✅ 摘要里印一句「未铺纯黑底垫轨」，零 ⚠️；
+	//   ② 本来最该提示异常的「黑底空洞」遥测被门控在 `blackTrack !== null`（见下），于是一并归零。
+	// 于是「该有黑底却没有」这件事在人读与机读两侧同时消失。上面那个漏支已修，
+	// 但「内容轨在场 ∧ 未显式关断 ∧ blackTrack 落 null」这个组合本身还没有兜底 ——
+	// 将来若新增别的 null 分支，会重蹈同一种静默。这里补一条：凡走到该组合，MUST 出告警。
+	// （画布非法与 PNG 落盘失败两条既有 null 分支自带告警，此处会与之叠加，属可接受的重复提示；
+	//  宁可多说一句，也不要再让「黑底没了」无声无息。）
+	if (blackBedOn && hasSelfProducedContentInPlace && blackTrack === null) {
+		warnings.push(
+			`异常：本轮有 B-roll 内容轨在场、也没有 --no-black-bed，却没能铺出纯黑底垫轨 —— ` +
+				`这些 B-roll 段落底下会直接露出口播 A-roll。请回报此告警（含本轮命令行）以便定位。`,
+		);
 	}
 
 	// ── 黑底空洞检测与告警（fix-black-bed-holes-and-gating）──
