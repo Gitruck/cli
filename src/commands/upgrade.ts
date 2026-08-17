@@ -3,14 +3,23 @@
  *   gtrk upgrade          有新版则升级、通过通用适配器刷新 Agent Skills
  *   gtrk upgrade --check  只查有没有新版、不动手
  * 客户端（桌面端）升级见输出提示：重跑安装脚本即覆盖装最新版，配置不动。
+ * 该提示**只在有客户端的平台呈现**，且止步于告知 —— 见 ../lib/desktop-client-hint。
  */
 import { Command } from "commander";
 import { spawnSync } from "node:child_process";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 import { log } from "../lib/log";
+import { desktopClientUpgradeHint } from "../lib/desktop-client-hint";
 
-// 客户端（桌面端）一键升级 = 重跑安装脚本（NSIS 覆盖装最新、per-user、免管理员）。
-const CLIENT_UPGRADE = "irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex";
+/**
+ * 打一行客户端升级提示；无客户端的平台静默跳过。
+ * 全命令**只经此一处**提客户端（单一出口，防日后新增调用点漏掉平台门）——
+ * test/desktop-client-hint.test.mjs 有源码守卫钉住。
+ */
+function noteClientUpgrade(prefix: string): void {
+	const hint = desktopClientUpgradeHint(prefix);
+	if (hint) log.info(hint);
+}
 
 interface UpgradeOpts {
 	check?: boolean;
@@ -34,12 +43,12 @@ export function registerUpgrade(program: Command): void {
 
 			if (!latest) {
 				log.warn("查不到最新版本（网络问题？）。手动升级：npm i -g @gitruck/cli@latest");
-				log.info(`客户端（桌面端）升级：${CLIENT_UPGRADE}`);
+				noteClientUpgrade("客户端（桌面端）升级");
 				return;
 			}
 			if (cmpSemver(latest, cur) <= 0) {
 				log.ok(`已是最新版 v${cur}。`);
-				log.info(`客户端（桌面端）如需升级：${CLIENT_UPGRADE}`);
+				noteClientUpgrade("客户端（桌面端）如需升级");
 				return;
 			}
 
@@ -64,6 +73,6 @@ export function registerUpgrade(program: Command): void {
 			}
 
 			log.ok(`已升级到 v${latest}。配置原样保留，直接接着用即可（gtrk doctor 可自检）。`);
-			log.info(`客户端（桌面端）如需一起升级：${CLIENT_UPGRADE}`);
+			noteClientUpgrade("客户端（桌面端）如需一起升级");
 		});
 }
