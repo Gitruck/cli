@@ -1,11 +1,11 @@
 ---
 name: gtrk-mg
-description: MG 动态图颗粒铺轨器——成片 SOP 第 ④ 步，在 B-roll 定下来之后，把栏目的 html-particle 动态图颗粒（透明叠加 / 满屏底层）叠铺到 B-roll 之上。先由栏目 MG 生产 skill 按派单各槽位产颗粒，再驱动 `gtrk mg` 命令 lint + 铺进 `.gtrk` 工程的 beat_track。当用户想「铺 MG 颗粒 / 上动态图 / 铺动效 / 给这段配动画铺进工程 / 把 MG 派单铺轨 / 消费 dispatch.mg」时使用本 skill。凡涉及把 MG 动态图颗粒铺进已剪好的成片工程，优先用本 skill 驱动 gtrk CLI，别让用户自己去终端敲 `gtrk mg`。
+description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后叠上**），在 B-roll 底轨三源（影视素材 / 本地素材 / AI 情景片段）全部铺齐、且 ④ 全局抽帧检查构图通过之后，把栏目的 html-particle 动态图颗粒（透明叠加 / 满屏底层）叠铺到已定稿的底轨之上。先由栏目 MG 生产 skill 按派单各槽位产颗粒，再驱动 `gtrk mg` 命令 lint + 铺进 `.gtrk` 工程的 beat_track。当用户想「铺 MG 颗粒 / 上动态图 / 铺动效 / 给这段配动画铺进工程 / 把 MG 派单铺轨 / 消费 dispatch.mg」时使用本 skill。凡涉及把 MG 动态图颗粒铺进已剪好的成片工程，优先用本 skill 驱动 gtrk CLI，别让用户自己去终端敲 `gtrk mg`。
 ---
 
 # MG 动态图铺轨（gtrk-mg）
 
-把 `gtrk split` 派好的 **MG 槽位**（`dispatch.mg`），先由**栏目的 MG 生产 skill** 产成 html-particle 动态图颗粒，再交给 `gtrk mg` 命令 lint + 铺进 `.gtrk` 工程的 `beat_track`——**叠在已经定下来的 B-roll 之上**。**CLI 是手（lint / 铺轨 / 写回），你是脑（认 SOP 位置、驱动栏目生产 skill、管用户检查点、判 lint 该不该硬铺）。栏目生产 skill 只产纯净颗粒、不知 gtrk 命令，由你驱动。**
+把 `gtrk split` 派好的 **MG 槽位**（`dispatch.mg`），先由**栏目的 MG 生产 skill** 产成 html-particle 动态图颗粒，再交给 `gtrk mg` 命令 lint + 铺进 `.gtrk` 工程的 `beat_track`——**叠在已经定稿的底轨之上（B-roll 三源全落齐、构图已核）**。**CLI 是手（lint / 铺轨 / 写回），你是脑（认 SOP 位置、驱动栏目生产 skill、管用户检查点、判 lint 该不该硬铺）。栏目生产 skill 只产纯净颗粒、不知 gtrk 命令，由你驱动。**
 
 > **本 skill 已含你需要的全部信息**（SOP 位置、业务分离、逐槽位工作流、命令参数、lint 铁律、排错、交棒）。命令参数细节以 `gtrk mg --help` 为准；颗粒的视觉/内容规范**不在这里**——那是栏目资产，由栏目 MG 生产 skill 全权负责。
 
@@ -13,16 +13,25 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ④ 步，在 B-rol
 
 成片是**有序 SOP + 用户检查点**，不是并行一次铺完。全序：
 
-> ① `/gtrk-oralcut`（剪口播）→ ② `/gtrk-splitter`（拆分派单出 `dispatch.json`）→ **③ `/gtrk-matrix` 先铺 B-roll → 用户 opencut 挑选/调整确认** → **④ 本 skill：再铺 MG（叠在 B-roll 之上）** → ⑤ `/gtrk-ai-drama`（最后上 AI 再现）→ `gtrk render` 收口
+> ① `/gtrk-oralcut`（剪口播）→ ② `/gtrk-splitter`（拆分派单出 `dispatch.json`）→ **③ B-roll 底轨全铺齐**（`/gtrk-matrix` 铺影视/本地素材 + `/gtrk-ai-drama` 产稿→外部出片→用户手动回铺，**两条腿同一阶段**）→ **④ 全局抽帧检查画面构图（用户确认）** → **⑤ 本 skill：MG（含 ov）最后叠上** → `gtrk render` 收口
 
-**你是第 ④ 步。MG 颗粒是叠层——底下那层 B-roll 必须先定死，否则 MG 会盖在还没挑好的画面上白铺。** 所以动手前先过前置硬门。
+**你是第 ⑤ 步、也是最后一层。** MG 颗粒是**唯一的叠加层**——底下那整层底轨必须先定死（**三源全落齐**），否则你的排版避让是对着一个不完整的画面做的。
+
+> ⚠️ **AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**。旧序把你排在 AI 再现之前、理由写「越往后叠得越上层」——**那是把「工序次序」误当成了「图层次序」**。AI 片段在你之后回铺，底轨构图就变了，你先产的颗粒必然避让错位、甚至盖住 AI 画面主体。
+
+所以动手前先过前置硬门。
 
 ### 前置硬门（不满足就别铺，先回上一步）
 
-1. **B-roll 已铺且用户已确认**：若 `dispatch.film_broll` 非空，必须 ③ 已跑过 `gtrk matrix` **且用户已在 opencut 里挑选/调整确认**。用户没确认 → **别铺 MG**，先回 ③ 让用户定 B-roll，明确告诉他「B-roll 定了我再上 MG」。（`dispatch.film_broll` 为空 = 本片没 B-roll 底层，可直接进 ④。）
-2. **有 split 产物**：需要一个跑过 `gtrk split` 的产物目录（含 `split/dispatch.json` 与工程 `.gtrk`）。没有 → 先回 ② `/gtrk-splitter`。
-3. **`dispatch.mg` 非空**：为空 = 本片没有 MG 车道 → **别硬造**，直接交棒 ⑤（见末节）。
-4. **CLI 在**：`gtrk` 找不到 → 让用户装 `npm i -g @gitruck/cli@latest`（需先有 Node.js）。
+1. **影视/本地素材 B-roll 已铺且用户已确认**：若 `dispatch.film_broll` 非空，必须 ③ 已跑过 `gtrk matrix` **且用户已在 opencut 里挑选/调整确认**。没确认 → **别铺 MG**，先回 ③。（为空 = 本片没这条腿，看下一门。）
+2. ★ **AI 情景片段已回铺，或用户明示先跳过**：若 `dispatch.ai_drama` 非空，必须已回铺完（用户已把外部平台出的片子拖进工程）**或**用户**明示**「先跳过 AI、先把 MG 铺上」。
+   - 外部平台抽卡可能数天，严格串行会把你无限期卡住，故留这个口子。
+   - **走跳过时你 MUST 付这个对价**：把**与 AI beat 相邻或重叠区间的 MG 颗粒**逐一标记为「**AI 回铺后待复查构图**」，并在交棒 `render` 时把该清单复述给用户。**MUST NOT 静默跳过** —— 用户得知道哪几颗将来可能要返工。
+   - （为空 = 本片没 AI 车道，此门自动通过。）
+3. ★ **④ 全局抽帧检查已过、用户已确认构图**：对**三源合并后的最终底轨**抽帧看主体位置 / 安全区 / 画面朝向 / 明暗，用户确认无误。**这与 ③ 那次「挑选 B-roll」的确认是两次不同的确认**，别拿前一次顶替。没做 → 先做 ④ 再回来。
+4. **有 split 产物**：需要一个跑过 `gtrk split` 的产物目录（含 `split/dispatch.json` 与工程 `.gtrk`）。没有 → 先回 ② `/gtrk-splitter`。
+5. **`dispatch.mg` 非空**：为空 = 本片没有 MG 车道 → **别硬造**，直接 `gtrk render` 收口（见末节）。
+6. **CLI 在**：`gtrk` 找不到 → 让用户装 `npm i -g @gitruck/cli@latest`（需先有 Node.js）。
 
 ## 业务分离：谁产颗粒（栏目），谁铺轨（本 skill）
 
@@ -154,12 +163,12 @@ gtrk mg --project "<split产物目录>" --json
 - **轨上有几颗不是这一轮的**：`kept > 0` 时点名 `kept_ids`——「这次只重铺了 N 颗，轨上另外 K 颗是上一轮的（位置和内容都还是旧版），要全刷新就全量重铺一次」。**别让「铺轨完成」读起来像轨上全是新的。**
 - 想在 opencut 里精修颗粒（手调参数/时长）→ 提示用户可打开工程手调。**但要把话说全**：手调只在「这颗**没被**下一次重铺命中」时活得下来——`--only <别的 beat>` 或全量重铺时被 skip 掉的那几颗会原样保留（含手调）；**一旦某次重铺真的铺到了这颗，CLI 自产的新 clip 会整条覆盖它，手调就没了**。要长期保留的手调，别放在 CLI 自产的 MG clip 上。
 
-## 交棒 ⑤（别停在铺完）
+## 交棒 `render` 收口（你是最后一层，别停在铺完）
 
-`dispatch.mg` 全铺满、`gtrk mg status` 全绿后**别收工**——按 SOP 顺势接力到第 ⑤ 步 **AI 再现**：
-- `dispatch.ai_drama` 非空 → 触发 `/gtrk-ai-drama`（持通用分镜 craft + 读栏目 style-lock，产 AI 再现分镜稿——四段描述 + 独立视觉基调 + 时长预算；用户去可灵 / Vidu 等外部平台出片回铺；**此车道产物即分镜稿、无 gtrk 命令**）。一句话交代即推进：「MG 颗粒已叠铺完，我接着安排最后一步 AI 再现」。
-- `dispatch.ai_drama` 为空 → 本片没有 AI 车道，可直接 `gtrk render` 收口成片。
+`dispatch.mg` 全铺满、`gtrk mg status` 全绿后**别收工**——你已是最后一层，顺势 `gtrk render` 收口成片。一句话交代即推进：「MG 颗粒已叠铺完，我接着出片」。
 
-除非用户表示只铺这一版 MG、暂不往下。
+★ **若你是走前置硬门 2 的「明示跳过 AI」进来的**：收口前 MUST 把那份「**AI 回铺后待复查构图**」清单复述给用户（哪几颗颗粒、对应哪几个 AI beat 区间），并说明「AI 片段回铺后这几颗可能要重产」。**MUST NOT 静默收口。**
+
+除非用户表示只铺这一版 MG、暂不出片。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill、驱动栏目生产 skill，用户只对话**——别让用户自己去终端敲 `gtrk mg`，也别让用户手动去 call 栏目生产 skill。

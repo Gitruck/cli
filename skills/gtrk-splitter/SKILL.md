@@ -49,6 +49,8 @@ gtrk split --project "<oralcut产物目录>" --json
 
 **抽帧确认底轨画面（凡毛片可能已含视觉包装时必做，勿只凭文稿派单）**：view.json 只给你文字，看不见画面——但毛片未必是素的。**二次过 / 补 ov 场景**（毛片本身是已烧入 MG、AI 再现或其他包装的成片再加工）尤其危险：只凭时码派 overlay 会撞上已有包装叠罗汉。姿势：对候选挂点（尤其打算派 `overlay` 的句区间）用本地 ffmpeg 按 `track_st` 抽 1 帧看一眼（`ffmpeg -ss <秒> -i <毛片> -frames:v 1 "<系统temp>/<句id>.jpg"`，成本≈0；抽帧图是临时文件——落系统 temp、用完即删，**别落 cwd / agent 自有目录**），确认该处画面性质——**裸口播 → 正常派；已有包装 → 避开该区间或另选挂点；拿不准 → 列给用户裁决**。首次过全素毛片可免；一旦毛片来历含「粗剪成片 / 待 ov 补充 / 二次过」字样，此步为硬门。抽帧顺带看清真人主体位置与画面明暗，写进 beat 的语义上下文，供下游产颗粒时构图避让。
 
+> 📌 **这一步与 SOP ④ 的全局抽帧检查不是同一件事，两者都要**：这里抽的是**毛片原始画面**（派单前，判该处是裸口播还是已有包装）；④ 抽的是**B-roll 三源全铺齐后的最终底轨**（产 MG 前，供排版避让）。前者防「派单派到包装上」，后者防「MG 对着不完整底轨做避让」。
+
 ### 3. 写拆分稿 JSON
 
 按 `references/field-schema.md` 的契约写。骨架：
@@ -115,19 +117,26 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 
 ### 7. 交棒下游 SOP（有序，别停在派单）
 
-dispatch 落地后**不要收工**——但下游各车道是**有先后的 SOP、每步用户可介入**，**不是并行一次铺完**。次序（有理由：MG 叠在 B-roll 之上，要先把底层定下来）：
+dispatch 落地后**不要收工**——但下游各车道是**有先后的 SOP、每步用户可介入**，**不是并行一次铺完**。次序：
 
-> **③ 先铺 B-roll（定底层）→ 用户调整确认 → ④ 再铺 MG（叠在 B-roll 上）→ ⑤ 最后上 AI 再现 → `gtrk render` 收口**
+> **③ B-roll 底轨全铺齐（影视素材 / 本地素材 / AI 情景片段）→ ④ 全局抽帧检查画面构图 → ⑤ MG（含 ov）叠上 → `gtrk render` 收口**
 
-按序推进、每步替用户跑命令，**关键处（尤其 B-roll 铺完）停下等用户确认**再进下一步；哪条车道 dispatch 队列为空就跳过。
+**为什么是这个序**：**AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**——叠加层只有 MG（含 ov）。MG 的排版决策是「因势象形避主体」，**依赖底轨的最终画面构图**；若 AI 片段在 MG 之后才回铺，底轨构图就变了，先产的 MG 是对着「还没有 AI 画面的底轨」做的避让，AI 片段落位后必然错位、甚至盖住 AI 画面主体。
 
-- **③ B-roll**（`dispatch.film_broll` 非空）：跑 `gtrk matrix --project <目录>`（检索 + 候选铺轨）→ **提示用户 opencut 里挑选/调整 B-roll**（小眼睛切换对比），确认后再进 ④。
-- **④ MG**（`dispatch.mg` 非空）：先由**栏目 MG 生产 skill** 按各槽位 `handoff`（theme/duration_hint/category）产 html-particle 颗粒，再跑 `gtrk mg --project <目录>`（lint + 铺轨，叠在 B-roll 上）。
-- **⑤ AI 再现**（`dispatch.ai_drama` 非空）：触发 `/gtrk-ai-drama` skill（持通用分镜 craft + 读栏目 style-lock）产 AI 再现分镜稿（四段描述 + 独立视觉基调 + 时长预算）→ 用户去可灵 / Vidu 等外部平台出片、回铺（**此车道产物即分镜稿、无机械尾巴 → 只 skill、无 gtrk 命令**，同 `/gtrk-style-maker`）。
+> ⚠️ 旧序（MG 在 AI 再现之前）的理由写的是「越往后叠得越上层」——**那是把「工序次序」误当成了「图层次序」**。工序上 AI 片段必须先落位；图层上它本来就在底轨。
+
+按序推进、每步替用户跑命令，**关键检查点停下等用户确认**再进下一步；哪条车道 dispatch 队列为空就跳过。
+
+- **③ B-roll 底轨（两条腿，同一阶段）**
+  - **影视 / 本地素材腿**（`dispatch.film_broll` 非空）：跑 `gtrk matrix --project <目录>`（检索 + 候选铺轨）→ **提示用户 opencut 里挑选/调整 B-roll**（小眼睛切换对比）。
+  - **AI 情景片段腿**（`dispatch.ai_drama` 非空）：触发 `/gtrk-ai-drama` skill（持通用分镜 craft + 读栏目 style-lock）产分镜稿（四段描述 + 独立视觉基调 + 时长预算）→ 用户去可灵 / Vidu 等外部平台出片、**手动回铺**（此车道产物即分镜稿、无机械尾巴 → 只 skill、无 gtrk 命令，同 `/gtrk-style-maker`）。
+  - ⚠️ **异步等待的口子**：AI 出片是手动异步（外部平台抽卡可能数天），严格串行会把后续无限期卡住。故 `dispatch.ai_drama` 非空时，进 ⑤ 的硬门是「**AI 片段已回铺 ∨ 用户明示先跳过**」。走「明示跳过」时你 MUST 把**与 AI beat 相邻或重叠区间的 MG 颗粒**标记为「AI 回铺后待复查构图」，并在交棒 `render` 时把该清单复述给用户——**MUST NOT 静默跳过**。
+- **④ 全局抽帧检查画面构图**（关键检查点，无专属 skill、是 agent 纪律）：对**三源合并后的最终底轨**抽帧，看主体位置 / 安全区 / 画面朝向 / 明暗，供 ⑤ 的 MG 排版避让决策使用。**MUST 停下等用户确认构图无误**再进 ⑤（这与 ③ 铺完那次确认是两次不同的确认）。
+- **⑤ MG（含 ov），最后叠上**（`dispatch.mg` 非空）：先由**栏目 MG 生产 skill** 按各槽位 `handoff`（theme/duration_hint/category）产 html-particle 颗粒，再跑 `gtrk mg --project <目录>`（lint + 铺轨，叠在已定稿的底轨之上）。
 
 **各车道的生产 skill 由栏目配置解析（业务分离）**：读 `style.skills[]`，取 `produces` 归一（旧 `RRV_MG`→`MG`）== 该车道 的条目 → 触发其 `ref` 指向的 skill；`routing:"none"` 跳过；无匹配 = 无生产 skill（B-roll 无需、A_ROLL 就是口播本身）。生产 skill 是栏目资产、留纯净、不知 gtrk 命令。
 
-> 每车道有专属**驱动 skill**（懂 SOP 位置 + 管用户检查点）：拆分派单后**直接交棒 ③ `/gtrk-matrix`**（先铺 B-roll），它再按 SOP 交棒 ④ `/gtrk-mg`、⑤ `/gtrk-ai-drama`。你（agent）触发 `/gtrk-matrix` 起步即可。**agent 替用户跑 CLI，用户只对话。**
+> 每车道有专属**驱动 skill**（懂 SOP 位置 + 管用户检查点）：拆分派单后**直接交棒 ③ `/gtrk-matrix`**（B-roll 底轨的影视/本地素材腿），AI 车道非空时它再交棒同阶段的 `/gtrk-ai-drama`；三源落齐 + ④ 抽帧检查过后，才交棒 ⑤ `/gtrk-mg`。你（agent）触发 `/gtrk-matrix` 起步即可。**agent 替用户跑 CLI，用户只对话。**
 
 ---
 
