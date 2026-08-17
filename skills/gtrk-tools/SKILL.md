@@ -15,7 +15,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 | 工具名 | 触发语（用户可能怎么说） | 输入要求 | 产物形态 | 计费 | 可用状态 |
 |---|---|---|---|---|---|
-| `image_move` | 「把这张图做成运镜视频 / 让图动起来 / 图转视频」 | 单张图片 | 运镜视频 | 运行前实时查询 | 已上线 |
+| `image_move` | 「把这张图做成运镜视频 / 让图动起来 / 图转视频 / 往右推镜 / 拉远」 | 单张图片；可选 `--motion` 指定 26 种运镜之一（见下文枚举表） | 运镜视频 | 运行前实时查询 | 已上线 |
 | `image_matting` | 「给图片抠像 / 抠出主体 / 去背景 / 出透明 png」 | 单张图片 | 透明背景 png | 运行前实时查询 | 已上线 |
 | `image_blackborder_remove` | 「图片去黑边 / 裁掉四周黑边 / 保留有效画面」 | 单张本地图片 | 去黑边图片 | 运行前实时查询 | 已上线 |
 | `image_canvas_adapt` | 「图片比例转换 / 调整画布尺寸 / 转成矩形或方形裁剪」 | 单张本地图片；模式只支持 `normal` / `rectangle` / `square` | 比例适配图片 | 运行前实时查询 | 已上线 |
@@ -99,6 +99,14 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 8. **单发单收、批量靠循环**：一次一份输入；用户要批处理就你逐个循环调。例外是多文件图片工具（`image_classic_template` / `image_vertical_stitch`）——它们的一份输入天然是一组图片（一次任务一次计费），传参顺序即拼装顺序，别把它当批处理。
 
 图片比例转换常用形态：`gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --json`。`--canvas-type` 只接受实际运行时契约 `normal`、`rectangle`、`square`；不要传旧文档中的 `fit`。省略画布参数时不替服务端写死默认值。
+
+图转运镜可指定运镜方式：`gtrk tool image_move ./photo.jpg --motion zoom_in_center --json`。`--motion` 未传时云端自动选择（构图 + 主体识别 + 随机，同图重跑结果会变）；显式指定后同图同参重跑结果一致。合法值 26 个、分三组，用户说「往右推 / 拉远 / 从左往右扫」这类自然语言时按语义对号入座，对不上就问清，别瞎猜：
+
+| 组 | 取值 | 语义 |
+|---|---|---|
+| 平移 8（值=运动朝向） | `up_to_down` `down_to_up` `left_to_right` `right_to_left` `left_up_to_right_down` `right_down_to_left_up` `right_up_to_left_down` `left_down_to_right_up` | 画面沿该方向平移扫过 |
+| 放大 9（值=画布锚点方位） | `zoom_in_center` `zoom_in_up` `zoom_in_down` `zoom_in_left` `zoom_in_right` `zoom_in_left_up` `zoom_in_right_up` `zoom_in_left_down` `zoom_in_right_down` | 以中心 / 边中点 / 角为锚点推近 |
+| 缩小 9（锚点同上） | `zoom_out_center` 及 `zoom_out_` 同九方位 | 以对应锚点拉远 |
 
 这七个公共视频工具（去黑边、比例转换、防抖、蒸汽波、净化、超分、插帧）都只接本地文件，允许扩展名为 `.mp4/.avi/.mpg/.mov/.flv/.mxf/.mpeg/.ogg/.3gp/.wmv/.h264/.m4v/.ts`；不要把 `.mkv`、`.webm` 或 URL 交给它们。
 

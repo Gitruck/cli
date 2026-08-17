@@ -43,7 +43,9 @@ export function imageMoveDurationForSlot(slotSec: number): number {
 	return Math.min(IMAGE_MOVE_DURATION_MAX_SEC, Math.max(IMAGE_MOVE_DURATION_MIN_SEC, d));
 }
 
-/** 参数指纹 = blake3("duration|width|height") 前 8 hex（D3；进材料 id，同图不同参不串产物）。 */
+/** 参数指纹 = blake3("duration|width|height") 前 8 hex（D3；进材料 id，同图不同参不串产物）。
+ * 铺轨链刻意不接 motion（恒云端自动挡，link-image-move-motion-param 拍板）；
+ * 将来若接入 motion，MUST 把它纳入本指纹，否则同图不同运镜共享缓存串产物。 */
 export async function imageMoveParamFingerprint(p: ImageMoveParams): Promise<string> {
 	return (await blake3(`${p.duration}|${p.width}|${p.height}`)).slice(0, 8);
 }

@@ -403,7 +403,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 
 | 工具 | 输入 | 产物 | 计费 | 状态 |
 |---|---|---|---|---|
-| `image_move` | 单张图片 | 运镜视频（几何按原图朝向推导：横 1920×1080 / 竖 1080×1920） | 运行前实时查询 | 已上线 |
+| `image_move` | 单张图片；可选 `--motion` 指定 26 种运镜之一 | 运镜视频（几何按原图朝向推导：横 1920×1080 / 竖 1080×1920） | 运行前实时查询 | 已上线 |
 | `image_matting` | 单张图片 | 透明背景 png（可 `--param` 请求背景底板） | 运行前实时查询 | 已上线 |
 | `image_blackborder_remove` | 单张本地图片 | 去黑边图片 | 运行前实时查询 | 已上线 |
 | `image_canvas_adapt` | 单张本地图片；可选目标宽高与 `normal` / `rectangle` / `square` | 比例适配图片 | 运行前实时查询 | 已上线 |
@@ -444,7 +444,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 去黑边、比例转换、防抖、蒸汽波、净化、超分、插帧七个公共视频工具只接受服务端当前 `video_ext`：`.mp4`、`.avi`、`.mpg`、`.mov`、`.flv`、`.mxf`、`.mpeg`、`.ogg`、`.3gp`、`.wmv`、`.h264`、`.m4v`、`.ts`；`.mkv` 与 `.webm` 会在本地拒绝。输入必须是本地文件路径，CLI 不负责下载远端视频。
 
 - `gtrk tool list [--json]` — 列全部工具（名称/说明/输入/产物/实时价格/状态）；`--json` 出单行机读数组（含动态 `billingHint`/`pricing`）。**无 API Key 也能跑**；价格通过公开接口匿名查询，失败仍列完整清单并标记暂不可用。
-- `gtrk tool image_move ./photo.jpg [--json]` — 图转运镜；产物落 `photo-image_move/`。`--param width=1080 --param height=1920` 覆盖推导几何。
+- `gtrk tool image_move ./photo.jpg [--motion zoom_in_center] [--json]` — 图转运镜；产物落 `photo-image_move/`。`--motion` 显式指定运镜方式（26 值：平移 8 `up_to_down`/`down_to_up`/`left_to_right`/`right_to_left` 及四对角线、放大锚点 9 `zoom_in_{up,down,left,right,left_up,right_up,left_down,right_down,center}`、缩小锚点 9 `zoom_out_` 同九方位），未传由云端自动选择；`--param width=1080 --param height=1920` 覆盖推导几何。
 - `gtrk tool image_matting ./portrait.jpg` / `gtrk tool video_matting ./clip.mp4` — 图片/视频抠像。
 - `gtrk tool image_blackborder_remove ./photo.jpg [--json]` — 自动裁去单张图片四周黑边。
 - `gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle [--json]` — 图片比例转换；省略画布参数时沿用服务端默认。画布模式按实际运行时契约只接受 `normal`、`rectangle`、`square`，不接受旧文档中的 `fit`。
