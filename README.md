@@ -88,18 +88,22 @@ gtrk transcript "D:/素材/采访视频.mp4"
 
 **每片一条龙（有先后的 SOP，对 agent 说话、每步你可介入——不是一次性并行铺完）**
 
-各车道**按次序铺、每步留检查点**：先铺 B-roll 定底层 → 你调好 → 再把 MG 叠上去 → 最后上 AI 再现。你对话推进每一步，agent 替你跑对应命令。
+各车道**按次序铺、每步留检查点**：先把 B-roll 底轨三源铺齐（影视素材 / 本地素材 / AI 情景片段）→ 你调好 → 抽帧核一遍画面构图 → 最后才把 MG（含 ov）叠上去。你对话推进每一步，agent 替你跑对应命令。
 
 | 步 | 你对 agent 说 | agent 替你做 | 你可以介入 |
 |:--:|---|---|---|
 | ① | 「帮我把这条口播**剪一版**」 | `/gtrk-oralcut` → `gtrk oralcut` → 三方工程 + transcript | — |
 | ② | 「接着**拆分镜派单**」 | `/gtrk-splitter` → `gtrk split` → `dispatch.json` 四车道 | 核对派单结果 |
-| ③ | 「**先铺 B-roll**」 | `/gtrk-matrix` → `gtrk matrix` → 候选轨铺入 | **opencut 里挑选/调整 B-roll**（小眼睛切换对比） |
-| ④ | 「B-roll 定了，**铺 MG**」 | `/gtrk-mg` → `gtrk mg` → MG 颗粒叠在 B-roll 之上 | 精修颗粒（opencut 手调） |
-| ⑤ | 「**上 AI 再现**」 | `/gtrk-ai-drama`（skill，无命令）→ 四段描述稿（中英分块） | 外部平台出片、片段手动回铺 |
+| ③ | 「**铺 B-roll 底轨**」（两条腿同一阶段） | `/gtrk-matrix` → `gtrk matrix` → 影视/本地素材候选轨铺入；`/gtrk-ai-drama`（skill，无命令）→ 四段描述稿（中英分块） | **opencut 里挑选/调整 B-roll**（小眼睛切换对比）；AI 片段去外部平台出片、**手动回铺** |
+| ④ | 「B-roll 齐了，**抽帧看看构图**」 | 对**三源合并后的最终底轨**抽帧（agent 纪律，无专属命令） | **确认构图**（主体位置 / 安全区 / 朝向 / 明暗） |
+| ⑤ | 「构图没问题，**铺 MG**」 | `/gtrk-mg` → `gtrk mg` → MG（含 ov）叠在已定稿的底轨之上 | 精修颗粒（opencut 手调） |
 | ⑥ | 「**出成片**」 | 客户端出片链（多车道合成 + 颗粒云渲 / 导剪映）；`gtrk render` 只出**主轨快照预览** | 客户端里精修定稿 |
 
-> 次序有理由：**MG 叠在 B-roll 之上**，要先把底层 B-roll 定下来、你满意了再铺 MG；AI 再现最后上。用不到的车道跳过（`dispatch` 里该队列为空就不铺）。
+> **次序有理由**：**AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**——整条管线里唯一的叠加层是 MG（含 ov）。MG 的排版是「因势象形避主体」、**依赖底轨的最终画面构图**，所以三源（影视 / 本地 / AI）必须全落齐、构图核过，才轮到 MG。用不到的车道跳过（`dispatch` 里该队列为空就不铺）。
+>
+> ⚠️ **旧版文档曾写「④ 铺 MG → ⑤ 最后上 AI 再现」，理由是「越往后叠得越上层」——那是把「工序次序」误当成了「图层次序」，已于 2026-08-17 纠正。** 若你装的是旧版 skill，`gtrk upgrade` 刷新后才是新序。
+>
+> **AI 出片是异步的**：外部平台抽卡可能数天，严格串行会把 ④⑤ 无限期卡住。故进 ⑤ 的门是「**AI 片段已回铺 ∨ 你明示先跳过**」；走跳过时 agent 会把与 AI 区间相邻/重叠的 MG 颗粒标记为「AI 回铺后待复查构图」并在收口时复述给你。
 >
 > ③④⑤⑥ 都要**回到客户端**挑选 / 精修 / 回铺 / 出片——CLI 把料铺进 `.gtrk`，客户端把 `.gtrk` 出成片。详见下文「**CLI × 客户端**」小节。
 
@@ -137,7 +141,7 @@ CLI 写 .gtrk ─▶ 客户端打开(自动感知外部改动、先存脏改再�
 | **B-roll 候选挑选** | `gtrk matrix` 铺 N 条候选轨，用轨道**小眼睛**逐条切换对比、选定、删多余——审美取舍只能人在客户端做 |
 | **MG / 颗粒精修** | 客户端里 html-particle **活颗粒透明预览** + Transform/Blending/Effects 参数逐帧微调 |
 | **口播精剪** | 磁性主轨 ripple、手动微调切点 / 停顿 / 分屏 |
-| **AI 再现回铺** | 外部平台出的 AI 片段**手动拖进 AI_DRAMA 车道**对齐区间（`/gtrk-ai-drama` 只吐描述稿，片在外部平台出，见 SOP ⑤） |
+| **AI 再现回铺** | 外部平台出的 AI 片段**手动拖进 AI_DRAMA 车道**对齐区间（`/gtrk-ai-drama` 只吐描述稿，片在外部平台出，见 SOP ③——它属底轨阶段，MG 要等它落位后才铺） |
 | **最终出片** | 多车道合成（overlay / MG / particle 云渲叠起来）+ 剪映草稿导出，都在客户端出片链 |
 
 > **`gtrk render` ≠ 最终成片。** `gtrk render` 是本地 ffmpeg 出**主轨（口播粗剪）的快照预览**——只合主视频轨 + 音轨，**不合成 overlay（B-roll 候选）/ MG 颗粒 / AI 再现**。要出**真正的多车道成片**（各车道叠起来、颗粒云渲、导剪映草稿），走**客户端出片链**。一句话：**CLI 管「把料铺进工程」，客户端管「把工程出成片」。**
@@ -202,9 +206,10 @@ gtrk skills install --copy
 |:--:|---|---|---|
 | ① | `/gtrk-oralcut` | `gtrk oralcut` | 智能剪口播 → 客户端/剪映/PR 三方工程 + transcript |
 | ② | `/gtrk-splitter` | `gtrk split` | 拆分派单 → `dispatch.json`（A_ROLL/MG/AI_DRAMA/FILM_BROLL 四车道） |
-| ③ | `/gtrk-matrix` | `gtrk matrix` | **先铺 B-roll** 候选轨 → **用户调整/挑选**（opencut 小眼睛切换） |
-| ④ | `/gtrk-mg` | `gtrk mg` | **再铺 MG 颗粒**（叠在调好的 B-roll 之上） |
-| ⑤ | `/gtrk-ai-drama` | （无命令，纯创作） | **最后上 AI 再现**：产四段描述稿（故事背景/角色/分镜/原文，中英分块）→ 任意外部平台出片、手动回铺（产物即描述文本、无机械尾巴，同 `/gtrk-style-maker` 只 skill 无命令） |
+| ③ | `/gtrk-matrix` | `gtrk matrix` | **B-roll 底轨·影视/本地素材腿**：铺候选轨 → **用户调整/挑选**（opencut 小眼睛切换） |
+| ③ | `/gtrk-ai-drama` | （无命令，纯创作） | **B-roll 底轨·AI 情景片段腿（与 matrix 同阶段，不是最后）**：产四段描述稿（故事背景/角色/分镜/原文，中英分块）→ 任意外部平台出片、手动回铺（产物即描述文本、无机械尾巴，同 `/gtrk-style-maker` 只 skill 无命令） |
+| ④ | （无 skill） | （无命令） | **全局抽帧检查画面构图**：对三源合并后的最终底轨抽帧，用户确认构图——这是 agent 纪律硬门，供 ⑤ 的排版避让决策使用 |
+| ⑤ | `/gtrk-mg` | `gtrk mg` | **MG（含 ov）最后叠上**（叠在已定稿、构图已核的底轨之上） |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
 | — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4 |
 | 📝 | `/gtrk-transcript` | `gtrk transcript` | 本地视频 → 一个含 Agent 总结、时码记录和纯文本的 Markdown，**不在成片 SOP 序列内** |
@@ -212,7 +217,7 @@ gtrk skills install --copy
 | 🎵 | `/gtrk-music-visualizer` | `gtrk music-visualizer` | 一首歌 → 频谱可视化成片（模板 + 可选背景/封面 + 配色样式），**不在成片 SOP 序列内**、独立引流用 |
 | 🖼️ | `/gtrk-cover` | （无命令，纯创作） | 封面工作台两阶段：设计诊断 + 三尺寸中英双版文生图 Prompt → 用户外部平台抽图 → H5 排字工作台（拖拽/滚轮微调、一键导出多尺寸 PNG）。栏目封面审美经栏目配置 `style.skills`（`produces:"cover"`）注入；**不在成片 SOP 序列内**（投放配套的「第 0 阶段」） |
 
-> **skill 与命令的区别**：`/gtrk-mg` 是**脑**——懂它在 SOP 第 ④ 步（B-roll 定了才铺 MG）、带用户确认、按栏目配置解析该产哪种颗粒；`gtrk mg` 是**手**——纯确定性 lint + 铺轨。你对话触发 skill，skill 替你跑命令。
+> **skill 与命令的区别**：`/gtrk-mg` 是**脑**——懂它在 SOP 第 ⑤ 步（B-roll 三源全齐、构图核过才铺 MG）、带用户确认、按栏目配置解析该产哪种颗粒；`gtrk mg` 是**手**——纯确定性 lint + 铺轨。你对话触发 skill，skill 替你跑命令。
 > 上面 10 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装）——`/gtrk-transcript` 独立驱动视频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，三者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
 
 **各车道的具体视觉/内容怎么产**——MG 动态图长什么样、AI 再现什么调性——不写死在 CLI 里，而由**你自己栏目的生产 skill** 提供（用 `/gtrk-style-maker` 访谈式产出、留本地）。它们经**栏目配置 `style.skills[].produces`**（值 = 车道名）绑定，`gtrk mg` / `gtrk matrix` 等**通用驱动器**据此消费。**驱动方向 = CLI 驱动栏目 skill**：栏目 skill 只供风格/内容、不含任何「跑哪条命令」的编排职责；框架只认车道与管线接口，画面风格永远归你的栏目。不建栏目就用内置默认，端到端照常跑。
