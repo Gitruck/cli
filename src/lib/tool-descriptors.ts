@@ -225,7 +225,7 @@ export function probeImageDims(
 // ---------------------------------------------------------------- 图片/视频首批 descriptor
 
 /** image_move 的 --motion 白名单（26 值 = 平移 8 + 放大锚点 9 + 缩小锚点 9）。
- * 源 = gitruck-infra `utils/process/media/vision/image_move.py` 的 `user_selectable_motion_set`；
+ * 源 = gitruck-infra `utils/process/media/vision/image_move_motions.py` 的 `user_selectable_motion_set`；
  * 透视缩放（zoom_in/out_perspective）留云端自动挡，刻意不入集。
  * infra 侧扩枚举 MUST 联动更新本白名单与 skills/gtrk-tools/SKILL.md 枚举表（link-image-move-motion-param）。 */
 export const IMAGE_MOVE_MOTIONS = new Set([
