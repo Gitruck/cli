@@ -15,6 +15,7 @@ import {
 	type UserConfig,
 } from "../lib/user-config";
 import { noticeOnce } from "../lib/compliance-notice";
+import { FIRST_RUN_USAGE_LINES } from "../lib/first-run-tutorial";
 import { probeJianyingDraftDir } from "../lib/jianying";
 import { openFile } from "../lib/open";
 import { packageRoot } from "../lib/paths";
@@ -142,10 +143,8 @@ async function afterConfigDoctor(): Promise<void> {
 	const healthy = await runDoctor();
 	if (healthy) {
 		log.step("装好了！两种用法任选：");
-		log.info('① 命令行直接剪：gtrk oralcut "<毛片.mp4>" --script "<文字稿.txt>"（无稿就别加 --script）');
-		log.info(
-			"② 刷新你常用的 AI Agent，在它的 Skills 入口选择或点名 gtrk-oralcut；不同客户端也都可以直接描述剪辑需求触发。",
-		);
+		// 文案与首跑教程块并源（add-first-run-tutorial）：同一句话别在两处各写一遍
+		for (const line of FIRST_RUN_USAGE_LINES) log.info(line);
 		log.info(
 			"想有自己栏目的风格体系？在 agent 里跑 /gtrk-style-maker 建一次「你的厨房」（skill 家族 + 栏目配置）；不建就直接用默认，照常开剪。",
 		);

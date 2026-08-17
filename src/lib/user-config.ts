@@ -30,6 +30,10 @@ export interface UserConfig {
 	termsNoticeVersion?: string;
 	/** 合规告知留痕（add-compliance-notice）：告知时间戳（ISO 8601）。 */
 	termsNoticeAt?: string;
+	/** 首跑教程指路留痕（add-first-run-tutorial）：已指路的时间戳（ISO 8601）。缺失 = 未指路。
+	 * **纯本地留痕**，MUST NOT 上报服务端；它 MUST NOT 被当作任何命令的执行前置条件。
+	 * 注：存量老用户（配置里已有 apiKey）会被静默补痕、不打印——见 first-run-tutorial.ts 的 looksOnboarded()。 */
+	firstRunNoticeAt?: string;
 }
 
 export function configPath(): string {

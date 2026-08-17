@@ -56,12 +56,22 @@ const { version } = JSON.parse(readFileSync(join(packageRoot(), "package.json"),
 	version: string;
 };
 
+import { firstRunTutorialOnce } from "./lib/first-run-tutorial";
+
 const program = new Command();
 
 program
 	.name("gtrk")
 	.description("同合云成片流水线 CLI —— agent 驱动云端任务、产物拉回本地、三方工程文件（客户端/剪映/PR）互通")
 	.version(version);
+
+// ── 首跑教程指路（add-first-run-tutorial）──
+// 挂在入口一处收口：任何子命令的首次运行都会指一次路，各子命令零改动。
+// 恒 stderr、幂等靠 ~/.gitruck/config.json 留痕、存量老用户（已有 apiKey）静默补痕不打印。
+// MUST NOT 阻断命令、MUST NOT 要交互输入 —— 详见 src/lib/first-run-tutorial.ts 文件头。
+program.hook("preAction", () => {
+	firstRunTutorialOnce();
+});
 
 // ── 注册子命令（后续新增命令在此加一行）──
 registerInstall(program);
