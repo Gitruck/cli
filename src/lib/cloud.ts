@@ -205,3 +205,23 @@ export async function download(url: string, dest: string): Promise<void> {
 	const buf = Buffer.from(await res.arrayBuffer());
 	await writeFile(dest, buf);
 }
+
+/**
+ * asr 任务 slim output_result 解引用（infra fix-task-output-result-offload，2026-08-19 起）：
+ * 全量转写落云端 JSON 文件，output_result 本体只剩 asr_result_download_url 引用与摘要。
+ * 发现引用即下载还原全量三键 {word_tc_list, sentence_tc_list, asr_text}（同构 envelope，
+ * 与旧内联逐字段一致）；旧内联形态（升级窗口 / 历史任务）原样返回——新旧两代服务端通吃。
+ */
+export async function resolveAsrOutput(
+	output: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+	const url = output?.asr_result_download_url;
+	if (typeof url !== "string" || !url.trim()) return output ?? {};
+	const res = await fetch(url);
+	if (!res.ok) throw new Error(`下载全量转写 JSON 失败 HTTP ${res.status}：${url}`);
+	const full = (await res.json()) as unknown;
+	if (!full || typeof full !== "object" || Array.isArray(full)) {
+		throw new Error("全量转写 JSON 形态异常（应为对象）");
+	}
+	return full as Record<string, unknown>;
+}
