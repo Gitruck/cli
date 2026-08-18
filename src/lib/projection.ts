@@ -57,6 +57,7 @@ export interface GtrkTrack {
 export interface GtrkProject {
 	version?: string;
 	video_track?: GtrkTrack[];
+	audio_track?: GtrkTrack[];
 	[k: string]: unknown;
 }
 
@@ -100,9 +101,8 @@ function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: nu
 	return { clip_st, clip_ed, track_st };
 }
 
-/** 取 main 底轨 = `track_index` 最小的 video_track（缺 track_index 视作 0）。无 video_track → undefined。 */
-function pickMainVideoTrack(gtrk: GtrkProject): GtrkTrack | undefined {
-	const tracks = gtrk.video_track ?? [];
+/** track_index 最小的一条（缺 track_index 视作 0）；空列表 → undefined。 */
+function pickLowestIndexTrack(tracks: GtrkTrack[]): GtrkTrack | undefined {
 	if (!tracks.length) return undefined;
 	let best = tracks[0];
 	let bestIdx = best.track_index ?? 0;
@@ -114,6 +114,16 @@ function pickMainVideoTrack(gtrk: GtrkProject): GtrkTrack | undefined {
 		}
 	}
 	return best;
+}
+
+/**
+ * 取投影主轨 = `track_index` 最小的 video_track；**无 video_track（或全空）时回退
+ * audio_track**——音频打底工程（add-audio-project-atoms：producer 产的配音驱动工程
+ * video_track 为空列表，配音轨即时间线主轴）没有这条回退会把全部 utterance 误判 dropped。
+ * 两者皆无 → undefined。
+ */
+function pickMainVideoTrack(gtrk: GtrkProject): GtrkTrack | undefined {
+	return pickLowestIndexTrack(gtrk.video_track ?? []) ?? pickLowestIndexTrack(gtrk.audio_track ?? []);
 }
 
 /**
@@ -194,6 +204,20 @@ export function projectTranscript(
 					kept_words: surviving.length,
 					words: surviving,
 				});
+			} else if (totalWords === 0) {
+				// 无词级时码的 transcript（TTS 产物 words 恒空，add-audio-project-atoms）：
+				// 按句级时码 [st, ed] 与 clip 源区间夹逼判存活——否则空词循环把整句误判 dropped。
+				// kept_words 保持 0（total_words 亦 0，语义如实：无词级明细，句级在轨）。
+				const s = Math.max(utt.st, clip.clip_st);
+				const e = Math.min(utt.ed, clip.clip_ed);
+				if (e > s) {
+					instances.push({
+						track_st: r3(clip.track_st + (s - clip.clip_st)),
+						track_ed: r3(clip.track_st + (e - clip.clip_st)),
+						kept_words: 0,
+						words: [],
+					});
+				}
 			}
 		}
 		if (!instances.length) {
