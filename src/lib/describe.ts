@@ -344,6 +344,19 @@ export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): 
 	}
 }
 
+/**
+ * mark 就近命中（add-audio-project-atoms mark-weight）：同素材内 |ts_ms 差| 最小的缓存条目的 mark。
+ * 无任何缓存条目返回 undefined（消费方按中性处理，MUST NOT 变成变相剔除）；mark 列 NULL 按 0。
+ */
+export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number): number | undefined {
+	const row = db.get<{ mark: number | null }>(
+		"SELECT mark FROM describes WHERE material_id = ? ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
+		[materialId, tsMs],
+	);
+	if (!row) return undefined;
+	return row.mark ?? 0;
+}
+
 export function putCachedDescribe(db: SqlDb, materialId: string, tsMs: number, d: MaterialDescribe): void {
 	db.run(
 		"INSERT OR REPLACE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, created_at) VALUES (?,?,?,?,?,?,?)",

@@ -39,6 +39,8 @@ import { registerTool } from "./commands/tool";
 import { registerTranscript } from "./commands/transcript";
 import { registerMusicVisualizer } from "./commands/music-visualizer";
 import { registerDeps } from "./commands/deps";
+import { registerProject } from "./commands/project";
+import { registerAudio } from "./commands/audio";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -91,6 +93,8 @@ registerTool(program); // 单点工具族：gtrk tool <name> [input]（image_mov
 registerTranscript(program); // 本地视频 → 只传抽取音频 → 单个含总结/时码记录/纯文本的 Markdown
 registerMusicVisualizer(program); // 音乐可视化：主音频 + 可选背景/封面 → 频谱可视化成片（独立命令 + driver skill）
 registerDeps(program); // 运行时资产：gtrk deps status / install（显式触发，绝不静默自动下载）
+registerProject(program); // 音频驱动工程：gtrk project init 从配音起盘建工程（服务端 producer 同步口消费端）
+registerAudio(program); // 音频轨零件：gtrk audio lay 往 .gtrk 追加 audio_track（BGM 上轨 + beat 对齐）
 
 program.parseAsync(process.argv).catch((e: unknown) => {
 	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);

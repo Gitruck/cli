@@ -318,22 +318,47 @@ interface Pair {
 	key: string;
 	/** agent 钉选（plan 可编辑契约）：排序置顶（覆盖 score 排序）+ 免 score 地板（强制入选语义）。 */
 	pinned: boolean;
+	/** 融合分（add-audio-project-atoms mark-weight）：w=0 时恒 === seg.score（排序逐字节零回归）；
+	 * w>0 且 mark 缓存命中时 = sim×(1-w)+(mark/100)×w，无缓存中性（=sim）。只参与排序，
+	 * MUST NOT 参与 score 地板判定（mark 缺失/低 mark 不得变成变相剔除）。 */
+	fused: number;
 }
+
+/** mark 融合统计收集器（按候选 clip 去重；planBeatFills 聚合进 summary）。 */
+export interface MarkStatsSets {
+	/** describe 缓存命中的候选 clip_id 集。 */
+	hit: Set<string>;
+	/** 无缓存按中性处理的候选 clip_id 集。 */
+	neutral: Set<string>;
+}
+
+/** mark 查询闭包（命令层供给：material_id+ts_ms 就近命中 describes 缓存；纯函数层零 IO）。 */
+export type MarkLookup = (clipId: string, tsMs: number) => number | undefined;
 
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
 const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
 
-/** 每 query 的取材池：results 展开全部 segments，score 降序（严格同分视频优先 tie-break，
+/** 每 query 的取材池：results 展开全部 segments，融合分降序（严格同分视频优先 tie-break，
  * ★ 主理人 2026-08-12 拍板）；excluded_hint 与低于地板的对不进池；noImage（--no-image-broll）
  * 时图片候选完全不进池（不上云）。
  * pinned（plan 可编辑契约）：钉选候选**置顶**（覆盖 score 排序）且免 excluded_hint / score 地板
- * （agent 显式裁定 > 自动护栏）；noImage 例外——「零图片上云」是用户级硬承诺，pinned 不豁免。 */
+ * （agent 显式裁定 > 自动护栏）；noImage 例外——「零图片上云」是用户级硬承诺，pinned 不豁免。
+ * mark-weight（add-audio-project-atoms）：markWeight>0 时融合分 = sim×(1-w)+(mark/100)×w，
+ * mark 经 markLookup 取 describes 缓存（就近命中）；无缓存候选中性（融合分=sim，不惩罚不加分）；
+ * score 地板仍只看原始 sim（mark 缺失 MUST NOT 变成变相剔除）；默认 w=0 排序逐字节零回归。 */
 function buildQueryPools(
 	beat: PlanBeat,
 	scoreFloor: number,
-	opts: { noImage?: boolean; dedupScope?: DedupScope } = {},
+	opts: {
+		noImage?: boolean;
+		dedupScope?: DedupScope;
+		markWeight?: number;
+		markLookup?: MarkLookup;
+		markStats?: MarkStatsSets;
+	} = {},
 ): { query: string; pool: Pair[] }[] {
 	const scope = opts.dedupScope ?? "scene";
+	const w = typeof opts.markWeight === "number" && opts.markWeight > 0 ? Math.min(1, opts.markWeight) : 0;
 	const out: { query: string; pool: Pair[] }[] = [];
 	for (const q of beat.queries) {
 		const pool: Pair[] = [];
@@ -346,13 +371,24 @@ function buildQueryPools(
 				: // 无命中段的候选降级为整片伪段（少见；score 用 clip 级分）
 					[{ start: 0, end: cand.duration ?? SHOT_TARGET_DEFAULT, best: (cand.duration ?? SHOT_TARGET_DEFAULT) / 2, score: cand.score }];
 			for (const seg of segs) {
-				if (!pinned && seg.score < scoreFloor) continue; // 低于阈值不采纳（pinned=强制入选，免地板）
-				pool.push({ cand, seg, query: q.query, key: consumeKeyFor(cand, seg, scope), pinned });
+				if (!pinned && seg.score < scoreFloor) continue; // 低于阈值不采纳（pinned=强制入选，免地板；地板恒看原始 sim）
+				let fused = seg.score;
+				if (w > 0) {
+					const mark = opts.markLookup?.(cand.clip_id, Math.round(seg.best * 1000));
+					if (typeof mark === "number" && Number.isFinite(mark)) {
+						fused = seg.score * (1 - w) + (Math.min(100, Math.max(0, mark)) / 100) * w;
+						opts.markStats?.hit.add(cand.clip_id);
+					} else {
+						opts.markStats?.neutral.add(cand.clip_id); // 无缓存中性：融合分=sim
+					}
+				}
+				pool.push({ cand, seg, query: q.query, key: consumeKeyFor(cand, seg, scope), pinned, fused });
 			}
 		}
 		pool.sort(
 			(a, b) =>
 				Number(b.pinned) - Number(a.pinned) ||
+				b.fused - a.fused ||
 				b.seg.score - a.seg.score ||
 				Number(isImagePair(a)) - Number(isImagePair(b)),
 		);
@@ -442,6 +478,12 @@ export function fillBeatTrack(opts: {
 	beatOwners?: Map<string, number>;
 	/** 填充统计收集器（planBeatFills 聚合进 summary）。 */
 	stats?: FillStats;
+	/** 美观度权重（add-audio-project-atoms）：0..1，默认 0 零回归；配 markLookup 用。 */
+	markWeight?: number;
+	/** mark 查询闭包（命令层供给 describes 缓存就近命中；缺省=全部中性）。 */
+	markLookup?: MarkLookup;
+	/** mark 融合统计收集器（planBeatFills 聚合）。 */
+	markStats?: MarkStatsSets;
 }): FillSlot[] {
 	const { beat, trackOrder, consumed, scoreFloor } = opts;
 	const span = beat.track_ed - beat.track_st;
@@ -449,7 +491,13 @@ export function fillBeatTrack(opts: {
 	const [shotMin, shotMax] = shotRange(beat, span);
 	const rand = mulberry32(hashStr(`${beat.beat}#${trackOrder}`));
 
-	const pools = buildQueryPools(beat, scoreFloor, { noImage: opts.noImage, dedupScope: opts.dedupScope });
+	const pools = buildQueryPools(beat, scoreFloor, {
+		noImage: opts.noImage,
+		dedupScope: opts.dedupScope,
+		markWeight: opts.markWeight,
+		markLookup: opts.markLookup,
+		markStats: opts.markStats,
+	});
 	if (!pools.length) return [];
 
 	const slots: FillSlot[] = [];
@@ -556,13 +604,21 @@ export function planBeatFills(
 	plan: BrollPlan,
 	lay: number,
 	scoreFloor: number,
-	opts: { noImage?: boolean; dedupScope?: DedupScope } = {},
-): { fills: Map<string, FillSlot[][]>; clipIds: Set<string>; stats: FillStats; pinnedOutcome: { requested: string[]; yielded: string[] } } {
+	opts: { noImage?: boolean; dedupScope?: DedupScope; markWeight?: number; markLookup?: MarkLookup } = {},
+): {
+	fills: Map<string, FillSlot[][]>;
+	clipIds: Set<string>;
+	stats: FillStats;
+	pinnedOutcome: { requested: string[]; yielded: string[] };
+	/** mark 融合统计（add-audio-project-atoms）：按候选 clip 去重的缓存命中/中性计数；w=0 时恒 0/0。 */
+	markStats: { hit: number; neutral: number };
+} {
 	const fills = new Map<string, FillSlot[][]>();
 	const clipIds = new Set<string>();
 	// 全局消费集（D4）：跨 beat 跨 query 跨轨共享——分配即消费、该轮不归还（剥旧重铺后新一轮独立适用）
 	const consumed = new Set<string>();
 	const stats: FillStats = { emptySlots: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
+	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set() };
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
 		const beatOwners = new Map<string, number>(); // 同槽候选组互斥：同 beat 跨轨同素材互斥
@@ -574,6 +630,9 @@ export function planBeatFills(
 				scoreFloor,
 				noImage: opts.noImage,
 				dedupScope: opts.dedupScope,
+				markWeight: opts.markWeight,
+				markLookup: opts.markLookup,
+				markStats: markSets,
 				beatOwners,
 				stats,
 			});
@@ -589,7 +648,13 @@ export function planBeatFills(
 	}
 	const yielded = [...pinnedRequested].filter((id) => !clipIds.has(id));
 	stats.pinnedYielded = yielded.length;
-	return { fills, clipIds, stats, pinnedOutcome: { requested: [...pinnedRequested], yielded } };
+	return {
+		fills,
+		clipIds,
+		stats,
+		pinnedOutcome: { requested: [...pinnedRequested], yielded },
+		markStats: { hit: markSets.hit.size, neutral: markSets.neutral.size },
+	};
 }
 
 // ── 落轨（剥旧 + append + struct_meta.broll）─────────────────────────────

@@ -24,6 +24,8 @@ export interface TranscriptMarkdownInput {
 	language: string;
 	generatedAt: Date;
 	asr: NormalizedAsr;
+	/** 输入媒介（add-audio-project-atoms）：audio 时头部标签换「音频时长 / 本地音频」；缺省 video，行为零变化。 */
+	sourceKind?: "video" | "audio";
 }
 
 /** 驱动 Agent 必须原地替换并在交付前确认消失的稳定标记。 */
@@ -114,12 +116,13 @@ export function renderTranscriptMarkdown(input: TranscriptMarkdownInput): string
 		"",
 	]);
 
+	const kindLabel = input.sourceKind === "audio" ? "音频" : "视频";
 	return [
 		`# ${input.title}`,
 		"",
 		`> 生成时间：${localDateTime(input.generatedAt)}  `,
-		`> 视频时长：${formatTimestamp(input.durationSec)}  `,
-		`> 来源：本地视频 \`${input.sourceName}\`  `,
+		`> ${kindLabel}时长：${formatTimestamp(input.durationSec)}  `,
+		`> 来源：本地${kindLabel} \`${input.sourceName}\`  `,
 		`> 识别语言：${input.language}`,
 		"",
 		"## 总结",

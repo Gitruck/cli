@@ -159,6 +159,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 |---|---|---|---|
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
 | 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 手工组的 plan 从这进 |
+| 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
 | 其余铺轨参数 | `--lay/--score-floor/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
 ## plan 编辑口径（法定通道的边界）
