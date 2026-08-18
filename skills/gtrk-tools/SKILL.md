@@ -48,7 +48,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `piano_audio_to_midi` | 「钢琴扒谱 / 钢琴音频转 MIDI / 提取 MIDI」 | 单条音频 | MIDI 文件 `.mid` | 运行前实时查询 | 已上线 |
 | `piano_audio_enhance` | 「钢琴录音修复 / 增强钢琴音质」 | 单条音频 | 高质量 WAV + 配套 MIDI（双产物） | 运行前实时查询 | 已上线 |
 | `image_to_square` | 「长图转方图 / 把长图变方的」 | 单张图片；可选 `--max-line`（≤20000） | 方形图片 | 运行前实时查询 | 已上线 |
-| `image_to_live` | 「图片变 LivePhoto / 静图微动 / 让照片动起来」 | 单张图片 | 微动视频 `.mp4`（产物是视频） | 运行前实时查询 | 未开放（上游生成能力暂未开放，恢复后重新上架） |
+| `image_to_live` | 「图片变 LivePhoto / 静图微动 / 让照片动起来」 | 单张图片 | 约 4 秒短视频 `.mp4`（无声，产物是视频） | 运行前实时查询 | 已上线 |
 | `image_classic_template` | 「做封面 / 智能拼图 / 标题配图出封面图」 | **多张图片**（可传多个路径，文件顺序即拼装顺序）；**`--main-title <标题>` 必填**；可选 `--sub-title`、`--template-mode`、`--aspect`、`--quality`、`--output-pic-count`（服务端钳制 ≤20）、`--output-text-count`（≤20）、`--title-layout` | 封面/拼图成品（text/pic/render 三组、各组可空可多张） | 运行前实时查询 | 已上线 |
 | `image_vertical_stitch` | 「拼长图 / 多图竖拼 / 截图接成一张长图」 | **多张图片**（可传多个路径，顺序=自上而下拼接顺序） | 一张垂直拼接长图 | 运行前实时查询 | 已上线 |
 | `audio_tts_clone` | 「配音 / 文字转语音 / TTS / 用 xx 音色念这段 / 把这段稿子合成音频」 | **无文件**：`--text <短文本>` 或 `--text-file <txt>` 二选一（≤2000 字，服务端为真相）+ **`--speaker <音色代号>` 必填**（可用音色见官网文档，传错时报错会列出全部可用项）；可选 `--text-lang`/`--output-format wav\|mp3`/`--speed`/`--split-method`/`--batch-size`（speed/切分法缺省跟随该音色调好的参数）。**计费按文本字数折算分钟（约 200 字/分钟）** | 配音音频（wav/mp3） | 运行前实时查询 | 已上线 |

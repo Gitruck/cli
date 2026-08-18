@@ -1190,18 +1190,18 @@ const imageToSquare: ToolDescriptor = {
 	},
 };
 
-/** image_to_live —— 智能 LivePhoto（图 → .mp4 微动视频，产物是视频非图片）。 */
+/** image_to_live —— 智能 LivePhoto（图 → .mp4 短视频，产物是视频非图片）。
+ *  2026-08-05 曾因上游供给停摆回收（adjust-gate-image-to-live），换供应商后经
+ *  restore-tool-image-to-live 翻回启用态；服务端门控须先解除，否则直调会拿 6029/503。 */
 const imageToLive: ToolDescriptor = {
 	name: "image_to_live",
 	title: "智能 LivePhoto",
-	description: "把一张静态图片生成微动的 LivePhoto 视频（产物是视频）。",
+	description: "让一张静态照片动起来，生成约 4 秒的短视频（产物是视频）。",
 	kind: "cloud",
 	input: { kind: "image" },
 	priceKey: "image_to_live",
-	outputHint: "微动视频（.mp4）",
-	// 2026-08-05 回收（adjust-gate-image-to-live）：上游生成能力暂未开放，恢复后新 change 翻门重上
-	enabled: false,
-	disabledReason: "上游生成能力暂未开放，恢复后重新上架",
+	outputHint: "约 4 秒短视频（.mp4，无声）",
+	enabled: true,
 	taskType: "image_to_live",
 	buildPayload(fileId) {
 		return { file_id: fileId };
