@@ -20,7 +20,7 @@ import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
-import { submitTask } from "../lib/cloud";
+import { resolveAsrOutput, submitTask } from "../lib/cloud";
 import { log, routeLogsToStderr } from "../lib/log";
 import { assertDurationConsistent, extractAudio, probeGeometry } from "../lib/media";
 import { defaultExtsFor } from "../lib/tool-descriptors";
@@ -201,7 +201,8 @@ export async function runTranscript(
 		log.tick(`${status}${progress != null ? ` ${Math.round(progress)}%` : ""}`);
 	});
 	log.tickEnd();
-	const asr = normalizeAsrOutput(raw);
+	// slim 形态（infra fix-task-output-result-offload）→ 先按引用拉回全量转写再归一；旧内联直通
+	const asr = normalizeAsrOutput(await resolveAsrOutput(raw));
 	const markdown = renderTranscriptMarkdown({
 		title,
 		sourceName,
