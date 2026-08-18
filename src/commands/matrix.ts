@@ -32,6 +32,7 @@ import {
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
+	type MarkLookup,
 	type SourceLayer,
 } from "../lib/matrix-lay";
 import {
@@ -81,6 +82,7 @@ import {
 import type { PlanResult } from "../lib/matrix";
 import {
 	describeImages,
+	getNearestCachedMark,
 	resolveDescribeUrl,
 	runDescribeItems,
 	toDescribeMeta,
@@ -157,6 +159,9 @@ interface MatrixOpts {
 	materials?: string;
 	/** `--source-window <start,end>`：--local 检索源时间窗过滤（秒；段级交集）。 */
 	sourceWindow?: string;
+	// ── 美观度权重（add-audio-project-atoms，仅 matrix lay）──
+	/** `--mark-weight <0..1>`：融合分 = sim×(1-w)+(mark/100)×w；默认 0 零回归。 */
+	markWeight?: string;
 }
 
 /** 测试注入面（MUST NOT 真调云端）：图片运镜生成与计费确认；缺省 = 真实云链 / stdin 确认。
@@ -210,6 +215,10 @@ export function registerMatrix(program: Command): void {
 		.option(
 			"--dedup-scope <scope>",
 			"铺轨去重粒度：scene=场景级（默认；同素材不同场景可分配，相邻槽位按跳剪豁免避让）| material=严格档（同一素材文件整轮只用一次）",
+		)
+		.option(
+			"--mark-weight <w>",
+			"仅 matrix lay：美观度权重 0..1（默认 0 关闭零回归）——候选融合分 = sim×(1-w)+(mark/100)×w，mark 取 describe 理解缓存（素材内就近帧）；无缓存候选按中性处理（融合分=sim，不惩罚不加分）",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -286,6 +295,10 @@ export function parseDirsOption(raw: string | undefined): string[] {
  */
 export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void {
 	const dirs = parseDirsOption(opts.dirs);
+	// --mark-weight 仅 lay 模式（spec 只对 matrix lay 立法；不做静默忽略）
+	if (opts.markWeight !== undefined && pos.kind !== "lay") {
+		throw new Error("--mark-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
+	}
 	if (pos.kind === "describe") {
 		if (!!opts.plan === !!opts.materials) {
 			throw new Error("matrix describe 需要 --plan <path> 或 --materials <a,b,...> 之一（两者互斥；理解目标永远显式可见）");
@@ -944,13 +957,48 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 
 	// 来源层：plan 无层登记，按 member_type 推导（local → local，云端 → common；概念层重铺请走检索命令）
 	const sourceLayer: SourceLayer = plan.member_type === "local" ? "local" : "common";
-	const laid = await layIntoProject(baseDir, effPlan, layN, parseScoreFloor(opts.scoreFloor), opts.blackBed ?? true, opts.forceRelay === true, reproj, {
-		imageBroll: opts.imageBroll !== false,
-		yes: opts.yes === true,
-		deps,
-		sourceLayer,
-		dedupScope: parseDedupScope(opts.dedupScope),
-	});
+
+	// ── 美观度权重（add-audio-project-atoms）：w>0 才建 mark 查询闭包（describes 缓存就近命中）──
+	const markWeight = parseMarkWeight(opts.markWeight);
+	let markDb: Awaited<ReturnType<typeof openLocalIndexDb>> | undefined;
+	let markLookup: MarkLookup | undefined;
+	if (markWeight > 0) {
+		const dbPath = localIndexDbPath();
+		if (existsSync(dbPath)) {
+			markDb = await openLocalIndexDb(dbPath);
+			const db = markDb;
+			const cache = new Map<string, number | undefined>(); // 同 (clip, ts) 免重复 SQL
+			markLookup = (clipId, tsMs) => {
+				const key = `${clipId}@${tsMs}`;
+				if (cache.has(key)) return cache.get(key);
+				const v = getNearestCachedMark(db, brollMaterialIdFor(clipId), tsMs);
+				cache.set(key, v);
+				return v;
+			};
+			log.info(
+				`美观度权重开启（w=${markWeight}）：融合分 = sim×${1 - markWeight}+(mark/100)×${markWeight}；mark 取 describe 理解缓存（素材内就近帧），无缓存候选按中性处理`,
+			);
+		} else {
+			log.warn(
+				`--mark-weight ${markWeight}：本地索引库不存在（${dbPath}），无任何 describe 缓存——全部候选按中性处理（排序与不开权重一致）。先跑 gtrk matrix describe 产 mark 再开权重才有效`,
+			);
+		}
+	}
+
+	let laid: Awaited<ReturnType<typeof layIntoProject>>;
+	try {
+		laid = await layIntoProject(baseDir, effPlan, layN, parseScoreFloor(opts.scoreFloor), opts.blackBed ?? true, opts.forceRelay === true, reproj, {
+			imageBroll: opts.imageBroll !== false,
+			yes: opts.yes === true,
+			deps,
+			sourceLayer,
+			dedupScope: parseDedupScope(opts.dedupScope),
+			markWeight,
+			markLookup,
+		});
+	} finally {
+		markDb?.close();
+	}
 	const laySummary = laid?.lay;
 	const refused = laySummary?.refused === true ? (laySummary.keptEditedTracks as number[]) : undefined;
 	const declined = laid?.declined === true;
@@ -1194,6 +1242,15 @@ export function parseDedupScope(raw: string | undefined): DedupScope {
 	if (raw === undefined || raw === "scene") return "scene";
 	if (raw === "material") return "material";
 	throw new Error(`--dedup-scope 只支持 scene 或 material（得到「${raw}」）`);
+}
+
+/** --mark-weight 解析：[0,1] 浮点，缺省/非法按 0（告警；0=关闭零回归）。 */
+export function parseMarkWeight(raw: string | undefined): number {
+	if (raw === undefined) return 0;
+	const n = Number(raw);
+	if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+	log.warn(`--mark-weight 取值非法（${raw}），按 0（关闭）处理`);
+	return 0;
 }
 
 /** --score-floor 解析：[0,1] 浮点，非法值按默认（告警）。 */
@@ -1467,6 +1524,10 @@ async function layIntoProject(
 		deps: MatrixRunDeps;
 		sourceLayer?: SourceLayer;
 		dedupScope?: DedupScope;
+		/** 美观度权重（add-audio-project-atoms，matrix lay 专用）：0..1，缺省 0 零回归。 */
+		markWeight?: number;
+		/** mark 查询闭包（runLayMode 供给；缺省=全部中性）。 */
+		markLookup?: MarkLookup;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -1480,10 +1541,16 @@ async function layIntoProject(
 
 	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重；--no-image-broll 时图片不进池；
 	// 全局不二用消费集与跳剪豁免避让在此生效（add-broll-dedup-and-layering D1/D4）
-	const { fills, clipIds, stats: fillStats, pinnedOutcome } = planBeatFills(plan, layN, scoreFloor, {
+	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats } = planBeatFills(plan, layN, scoreFloor, {
 		noImage: !layOpts.imageBroll,
 		dedupScope: layOpts.dedupScope,
+		markWeight: layOpts.markWeight,
+		markLookup: layOpts.markLookup,
 	});
+	const markOn = typeof layOpts.markWeight === "number" && layOpts.markWeight > 0;
+	if (markOn) {
+		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 候选 · 中性 ${markStats.neutral} 候选（w=${layOpts.markWeight}）`);
+	}
 	// pinned 让位必须明示（matrix-command spec：冲突后到让位并 summary 明示，MUST NOT 静默）
 	if (pinnedOutcome.yielded.length) {
 		log.warn(
@@ -1725,6 +1792,8 @@ async function layIntoProject(
 				emptySlots: fillStats.emptySlots,
 				adjacentWaived: fillStats.adjacentWaived,
 			},
+			// mark 融合账面（add-audio-project-atoms）：仅开启时出现（默认 0 时 lay JSON 逐字节不变）
+			...(markOn ? { mark_weight: layOpts.markWeight, mark_hit: markStats.hit, mark_neutral: markStats.neutral } : {}),
 			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）
 			...(pinnedOutcome.requested.length
 				? {
