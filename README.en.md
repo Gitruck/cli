@@ -432,7 +432,7 @@ Standalone single-request capabilities, kept separate from the pipeline's lane c
 | `piano_audio_to_midi` | One audio file | A MIDI file `.mid` | Queried live before the run | Live |
 | `piano_audio_enhance` | One audio file | High-quality WAV + accompanying MIDI (two artifacts) | Queried live before the run | Live |
 | `image_to_square` | One image; optional `--max-line <px>` (≤ 20000) | Square image | Queried live before the run | Live |
-| `image_to_live` | One image | Subtly animated LivePhoto video `.mp4` (the artifact is a video) | Queried live before the run | Not available (the upstream generation capability is temporarily unavailable; it will be re-listed once restored) |
+| `image_to_live` | One image | A short video of about 4 seconds `.mp4` (silent; the artifact is a video) | Queried live before the run | Live |
 | `image_classic_template` | **Several images** + a required `--main-title`; optional subtitle/mode/ratio/quality/count/layout | Finished cover/collage (text/pic/render groups, possibly several images) | Queried live before the run | Live |
 | `image_vertical_stitch` | **Several images** (order = top-to-bottom stitching order) | One vertically stitched long image | Queried live before the run | Live |
 | `video_split_screen` | **2–16 video segments** (multiple positionals); the precise tier uses `--clips-json` (entries `{input:0-based index, begin_time_ms, end_time_ms, crop}`, millisecond time base); nine optional layout/aspect/audio parameters | One split-screen video (its length matches the shortest segment) | Queried live before the run | Live |
@@ -470,7 +470,7 @@ The seven shared video tools — black-border removal, aspect adaptation, stabil
 - `gtrk tool piano_audio_to_midi ./piano.mp3` — transcribe piano audio into `.mid`.
 - `gtrk tool piano_audio_enhance ./piano.mp3` — piano recording restoration, producing a high-quality WAV as the main artifact plus a companion MIDI.
 - `gtrk tool image_to_square ./long.jpg [--max-line 8000]` — long image to square; `--max-line` defaults to 4000 and caps at 20000.
-- `gtrk tool image_to_live ./photo.jpg` — turn a still image into a subtly animated LivePhoto; the artifact is an `.mp4` video. (Temporarily unavailable: it will be re-listed once the upstream generation capability is restored.)
+- `gtrk tool image_to_live ./photo.jpg` — bring a still photo to life; the artifact is a silent `.mp4` video of about 4 seconds.
 - `gtrk tool image_classic_template a.jpg b.jpg c.jpg --main-title "新品速览"` — title + several images into a cover/collage; `--output-pic-count`/`--output-text-count` are clamped to ≤ 20 by the server.
 - `gtrk tool image_vertical_stitch top.png mid.png bottom.png` — stitch several images vertically in the order given.
 - `gtrk tool video_split_screen a.mp4 b.mp4 --output-ratio 16:9` — simple tier: automatic split-screen layout over the whole clips (reaction / side-by-side comparison).
