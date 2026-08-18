@@ -437,7 +437,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 | `piano_audio_to_midi` | 单条音频 | MIDI 文件 `.mid` | 运行前实时查询 | 已上线 |
 | `piano_audio_enhance` | 单条音频 | 高质量 WAV + 配套 MIDI（双产物） | 运行前实时查询 | 已上线 |
 | `image_to_square` | 单张图片；可选 `--max-line <px>`（≤20000） | 方形图片 | 运行前实时查询 | 已上线 |
-| `image_to_live` | 单张图片 | 微动 LivePhoto 视频 `.mp4`（产物是视频） | 运行前实时查询 | 未开放（上游生成能力暂未开放，恢复后重新上架） |
+| `image_to_live` | 单张图片 | 约 4 秒短视频 `.mp4`（无声，产物是视频） | 运行前实时查询 | 已上线 |
 | `image_classic_template` | **多张图片** + `--main-title` 必填；可选副标题/模式/比例/质量/数量/版式 | 封面/拼图成品（text/pic/render 三组、可多张） | 运行前实时查询 | 已上线 |
 | `image_vertical_stitch` | **多张图片**（顺序=自上而下拼接顺序） | 一张垂直拼接长图 | 运行前实时查询 | 已上线 |
 | `video_split_screen` | **2~16 段视频**（多 positional）；精确档 `--clips-json`（条目 `{input:0 起序号, begin_time_ms, end_time_ms, crop}`，毫秒时基）；九个可选布局/画幅/音频参数 | 一条分屏成片（成片时长对齐最短段） | 运行前实时查询 | 已上线 |
@@ -475,7 +475,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 - `gtrk tool piano_audio_to_midi ./piano.mp3` — 钢琴音频扒谱为 `.mid`。
 - `gtrk tool piano_audio_enhance ./piano.mp3` — 钢琴录音修复增强，产高质量 WAV 主产物 + 配套 MIDI 副产物。
 - `gtrk tool image_to_square ./long.jpg [--max-line 8000]` — 长图转方图；`--max-line` 默认 4000、上限 20000。
-- `gtrk tool image_to_live ./photo.jpg` — 静态图生成微动 LivePhoto，产物是 `.mp4` 视频。（暂未开放：上游生成能力恢复后重新上架。）
+- `gtrk tool image_to_live ./photo.jpg` — 让静态照片动起来，产出约 4 秒的 `.mp4` 短视频（无声）。
 - `gtrk tool image_classic_template a.jpg b.jpg c.jpg --main-title "新品速览"` — 标题+多图出封面/拼图；`--output-pic-count`/`--output-text-count` 由服务端钳制 ≤20。
 - `gtrk tool image_vertical_stitch top.png mid.png bottom.png` — 多图按传入顺序竖拼成一张长图。
 - `gtrk tool video_split_screen a.mp4 b.mp4 --output-ratio 16:9` — 简单档：整段视频自动布局分屏（reaction/对比同框）。
