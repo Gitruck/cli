@@ -66,6 +66,7 @@ import {
 	type ReprojectResult,
 } from "../lib/reproject";
 import {
+	anchorAtSec,
 	buildPlan,
 	buildPlanBeat,
 	buildSearchBody,
@@ -75,6 +76,7 @@ import {
 	searchOnce,
 	validatePlanForLay,
 	type BrollPlan,
+	type PlanAnchor,
 	type QueryOutcome,
 	type SearchRespData,
 	type Tier,
@@ -1129,13 +1131,23 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	let resultCount = 0;
 	for (const entry of queue) {
 		const outcomes: QueryOutcome[] = [];
-		for (const q of entry.queries) {
+		// 锚 query 并入同一检索链（add-keyword-anchored-broll）：与普通 queries 同口同参跑；
+		// 已在 queries 里的不重发（beat 内 dedupe 与叙事序照旧）。plan 里的归属标注 = beat.anchors[].query。
+		const anchorQueries = [
+			...new Set(
+				(entry.anchors ?? [])
+					.map((a) => a.query)
+					.filter((q) => typeof q === "string" && q && !entry.queries.includes(q)),
+			),
+		];
+		for (const q of [...entry.queries, ...anchorQueries]) {
+			const isAnchorQ = anchorQueries.includes(q);
 			try {
 				const data = await ctx.search(q, entry);
 				outcomes.push({ query: q, data });
 				okCount++;
 				resultCount += data.results?.length ?? 0;
-				log.info(`${entry.beat}「${q}」→ ${data.results?.length ?? 0} 条候选（召回 ${data.recalled ?? "?"}）`);
+				log.info(`${entry.beat}「${q}」${isAnchorQ ? "（锚）" : ""}→ ${data.results?.length ?? 0} 条候选（召回 ${data.recalled ?? "?"}）`);
 			} catch (e) {
 				// embed 端点硬失败绝不局部化吞掉：本地模式没有查询向量=整体不可用（MUST NOT 静默降级）
 				if ((e as { code?: unknown } | null)?.code === EMBED_UNREACHABLE_CODE) throw e;
@@ -1147,7 +1159,24 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 				log.warn(`${entry.beat}「${q}」失败：${msg}`);
 			}
 		}
-		beats.push(buildPlanBeat(entry, outcomes));
+		const planBeat = buildPlanBeat(entry, outcomes);
+		// 锚 at_sec 内插（add-keyword-anchored-broll）：句级当刻包络 × 关键词字符偏移比例——
+		// 供数来自重投影同一份产物（utteranceIndex）；算不出即 null（lay 按 degraded 处置，不硬锚）
+		if (entry.anchors?.length) {
+			planBeat.anchors = entry.anchors.map((a): PlanAnchor => {
+				const u = reproj.utteranceIndex?.get(a.utterance);
+				const at = u ? anchorAtSec(u.text, a.keyword, u.track_st, u.track_ed) : null;
+				if (at === null) {
+					log.warn(
+						u
+							? `${entry.beat} 锚「${a.keyword}」：当刻句 ${a.utterance} 文本里找不到该关键词（改稿后文本漂移）——本锚 degraded，铺轨退化普通槽`
+							: `${entry.beat} 锚「${a.keyword}」：句 ${a.utterance} 无当刻时码（重投影降级或该句已被剪）——本锚 degraded，铺轨退化普通槽`,
+					);
+				}
+				return { keyword: a.keyword, utterance: a.utterance, at_sec: at, query: a.query };
+			});
+		}
+		beats.push(planBeat);
 	}
 
 	const totalQueries = okCount + errCount;
@@ -1541,12 +1570,27 @@ async function layIntoProject(
 
 	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重；--no-image-broll 时图片不进池；
 	// 全局不二用消费集与跳剪豁免避让在此生效（add-broll-dedup-and-layering D1/D4）
-	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats } = planBeatFills(plan, layN, scoreFloor, {
+	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes } = planBeatFills(plan, layN, scoreFloor, {
 		noImage: !layOpts.imageBroll,
 		dedupScope: layOpts.dedupScope,
 		markWeight: layOpts.markWeight,
 		markLookup: layOpts.markLookup,
 	});
+	// 关键词锚落位回报（add-keyword-anchored-broll）：逐锚明示，degraded MUST NOT 静默
+	if (anchorOutcomes.length) {
+		const cnt = { planned: 0, pinned: 0, degraded: 0 };
+		for (const d of anchorOutcomes) {
+			cnt[d.status]++;
+			if (d.status === "degraded") {
+				log.warn(`${d.beat} 锚「${d.keyword}」降级：${d.reason ?? "未知原因"}——该锚退化普通槽，区间照常序贯填充`);
+			} else {
+				log.info(
+					`${d.beat} 锚「${d.keyword}」@ ${d.at_sec}s → clip ${d.clip_id} 钉 ${d.track_st}s（提前量 0.5s${d.status === "pinned" ? " · 用户钉选候选占锚槽" : ""}）`,
+				);
+			}
+		}
+		log.info(`关键词锚：钉位 ${cnt.planned} · 用户钉选 ${cnt.pinned} · 降级 ${cnt.degraded}（共 ${anchorOutcomes.length} 锚）`);
+	}
 	const markOn = typeof layOpts.markWeight === "number" && layOpts.markWeight > 0;
 	if (markOn) {
 		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 候选 · 中性 ${markStats.neutral} 候选（w=${layOpts.markWeight}）`);
@@ -1807,6 +1851,25 @@ async function layIntoProject(
 							placedSlots: fillStats.pinnedPlaced,
 							yielded: pinnedOutcome.yielded,
 						},
+					}
+				: {}),
+			// 关键词锚账面（add-keyword-anchored-broll）：plan 里有锚才出现（无锚时 lay JSON 逐字节不变）
+			...(anchorOutcomes.length
+				? {
+						anchors: {
+							planned: anchorOutcomes.filter((d) => d.status === "planned").length,
+							pinned: anchorOutcomes.filter((d) => d.status === "pinned").length,
+							degraded: anchorOutcomes.filter((d) => d.status === "degraded").length,
+						},
+						anchor_details: anchorOutcomes.map((d) => ({
+							beat: d.beat,
+							keyword: d.keyword,
+							at_sec: d.at_sec,
+							track_st: d.track_st,
+							clip_id: d.clip_id,
+							status: d.status,
+							...(d.reason ? { reason: d.reason } : {}),
+						})),
 					}
 				: {}),
 			laidTracks: summary.laidTracks,

@@ -119,7 +119,9 @@ gtrk project init --tts-task <TTS任务id> --canvas 1920x1080 --no-open --json
 gtrk split --project "<工程目录>" --json          # 投影：拿 utterance id/时码/hash
 # 你写 split/visual-split.json：beat 全覆盖（配音工程无 A-roll 画面，留隙=黑屏！）、
 #   lane 全 FILM_BROLL、base_track="旁白主导"、narrative 用八枚举、
-#   字卡挂 aux_layers type:"overlay"（handoff.category:"overlay"+duration_hint，进 dispatch.mg）
+#   字卡挂 aux_layers type:"overlay"（handoff.category:"overlay"+duration_hint，进 dispatch.mg）、
+#   看点关键词圈 handoff.anchors（[{keyword,utterance,query}] ≤2 个/beat——地名/奇观/数字头衔类实词，
+#   铺轨把锚 query 最高分命中钉在关键词说出时刻：听到「野牛高速」的瞬间看到野牛；圈定指引见 gtrk-splitter）
 gtrk split "<拆分稿>" --project "<工程目录>" --json
 
 # ⑦ B-roll 三连（describe 给字卡抽帧检查与 mark 加权供料；internal 用户 describe 免费）

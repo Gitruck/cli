@@ -178,6 +178,13 @@ export interface ReprojectResult {
 	entries: ReprojectEntryOutcome[];
 	/** key → 本次采用窗口（调用方按 key 查表换时码）。 */
 	windows: Map<string, { track_st: number; track_ed: number }>;
+	/**
+	 * 句级当刻明细（add-keyword-anchored-broll 锚点内插用）：utterance id → 存活包络 + 句文本
+	 * （多存活实例取 min..max 包络——句内被剪的近似，与字符比例内插同为句级精度）。
+	 * 仅重投影成功（mode="reprojected"）时给出；降级态没有可信句时码——锚 MUST 按 degraded 处置，
+	 * MUST NOT 拿派单快照时码去内插。被全剪的句不在表内（同 degraded 语义）。
+	 */
+	utteranceIndex?: Map<string, { track_st: number; track_ed: number; text: string }>;
 }
 
 export interface ReprojectRequest {
@@ -332,6 +339,19 @@ export async function reprojectDispatchWindows(req: ReprojectRequest): Promise<R
 		transcript.utterances.map((u) => u.id),
 	);
 
+	// 锚点内插供数（add-keyword-anchored-broll）：句级存活包络 + 当刻句文本——与窗口重投影同一份
+	// 投影产物（同一段代码 × 同一份输入），不另开推导路径
+	const utteranceIndex = new Map<string, { track_st: number; track_ed: number; text: string }>();
+	for (const u of transcript.utterances) {
+		const inst = index.byId.get(u.id) ?? [];
+		if (!inst.length) continue; // 被全剪的句无当刻时码——锚引用它即 degraded
+		utteranceIndex.set(u.id, {
+			track_st: Math.min(...inst.map((x) => x.track_st)),
+			track_ed: Math.max(...inst.map((x) => x.track_ed)),
+			text: u.text ?? "",
+		});
+	}
+
 	// span 回落表（优先级 ②）：dispatch 老档没有 span 时按 struct_meta.split 定位
 	const fallback = splitSpanIndex(req.gtrk);
 	const projectSlug = slugify(basename(baseDir));
@@ -438,6 +458,7 @@ export async function reprojectDispatchWindows(req: ReprojectRequest): Promise<R
 		},
 		entries: outcomes,
 		windows: new Map(outcomes.map((o) => [o.key, { track_st: o.track_st, track_ed: o.track_ed }])),
+		utteranceIndex,
 	};
 }
 

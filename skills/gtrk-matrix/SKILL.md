@@ -171,6 +171,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 - `segments` 数组：**删段**（某命中段不想要就删）；
 - `result.describe`：增删（describe 命令注入的，你也可以手写笔记进去）；
 - `result.pinned: true`：**钉选**——分配器优先满足（覆盖 score 排序、免 score 地板强制入选）。多个 pinned 冲突（同槽/供长不足）时**后到让位**，让位名单在结果 JSON `lay.pinned.yielded` 与告警里明示。注意 `--no-image-broll` 下图片候选连 pinned 也进不来（零图片上云是硬承诺）。
+- beat 的 `anchors`：**关键词锚**（拆分稿圈定、plan 检索时内插 `at_sec`）——`[{keyword, utterance, at_sec, query}]`，lay 把锚 query 最高分命中钉在 `at_sec−0.5s`（时长 min(命中段, per_shot×2)），其余槽位在锚点分割的区间内序贯填充。可编辑：**挪 `at_sec`**（微调卡点时刻）、**换 `query`**（换锚画面）、**删锚**（整条删除）；`at_sec:null`=内插失败态，lay 按降级普通槽处置。锚 query 池内有 pinned 候选时**用户钉选优先占锚槽**。
 - beat 的 `per_shot_sec`/`requested_shots`（节奏锚，影响槽长档位）。
 
 **不可编辑面**（动了会被 `matrix lay` 校验拒绝并指名字段）：
@@ -248,7 +249,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 ```
 
 - `--json`：人读日志走 stderr，成功时 stdout 只有一行结果 JSON：
-  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, pinned?:{requested,placedSlots,yielded}, downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
+  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, pinned?:{requested,placedSlots,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
   （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/items? }`）
 - **拒铺结局**（候选轨已被用户编辑）：stdout 出 `{ ok:false, refused:[…], reason:"tracks_edited", planReusable:true, … }` 且非 0 退出——不是命令失败，plan 已产出，处置见下表。
 - **命令失败**（缺派单、鉴权失败、全部 query 失败、参数越界、坏 plan 被 lay 拒）→ 非 0 退出、报错在 stderr、stdout 无 JSON。先看退出码，把 stderr 报错如实回给用户。
@@ -266,6 +267,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - `lay.removedTracks` / `lay.keptEditedTracks`：剥了哪些旧自产轨 / 因「你编辑过」保留未剥的轨。删了什么必须跟用户说。
 - `lay.dedup`：`emptySlots`（宁空不重复的空槽数——多了是该补料或走动线②的信号）、`adjacentWaived`。
 - `lay.pinned`（有钉选才出现）：`requested/placedSlots/yielded`——`yielded` 非空要指名哪些钉选让位了（stderr 也有告警）。
+- `lay.anchors` / `lay.anchor_details`（拆分稿圈了关键词锚才出现）：`planned` 钉位数 / `pinned` 用户钉选占锚槽数 / `degraded` 降级数——`degraded` 非零要按 `anchor_details` 指名哪个关键词没锚上及原因（无合格命中/文本漂移/窗口不足），提示用户该处「听到关键词看到画面」的卡点没兑现、可换 query 或补素材后重跑。
 - `lay.downloads`：`raw` 原片回落 / `failed` 掉槽位非零时提一句。
 - `integrity`（素材落盘自检，只在真写回过时出现）：`dangling` 悬空引用全量清单；`danglingReferenced`（时间线上没素材可放）与 `danglingOrphan`（只挂在 materials 里）严重度差一个量级，**分开说**；`external` 绝对路径找不到文件另一档。告知不拦阻，别自己删素材。
 - 单 query 失败是局部化的（`counts.errors>0` 但 `ok:true`）：如实说哪几段没检到。

@@ -182,6 +182,9 @@ async function runLand(
 	for (const w of resolved.warnings) log.warn(w);
 	const ctx = {
 		utteranceIds: transcript.utterances.map((u) => u.id),
+		// 句文本供给（add-keyword-anchored-broll）：anchors 的「keyword ∈ 句文」在校验链内完成——
+		// splitdoc 是纯逻辑层不碰 IO，全文由本命令层沿 utteranceIds 同路注入；失败零副作用口径不变
+		utteranceTexts: new Map(transcript.utterances.map((u) => [u.id, u.text ?? ""])),
 		transcriptHash: transcript.text_hash,
 		vocab: effectiveVocab(resolved.config),
 	};
