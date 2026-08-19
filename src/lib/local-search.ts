@@ -170,8 +170,6 @@ interface FrameJoinRow {
 	width: number | null;
 	height: number | null;
 	fps: number | null;
-	/** materials.cuts_indexed（1=切点全集在库；NULL=旧行无数据）。 */
-	cuts_indexed: number | null;
 }
 
 /**
@@ -184,9 +182,12 @@ export function loadLocalIndex(
 	deps: { fileExists?: (p: string) => boolean } = {},
 ): LoadedIndex {
 	const fileExists = deps.fileExists ?? existsSync;
+	// 逐帧 JOIN 只取帧级/场景级/素材几何列——**素材级标志位（如 cuts_indexed）MUST NOT 挂在这条
+	// 查询上**：它按帧重复 N 次，千帧级实测多一列即多约 11% 载入耗时（3.1 验收线 <100ms 很紧）。
+	// 素材级数据一律走下方的小查询按 material 取一次。
 	const rows = db.all<FrameJoinRow>(
 		`SELECT f.ts_ms, f.vec, s.st_ms, s.ed_ms, s.stable AS scene_stable,
-		        m.id AS mkey, m.material_id, m.path, m.kind, m.duration_ms, m.width, m.height, m.fps, m.cuts_indexed
+		        m.id AS mkey, m.material_id, m.path, m.kind, m.duration_ms, m.width, m.height, m.fps
 		 FROM frames f
 		 JOIN scenes s ON f.scene_id = s.id
 		 JOIN materials m ON f.material_id = m.id
@@ -217,8 +218,6 @@ export function loadLocalIndex(
 				width: r.width,
 				height: r.height,
 				fps: r.fps,
-				// cuts_indexed=1 才载切点全集（fix-broll-flash-frames D5）：先占位空数组，行遍历后统一回填
-				...(r.cuts_indexed === 1 ? { cutsMs: [] } : {}),
 			});
 		}
 		const v = decodeVec(r.vec);
@@ -227,13 +226,26 @@ export function loadLocalIndex(
 		frames.push({ matIdx, ts_ms: r.ts_ms, scene_st_ms: r.st_ms, scene_ed_ms: r.ed_ms, stable: r.scene_stable === 1 });
 		vecs.push(v);
 	}
-	// 切点全集回填（仅 cuts_indexed=1 的在场素材；表按 (material_id, t_ms) 主键天然升序）
-	if (materials.some((m) => m.cutsMs !== undefined)) {
-		for (const c of db.all<{ material_id: number; t_ms: number }>(
-			"SELECT material_id, t_ms FROM cuts ORDER BY material_id, t_ms",
+	// 切点全集（fix-broll-flash-frames D5）：素材级两小步——先按 material 取标志位（在场素材才问），
+	// 置位者初始化空数组（`[]`=真无切点，undefined=旧库无数据，两者语义不同）；再按 (material_id, t_ms)
+	// 主键序回填。两条查询都是 O(素材数/切点数)，与帧数无关。
+	if (matIdxByKey.size > 0) {
+		let anyIndexed = false;
+		for (const m of db.all<{ id: number; cuts_indexed: number | null }>(
+			"SELECT id, cuts_indexed FROM materials WHERE cuts_indexed = 1",
 		)) {
-			const matIdx = matIdxByKey.get(c.material_id);
-			if (matIdx !== undefined) materials[matIdx]!.cutsMs?.push(c.t_ms);
+			const matIdx = matIdxByKey.get(m.id);
+			if (matIdx === undefined) continue; // 不在检索域/文件已消失
+			materials[matIdx]!.cutsMs = [];
+			anyIndexed = true;
+		}
+		if (anyIndexed) {
+			for (const c of db.all<{ material_id: number; t_ms: number }>(
+				"SELECT material_id, t_ms FROM cuts ORDER BY material_id, t_ms",
+			)) {
+				const matIdx = matIdxByKey.get(c.material_id);
+				if (matIdx !== undefined) materials[matIdx]!.cutsMs?.push(c.t_ms);
+			}
 		}
 	}
 	const flat = new Float32Array(vecs.length * dim);
