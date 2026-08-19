@@ -32,6 +32,15 @@ export const TOPK_FRAMES_DEFAULT = 60;
  * 数值上同为 0.2 是 POC 对本域的标定结果，完美命中可低至 0.246，处置表见 SKILL.md）。 */
 export const LOCAL_SCORE_FLOOR_DEFAULT = 0.2;
 
+/** 段级运动量摘要（add-material-motion-signal）：去重后帧间分分位 + 样本数 + 有效帧率。
+ * 段跨多场景时按各场景时长加权；任一分位不可判（样本不足）的场景不参与加权。 */
+export interface SegmentMotion {
+	p50: number;
+	p90: number;
+	samples: number;
+	effective_fps?: number;
+}
+
 /** 单帧命中（聚合输入；同素材内按 ts 升序）。 */
 export interface FrameHit {
 	ts_ms: number;
@@ -132,6 +141,9 @@ export interface LoadedMaterial {
 	/** 切点全集（毫秒，升序；fix-broll-flash-frames D4/D5）：仅 cuts_indexed=1 的素材携带
 	 * （`[]`=真无切点）；undefined=旧库无数据（检索段不透出 cuts）。 */
 	cutsMs?: number[];
+	/** 带运动信号的场景跨度（add-material-motion-signal）：按 st_ms 升序，只含 motion 可判的场景。
+	 * undefined/空 = 该素材无运动信号（旧库未重建），段不透出 motion。 */
+	motionScenes?: { st_ms: number; ed_ms: number; p50: number; p90: number; samples: number; effectiveFps: number | null }[];
 }
 
 export interface LoadedIndex {
@@ -247,6 +259,32 @@ export function loadLocalIndex(
 				if (matIdx !== undefined) materials[matIdx]!.cutsMs?.push(c.t_ms);
 			}
 		}
+		// 运动信号（add-material-motion-signal）：**场景级**数据同样走素材级小查询——
+		// 挂到逐帧 JOIN 上会按帧重复 N 次（实测多一列即多约 11% 载入耗时）。只取可判的场景。
+		for (const s of db.all<{
+			material_id: number;
+			st_ms: number;
+			ed_ms: number;
+			motion_p50: number;
+			motion_p90: number;
+			motion_samples: number;
+			effective_fps: number | null;
+		}>(
+			`SELECT material_id, st_ms, ed_ms, motion_p50, motion_p90, motion_samples, effective_fps
+			 FROM scenes WHERE motion_p50 IS NOT NULL ORDER BY material_id, st_ms`,
+		)) {
+			const matIdx = matIdxByKey.get(s.material_id);
+			if (matIdx === undefined) continue;
+			const m = materials[matIdx]!;
+			(m.motionScenes ??= []).push({
+				st_ms: s.st_ms,
+				ed_ms: s.ed_ms,
+				p50: s.motion_p50,
+				p90: s.motion_p90,
+				samples: s.motion_samples,
+				effectiveFps: s.effective_fps,
+			});
+		}
 	}
 	const flat = new Float32Array(vecs.length * dim);
 	vecs.forEach((v, i) => flat.set(v, i * dim));
@@ -265,6 +303,46 @@ export function localClipIdForMaterialId(materialId: string): string {
 }
 
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+const r4 = (n: number): number => Math.round(n * 10000) / 10000;
+
+/**
+ * 段级运动量摘要（add-material-motion-signal · local-material-search spec）：
+ * 取与段 [stMs, edMs] 有交集的**可判**场景，按交集时长加权平均 p50/p90；样本数取和。
+ * 有效帧率取加权占比最大的那个场景的值（同一段内混合帧率时以主体为准）。
+ * 无可判场景（旧库未重建 / 全是样本不足的静止场景）返回 undefined —— 段不透出 motion，
+ * 语义是「不可判」而非「平稳」。
+ */
+export function segmentMotion(
+	scenes: NonNullable<LoadedMaterial["motionScenes"]>,
+	stMs: number,
+	edMs: number,
+): SegmentMotion | undefined {
+	let wSum = 0;
+	let p50 = 0;
+	let p90 = 0;
+	let samples = 0;
+	let bestW = 0;
+	let fps: number | null = null;
+	for (const s of scenes) {
+		const w = Math.min(edMs, s.ed_ms) - Math.max(stMs, s.st_ms);
+		if (w <= 0) continue;
+		wSum += w;
+		p50 += s.p50 * w;
+		p90 += s.p90 * w;
+		samples += s.samples;
+		if (w > bestW) {
+			bestW = w;
+			fps = s.effectiveFps;
+		}
+	}
+	if (wSum <= 0) return undefined;
+	return {
+		p50: r4(p50 / wSum),
+		p90: r4(p90 / wSum),
+		samples,
+		...(fps !== null ? { effective_fps: fps } : {}),
+	};
+}
 
 export interface LocalSearchOutcome {
 	/** 过滤（score 地板）前的真实召回段数（PlanQuery.recalled 口径）。 */
@@ -390,12 +468,15 @@ export function searchLoadedIndex(
 				// 段内切点明细（fix-broll-flash-frames D5）：切点全集中严格落在段开区间内者随段透出
 				// （铺轨端点吸附消残片用）；cuts_indexed 未置位（旧库）或段内无切点时省略字段。
 				const cutsInSeg = mat.cutsMs?.filter((t) => t > s.start_ms && t < s.end_ms) ?? [];
+				// 段级运动量（add-material-motion-signal）：无信号时省略字段（「不可判」≠「平稳」）
+				const motion = mat.motionScenes?.length ? segmentMotion(mat.motionScenes, s.start_ms, s.end_ms) : undefined;
 				return {
 					start: r3(s.start_ms / 1000),
 					end: r3(s.end_ms / 1000),
 					best: r3(s.best_ts_ms / 1000),
 					score: s.score,
 					...(cutsInSeg.length ? { cuts: cutsInSeg.map((t) => r3(t / 1000)) } : {}),
+					...(motion ? { motion } : {}),
 				};
 			}),
 		};

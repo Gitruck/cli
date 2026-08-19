@@ -95,6 +95,17 @@ export const MAX_SLOTS_PER_BEAT = 32;
  * （源上跳跃取段=过程/时间推进的合法叙事手法）。 */
 export const JUMP_CUT_GAP_SEC = 2;
 
+/** 高运动判据（add-material-motion-signal D1）：段的去重后帧间分 p50 超过此值即视为高运动，
+ * 排序时降权（**不是排除**——候选稀疏时宁可用高运动段也不留空，留空的观感代价更大）。
+ * 0.05 = 打样标定：问题窗口 0.1058 / 倍帧快摇 0.2747 在线上，干净窗 0.0247 / 真快剪段 0.0165 /
+ * 静止 0.0178 在线下。**首批工程复核后再固化**，spec 只要求「可排序、可降权、不硬排除」。 */
+export const MOTION_HOT_P50 = 0.05;
+/** 高运动降权（分，add-material-motion-signal D1）：排序时高运动段的等效分减去此值——
+ * 即「高运动段要比平稳段多 0.02 分才压得过它」，实现 spec 的「同等 score 下优先平稳」。
+ * 取降权而非按分档排序：分档会在档位边界上武断（0.339 与 0.341 落不同档）。
+ * 无运动信号（旧库/云端候选）时降权恒 0 ⇒ 排序逐字节零回归。 */
+export const MOTION_HOT_PENALTY = 0.02;
+
 /** 去重粒度（D1）：scene=场景级（默认）；material=严格档（同一素材文件整轮只消费一次）。 */
 export type DedupScope = "scene" | "material";
 
@@ -140,6 +151,9 @@ export interface FillStats {
 	 * （tune-shot-rhythm-thresholds 的代价观察项：SLIVER_MIN_SEC 上调的真实代价只可能在此显形。
 	 * 候选充足时精修弃用会被「换下一候选」吸收、该数恒 0；候选稀疏工程才可能非 0）。 */
 	emptySlotsByRefine: number;
+	/** 落成槽位中取用了**高运动段**的数量（add-material-motion-signal）：降权只改排序不作排除，
+	 * 候选稀疏时仍会取高运动段——如实记录，让「为什么这颗抖」可追溯。 */
+	hotSlotsPlaced: number;
 	/** pinned 候选未能入选数（冲突后到让位/候选枯竭/被排除——按候选 clip 计，summary 明示）。 */
 	pinnedYielded: number;
 }
@@ -346,6 +360,11 @@ interface Pair {
 	 * w>0 且 mark 缓存命中时 = sim×(1-w)+(mark/100)×w，无缓存中性（=sim）。只参与排序，
 	 * MUST NOT 参与 score 地板判定（mark 缺失/低 mark 不得变成变相剔除）。 */
 	fused: number;
+	/** 排序用等效分（add-material-motion-signal）：`fused − 高运动降权`。无运动信号时恒 === fused
+	 * （零回归）。只参与**排序**，MUST NOT 参与 score 地板判定或作为排除条件。 */
+	rank: number;
+	/** 该段是否判为高运动（p50 > MOTION_HOT_P50）——summary 计数与诊断用。 */
+	hot: boolean;
 }
 
 /** mark 融合统计收集器（按候选 clip 去重；planBeatFills 聚合进 summary）。 */
@@ -406,12 +425,26 @@ function buildQueryPools(
 						opts.markStats?.neutral.add(cand.clip_id); // 无缓存中性：融合分=sim
 					}
 				}
-				pool.push({ cand, seg, query: q.query, key: consumeKeyFor(cand, seg, scope), pinned, fused });
+				// 高运动降权（add-material-motion-signal）：只影响排序，不改地板、不作排除
+				const p50 = (seg as { motion?: { p50?: number } }).motion?.p50;
+				const hot = typeof p50 === "number" && Number.isFinite(p50) && p50 > MOTION_HOT_P50;
+				pool.push({
+					cand,
+					seg,
+					query: q.query,
+					key: consumeKeyFor(cand, seg, scope),
+					pinned,
+					fused,
+					hot,
+					rank: hot ? fused - MOTION_HOT_PENALTY : fused,
+				});
 			}
 		}
 		pool.sort(
 			(a, b) =>
 				Number(b.pinned) - Number(a.pinned) ||
+				// rank = fused − 高运动降权（无信号时恒 === fused，排序零回归）
+				b.rank - a.rank ||
 				b.fused - a.fused ||
 				b.seg.score - a.seg.score ||
 				Number(isImagePair(a)) - Number(isImagePair(b)),
@@ -662,6 +695,7 @@ export function fillBeatTrack(opts: {
 			track_ed: r3(cursor + d),
 		});
 		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++; // pinned 落成计数（summary 明示）
+		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++; // 取用高运动段（降权未挡住=候选稀疏）
 		consumed.add(pick.key);
 		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
 		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipEd };
@@ -717,7 +751,7 @@ export function planBeatFills(
 	const clipIds = new Set<string>();
 	// 全局消费集（D4）：跨 beat 跨 query 跨轨共享——分配即消费、该轮不归还（剥旧重铺后新一轮独立适用）
 	const consumed = new Set<string>();
-	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
+	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set() };
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];

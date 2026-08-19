@@ -37,8 +37,17 @@ export interface PlanResult {
 	/** 按 score 降序（非时间序）；best = 段内最像 query 的一帧时刻（截取/缩略锚点）。
 	 * cuts（fix-broll-flash-frames · broll-plan-contract）：本地形态可选——段内已知场景切点时码
 	 * （素材时基秒，升序，严格落在 (start,end) 开区间内），铺轨据此吸附窗口端点消残片；
-	 * 缺省=无已知切点（旧 plan/旧库容错）；云端形态 MUST NOT 出现。 */
-	segments?: { start: number; end: number; best: number; score: number; cuts?: number[] }[];
+	 * 缺省=无已知切点（旧 plan/旧库容错）；云端形态 MUST NOT 出现。
+	 * motion（add-material-motion-signal）：本地形态可选——该段去重后的帧间跳变分位与样本数，
+	 * 供铺轨择窗降权、agent 换段裁定；缺省=**不可判**（旧库/样本不足），MUST NOT 当「平稳」用。 */
+	segments?: {
+		start: number;
+		end: number;
+		best: number;
+		score: number;
+		cuts?: number[];
+		motion?: { p50: number; p90: number; samples: number; effective_fps?: number };
+	}[];
 	note?: string | null;
 	matched?: Record<string, unknown>;
 	// internal 口独有
@@ -167,6 +176,24 @@ function validatePlanResultForLay(r: PlanResult, where: string, errs: string[]):
 				if (!(s.start <= s.best && s.best <= s.end)) {
 					errs.push(`${where}：segment 几何不可编辑——best 必须落在 [start,end] 内（${s.start}–${s.end} best=${s.best}）`);
 					break;
+				}
+				// motion 可选字段（add-material-motion-signal）：agent 可整体删除，改坏即拒
+				if (s.motion !== undefined) {
+					const m = s.motion as { p50?: unknown; p90?: unknown; samples?: unknown; effective_fps?: unknown };
+					const num = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v);
+					const bad =
+						!m ||
+						typeof m !== "object" ||
+						Array.isArray(m) ||
+						!num(m.p50) ||
+						!num(m.p90) ||
+						(m.p90 as number) < (m.p50 as number) ||
+						!(typeof m.samples === "number" && Number.isInteger(m.samples) && m.samples > 0) ||
+						(m.effective_fps !== undefined && !(num(m.effective_fps) && (m.effective_fps as number) > 0));
+					if (bad) {
+						errs.push(`${where}：segment motion 须为 {p50,p90(≥p50),samples(正整数),effective_fps?(正数)}（可整体删除，不可改坏形态）`);
+						break;
+					}
 				}
 				// cuts 可选字段（fix-broll-flash-frames）：agent 可增删；存在即须为升序有限数字、
 				// 严格落在 (start,end) 开区间内（改坏即拒——铺轨吸附消费不做猜测修复）
