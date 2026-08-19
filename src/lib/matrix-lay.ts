@@ -70,6 +70,10 @@ export const BROLL_META_CANDIDATE_CAP = 12;
 export const SHOT_TARGET_DEFAULT = 3;
 /** 最小可用镜头长（秒）：低于此长度的碎片不铺。 */
 export const MIN_SHOT_SEC = 1.2;
+/** 端点残片下限（秒，fix-broll-flash-frames D1；与索引 MIN_SCENE_SEC 同源常量不暴露配置）：
+ * 窗口端点与窗内最近切点（seg.cuts）之间短于此的区间 = 异景残片（2~3 帧闪帧观感来源），
+ * 端点就近**收缩**至切点消除；端点恰落切点上视为无残片。 */
+export const SLIVER_MIN_SEC = 0.5;
 /** segment 置信度地板：低于则不采纳（--score-floor 覆盖）。
  * 0.2 = 真机量纲校准（2026-07-10 回声定位）：该后端 score 集中于 0.1~0.4，0.25+ 已是强命中。 */
 export const SCORE_FLOOR_DEFAULT = 0.2;
@@ -320,7 +324,7 @@ const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 interface Pair {
 	cand: PlanResult;
-	seg: { start: number; end: number; best: number; score: number };
+	seg: { start: number; end: number; best: number; score: number; cuts?: number[] };
 	query: string;
 	/** 全局消费单元键（consumeKeyFor：云端/图片=材料级、本地视频=场景级、严格档=材料级）。 */
 	key: string;
@@ -406,23 +410,53 @@ function buildQueryPools(
 }
 
 /** 颗粒源窗（选取评估与落位共用，保证避让判定用的就是将落位的窗口）：
- * 图片=0..d（运镜分支）；视频=best 居中截 d（有素材时长钳 [0,dur]，否则钳段界）。 */
+ * 图片=0..d（运镜分支）；视频=best 居中截 d **钳段界**（fix-broll-flash-frames D1——
+ * 「有素材时长向段外扩」口径废止：段边界≈场景切点，外扩即把邻场景异景帧截进 clip，
+ * 旅拍打样闪帧实锤根因；本地与云端视频候选统一段界口径）。 */
 function sourceWindowFor(p: Pair, d: number): { clipSt: number; clipEd: number } {
 	if (isImagePair(p)) return { clipSt: 0, clipEd: d };
-	const dur = typeof p.cand.duration === "number" && p.cand.duration > 0 ? p.cand.duration : undefined;
-	const lo = dur !== undefined ? 0 : p.seg.start;
-	const hi = dur ?? p.seg.end;
-	const maxSt = Math.max(lo, hi - d);
+	const lo = p.seg.start;
+	const maxSt = Math.max(lo, p.seg.end - d);
 	const clipSt = Math.min(Math.max(p.seg.best - d / 2, lo), maxSt);
-	return { clipSt, clipEd: clipSt + d };
+	return { clipSt, clipEd: Math.min(clipSt + d, p.seg.end) };
 }
 
-/** 该对可供的最大镜头长：有素材时长则允许向段外扩（同素材相邻画面），否则只信段长。
+/** 窗口精修（fix-broll-flash-frames D1）：①端点残片收缩（只收不移）——窗内切点（seg.cuts）距
+ * 端点 <SLIVER_MIN_SEC 时端点吸附至切点（恰落切点=无残片不动）；收缩后短于 MIN_SHOT_SEC 返回
+ * null（该对不采纳，走既有换候选/留空路径）。②帧网格吸附——端点按素材帧率（result.fps）就近
+ * 吸附整帧边界（VFR/非常规 time_base 消除 ±1 帧边界抖动；fps 缺失跳过）。图片候选原样返回。 */
+function refineWindow(p: Pair, win: { clipSt: number; clipEd: number }): { clipSt: number; clipEd: number } | null {
+	if (isImagePair(p)) return win;
+	const EPS = 1e-6;
+	let { clipSt, clipEd } = win;
+	const cuts = p.seg.cuts;
+	if (Array.isArray(cuts) && cuts.length) {
+		const inWin = cuts.filter((c) => Number.isFinite(c) && c > clipSt + EPS && c < clipEd - EPS);
+		if (inWin.length) {
+			const head = inWin[0]!;
+			if (head - clipSt < SLIVER_MIN_SEC) clipSt = head;
+			const tail = inWin[inWin.length - 1]!;
+			if (tail > clipSt + EPS && clipEd - tail < SLIVER_MIN_SEC) clipEd = tail;
+		}
+		if (clipEd - clipSt < MIN_SHOT_SEC) return null;
+	}
+	const fps = p.cand.fps;
+	if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) {
+		const st = Math.round(clipSt * fps) / fps;
+		const ed = Math.round(clipEd * fps) / fps;
+		if (ed - st > EPS) {
+			clipSt = st;
+			clipEd = ed;
+		}
+	}
+	return { clipSt, clipEd };
+}
+
+/** 该对可供的最大镜头长 = 段界内长度（fix-broll-flash-frames D1：外扩口径废止，只信段长）。
  * 图片候选恒不限长（运镜视频按槽长档位现生成，槽长在 shotRange 上限内必被覆盖）。 */
 function pairAvail(p: Pair): number {
 	if (isImagePair(p)) return Number.POSITIVE_INFINITY;
-	const dur = typeof p.cand.duration === "number" && p.cand.duration > 0 ? p.cand.duration : undefined;
-	return dur ?? Math.max(0, p.seg.end - p.seg.start);
+	return Math.max(0, p.seg.end - p.seg.start);
 }
 
 /** 字符串哈希（FNV-1a）→ 种子。 */
@@ -532,28 +566,46 @@ export function fillBeatTrack(opts: {
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			return owner === undefined || owner === trackOrder;
 		};
+		// 将落位窗口 = 基础源窗（best 居中钳段）+ 精修（残片收缩/帧吸附）；null=收缩后不足不采纳
+		const resolveWindow = (p: Pair): { clipSt: number; clipEd: number } | null =>
+			refineWindow(p, sourceWindowFor(p, dFor(p)));
 		// 跳剪豁免版相邻避让（D1）：相邻槽位（间隔 <2 槽）∧ 同素材 ∧ |后颗粒 clip_st − 前颗粒 clip_ed| < 2s
-		const jumpCutBlocked = (p: Pair): boolean => {
+		const jumpCutBlocked = (p: Pair, win: { clipSt: number }): boolean => {
 			if (!lastPlaced || slotIdx - lastPlaced.slotIdx >= 2) return false;
 			if (p.cand.clip_id !== lastPlaced.clipId) return false;
-			return Math.abs(sourceWindowFor(p, dFor(p)).clipSt - lastPlaced.clipEd) < JUMP_CUT_GAP_SEC;
+			return Math.abs(win.clipSt - lastPlaced.clipEd) < JUMP_CUT_GAP_SEC;
 		};
 
 		// query 叙事序轮转：本槽位从 slotIdx 对应的 query 起，池干涸/无合格对则轮下一条
 		let pick: Pair | null = null;
+		let pickWin: { clipSt: number; clipEd: number } | null = null;
 		for (let t = 0; t < pools.length && !pick; t++) {
 			const { pool } = pools[(slotIdx + t) % pools.length];
-			pick = pool.find((p) => eligible(p) && !jumpCutBlocked(p)) ?? null;
+			for (const p of pool) {
+				if (!eligible(p)) continue;
+				const win = resolveWindow(p);
+				if (!win || jumpCutBlocked(p, win)) continue;
+				pick = p;
+				pickWin = win;
+				break;
+			}
 		}
 		if (!pick) {
 			// 枯竭放行（软避让）：无次优候选时放行被避让的同素材近邻颗粒，计入 summary
 			for (let t = 0; t < pools.length && !pick; t++) {
 				const { pool } = pools[(slotIdx + t) % pools.length];
-				pick = pool.find((p) => eligible(p)) ?? null;
+				for (const p of pool) {
+					if (!eligible(p)) continue;
+					const win = resolveWindow(p);
+					if (!win) continue;
+					pick = p;
+					pickWin = win;
+					break;
+				}
 			}
 			if (pick && opts.stats) opts.stats.adjacentWaived++;
 		}
-		if (!pick) {
+		if (!pick || !pickWin) {
 			// 宁空不重复（铁律）：候选枯竭即留空，MUST NOT 复用已分配素材；连空两次视为干涸
 			if (opts.stats) opts.stats.emptySlots++;
 			gapRun++;
@@ -563,42 +615,47 @@ export function fillBeatTrack(opts: {
 		}
 		gapRun = 0;
 
-		const d = dFor(pick);
-		// 源窗：图片候选走「运镜生成/复用」分支恒 0..槽长（MUST NOT best 居中截取）；视频 best 居中截 d
-		const win = sourceWindowFor(pick, d);
+		// 落位窗口即避让判定用的窗口（精修后 d 可短于抽取槽长——钳段/收缩/吸附皆只收不涨）
+		const win = pickWin;
+		const d = win.clipEd - win.clipSt;
 
 		slots.push({
 			clip_id: pick.cand.clip_id,
 			query: pick.query,
 			score: pick.seg.score,
 			clip_st: r3(win.clipSt),
-			clip_ed: r3(win.clipSt + d),
+			clip_ed: r3(win.clipEd),
 			track_st: r3(cursor),
 			track_ed: r3(cursor + d),
 		});
 		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++; // pinned 落成计数（summary 明示）
 		consumed.add(pick.key);
 		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
-		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipSt + d };
+		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipEd };
 		lastPick = pick;
 		cursor += d;
 	}
 
-	// 碎尾吸收:残量 < MIN_SHOT(素材短截/浮点残渣)且最后一颗粒紧贴残量时,由它顺延吃掉(素材界内,
+	// 碎尾吸收:残量 < MIN_SHOT(素材短截/浮点残渣)且最后一颗粒紧贴残量时,由它顺延吃掉(**段界内**,
 	// 双时基同步);gap 造成的大段留空(≥ MIN_SHOT)是有意留空,不吸——该处露黑底垫轨(默认开),
 	// 仅 --no-black-bed / 该 beat 未铺黑底时才露 A-roll。
+	// fix-broll-flash-frames D1:吸收上界随窗口口径一并收窄到段界(MUST NOT 用素材时长外扩),
+	// 且吸收后的尾端点同样过残片收缩/帧吸附(吸收不得把刚消掉的异景残片又吃回来)。
 	const last = slots[slots.length - 1];
 	if (last && lastPick) {
 		const tail = beat.track_ed - last.track_ed;
 		if (tail > 1e-6 && tail < MIN_SHOT_SEC) {
-			const dur =
-				typeof lastPick.cand.duration === "number" && lastPick.cand.duration > 0 ? lastPick.cand.duration : undefined;
 			// 图片候选不限源界（运镜 duration 按最终槽长档位生成，吸收后仍被覆盖）
-			const hi = isImagePair(lastPick) ? Number.POSITIVE_INFINITY : (dur ?? lastPick.seg.end);
+			const hi = isImagePair(lastPick) ? Number.POSITIVE_INFINITY : lastPick.seg.end;
 			const ext = Math.min(tail, Math.max(0, hi - last.clip_ed));
 			if (ext > 1e-6) {
-				last.clip_ed = r3(last.clip_ed + ext);
-				last.track_ed = r3(last.track_ed + ext);
+				const refined = refineWindow(lastPick, { clipSt: last.clip_st, clipEd: last.clip_ed + ext });
+				// 精修失败（收缩后不足下限）= 维持吸收前窗口，如实留空
+				if (refined && refined.clipEd > last.clip_ed + 1e-6) {
+					const grew = refined.clipEd - last.clip_ed;
+					last.clip_ed = r3(refined.clipEd);
+					last.track_ed = r3(last.track_ed + grew);
+				}
 			}
 		}
 	}

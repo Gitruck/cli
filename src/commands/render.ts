@@ -6,6 +6,7 @@ import { Command } from "commander";
 import { resolve, dirname, join, basename, extname } from "node:path";
 import { existsSync } from "node:fs";
 import { readGtrkFile, renderGtrk } from "../lib/render";
+import { runPostRenderQc } from "./qc";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
 
@@ -16,6 +17,7 @@ interface RenderOpts {
 	ffmpegPath?: string;
 	open?: boolean;
 	json?: boolean;
+	qc?: boolean;
 }
 
 export function registerRender(program: Command): void {
@@ -27,6 +29,7 @@ export function registerRender(program: Command): void {
 		.option("--codec <c>", "视频编码（默认 h264）")
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统）")
 		.option("--no-open", "完成后不自动打开产物目录")
+		.option("--no-qc", "跳过渲染后质检（缺省渲完自动扫一遍闪帧/黑帧/爆音等并落 .qc.json）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (gtrk: string, opts: RenderOpts) => {
 			if (opts.json) routeLogsToStderr();
@@ -48,9 +51,20 @@ export function registerRender(program: Command): void {
 			log.tickEnd();
 			log.ok(`渲染完成：${outMp4}（${result.duration.toFixed(1)}s）`);
 
+			// 渲后质检（local-ffmpeg-render delta）：同进程复用扫描零件、透传已解析工程做工程感知；
+			// 结果只呈现不改变渲染退出语义（硬门控走独立 gtrk qc --fail-on）
+			const qc = opts.qc === false ? null : await runPostRenderQc(outMp4, project, { ffmpegPath: opts.ffmpegPath });
+
 			if (opts.open) openFolder(dirname(outMp4));
 			if (opts.json) {
-				console.log(JSON.stringify({ ok: true, output: outMp4, duration: result.duration }));
+				console.log(
+					JSON.stringify({
+						ok: true,
+						output: outMp4,
+						duration: result.duration,
+						...(qc ? { qc: qc.summary } : {}),
+					}),
+				);
 			}
 		});
 }
