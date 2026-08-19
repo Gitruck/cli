@@ -8,6 +8,7 @@ import { resolve, dirname, join, basename, extname } from "node:path";
 import { existsSync } from "node:fs";
 import { writeFile, readFile } from "node:fs/promises";
 import { fmtTime, scanFinalCut, shouldFail, type QcItem, type QcReport, type QcSeverity } from "../lib/qc";
+import { openLocalIndexDb, recordConfirmedCuts } from "../lib/local-index";
 import { log, routeLogsToStderr } from "../lib/log";
 
 interface QcOpts {
@@ -15,6 +16,7 @@ interface QcOpts {
 	json?: string;
 	failOn?: string;
 	ffmpegPath?: string;
+	feedbackCuts?: boolean;
 }
 
 const SEVERITY_LABEL: Record<QcSeverity, string> = { error: "严重", warn: "提示", info: "备注" };
@@ -65,6 +67,10 @@ export function registerQc(program: Command): void {
 		.option("--gtrk <path>", "工程感知模式：对表 clip 拼接边界，识别段内跳切、已知黑底空洞降级")
 		.option("--json <path>", "机读报告落点（缺省 = <成片同目录>/<成片名>.qc.json）")
 		.option("--fail-on <level>", "退出码门控：error（默认）| warn | never", "error")
+		.option(
+			"--feedback-cuts",
+			"把段内跳切映射回源时码并补录进本地索引（标 qc_confirmed，治检测阈值漏网）——须配 --gtrk；不带本开关时常规扫描零写库",
+		)
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统）")
 		.action(async (input: string, opts: QcOpts) => {
 			const failOn = opts.failOn === "warn" || opts.failOn === "never" ? opts.failOn : "error";
@@ -86,6 +92,36 @@ export function registerQc(program: Command): void {
 			});
 
 			for (const line of formatReport(report)) log.info(line);
+
+			// 确认切点回流（显式动作；常规扫描零写库——QC 是只读诊断工具，静默改索引会让
+			// 「重扫一次结果就变了」）。按 clip_id → 材料 id（消费方既有拼接 broll-+clip_id）分组补录。
+			if (opts.feedbackCuts) {
+				if (!gtrk) throw new Error("--feedback-cuts 须配 --gtrk（无工程坐标无从映射回源时码）");
+				const byMaterial = new Map<string, number[]>();
+				let skipped = 0;
+				for (const it of report.items) {
+					if (it.type !== "intra_cut") continue;
+					const clipId = it.evidence.clip_id;
+					const src = it.evidence.source_time;
+					if (typeof clipId !== "string" || typeof src !== "number") {
+						skipped++;
+						continue;
+					}
+					const materialId = clipId.startsWith("broll-") ? clipId : `broll-${clipId}`;
+					const list = byMaterial.get(materialId) ?? [];
+					list.push(Math.round(src * 1000));
+					byMaterial.set(materialId, list);
+				}
+				const db = await openLocalIndexDb();
+				try {
+					let added = 0;
+					for (const [materialId, tsMs] of byMaterial) added += recordConfirmedCuts(db, materialId, tsMs);
+					log.ok(`确认切点已回流索引：新增 ${added} 条（跳过 ${skipped} 条无法唯一映射）`);
+				} finally {
+					db.close();
+				}
+			}
+
 			const reportPath = resolve(opts.json ?? defaultReportPath(inputAbs));
 			await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
 			log.ok(
