@@ -480,21 +480,35 @@ function refineWindow(
 	if (isImagePair(p)) return win;
 	const EPS = 1e-6;
 	let { clipSt, clipEd } = win;
+	// 端点是否由「吸附到切点」得来——若是，帧网格取整 MUST NOT 把它推回切点的另一侧：
+	// 切点时码 = 新场景**首帧**的时刻，起点就近取整可能落到切点前一帧（= 留 1 帧旧场景，
+	// 把刚做的收缩撤销了半帧；打样实测 618.469 在 60fps 上取整到 618.4667）。故起点向上取整、
+	// 终点向下取整，宁可少一帧也不越到切点另一侧。
+	let stOnCut = false;
+	let edOnCut = false;
 	const cuts = p.seg.cuts;
 	if (Array.isArray(cuts) && cuts.length) {
 		const inWin = cuts.filter((c) => Number.isFinite(c) && c > clipSt + EPS && c < clipEd - EPS);
 		if (inWin.length) {
 			const head = inWin[0]!;
-			if (head - clipSt < SLIVER_MIN_SEC) clipSt = head;
+			if (head - clipSt < SLIVER_MIN_SEC) {
+				clipSt = head;
+				stOnCut = true;
+			}
 			const tail = inWin[inWin.length - 1]!;
-			if (tail > clipSt + EPS && clipEd - tail < SLIVER_MIN_SEC) clipEd = tail;
+			if (tail > clipSt + EPS && clipEd - tail < SLIVER_MIN_SEC) {
+				clipEd = tail;
+				edOnCut = true;
+			}
 		}
 	}
 	const fps = p.cand.fps;
 	if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) {
-		// 起点就近吸附后钳回段内（向下取整会越过段头）；终点同理钳回段尾
-		const st = Math.min(Math.max(Math.round(clipSt * fps) / fps, p.seg.start), clipEd);
-		let ed = Math.min(Math.round(clipEd * fps) / fps, p.seg.end);
+		// 起点：吸附到切点者向上取整（不含切点前那帧），否则就近；再钳回段内
+		const stGrid = stOnCut ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
+		const st = Math.min(Math.max(stGrid, p.seg.start), clipEd);
+		// 终点：吸附到切点者向下取整（不含切点那帧，它属下一镜头），否则就近
+		let ed = Math.min(edOnCut ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
 		// 吸附撑长的硬上限：超出剩余空间即把终点**向下**取整到帧网格（宁短一帧不越界）
 		if (ed - st > maxD + EPS) ed = st + Math.floor((maxD + EPS) * fps) / fps;
 		if (ed - st > EPS) {
