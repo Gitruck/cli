@@ -20,6 +20,9 @@ const AUDIO_LAYOUT = "stereo";
 const DEFAULT_CRF = 18;
 const DEFAULT_AUDIO_CROSSFADE_MS = 8;
 const MAX_CLIPS = 500;
+/** 帧对齐补齐余量（帧，fix-render-frame-drift）：截到裁定帧数前先备出的富余帧数。
+ * 2 帧足够覆盖 `fps` 出帧数随 trim 起点相位的 ±1 摆动；富余帧够用时被 end_frame 原样截掉。 */
+const PAD_FRAMES = 2;
 
 /** Python %g 近似：6 位有效数字并去尾零（fps 格式化对齐后端）。 */
 const g = (n: number): string => String(Number(n.toPrecision(6)));
@@ -132,6 +135,31 @@ export interface RenderParams {
 	audio_crossfade_ms?: number;
 }
 
+/**
+ * 视频元素序列 → 逐元素输出帧数（fix-render-frame-drift D1：累计取整）。
+ *
+ * 现行 `trim`+`fps` 链每段产出 `ceil(d × rate)` 帧——`fps` 在 t=0,1/rate,2/rate… 逐槽取帧，
+ * 只要 `d × rate` 非整数就多出不足一帧的尾巴且**从不向下取整**，`concat` 逐段累加 →
+ * 画面对配音渐进失步（旅拍打样实测：视频流比音频流长 0.279s，切点漂移 0.028s→0.256s 单调增长）。
+ * 该行为与 VFR 无关，纯 CFR 源同样发生（合成源实测 2.010s→61 帧、2.510s→76 帧）。
+ *
+ * 累计取整：第 i 段帧数 = `round(cumEnd_i × rate) − round(cumStart_i × rate)`，
+ * 每段的取整误差被下一段起点吸收，全片总帧数恒 `round(total × rate)`，不随段序累加。
+ * 各段时长均为帧长整数倍时退化为原值（零回归）。导出供单测与跨仓对拍。
+ */
+export function allocateFrames(elements: { duration: number }[], rate: number): number[] {
+	const out: number[] = [];
+	let cum = 0;
+	let prevFrame = 0;
+	for (const el of elements) {
+		cum += el.duration;
+		const edge = Math.round(cum * rate);
+		out.push(edge - prevFrame);
+		prevFrame = edge;
+	}
+	return out;
+}
+
 /** gtrk v1 → (输入文件列表, filter_complex 文本, 总时长)。纯函数，供黄金用例对拍。 */
 export function buildFilterGraph(
 	gtrk: GtrkV1,
@@ -185,25 +213,40 @@ export function buildFilterGraph(
 	if (total <= 0) throw new Error("时间线总时长为 0");
 	if (total > vEnd + 1e-6) vElements.push({ kind: "gap", duration: total - vEnd });
 
+	// 逐元素输出帧数：按成片时间线**累计取整**裁定（fix-render-frame-drift D1）——
+	// 取整误差被下一段起点吸收，全片总帧数恒 round(total×rate)，MUST NOT 逐段累加
+	const frameCounts = allocateFrames(vElements, rate);
+
 	const vLabels: string[] = [];
-	for (const el of vElements) {
+	vElements.forEach((el, i) => {
 		const lab = label();
+		const frames = frameCounts[i]!;
 		if (el.kind === "clip") {
 			const idx = inputOf(el.material);
 			const st = el.clip_st;
 			const ed = el.clip_st + el.duration;
+			// fps 之后按**输出帧号**截到裁定值（trim=end_frame 与源时基解耦，VFR 源同样成立）。
+			// 截断前先 tpad 克隆末帧补足 PAD_FRAMES 帧：`fps` 的实际出帧数随 trim 起点相对源帧的
+			// **相位**在 floor/ceil 之间摆动（合成源实测：同为 d=2.010s，start=5.000 出 61 帧、
+			// start=5.008 出 60 帧），只截不补会在裁定值恰好取到高位时少一帧、逐段累成短片
+			// （打样实测 5100 vs 应有 5103）。补出来的帧在够用时被 end_frame 原样截掉；
+			// 真不够时最多多驻留一帧末帧（不可见），MUST NOT 靠外扩源窗补——那会把邻场景帧截进来。
 			chains.push(
 				`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
-					`fps=${g(rate)},scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+					`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
+					`trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
+					`scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
 					`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[${lab}]`,
 			);
 		} else {
+			// gap 是合成黑场，给足 d（裁定帧数 + 余量）再按帧截即可，无需 tpad
 			chains.push(
-				`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6(el.duration)},format=yuv420p[${lab}]`,
+				`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6((frames + PAD_FRAMES) / rate)},` +
+					`trim=end_frame=${frames},setpts=PTS-STARTPTS,format=yuv420p[${lab}]`,
 			);
 		}
 		vLabels.push(lab);
-	}
+	});
 	chains.push(vLabels.map((x) => `[${x}]`).join("") + `concat=n=${vLabels.length}:v=1:a=0[vout]`);
 
 	// 音频轨（0..N）

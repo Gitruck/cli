@@ -32,6 +32,7 @@ import { registerDoctor } from "./commands/doctor";
 import { registerSkills } from "./commands/skills";
 import { registerUpgrade } from "./commands/upgrade";
 import { registerRender } from "./commands/render";
+import { registerQc } from "./commands/qc";
 import { registerSplit } from "./commands/split";
 import { registerMatrix } from "./commands/matrix";
 import { registerMg } from "./commands/mg";
@@ -85,6 +86,7 @@ registerDoctor(program);
 registerSkills(program);
 registerUpgrade(program);
 registerRender(program); // 本地渲染 gtrk 工程（EDL）→ 成片 mp4
+registerQc(program); // 成片质量扫描（闪帧/段内跳切/黑帧/冻结/爆音/静音/音画规整）
 registerSplit(program); // 视觉拆分派单器：transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch
 // registerStruct(program);   // 已有 gtrk → 三方工程文件
 registerMatrix(program); // B-roll 检索：dispatch.film_broll → split/broll-plan.json 候选清单（双口路由）
