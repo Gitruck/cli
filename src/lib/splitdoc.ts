@@ -49,6 +49,22 @@ export const AUX_TYPES = [
 export type Lane = (typeof LANES)[number];
 
 /**
+ * 关键词锚（add-keyword-anchored-broll）：FILM_BROLL beat 的 `handoff.anchors` 条目——agent 圈定的
+ * 「听到关键词的瞬间看到对应画面」锚点，铺轨时锚 query 的最高分命中钉在关键词说出时刻。
+ * 拆分层只写语义（哪个词、哪句、什么画面）；说出时刻（at_sec）由消费侧（matrix plan）现场内插。
+ */
+export interface SplitAnchor {
+	/** 关键词原文（须为所在句 text 的子串——照原句抄写，勿改写勿增删标点）。 */
+	keyword: string;
+	/** 关键词所在句 utterance id（须落在该 beat 的 span 区间内）。 */
+	utterance: string;
+	/** 锚专属检索词（视觉描述，与 handoff.queries 同链检索）。 */
+	query: string;
+}
+/** 每 beat 锚上限（主理人 2026-08-19 拍板 0-2）：锚过密会把序贯填充区间切碎。 */
+export const MAX_ANCHORS_PER_BEAT = 2;
+
+/**
  * 遗留 lane 别名（去品牌化读旧兼容）：既有工程/拆分稿的品牌名读入即归一为中性名。
  * 写侧一律新名（buildLanding/struct_meta/dispatch）；此表只服务读侧双名认旧。
  */
@@ -123,6 +139,13 @@ export interface ValidationCtx {
 	transcriptHash: string;
 	/** 有效栏目配置的 vocab；缺省 = 内置默认（现枚举），校验行为与词表化前一致。 */
 	vocab?: VocabCtx;
+	/**
+	 * 句文本供给（add-keyword-anchored-broll）：utterance id → text。分层理由：splitdoc 是纯逻辑层
+	 * 不碰文件 IO，transcript 全文只在命令层（split 落地 loadTranscript 之后）持有——沿 utteranceIds
+	 * 同一条供给路径注入。供给在位时 anchors 的「keyword ∈ 句文」在校验链内完成（失败零副作用口径
+	 * 不变）；供给缺席只校字段形态 + utterance ∈ span，不做静默降级猜测。
+	 */
+	utteranceTexts?: Map<string, string>;
 }
 
 export interface ValidationResult {
@@ -233,6 +256,9 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 		// handoff 按 lane 分型
 		validateHandoff(tag, b, errors, warnings);
 
+		// 关键词锚（add-keyword-anchored-broll）：utterance ∈ span 复用上方 fromIdx/toIdx 判定
+		validateAnchors(tag, b, idIndex, fromIdx, toIdx, ctx.utteranceTexts, errors, warnings);
+
 		// 辅助层
 		if (b.aux_layers != null) {
 			if (!Array.isArray(b.aux_layers)) errors.push(`${tag}：aux_layers 必须是数组`);
@@ -284,6 +310,64 @@ function validateHandoff(
 		return;
 	}
 	// AI_DRAMA：字段全可选，下游有推断默认——不强校验
+}
+
+/**
+ * 关键词锚校验（add-keyword-anchored-broll）：handoff.anchors 仅 FILM_BROLL 主层消费——
+ * ≤MAX_ANCHORS_PER_BEAT 个/beat、keyword/utterance/query 非空、utterance ∈ beat span（id 序比较）。
+ * 「keyword ∈ 句文」只在 ctx 供给 utteranceTexts 时校验（分层理由见 ValidationCtx.utteranceTexts 注释）。
+ */
+function validateAnchors(
+	tag: string,
+	b: Record<string, unknown>,
+	idIndex: Map<string, number>,
+	fromIdx: number,
+	toIdx: number,
+	texts: Map<string, string> | undefined,
+	errors: string[],
+	warnings: string[],
+): void {
+	const handoff = b.handoff as Record<string, unknown> | undefined;
+	const anchors = handoff?.anchors;
+	if (anchors === undefined) return;
+	// 锚只被 FILM_BROLL 派单分支消费（dispatch.film_broll 透传）；其余 lane 出现即告警忽略，不静默
+	if (normalizeLane(b.lane) !== "FILM_BROLL") {
+		warnings.push(`${tag}：handoff.anchors 仅 FILM_BROLL 主层消费（当前 lane=${String(b.lane)}），已忽略不透传`);
+		return;
+	}
+	if (!Array.isArray(anchors)) {
+		errors.push(`${tag}：handoff.anchors 必须是数组`);
+		return;
+	}
+	if (anchors.length > MAX_ANCHORS_PER_BEAT) {
+		errors.push(`${tag}：anchors 至多 ${MAX_ANCHORS_PER_BEAT} 个/beat（得到 ${anchors.length}）——锚过密会把序贯填充区间切碎`);
+	}
+	anchors.forEach((raw, ai) => {
+		const atag = `${tag}.anchors[${ai}]`;
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			errors.push(`${atag}：锚必须是对象（{keyword, utterance, query}）`);
+			return;
+		}
+		const a = raw as Record<string, unknown>;
+		if (!isNonEmptyStr(a.keyword)) errors.push(`${atag}：缺 keyword（关键词原文）`);
+		if (!isNonEmptyStr(a.query)) errors.push(`${atag}：缺 query（锚专属检索词，写视觉描述）`);
+		if (!isNonEmptyStr(a.utterance)) {
+			errors.push(`${atag}：缺 utterance（关键词所在句 id）`);
+			return;
+		}
+		const ui = idIndex.get(a.utterance);
+		if (ui === undefined) {
+			errors.push(`${atag}：utterance 引用了不存在的 id ${a.utterance}`);
+			return;
+		}
+		if (fromIdx >= 0 && toIdx >= 0 && (ui < fromIdx || ui > toIdx)) {
+			errors.push(`${atag}：utterance ${a.utterance} 不在该 beat 的 span 区间内`);
+		}
+		const text = texts?.get(a.utterance);
+		if (isNonEmptyStr(a.keyword) && typeof text === "string" && !text.includes(a.keyword)) {
+			errors.push(`${atag}：keyword「${a.keyword}」不是句 ${a.utterance} 文本的子串——照原句抄写关键词（勿改写、勿增删标点）`);
+		}
+	});
 }
 
 function validateAux(
@@ -421,6 +505,9 @@ export interface FilmDispatch {
 	shots?: unknown;
 	per_shot_sec?: unknown;
 	exclude?: unknown;
+	/** 关键词锚（add-keyword-anchored-broll，纯追加可选）：agent 圈定的 0-2 个锚原样透传——
+	 * 不派生颗粒；at_sec 内插与锚定布局在消费侧（gtrk matrix）完成。 */
+	anchors?: SplitAnchor[];
 	track_st: number;
 	track_ed: number;
 	/** 该 beat 的 utterance 区间（add-consume-side-reprojection，纯追加可选）。 */
@@ -556,12 +643,16 @@ export function buildLanding(
 				span: beat.span,
 			});
 		} else if (lane === "FILM_BROLL") {
+			// 关键词锚透传（add-keyword-anchored-broll）：已过校验的 anchors 原样进派单条目——
+			// 拆分层不写任何秒级时码，说出时刻（at_sec）由消费侧现场内插（句级时码只在当刻投影里为真）
+			const anchors = Array.isArray(h.anchors) && h.anchors.length ? (h.anchors as SplitAnchor[]) : undefined;
 			dispatch.film_broll.push({
 				beat: beat.id,
 				queries: Array.isArray(h.queries) ? (h.queries as string[]) : [],
 				shots: h.shots,
 				per_shot_sec: h.per_shot_sec,
 				exclude: h.exclude,
+				...(anchors ? { anchors } : {}),
 				track_st,
 				track_ed,
 				span: beat.span,
@@ -711,7 +802,11 @@ export function renderSplitMarkdown(
 	for (const a of landing.dispatch.ai_drama) L.push(`- \`${a.beat}\` ${a.track_st}s…${a.track_ed}s`);
 	L.push("");
 	L.push("## FILM_BROLL Queue");
-	for (const f of landing.dispatch.film_broll) L.push(`- \`${f.beat}\` queries=[${f.queries.join(" / ")}]`);
+	for (const f of landing.dispatch.film_broll) {
+		// 锚点摘要（add-keyword-anchored-broll）：人读稿一眼看到哪些关键词被钉
+		const anchorNote = f.anchors?.length ? ` · 锚=[${f.anchors.map((a) => a.keyword).join(" / ")}]` : "";
+		L.push(`- \`${f.beat}\` queries=[${f.queries.join(" / ")}]${anchorNote}`);
+	}
 	L.push("");
 	return L.join("\n");
 }

@@ -83,9 +83,29 @@ gtrk split --project "<oralcut产物目录>" --json
 - `lane` 四选一 `A_ROLL | MG | AI_DRAMA | FILM_BROLL`；`base_track` 三选一 `真人出镜 | 口播继续 | 旁白主导`。
 - **handoff 按 lane 分型**（校验器会硬查）：
   - `MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**；可选 `category`（overlay 透明叠加/fullscreen 不透明满屏,裁决⑩,供色带分层,详见 field-schema）。
-  - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?}`，**`queries` 非空必填**；queries 写**英文长句场景描述**（一条一个意象，避多义动词），**exclude 保持中文**（细则见 field-schema）。
+  - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?, anchors?}`，**`queries` 非空必填**；queries 写**英文长句场景描述**（一条一个意象，避多义动词），**exclude 保持中文**；`anchors` 为关键词锚（圈定指引见下节，细则见 field-schema）。
   - `AI_DRAMA` → `handoff:{narrative?, theme?, emotion_stage?, platform?, shot_count?}`，全可选（下游框架 skill /gtrk-ai-drama 有推断默认）。
   - `A_ROLL` → **无 handoff**（写了会被警告忽略）。
+
+### 关键词锚（FILM_BROLL 的 `handoff.anchors`，选配但强烈建议）
+
+**为什么**：beat 级 queries 只保证「这段有对的画面」，不保证「说到关键词的那一刻画面正好对上」——听到「野牛高速」的瞬间看到野牛，是解说视频的看点兑现契约。铺轨会把锚 query 的最高分命中**钉在关键词说出时刻**（句级时码字符比例内插 − 0.5s 提前量），其余槽位在锚点两侧照常序贯填充。
+
+```jsonc
+"handoff": {
+  "queries": ["bison herd crossing a highway in yellowstone"],
+  "anchors": [
+    { "keyword": "野牛高速", "utterance": "u0002", "query": "bison walking on highway blocking cars" }
+  ]
+}
+```
+
+**圈定指引**：
+- **圈「贵大奇多」类看点实词**——地名/地标（黄石湖、老忠实）、奇观名物（野牛高速、间歇泉）、数字头衔（全球第一、三万美元）：观众听到会期待「给我看」的词。**虚词/泛词勿圈**（「非常」「其实」「这个地方」锚不出画面）。
+- **每 beat 至多 2 个**（校验硬拒超额）——锚过密会把序贯填充区间切碎，节奏反而乱。没有值得钉的词就不写 anchors，宁缺毋滥。
+- `keyword` **照原句抄写**（须为该句 text 的子串，勿改写勿增删标点）；`utterance` 是关键词所在句 id（须落在该 beat 的 span 内）——两者校验器都硬查。
+- `query` 写**该关键词的视觉描述**（同 queries 语言规范：英文长句场景描述）——它与 queries 同链检索，锚点钉的是它的最高分命中；写抽象词等于锚一张糊画面。
+- 锚 query 无合格命中时铺轨自动降级普通槽并在 summary 明示（不硬锚烂画面）——你无需为素材库兜底，只管圈对词。
 
 ### 4. 落地校验
 
@@ -104,6 +124,7 @@ gtrk split "<拆分稿.json>" --project "<oralcut产物目录>" --md --json
 - `B02 与 B03 区间重叠` → 收窄其中一个 beat 的 span，让区间不相交。
 - `transcript_hash 不匹配` → 转写已变更：**重新跑第 1 步导出视图**，用新 hash 重拆（别硬改 hash 蒙混）。
 - `FILM_BROLL 缺检索 query` / `MG 缺 duration_hint` → 补齐对应 handoff 必填字段。
+- `keyword「…」不是句 uNNNN 文本的子串` / `utterance 不在该 beat 的 span 区间内` / `anchors 至多 2 个` → 锚字段问题：keyword 照原句抄写、utterance 换成关键词真正所在句、锚删到 ≤2 个。
 
 **3 轮仍失败 → 把错误原样呈给用户**，不静默降级、不绕过校验。
 

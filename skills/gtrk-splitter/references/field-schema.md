@@ -67,6 +67,10 @@
 //   - 每条 query 只装一个场景意象，多意象拆成多条
 //   - **避多义/字面义强的动词**（"pointing" 会召回手指特写、"hunting" 召回猎人——改用 "giving suggestions in a meeting" 这类场景语义）
 //   - **exclude 保持中文**：负向过滤匹配的是服务端返回的中文 note，写英文会失效
+//   anchors（可选，关键词锚 · add-keyword-anchored-broll）：[{ keyword, utterance, query }] ≤2 个/beat——
+//   - keyword 照原句抄写（须为所在句 text 子串）；utterance 为该句 id（须在本 beat span 内）；query 写该词的英文视觉描述
+//   - 语义：铺轨把锚 query 最高分命中钉在关键词说出时刻（句级时码内插 −0.5s 提前量）；无合格命中自动降级普通槽
+//   - 圈「贵大奇多」类看点实词（地名/奇观/数字头衔），虚词泛词勿圈；圈定指引见 SKILL.md「关键词锚」节
 
 // lane === "AI_DRAMA"  —— 全可选（下游框架 skill /gtrk-ai-drama 有推断默认）
 "handoff": { "narrative": "trauma-repetition", "theme": "freud-fort-da", "emotion_stage": "abyssal", "platform": "video-gen", "shot_count": 5 }

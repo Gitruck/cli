@@ -85,6 +85,9 @@ export const SLIVER_MIN_SEC = 1.0;
 /** segment 置信度地板：低于则不采纳（--score-floor 覆盖）。
  * 0.2 = 真机量纲校准（2026-07-10 回声定位）：该后端 score 集中于 0.1~0.4，0.25+ 已是强命中。 */
 export const SCORE_FLOOR_DEFAULT = 0.2;
+/** 锚起播提前量（秒，add-keyword-anchored-broll）：锚片段钉 `at_sec − 提前量` 起播——提前量让画面
+ * 先展开、关键词说出时画面已立住（主理人 2026-08-19 拍板默认 0.5s，常量不暴露配置）。 */
+export const ANCHOR_LEAD_SEC = 0.5;
 /** 单 beat 单轨槽位上限（防呆）。 */
 export const MAX_SLOTS_PER_BEAT = 32;
 
@@ -745,6 +748,163 @@ export function fillBeatTrack(opts: {
 	return slots;
 }
 
+// ── 锚点优先布局（add-keyword-anchored-broll）─────────────────────────────
+
+/** 逐锚落位结果（summary anchor_details 条目）：status = planned（系统选取钉位）| pinned（用户
+ * 钉选候选占锚槽——用户 pin 优先于锚的系统选取）| degraded（退化普通槽，reason 给因）。 */
+export interface AnchorOutcome {
+	beat: string;
+	keyword: string;
+	at_sec: number | null;
+	/** 实际钉住的槽位起点（track_st = max(beat 起点, at_sec − ANCHOR_LEAD_SEC) 出界钳回）；degraded 时 null。 */
+	track_st: number | null;
+	clip_id: string | null;
+	status: "planned" | "pinned" | "degraded";
+	/** degraded 原因（人读告警与机读诊断共用）。 */
+	reason?: string;
+}
+
+/**
+ * 单 beat 首轨锚点优先布局（add-keyword-anchored-broll）：先钉锚、再在锚点分割出的区间内复用
+ * 既有序贯填充（fillBeatTrack 整套切槽/避让/精修/吸收逻辑，MUST NOT 另写一套）。
+ *
+ * 口径：
+ *   - 锚只钉**首轨**（trackOrder 0，默认可见的主候选轨）；备选轨保持既有序贯填充——N 轨 × 锚
+ *     重复钉位会把不二用消费池抽干，备选轨要给用户的是整套差异化方案，同一锚的次优命中撑不起这个价值。
+ *   - 每锚取其 query 池的首个合格对（池序 = pinned 置顶 > 等效分降序——**用户 pinned 优先于锚**
+ *     的系统选取，取到 pinned 对时 status="pinned"）；片段钉 `max(beat.track_st, at_sec − 提前量)`，
+ *     时长 = min(命中段可用长, per_shot_sec×2)，出界钳回 beat 窗口。
+ *   - 锚间时间重叠：按 at_sec 先到先钉，后锚只后移不重叠；挤到不足最小槽长即 degraded（不硬锚）。
+ *   - 锚 query 无 ≥score 地板命中 / at_sec 缺失（内插失败）→ 该锚 degraded 退化普通槽 + summary 明示。
+ *   - 锚片段消费照走全局不二用记账（consumed/beatOwners）；黑片叠底/mark-weight/层带零改动。
+ */
+export function fillBeatTrackWithAnchors(opts: {
+	beat: PlanBeat;
+	trackOrder: number;
+	consumed: Set<string>;
+	scoreFloor: number;
+	noImage?: boolean;
+	dedupScope?: DedupScope;
+	beatOwners?: Map<string, number>;
+	stats?: FillStats;
+	markWeight?: number;
+	markLookup?: MarkLookup;
+	markStats?: MarkStatsSets;
+}): { slots: FillSlot[]; anchors: AnchorOutcome[] } {
+	const { beat } = opts;
+	const anchorsIn = Array.isArray(beat.anchors) ? beat.anchors : [];
+	// 无锚 = 原路序贯填充（零回归：本函数只是 fillBeatTrack 的透明壳）
+	if (!anchorsIn.length) return { slots: fillBeatTrack(opts), anchors: [] };
+
+	const outcomes: AnchorOutcome[] = [];
+	const anchorSlots: FillSlot[] = [];
+	const span = beat.track_ed - beat.track_st;
+	const degraded = (a: { keyword: string; at_sec: number | null }, reason: string): void => {
+		outcomes.push({ beat: beat.beat, keyword: a.keyword, at_sec: a.at_sec ?? null, track_st: null, clip_id: null, status: "degraded", reason });
+	};
+	if (!(span > 0)) {
+		for (const a of anchorsIn) degraded({ keyword: a.keyword, at_sec: a.at_sec ?? null }, "beat 窗口无长度");
+		return { slots: [], anchors: outcomes };
+	}
+
+	const pools = buildQueryPools(beat, opts.scoreFloor, {
+		noImage: opts.noImage,
+		dedupScope: opts.dedupScope,
+		markWeight: opts.markWeight,
+		markLookup: opts.markLookup,
+		markStats: opts.markStats,
+	});
+	const poolByQuery = new Map(pools.map((p) => [p.query, p.pool]));
+	const perShot = typeof beat.per_shot_sec === "number" && beat.per_shot_sec > 0 ? beat.per_shot_sec : SHOT_TARGET_DEFAULT;
+	const maxAnchorLen = perShot * 2; // 锚片段时长上限 = per_shot_sec × 2（拍板口径）
+	// 按 at_sec 升序钉位（at_sec 缺失者排尾直接 degraded，不占位）；同刻按原序
+	const sorted = anchorsIn
+		.map((a, i) => ({ a, i }))
+		.sort((x, y) => (x.a.at_sec ?? Number.POSITIVE_INFINITY) - (y.a.at_sec ?? Number.POSITIVE_INFINITY) || x.i - y.i);
+	let cursorMin = beat.track_st; // 前锚已占用的推进线（锚间只后移不重叠）
+
+	for (const { a } of sorted) {
+		if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) {
+			degraded(a, "at_sec 缺失（plan 内插失败：文本漂移/句被剪/重投影降级）");
+			continue;
+		}
+		// 钉位：at_sec − 提前量，出界钳回 beat 窗口（尾部至少容一个最小槽）
+		let st = Math.max(beat.track_st, a.at_sec - ANCHOR_LEAD_SEC);
+		st = Math.min(st, beat.track_ed - MIN_SHOT_SEC);
+		st = Math.max(st, beat.track_st, cursorMin);
+		const room = beat.track_ed - st;
+		if (room < MIN_SHOT_SEC - 1e-6) {
+			degraded(a, "锚点窗口不足（与前锚重叠或过近 beat 末端）");
+			continue;
+		}
+		const pool = poolByQuery.get(a.query);
+		if (!pool?.length) {
+			degraded(a, `锚 query「${a.query}」无 ≥score 地板的命中`);
+			continue;
+		}
+		// 取该 query 池首个合格对：不二用/同 beat 归属/精修口径与序贯填充完全同一套
+		let pick: Pair | null = null;
+		let pickWin: { clipSt: number; clipEd: number } | null = null;
+		for (const p of pool) {
+			if (opts.consumed.has(p.key)) continue;
+			if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
+			const owner = opts.beatOwners?.get(p.cand.clip_id);
+			if (owner !== undefined && owner !== opts.trackOrder) continue;
+			const win = refineWindow(p, sourceWindowFor(p, Math.min(maxAnchorLen, pairAvail(p), room)), room);
+			if (!win) continue;
+			pick = p;
+			pickWin = win;
+			break;
+		}
+		if (!pick || !pickWin) {
+			degraded(a, `锚 query「${a.query}」候选耗尽或精修后不足最小槽长`);
+			continue;
+		}
+		const d = pickWin.clipEd - pickWin.clipSt;
+		anchorSlots.push({
+			clip_id: pick.cand.clip_id,
+			query: a.query,
+			score: pick.seg.score,
+			clip_st: r3(pickWin.clipSt),
+			clip_ed: r3(pickWin.clipEd),
+			track_st: r3(st),
+			track_ed: r3(st + d),
+		});
+		opts.consumed.add(pick.key);
+		opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
+		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++;
+		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
+		cursorMin = st + d;
+		outcomes.push({
+			beat: beat.beat,
+			keyword: a.keyword,
+			at_sec: a.at_sec,
+			track_st: r3(st),
+			clip_id: pick.cand.clip_id,
+			// 用户 pinned 优先于锚：锚槽被用户钉选候选占据时如实标 pinned（系统选取让位）
+			status: pick.pinned ? "pinned" : "planned",
+		});
+	}
+
+	// 锚点分割区间：各区间内按既有序贯逻辑铺（复用 fillBeatTrack；子区间以 sub-beat 形态传入——
+	// beat 名带区间序号只为节奏种子分流，FillSlot 不携带 beat 名故对产物形态零影响）
+	const intervals: { st: number; ed: number }[] = [];
+	let cur = beat.track_st;
+	for (const s of [...anchorSlots].sort((x, y) => x.track_st - y.track_st)) {
+		if (s.track_st - cur >= MIN_SHOT_SEC) intervals.push({ st: cur, ed: s.track_st });
+		cur = Math.max(cur, s.track_ed);
+	}
+	if (beat.track_ed - cur >= MIN_SHOT_SEC) intervals.push({ st: cur, ed: beat.track_ed });
+
+	const slots = [...anchorSlots];
+	intervals.forEach((iv, i) => {
+		const sub: PlanBeat = { ...beat, beat: `${beat.beat}~a${i}`, track_st: iv.st, track_ed: iv.ed };
+		slots.push(...fillBeatTrack({ ...opts, beat: sub }));
+	});
+	slots.sort((x, y) => x.track_st - y.track_st);
+	return { slots, anchors: outcomes };
+}
+
 /** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。
  * pinned 结算（plan 可编辑契约）：铺完统计 plan 内钉选候选的入选/让位（冲突后到让位不报错，
  * summary 明示——stats.pinnedYielded；yielded 名单由 pinnedOutcome 给出供告警指名）。 */
@@ -760,6 +920,8 @@ export function planBeatFills(
 	pinnedOutcome: { requested: string[]; yielded: string[] };
 	/** mark 融合统计（add-audio-project-atoms）：按候选 clip 去重的缓存命中/中性计数；w=0 时恒 0/0。 */
 	markStats: { hit: number; neutral: number };
+	/** 逐锚落位结果（add-keyword-anchored-broll）：plan 无 anchors 时恒空数组（零回归）。 */
+	anchors: AnchorOutcome[];
 } {
 	const fills = new Map<string, FillSlot[][]>();
 	const clipIds = new Set<string>();
@@ -767,11 +929,12 @@ export function planBeatFills(
 	const consumed = new Set<string>();
 	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set() };
+	const anchorOutcomes: AnchorOutcome[] = [];
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
 		const beatOwners = new Map<string, number>(); // 同槽候选组互斥：同 beat 跨轨同素材互斥
 		for (let k = 0; k < Math.max(0, lay); k++) {
-			const slots = fillBeatTrack({
+			const trackOpts = {
 				beat,
 				trackOrder: k,
 				consumed,
@@ -783,7 +946,16 @@ export function planBeatFills(
 				markStats: markSets,
 				beatOwners,
 				stats,
-			});
+			};
+			// 锚点优先布局只作用于首轨（口径注记见 fillBeatTrackWithAnchors 头注）；无锚 beat 走原路零回归
+			let slots: FillSlot[];
+			if (k === 0 && Array.isArray(beat.anchors) && beat.anchors.length) {
+				const r = fillBeatTrackWithAnchors(trackOpts);
+				slots = r.slots;
+				anchorOutcomes.push(...r.anchors);
+			} else {
+				slots = fillBeatTrack(trackOpts);
+			}
 			perTrack.push(slots);
 			for (const s of slots) clipIds.add(s.clip_id);
 		}
@@ -802,6 +974,7 @@ export function planBeatFills(
 		stats,
 		pinnedOutcome: { requested: [...pinnedRequested], yielded },
 		markStats: { hit: markSets.hit.size, neutral: markSets.neutral.size },
+		anchors: anchorOutcomes,
 	};
 }
 

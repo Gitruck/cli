@@ -257,6 +257,32 @@ export function validatePlanForLay(planRaw: unknown): string[] {
 		if (!(typeof beat.track_st === "number" && typeof beat.track_ed === "number" && Number.isFinite(beat.track_st) && Number.isFinite(beat.track_ed))) {
 			errs.push(`beat ${beat.beat}：track_st/track_ed 须为有限数字`);
 		}
+		// 关键词锚（add-keyword-anchored-broll）：可编辑面（挪 at_sec/换 query/删锚），改坏形态即拒
+		if (beat.anchors !== undefined) {
+			if (!Array.isArray(beat.anchors)) {
+				errs.push(`beat ${beat.beat}：anchors 须为数组（可删锚/挪 at_sec，不可改坏形态）`);
+			} else {
+				for (const a of beat.anchors) {
+					const ok =
+						a &&
+						typeof a === "object" &&
+						!Array.isArray(a) &&
+						typeof a.keyword === "string" &&
+						a.keyword &&
+						typeof a.utterance === "string" &&
+						a.utterance &&
+						typeof a.query === "string" &&
+						a.query &&
+						(a.at_sec === null || (typeof a.at_sec === "number" && Number.isFinite(a.at_sec)));
+					if (!ok) {
+						errs.push(
+							`beat ${beat.beat}：anchor 须为 {keyword/utterance/query 非空字符串, at_sec 有限数字或 null}（可删锚/挪 at_sec，不可改坏形态）`,
+						);
+						break;
+					}
+				}
+			}
+		}
 		if (!Array.isArray(beat.queries)) {
 			errs.push(`beat ${beat.beat}：queries 必须为数组`);
 			continue;
@@ -283,6 +309,34 @@ export function validatePlanForLay(planRaw: unknown): string[] {
 	return errs;
 }
 
+// ── 关键词锚（add-keyword-anchored-broll）──────────────────────────────────
+
+/**
+ * plan beat 的关键词锚条目：`at_sec` = 关键词说出时刻（句级时码 + 字符偏移比例内插——TTS 无词级
+ * 时码的近似，误差 <1s 观感足够；未来 TTS 出词级时码可无缝换源）。`null` = 内插失败（改稿后文本
+ * 漂移 / 句被剪 / 重投影降级），lay 按 degraded 处置（退化普通槽 + summary 明示，不硬锚）。
+ * plan 一等可编辑：可挪 at_sec、换 query、删锚；keyword/utterance 供溯源展示。
+ */
+export interface PlanAnchor {
+	keyword: string;
+	utterance: string;
+	at_sec: number | null;
+	query: string;
+}
+
+/**
+ * 锚时刻内插（导出纯函数供单测）：at_sec = track_st + (关键词字符起始偏移 / 句总字数) × 句时长。
+ * 关键词多次出现取首次（首现 = 最早说出时刻）；找不到返回 null（改稿后文本漂移——该锚 degraded）。
+ */
+export function anchorAtSec(utteranceText: string, keyword: string, trackSt: number, trackEd: number): number | null {
+	if (!utteranceText || !keyword) return null;
+	const idx = utteranceText.indexOf(keyword);
+	if (idx < 0) return null;
+	const span = trackEd - trackSt;
+	if (!(Number.isFinite(trackSt) && Number.isFinite(span) && span > 0)) return null;
+	return Math.round((trackSt + (idx / utteranceText.length) * span) * 1000) / 1000;
+}
+
 export interface PlanBeat {
 	beat: string;
 	track_st: number;
@@ -290,6 +344,9 @@ export interface PlanBeat {
 	requested_shots?: number;
 	per_shot_sec?: number;
 	exclude?: string[];
+	/** 关键词锚（add-keyword-anchored-broll，可选）：lay 锚点优先布局的输入；无该键 = 行为与
+	 * 本 change 之前逐字节一致。 */
+	anchors?: PlanAnchor[];
 	queries: PlanQuery[];
 }
 
