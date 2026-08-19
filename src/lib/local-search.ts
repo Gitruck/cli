@@ -5,14 +5,16 @@
  * 进程内点积（MUST NOT 经任何网络检索服务）→ 帧命中聚合为素材内 sub-segment →
  * 组装与云端 PlanResult **同构**的本地形态结果（source:"local"，url 系字段 MUST NOT 出现）。
  *
- * 聚合（D5）：media_matrix aggregate_frame_hits_to_subsegments 语义的 TS 移植，
- * 以 POC pipeline.py 的 aggregate() 为黄金样本逐条对拍（单测 fixture 由该 Python 函数原样跑出）：
- * gap≤3000ms 归窗 → ±750ms buffer → 窗分 top3 加权 0.5/0.3/0.2（不足 3 帧取最高分）
- * → best=窗内最高分帧 → 场景边界对齐裁剪 → 窗宽 <1500ms 丢弃（CLI 侧增量）。
- * stable 场景（add-index-stability-sampling）：best 帧所在场景 stable=1 时对齐**无条件**扩到整场景
- * 边界（中点单帧代表整场景；gap 守卫只约束 unstable 多帧窗），unstable 路径与 POC 黄金样本零改动。
- * 丢弃判定放在**对齐之后**：对齐只会扩窗，先丢会把 POC 保留的「素材端点碎窗被场景对齐救回」
- * 的段错杀——黄金样本对拍（spec SHALL）优先于参数罗列顺序。
+ * 聚合（D5 + fix-broll-flash-frames D2 整景并集）：media_matrix aggregate_frame_hits_to_subsegments
+ * 的 TS 移植，段边界口径经 fix-broll-flash-frames 收口为**整景并集**：
+ * gap≤3000ms 归窗 → 段 = [首命中帧所在场景 st, 末命中帧所在场景 ed]（归窗跨过的中间场景整景收录）
+ * → 窗分 top3 加权 0.5/0.3/0.2（不足 3 帧取最高分）→ best=窗内最高分帧 → 窗宽 <1500ms 丢弃。
+ * ±750ms buffer 裸边与「只对齐 best 帧所在场景」的旧口径废止——段边界骑在场景切点两侧是旅拍
+ * 打样闪帧实锤根因之一；stable 整景特例被本口径自然吸收（语义零变化）。
+ * **POC 黄金样本对拍在段边界处有意破口**（fix-broll-flash-frames design D2 决策记录）：
+ * fixtures/local-search/golden-aggregate.json 已由新实现重跑固化为新基线。
+ * 段内切点明细（cuts）：素材切点全集（local-index cuts 表）中严格落在段开区间内的切点随段透出，
+ * 供铺轨端点吸附消残片；旧库无数据（cuts_indexed NULL）时省略字段。
  */
 import { existsSync } from "node:fs";
 import { resolve, sep } from "node:path";
@@ -22,8 +24,7 @@ import { decodeVec, type SqlDb } from "./local-index";
 
 // ── 聚合参数（POC 标定基线）───────────────────────────────────────────────
 export const AGG_GAP_MS = 3000;
-export const AGG_BUFFER_MS = 750;
-/** 窗宽下限（毫秒）：buffer 后仍窄于此（只能是被素材端点钳出来的碎窗）即丢弃。 */
+/** 窗宽下限（毫秒）：整景并集后仍窄于此（命中场景本身过短）即丢弃——短于铺轨最小槽长的碎景铺不了。 */
 export const MIN_SEGMENT_WIDTH_MS = 1500;
 /** 每查询进入聚合的 top 帧数（POC TOPK_FRAMES）。 */
 export const TOPK_FRAMES_DEFAULT = 60;
@@ -56,16 +57,15 @@ export interface SubSegment {
 const round4 = (n: number): number => Math.round(n * 10000) / 10000;
 
 /**
- * 帧命中 → sub-segments（POC aggregate() 语义逐行对齐 + 窗宽丢弃增量）。
+ * 帧命中 → sub-segments（POC aggregate() 归窗/窗分/best 语义 + fix-broll-flash-frames D2 整景并集）。
  * 入参 hits 须为**同一素材**内、按 ts_ms 升序。
  */
 export function aggregateFrameHits(
 	hits: FrameHit[],
-	opts: { gapMs?: number; bufferMs?: number; minWidthMs?: number } = {},
+	opts: { gapMs?: number; minWidthMs?: number } = {},
 ): SubSegment[] {
 	if (!hits.length) return [];
 	const gapMs = opts.gapMs ?? AGG_GAP_MS;
-	const bufferMs = opts.bufferMs ?? AGG_BUFFER_MS;
 	const minWidthMs = opts.minWidthMs ?? MIN_SEGMENT_WIDTH_MS;
 
 	// gap 归窗
@@ -82,28 +82,19 @@ export function aggregateFrameHits(
 
 	const segs: SubSegment[] = [];
 	for (const w of windows) {
-		// buffer 扩窗 + 素材端点钳位
-		const durMs = w[0]!.duration_ms;
-		let st = Math.max(0, w[0]!.ts_ms - bufferMs);
-		let ed = Math.min(durMs, w[w.length - 1]!.ts_ms + bufferMs);
+		// 整景并集（fix-broll-flash-frames D2）：st=首命中帧所在场景起点、ed=末命中帧所在场景终点
+		// （hits 升序 ⇒ 首/末命中即时间最早/最晚；归窗跨过的中间场景整景收录）。段边界恒落场景
+		// 边界/素材端点上——±buffer 裸边与「只对齐 best 场景」旧口径废止（骑缝段=闪帧根因之一）；
+		// stable 整景特例被本口径自然吸收（单帧命中的首=末=best，仍是整场景段）。
+		const st = w[0]!.scene_st_ms;
+		const ed = w[w.length - 1]!.scene_ed_ms;
 		// 窗分：top3 加权 0.5/0.3/0.2；不足 3 帧取最高分（POC：len<3 时 wscore=scores[0]）
 		const scores = w.map((h) => h.score).sort((a, b) => b - a);
 		const wscore = scores.length >= 3 ? 0.5 * scores[0]! + 0.3 * scores[1]! + 0.2 * scores[2]! : scores[0]!;
 		// best = 窗内最高分帧（分数并列取先到者，与 Python max() 一致）
 		let best = w[0]!;
 		for (const h of w) if (h.score > best.score) best = h;
-		if (best.stable === true) {
-			// stable 场景单帧命中（add-index-stability-sampling spec「检索语义不变」）：中点 1 帧代表
-			// 整场景，无条件对齐整场景边界——gap 守卫是多帧窗语义（防越到无关场景），stable 长场景
-			// （如 60s 固定机位）中点距边界远超 gap，套守卫会把整场景错杀成 ±buffer 碎窗
-			st = Math.min(st, best.scene_st_ms);
-			ed = Math.max(ed, best.scene_ed_ms);
-		} else {
-			// 场景边界对齐裁剪：向 best 帧所在场景扩（越界 ≤gap 才扩，POC 同款守卫）
-			if (best.scene_st_ms >= st - gapMs) st = Math.min(st, best.scene_st_ms);
-			if (best.scene_ed_ms <= ed + gapMs) ed = Math.max(ed, best.scene_ed_ms);
-		}
-		// 窗宽丢弃（CLI 侧增量）：对齐后仍窄于下限（只可能是素材端点钳出的碎窗且场景没救回）才丢
+		// 窗宽丢弃：整景并集后仍窄于下限（命中场景本身过短）才丢
 		if (ed - st < minWidthMs) continue;
 		segs.push({
 			start_ms: st,
@@ -138,6 +129,9 @@ export interface LoadedMaterial {
 	width: number | null;
 	height: number | null;
 	fps: number | null;
+	/** 切点全集（毫秒，升序；fix-broll-flash-frames D4/D5）：仅 cuts_indexed=1 的素材携带
+	 * （`[]`=真无切点）；undefined=旧库无数据（检索段不透出 cuts）。 */
+	cutsMs?: number[];
 }
 
 export interface LoadedIndex {
@@ -176,6 +170,8 @@ interface FrameJoinRow {
 	width: number | null;
 	height: number | null;
 	fps: number | null;
+	/** materials.cuts_indexed（1=切点全集在库；NULL=旧行无数据）。 */
+	cuts_indexed: number | null;
 }
 
 /**
@@ -190,7 +186,7 @@ export function loadLocalIndex(
 	const fileExists = deps.fileExists ?? existsSync;
 	const rows = db.all<FrameJoinRow>(
 		`SELECT f.ts_ms, f.vec, s.st_ms, s.ed_ms, s.stable AS scene_stable,
-		        m.id AS mkey, m.material_id, m.path, m.kind, m.duration_ms, m.width, m.height, m.fps
+		        m.id AS mkey, m.material_id, m.path, m.kind, m.duration_ms, m.width, m.height, m.fps, m.cuts_indexed
 		 FROM frames f
 		 JOIN scenes s ON f.scene_id = s.id
 		 JOIN materials m ON f.material_id = m.id
@@ -221,6 +217,8 @@ export function loadLocalIndex(
 				width: r.width,
 				height: r.height,
 				fps: r.fps,
+				// cuts_indexed=1 才载切点全集（fix-broll-flash-frames D5）：先占位空数组，行遍历后统一回填
+				...(r.cuts_indexed === 1 ? { cutsMs: [] } : {}),
 			});
 		}
 		const v = decodeVec(r.vec);
@@ -228,6 +226,15 @@ export function loadLocalIndex(
 		else if (v.length !== dim) throw new Error(`索引向量维度不一致（${v.length} vs ${dim}）——索引损坏，请 gtrk matrix index --rebuild`);
 		frames.push({ matIdx, ts_ms: r.ts_ms, scene_st_ms: r.st_ms, scene_ed_ms: r.ed_ms, stable: r.scene_stable === 1 });
 		vecs.push(v);
+	}
+	// 切点全集回填（仅 cuts_indexed=1 的在场素材；表按 (material_id, t_ms) 主键天然升序）
+	if (materials.some((m) => m.cutsMs !== undefined)) {
+		for (const c of db.all<{ material_id: number; t_ms: number }>(
+			"SELECT material_id, t_ms FROM cuts ORDER BY material_id, t_ms",
+		)) {
+			const matIdx = matIdxByKey.get(c.material_id);
+			if (matIdx !== undefined) materials[matIdx]!.cutsMs?.push(c.t_ms);
+		}
 	}
 	const flat = new Float32Array(vecs.length * dim);
 	vecs.forEach((v, i) => flat.set(v, i * dim));
@@ -367,12 +374,18 @@ export function searchLoadedIndex(
 			...(mat.height != null ? { height: mat.height } : {}),
 			...(mat.fps != null ? { fps: r3(mat.fps) } : {}),
 			...(mat.width != null && mat.height != null ? { orientation: mat.width >= mat.height ? "landscape" : "portrait" } : {}),
-			segments: kept.map((s) => ({
-				start: r3(s.start_ms / 1000),
-				end: r3(s.end_ms / 1000),
-				best: r3(s.best_ts_ms / 1000),
-				score: s.score,
-			})),
+			segments: kept.map((s) => {
+				// 段内切点明细（fix-broll-flash-frames D5）：切点全集中严格落在段开区间内者随段透出
+				// （铺轨端点吸附消残片用）；cuts_indexed 未置位（旧库）或段内无切点时省略字段。
+				const cutsInSeg = mat.cutsMs?.filter((t) => t > s.start_ms && t < s.end_ms) ?? [];
+				return {
+					start: r3(s.start_ms / 1000),
+					end: r3(s.end_ms / 1000),
+					best: r3(s.best_ts_ms / 1000),
+					score: s.score,
+					...(cutsInSeg.length ? { cuts: cutsInSeg.map((t) => r3(t / 1000)) } : {}),
+				};
+			}),
 		};
 		results.push(r);
 	}

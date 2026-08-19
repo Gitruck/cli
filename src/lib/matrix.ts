@@ -34,8 +34,11 @@ export interface PlanResult {
 	height?: number;
 	fps?: number;
 	orientation?: string;
-	/** 按 score 降序（非时间序）；best = 段内最像 query 的一帧时刻（截取/缩略锚点）。 */
-	segments?: { start: number; end: number; best: number; score: number }[];
+	/** 按 score 降序（非时间序）；best = 段内最像 query 的一帧时刻（截取/缩略锚点）。
+	 * cuts（fix-broll-flash-frames · broll-plan-contract）：本地形态可选——段内已知场景切点时码
+	 * （素材时基秒，升序，严格落在 (start,end) 开区间内），铺轨据此吸附窗口端点消残片；
+	 * 缺省=无已知切点（旧 plan/旧库容错）；云端形态 MUST NOT 出现。 */
+	segments?: { start: number; end: number; best: number; score: number; cuts?: number[] }[];
 	note?: string | null;
 	matched?: Record<string, unknown>;
 	// internal 口独有
@@ -164,6 +167,18 @@ function validatePlanResultForLay(r: PlanResult, where: string, errs: string[]):
 				if (!(s.start <= s.best && s.best <= s.end)) {
 					errs.push(`${where}：segment 几何不可编辑——best 必须落在 [start,end] 内（${s.start}–${s.end} best=${s.best}）`);
 					break;
+				}
+				// cuts 可选字段（fix-broll-flash-frames）：agent 可增删；存在即须为升序有限数字、
+				// 严格落在 (start,end) 开区间内（改坏即拒——铺轨吸附消费不做猜测修复）
+				if (s.cuts !== undefined) {
+					const bad =
+						!Array.isArray(s.cuts) ||
+						!s.cuts.every((c: unknown) => typeof c === "number" && Number.isFinite(c)) ||
+						s.cuts.some((c: number, i: number) => (i > 0 && c <= s.cuts![i - 1]!) || c <= s.start || c >= s.end);
+					if (bad) {
+						errs.push(`${where}：segment cuts 须为升序有限数字且严格落在 (start,end) 开区间内（可整体删除，不可改坏形态）`);
+						break;
+					}
 				}
 			}
 		}
