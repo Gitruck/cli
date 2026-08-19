@@ -1790,6 +1790,9 @@ async function layIntoProject(
 			dedup: {
 				scope: layOpts.dedupScope ?? "scene",
 				emptySlots: fillStats.emptySlots,
+				// 其中因窗口精修（残片收缩后不足最小槽长）而留空的部分——SLIVER_MIN_SEC 的真实代价
+				// 只可能在此显形（候选充足时恒 0，候选稀疏工程才可能非 0）
+				emptySlotsByRefine: fillStats.emptySlotsByRefine,
 				adjacentWaived: fillStats.adjacentWaived,
 			},
 			// mark 融合账面（add-audio-project-atoms）：仅开启时出现（默认 0 时 lay JSON 逐字节不变）
