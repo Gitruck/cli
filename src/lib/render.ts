@@ -132,6 +132,31 @@ export interface RenderParams {
 	audio_crossfade_ms?: number;
 }
 
+/**
+ * 视频元素序列 → 逐元素输出帧数（fix-render-frame-drift D1：累计取整）。
+ *
+ * 现行 `trim`+`fps` 链每段产出 `ceil(d × rate)` 帧——`fps` 在 t=0,1/rate,2/rate… 逐槽取帧，
+ * 只要 `d × rate` 非整数就多出不足一帧的尾巴且**从不向下取整**，`concat` 逐段累加 →
+ * 画面对配音渐进失步（旅拍打样实测：视频流比音频流长 0.279s，切点漂移 0.028s→0.256s 单调增长）。
+ * 该行为与 VFR 无关，纯 CFR 源同样发生（合成源实测 2.010s→61 帧、2.510s→76 帧）。
+ *
+ * 累计取整：第 i 段帧数 = `round(cumEnd_i × rate) − round(cumStart_i × rate)`，
+ * 每段的取整误差被下一段起点吸收，全片总帧数恒 `round(total × rate)`，不随段序累加。
+ * 各段时长均为帧长整数倍时退化为原值（零回归）。导出供单测与跨仓对拍。
+ */
+export function allocateFrames(elements: { duration: number }[], rate: number): number[] {
+	const out: number[] = [];
+	let cum = 0;
+	let prevFrame = 0;
+	for (const el of elements) {
+		cum += el.duration;
+		const edge = Math.round(cum * rate);
+		out.push(edge - prevFrame);
+		prevFrame = edge;
+	}
+	return out;
+}
+
 /** gtrk v1 → (输入文件列表, filter_complex 文本, 总时长)。纯函数，供黄金用例对拍。 */
 export function buildFilterGraph(
 	gtrk: GtrkV1,
@@ -185,25 +210,35 @@ export function buildFilterGraph(
 	if (total <= 0) throw new Error("时间线总时长为 0");
 	if (total > vEnd + 1e-6) vElements.push({ kind: "gap", duration: total - vEnd });
 
+	// 逐元素输出帧数：按成片时间线**累计取整**裁定（fix-render-frame-drift D1）——
+	// 取整误差被下一段起点吸收，全片总帧数恒 round(total×rate)，MUST NOT 逐段累加
+	const frameCounts = allocateFrames(vElements, rate);
+
 	const vLabels: string[] = [];
-	for (const el of vElements) {
+	vElements.forEach((el, i) => {
 		const lab = label();
+		const frames = frameCounts[i]!;
 		if (el.kind === "clip") {
 			const idx = inputOf(el.material);
 			const st = el.clip_st;
 			const ed = el.clip_st + el.duration;
+			// fps 之后按**输出帧号**截到裁定值（trim=end_frame 与源时基解耦，VFR 源同样成立）；
+			// 源尾不足时 fps 本就重复末帧补齐，截断只截不补，故不会引入黑帧/卡帧
 			chains.push(
 				`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
-					`fps=${g(rate)},scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+					`fps=${g(rate)},trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
+					`scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
 					`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[${lab}]`,
 			);
 		} else {
+			// color 源的 d 同样按时长向上取整，故同改按帧裁
 			chains.push(
-				`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6(el.duration)},format=yuv420p[${lab}]`,
+				`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6(el.duration)},` +
+					`trim=end_frame=${frames},setpts=PTS-STARTPTS,format=yuv420p[${lab}]`,
 			);
 		}
 		vLabels.push(lab);
-	}
+	});
 	chains.push(vLabels.map((x) => `[${x}]`).join("") + `concat=n=${vLabels.length}:v=1:a=0[vout]`);
 
 	// 音频轨（0..N）
