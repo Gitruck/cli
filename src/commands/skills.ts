@@ -25,6 +25,10 @@ export const SKILL_NAMES = [
 	"gtrk-transcript",
 	"gtrk-tools",
 	"gtrk-music-visualizer",
+	// 既有不一致修正（add-travel-recap-skill 顺带）：gtrk-cover 一直在磁盘却不在分发清单，README 宣称随包 11 个
+	"gtrk-cover",
+	// 第一张 structure 级组合图纸（add-travel-recap-skill）
+	"gtrk-travel-recap",
 ] as const;
 
 export interface InstallSkillOptions {
