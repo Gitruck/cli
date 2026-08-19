@@ -20,6 +20,9 @@ const AUDIO_LAYOUT = "stereo";
 const DEFAULT_CRF = 18;
 const DEFAULT_AUDIO_CROSSFADE_MS = 8;
 const MAX_CLIPS = 500;
+/** 帧对齐补齐余量（帧，fix-render-frame-drift）：截到裁定帧数前先备出的富余帧数。
+ * 2 帧足够覆盖 `fps` 出帧数随 trim 起点相位的 ±1 摆动；富余帧够用时被 end_frame 原样截掉。 */
+const PAD_FRAMES = 2;
 
 /** Python %g 近似：6 位有效数字并去尾零（fps 格式化对齐后端）。 */
 const g = (n: number): string => String(Number(n.toPrecision(6)));
@@ -222,18 +225,23 @@ export function buildFilterGraph(
 			const idx = inputOf(el.material);
 			const st = el.clip_st;
 			const ed = el.clip_st + el.duration;
-			// fps 之后按**输出帧号**截到裁定值（trim=end_frame 与源时基解耦，VFR 源同样成立）；
-			// 源尾不足时 fps 本就重复末帧补齐，截断只截不补，故不会引入黑帧/卡帧
+			// fps 之后按**输出帧号**截到裁定值（trim=end_frame 与源时基解耦，VFR 源同样成立）。
+			// 截断前先 tpad 克隆末帧补足 PAD_FRAMES 帧：`fps` 的实际出帧数随 trim 起点相对源帧的
+			// **相位**在 floor/ceil 之间摆动（合成源实测：同为 d=2.010s，start=5.000 出 61 帧、
+			// start=5.008 出 60 帧），只截不补会在裁定值恰好取到高位时少一帧、逐段累成短片
+			// （打样实测 5100 vs 应有 5103）。补出来的帧在够用时被 end_frame 原样截掉；
+			// 真不够时最多多驻留一帧末帧（不可见），MUST NOT 靠外扩源窗补——那会把邻场景帧截进来。
 			chains.push(
 				`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
-					`fps=${g(rate)},trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
+					`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
+					`trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
 					`scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
 					`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[${lab}]`,
 			);
 		} else {
-			// color 源的 d 同样按时长向上取整，故同改按帧裁
+			// gap 是合成黑场，给足 d（裁定帧数 + 余量）再按帧截即可，无需 tpad
 			chains.push(
-				`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6(el.duration)},` +
+				`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6((frames + PAD_FRAMES) / rate)},` +
 					`trim=end_frame=${frames},setpts=PTS-STARTPTS,format=yuv420p[${lab}]`,
 			);
 		}
