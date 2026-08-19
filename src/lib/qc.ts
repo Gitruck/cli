@@ -236,6 +236,82 @@ export function matchCutsToBoundaries(
 	return { matched, intra, missing };
 }
 
+/** 工程槽位登记（add-material-motion-signal · qc-command「缺陷带工程坐标」）：从
+ * `struct_meta.broll.beats[].laid[].slots[]` 反查，把成片时码映射回 (beat, 槽位, clip, 源窗)。 */
+export interface SlotRef {
+	beat: string;
+	slotIndex: number;
+	clipId: string;
+	trackSt: number;
+	trackEd: number;
+	clipSt: number;
+	clipEd: number;
+}
+
+/** 同 beat 的候选段（备选建议用）。 */
+export interface CandidateRef {
+	clipId: string;
+	start: number;
+	end: number;
+	score: number;
+	/** 去重后帧间分 p50（越低越稳）；索引无信号时 undefined。 */
+	motionP50?: number;
+	/** 段内已知切点数（越少越好）。 */
+	cutCount?: number;
+}
+
+/** 从工程 struct_meta.broll 抽出全部落成槽位（按 track_st 升序）。 */
+export function slotsFromGtrk(gtrk: unknown): SlotRef[] {
+	const beats = (gtrk as { struct_meta?: { broll?: { beats?: unknown[] } } })?.struct_meta?.broll?.beats;
+	if (!Array.isArray(beats)) return [];
+	const out: SlotRef[] = [];
+	for (const b of beats as { beat?: string; laid?: { slots?: Record<string, number | string>[] }[] }[]) {
+		for (const l of b.laid ?? []) {
+			(l.slots ?? []).forEach((s, i) => {
+				const num = (v: unknown): number => (typeof v === "number" ? v : Number.NaN);
+				const trackSt = num(s.track_st);
+				if (!Number.isFinite(trackSt)) return;
+				out.push({
+					beat: String(b.beat ?? ""),
+					slotIndex: i,
+					clipId: String(s.clip_id ?? ""),
+					trackSt,
+					trackEd: num(s.track_ed),
+					clipSt: num(s.clip_st),
+					clipEd: num(s.clip_ed),
+				});
+			});
+		}
+	}
+	return out.sort((a, b) => a.trackSt - b.trackSt);
+}
+
+/** 成片时码 → 所属槽位（扣渲染漂移：容差按帧级给，命中不唯一时返回 null）。 */
+export function slotAt(slots: SlotRef[], t: number, tolSec = 0.1): SlotRef | null {
+	const hit = slots.filter((s) => t >= s.trackSt - tolSec && t < s.trackEd + tolSec);
+	return hit.length === 1 ? hit[0]! : null;
+}
+
+/** 成片时码 → 源素材时码（经所属槽位换算；槽位不唯一时 null）。 */
+export function toSourceTime(slots: SlotRef[], t: number, tolSec = 0.1): { slot: SlotRef; src: number } | null {
+	const slot = slotAt(slots, t, tolSec);
+	if (!slot) return null;
+	return { slot, src: r3(slot.clipSt + (t - slot.trackSt)) };
+}
+
+/** 同 beat 未被采用的候选段，按「稳」排序：运动量升序 → 段内切点数升序 → score 降序。
+ * 索引无运动信号时退回单维（切点数）排序，调用方据 `ranked_by` 标注口径受限。 */
+export function rankAlternatives(candidates: CandidateRef[], usedClipIds: Set<string>): CandidateRef[] {
+	return candidates
+		.filter((c) => !usedClipIds.has(c.clipId))
+		.sort(
+			(a, b) =>
+				(a.motionP50 ?? Number.POSITIVE_INFINITY) - (b.motionP50 ?? Number.POSITIVE_INFINITY) ||
+				(a.cutCount ?? 0) - (b.cutCount ?? 0) ||
+				b.score - a.score,
+		);
+}
+
 /** gtrk 工程 → 主视频轨 clip 拼接边界（秒，升序；首 clip 起点不算切点）。
  * 主轨口径与渲染一致：track_index 最小的**非黑底垫轨**（struct_meta.broll.black_track 登记）。 */
 export function boundariesFromGtrk(gtrk: unknown): number[] {
@@ -347,11 +423,14 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 		const { matched, intra } = matchCutsToBoundaries(cuts, bounds);
 		const drifts = matched.map((m) => m.drift);
 		spliceCuts = new Set(matched.map((m) => m.cut));
+		// 工程坐标（add-material-motion-signal）：把成片时码映射回 (beat, 槽位, clip, 源窗)
+		const slots = slotsFromGtrk(opts.gtrk);
 		for (const t of intra) {
 			// 定位到「跳变发生在哪一颗粒内部」：取该跳变之前最后一个已对齐的拼接切点（成片时基，
 			// 已含漂移），人跳时码复核时对得上画面；片头颗粒无前序切点则给 null
 			const prior = matched.filter((m) => m.cut <= t);
 			const clipStart = prior.length ? prior[prior.length - 1]!.cut : null;
+			const mapped = toSourceTime(slots, t);
 			items.push({
 				type: "intra_cut",
 				severity: "warn",
@@ -361,6 +440,16 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 					note: "跳变不落在任何 clip 拼接边界上：颗粒窗口内部越过了源素材的镜头切点",
 					clip_started_at: clipStart,
 					...(clipStart !== null ? { into_clip_sec: r3(t - clipStart) } : {}),
+					// 工程坐标：定位到 beat / 槽位 / 素材 / 源窗，供直接改 plan 换段
+					...(mapped
+						? {
+								beat: mapped.slot.beat,
+								slot_index: mapped.slot.slotIndex,
+								clip_id: mapped.slot.clipId,
+								source_window: [mapped.slot.clipSt, mapped.slot.clipEd],
+								source_time: mapped.src,
+							}
+						: { coord_note: "跳变落在槽位边界容差内或工程无槽位登记，无法唯一定位" }),
 				},
 			});
 		}
