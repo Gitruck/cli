@@ -19,8 +19,11 @@ import { parseSceneScores } from "./local-index";
 export const QC_THRESHOLDS = {
 	/** 视觉跳变判定阈值（成片恒 CFR，无帧率归一问题；与索引场景检测同源取值）。 */
 	sceneScore: 0.3,
-	/** 闪现判定：相邻两跳变间隔 ≤ 此值即判短镜头闪现（30fps ≈ ≤7 帧，含 1-3 帧孤立闪帧）。 */
-	flashMaxSec: 0.25,
+	/** 过短镜头判定：相邻两跳变间隔 ≤ 此值即判过短（tune-shot-rhythm-thresholds，主理人 2026-08-19
+	 * 走查裁定 1.0s）。判据是**节奏断裂**而非「闪」——长镜头之间突然插入半拍短镜头最难受。
+	 * 与铺轨的 SLIVER_MIN_SEC 同为 1.0s：防与查同一条感知线。
+	 * 严重级 MUST 按端点来源分级（见 scanFinalCut）——一刀切会把素材自身的快剪蒙太奇误报成缺陷。 */
+	flashMaxSec: 1.0,
 	/** 段内跳切对表容差（秒）：跳变与漂移修正后的 clip 边界之差在此内算正常剪切。 */
 	cutMatchTolSec: 0.12,
 	/** blackdetect：最短黑段/像素黑判据/单像素黑阈值。 */
@@ -147,7 +150,8 @@ export function parseAudioStats(stderr: string): { clipCount: number; truePeakDb
 
 // ── 判定（纯函数，供单测直调）────────────────────────────────────────────
 
-/** 闪现：相邻跳变间隔 ≤ flashMaxSec 的短镜头（区间 = 两跳变之间）。 */
+/** 过短镜头：相邻跳变间隔 ≤ flashMaxSec 者（区间 = 两跳变之间）。纯阈值，**不判严重级**——
+ * 定级要看端点来源（拼接切 vs 段内跳切），那是 scanFinalCut 在工程对表之后做的事。 */
 export function detectFlashes(
 	cuts: number[],
 	maxSec: number = QC_THRESHOLDS.flashMaxSec,
@@ -158,6 +162,48 @@ export function detectFlashes(
 		if (sec > 0 && sec <= maxSec) out.push({ st: r3(cuts[i - 1]!), ed: r3(cuts[i]!), sec: r3(sec) });
 	}
 	return out;
+}
+
+/**
+ * 过短镜头 → 报告条目，**按两端来源定级**（tune-shot-rhythm-thresholds · spec「闪现判定按端点来源分级」）：
+ *
+ *   · 至少一端是 clip 拼接切 → `error`：我方剪辑造成的节奏断裂。铺轨的槽长地板（MIN_SHOT_SEC=1.2s）
+ *     保证我方从不排出更短的槽，故这类短镜头必然是「颗粒窗口跨过源切点、且切点贴近拼接处」的产物，
+ *     属可修缺陷（铺轨的 SLIVER_MIN_SEC 负责预防）。
+ *   · 两端皆段内跳切 → `info`：整段落在同一颗粒内部，是**源素材自身的快剪语言**（打样实锤：源
+ *     550.567–553.017s 的真蒙太奇，7 刀 0.267–0.467s，成片曾整段采用）。一刀切会把它误报成 6 条
+ *     error，与「除非素材颗粒内部本来就高频」的例外条款直接冲突。
+ *   · `spliceCuts === null`（未开工程感知）→ 来源不可判，退回不分级的 `warn` 并标注口径受限。
+ *
+ * 纯函数，供单测直调 spec 的三条 Scenario。
+ */
+export function shortShotItems(cuts: number[], spliceCuts: Set<number> | null): QcItem[] {
+	const isSplice = (t: number): boolean => spliceCuts !== null && spliceCuts.has(r3(t));
+	return detectFlashes(cuts).map((f) => {
+		if (spliceCuts === null) {
+			return {
+				type: "flash" as const,
+				severity: "warn" as const,
+				st: f.st,
+				ed: f.ed,
+				evidence: { shot_sec: f.sec, note: "镜头过短；未开工程感知（--gtrk），来源不可判、未分级" },
+			};
+		}
+		const ours = isSplice(f.st) || isSplice(f.ed);
+		return {
+			type: "flash" as const,
+			severity: (ours ? "error" : "info") as QcSeverity,
+			st: f.st,
+			ed: f.ed,
+			evidence: {
+				shot_sec: f.sec,
+				endpoints: `${isSplice(f.st) ? "拼接切" : "段内跳切"}→${isSplice(f.ed) ? "拼接切" : "段内跳切"}`,
+				note: ours
+					? "镜头过短且至少一端是 clip 拼接处：颗粒窗口跨过源切点造成的节奏断裂，可重铺修复"
+					: "镜头过短但两端都在同一颗粒内部：源素材自身的快剪节奏，非缺陷",
+			},
+		};
+	});
 }
 
 /**
@@ -292,20 +338,15 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 	const frames = parseSceneScores(vErr);
 	const cuts = frames.filter((f) => f.score > T.sceneScore).map((f) => f.ts);
 
-	for (const f of detectFlashes(cuts)) {
-		items.push({
-			type: "flash",
-			severity: "error",
-			st: f.st,
-			ed: f.ed,
-			evidence: { shot_sec: f.sec, note: "两次视觉跳变间隔过短（短镜头闪现/闪帧）" },
-		});
-	}
+	// 闪现判定放在**工程对表之后**（tune-shot-rhythm-thresholds D1）：严重级要按端点来源裁定，
+	// 而来源只有对表才知道。无工程时退回不分级的纯阈值报告。
+	let spliceCuts: Set<number> | null = null;
 
 	if (opts.gtrk) {
 		const bounds = boundariesFromGtrk(opts.gtrk);
 		const { matched, intra } = matchCutsToBoundaries(cuts, bounds);
 		const drifts = matched.map((m) => m.drift);
+		spliceCuts = new Set(matched.map((m) => m.cut));
 		for (const t of intra) {
 			// 定位到「跳变发生在哪一颗粒内部」：取该跳变之前最后一个已对齐的拼接切点（成片时基，
 			// 已含漂移），人跳时码复核时对得上画面；片头颗粒无前序切点则给 null
@@ -329,6 +370,8 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 			);
 		}
 	}
+
+	items.push(...shortShotItems(cuts, spliceCuts));
 
 	for (const b of parseBlackDetect(vErr)) {
 		const known = opts.gtrk ? isKnownBlackHole(opts.gtrk, b.st, b.ed) : false;

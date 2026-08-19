@@ -19,7 +19,7 @@ interface QcOpts {
 
 const SEVERITY_LABEL: Record<QcSeverity, string> = { error: "严重", warn: "提示", info: "备注" };
 const TYPE_LABEL: Record<string, string> = {
-	flash: "闪帧/短镜头闪现",
+	flash: "过短镜头/节奏断裂",
 	intra_cut: "段内跳切",
 	black: "黑帧/黑段",
 	freeze: "冻结画面",

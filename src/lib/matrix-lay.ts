@@ -70,10 +70,18 @@ export const BROLL_META_CANDIDATE_CAP = 12;
 export const SHOT_TARGET_DEFAULT = 3;
 /** 最小可用镜头长（秒）：低于此长度的碎片不铺。 */
 export const MIN_SHOT_SEC = 1.2;
-/** 端点残片下限（秒，fix-broll-flash-frames D1；与索引 MIN_SCENE_SEC 同源常量不暴露配置）：
- * 窗口端点与窗内最近切点（seg.cuts）之间短于此的区间 = 异景残片（2~3 帧闪帧观感来源），
- * 端点就近**收缩**至切点消除；端点恰落切点上视为无残片。 */
-export const SLIVER_MIN_SEC = 0.5;
+/** 端点残片下限（秒，不暴露配置）：窗口端点与窗内最近切点（seg.cuts）之间短于此的区间 =
+ * 异景残片，端点就近**收缩**至切点消除；端点恰落切点上视为无残片。
+ *
+ * 取 1.0s（tune-shot-rhythm-thresholds，主理人 2026-08-19 走查裁定）：判据不是「残片有多短」
+ * 而是**节奏断裂**——「一下慢，一下突然间快，一下又慢」比短镜头本身更难受。铺轨自身的槽长
+ * 地板 MIN_SHOT_SEC=1.2s 保证我方从不排出更短的槽，故屏幕上 <1.0s 的镜头必然来自「窗口跨过
+ * 源切点且切点贴近端点」，是可修的我方责任。与 QC 的 flashMaxSec 同为 1.0s（防与查同一条线）。
+ *
+ * **MUST NOT 再上抬到 1.5s 及以上**：实测那是代价拐点——槽位数被迫增加（打样 51→53，节奏反而
+ * 变快）、时间线扰动过半（26/51），并开始吃进源素材真实的 1.0–1.5s 镜头（打样素材有 9 条）。
+ * 0.5→1.0 这一段实测零代价（槽位数/覆盖率/空槽全不动，窗口收缩由后续槽位吸收）。 */
+export const SLIVER_MIN_SEC = 1.0;
 /** segment 置信度地板：低于则不采纳（--score-floor 覆盖）。
  * 0.2 = 真机量纲校准（2026-07-10 回声定位）：该后端 score 集中于 0.1~0.4，0.25+ 已是强命中。 */
 export const SCORE_FLOOR_DEFAULT = 0.2;
@@ -128,6 +136,10 @@ export interface FillStats {
 	adjacentWaived: number;
 	/** pinned 槽位落成数（plan 可编辑契约：agent 钉选被分配器满足的槽位事件数）。 */
 	pinnedPlaced: number;
+	/** 其中**因窗口精修（残片收缩）后不足 MIN_SHOT_SEC 而无候选可用**导致的留空数
+	 * （tune-shot-rhythm-thresholds 的代价观察项：SLIVER_MIN_SEC 上调的真实代价只可能在此显形。
+	 * 候选充足时精修弃用会被「换下一候选」吸收、该数恒 0；候选稀疏工程才可能非 0）。 */
+	emptySlotsByRefine: number;
 	/** pinned 候选未能入选数（冲突后到让位/候选枯竭/被排除——按候选 clip 计，summary 明示）。 */
 	pinnedYielded: number;
 }
@@ -601,6 +613,9 @@ export function fillBeatTrack(opts: {
 				break;
 			}
 		}
+		// 精修弃用归因（tune-shot-rhythm-thresholds 代价观察项）：本槽位是否**只**因窗口精修
+		// （残片收缩后不足 MIN_SHOT_SEC）而找不到对——即存在基础合格但精修返回 null 的候选
+		let refineRejected = false;
 		if (!pick) {
 			// 枯竭放行（软避让）：无次优候选时放行被避让的同素材近邻颗粒，计入 summary
 			for (let t = 0; t < pools.length && !pick; t++) {
@@ -608,7 +623,10 @@ export function fillBeatTrack(opts: {
 				for (const p of pool) {
 					if (!eligible(p)) continue;
 					const win = resolveWindow(p);
-					if (!win) continue;
+					if (!win) {
+						refineRejected = true;
+						continue;
+					}
 					pick = p;
 					pickWin = win;
 					break;
@@ -618,7 +636,11 @@ export function fillBeatTrack(opts: {
 		}
 		if (!pick || !pickWin) {
 			// 宁空不重复（铁律）：候选枯竭即留空，MUST NOT 复用已分配素材；连空两次视为干涸
-			if (opts.stats) opts.stats.emptySlots++;
+			if (opts.stats) {
+				opts.stats.emptySlots++;
+				// 有基础合格候选、但全被精修弃用 ⇒ 该空槽记在阈值账上（候选充足时恒为 0）
+				if (refineRejected) opts.stats.emptySlotsByRefine++;
+			}
 			gapRun++;
 			if (gapRun >= 2) break;
 			cursor += Math.min(dTarget, remaining);
@@ -695,7 +717,7 @@ export function planBeatFills(
 	const clipIds = new Set<string>();
 	// 全局消费集（D4）：跨 beat 跨 query 跨轨共享——分配即消费、该轮不归还（剥旧重铺后新一轮独立适用）
 	const consumed = new Set<string>();
-	const stats: FillStats = { emptySlots: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
+	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set() };
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
