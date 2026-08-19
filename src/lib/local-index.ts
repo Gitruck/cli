@@ -171,7 +171,14 @@ CREATE TABLE IF NOT EXISTS scenes (
   material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
   st_ms INTEGER NOT NULL,
   ed_ms INTEGER NOT NULL,
-  stable INTEGER                        -- 1=stable（固定机位，中点单帧）；NULL/0=unstable（旧行/图片行按 unstable 语义）
+  stable INTEGER,                       -- 1=stable（固定机位，中点单帧）；NULL/0=unstable（旧行/图片行按 unstable 语义）
+  -- 运动量分级信号（add-material-motion-signal）：去重后帧间分分位 + 样本数 + 倍帧注记。
+  -- NULL = 该场景无信号（旧行未重建 / 样本不足），消费方按「不可判」兜底，MUST NOT 当 0 用。
+  motion_p50 REAL,
+  motion_p90 REAL,
+  motion_samples INTEGER,
+  effective_fps REAL,
+  doubled INTEGER                       -- 1=倍帧（低帧率内容装进高帧率容器）；NULL/0=未判定/否
 );
 CREATE INDEX IF NOT EXISTS idx_scenes_material ON scenes(material_id);
 CREATE TABLE IF NOT EXISTS frames (
@@ -182,6 +189,14 @@ CREATE TABLE IF NOT EXISTS frames (
   vec BLOB NOT NULL                     -- float32 小端 1024 维
 );
 CREATE INDEX IF NOT EXISTS idx_frames_material ON frames(material_id);
+CREATE TABLE IF NOT EXISTS cuts (
+  material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
+  t_ms INTEGER NOT NULL,                -- 切点全集：含被 buildScenes 0.5s 合并吞并的微切点（fix-broll-flash-frames D4）
+  -- 来源（add-material-motion-signal）：'detected'=检测所得（缺省，旧行 NULL 同义）；
+  -- 'qc_confirmed'=成片像素上确认后回流（治 θ 临界漏网）。分来源存是为了保住检测口径的可复算性。
+  origin TEXT,
+  PRIMARY KEY (material_id, t_ms)
+);
 CREATE TABLE IF NOT EXISTS describes (
   material_id TEXT NOT NULL,            -- broll- 家族材料 id（字符串，随内容不随行号——生命周期独立于三表）
   ts_ms INTEGER NOT NULL,               -- 帧时刻（缓存键第二维）
@@ -211,6 +226,26 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		if (!sceneCols.some((c) => c.name === "stable")) {
 			db.exec("ALTER TABLE scenes ADD COLUMN stable INTEGER");
 		}
+		// 运动量列幂等迁移（add-material-motion-signal）：旧行 NULL = 无信号（不可判），
+		// 消费方兜底；--rebuild 全量补齐。与 stable/cuts_indexed 同款迁移先例。
+		const sceneCols2 = db.all<{ name: string }>("PRAGMA table_info(scenes)").map((c) => c.name);
+		for (const [col, type] of [
+			["motion_p50", "REAL"],
+			["motion_p90", "REAL"],
+			["motion_samples", "INTEGER"],
+			["effective_fps", "REAL"],
+			["doubled", "INTEGER"],
+		] as const) {
+			if (!sceneCols2.includes(col)) db.exec(`ALTER TABLE scenes ADD COLUMN ${col} ${type}`);
+		}
+		// cuts.origin 幂等迁移：旧行 NULL 与 'detected' 同义（检测所得）
+		const cutCols = db.all<{ name: string }>("PRAGMA table_info(cuts)").map((c) => c.name);
+		if (!cutCols.includes("origin")) db.exec("ALTER TABLE cuts ADD COLUMN origin TEXT");
+		// materials.cuts_indexed 幂等迁移（fix-broll-flash-frames D4）：NULL=旧行无切点全集数据
+		// （检索侧不透出 cuts、消费方按无已知切点兜底）；1=本素材已落切点全集（空集=真无切点）。
+		if (!cols.some((c) => c.name === "cuts_indexed")) {
+			db.exec("ALTER TABLE materials ADD COLUMN cuts_indexed INTEGER");
+		}
 	} catch (e) {
 		db.close();
 		throw new Error(
@@ -237,11 +272,37 @@ export interface MaterialRow {
 	indexed_at: string;
 }
 
-/** 级联删一个素材的全部行（frames → scenes → materials；显式删，不依赖外键 pragma）。 */
+/** 级联删一个素材的全部行（frames → scenes → cuts → materials；显式删，不依赖外键 pragma）。 */
 export function deleteMaterialRows(db: SqlDb, materialRowId: number): void {
 	db.run("DELETE FROM frames WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM scenes WHERE material_id = ?", [materialRowId]);
+	db.run("DELETE FROM cuts WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM materials WHERE id = ?", [materialRowId]);
+}
+
+/** 确认切点回流（add-material-motion-signal D3 · local-material-index「确认切点回流」）：把成片
+ * 像素上确认、映射回源时码的切点补录进索引，标 `qc_confirmed` 以区别于检测所得。
+ *
+ * 为何需要：检测存在**阈值临界漏网**——打样实测源 618.483 处一刀真实硬切（抽帧确认为两个不同
+ * 场景）仅得 0.290296 分，差 0.01 未过默认 θ=0.3。索引对自身判据是忠实的（全片重扫复现全部
+ * 切点），故这类缺口 MUST NOT 靠调低 θ 全局解决（会引入误检、且 θ 是用户可调参数），
+ * 而应由「成片像素上看得见的一方」补录。
+ *
+ * 返回实际新增条数（已存在的时码不重复计）。调用方须确保这是**显式动作**——常规扫描不写库。 */
+export function recordConfirmedCuts(db: SqlDb, materialId: string, tsMs: number[]): number {
+	const row = db.get<{ id: number }>("SELECT id FROM materials WHERE material_id = ?", [materialId]);
+	if (!row) return 0;
+	let added = 0;
+	withTransaction(db, () => {
+		for (const t of tsMs) {
+			const ms = Math.round(t);
+			const exists = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM cuts WHERE material_id = ? AND t_ms = ?", [row.id, ms]);
+			if (exists && exists.n > 0) continue;
+			db.run("INSERT INTO cuts(material_id, t_ms, origin) VALUES (?,?,'qc_confirmed')", [row.id, ms]);
+			added++;
+		}
+	});
+	return added;
 }
 
 /** 清一个素材的全部理解缓存（describes 键=字符串材料 id；add-matrix-describe-and-window D1）。
@@ -307,6 +368,22 @@ export function parseSceneScores(stderr: string): { ts: number; score: number }[
 	return out;
 }
 
+/** 逐帧 score → 切点全集：`score > θ` 单帧判定（与旧 `select gt(scene,θ)` 选帧集合定义相同）。
+ *
+ * 「切点全集」相对场景表的增量在于**不做 <0.5s 合并**（buildScenes 会把紧邻切点并入前段）——
+ * 被并掉的微切点正是快切蒙太奇的段内隐藏切点，铺轨窗口跨过它即闪帧（fix-broll-flash-frames D4）。
+ *
+ * ★ 帧率归一（滑窗和）判定曾在本 change 内实现，后按 2026-08-19 打样归因证据**撤出**：
+ * 黄石 60fps 素材的 52 处真段内跳变里 49 处落在**已检出**的场景边界上（窗口越段，D1），
+ * 3 处符合微切点特征（D4），无一处可归因于「高帧率软切漏检」；定向复扫（源 1185-1205s 等 7 段）
+ * 新旧判定切点集合完全一致。无证据的检测阈值变更只会引入误检风险，故维持单帧判定。 */
+export function detectCutsFromScores(
+	frames: { ts: number; score: number }[],
+	threshold: number = SCENE_THRESHOLD_DEFAULT,
+): number[] {
+	return frames.filter((f) => f.score > threshold).map((f) => f.ts);
+}
+
 /** 切点 → 场景区间（秒）：<0.5s 的边界间隔并入前段（POC detect_scenes 逐行对齐）。 */
 export function buildScenes(cuts: number[], durationSec: number, minSceneSec: number = MIN_SCENE_SEC): { st: number; ed: number }[] {
 	const bounds = [0];
@@ -344,6 +421,25 @@ export interface SceneSpan {
 	maxScore: number;
 	/** maxScore < stabilityThreshold ⇒ 固定机位类稳定场景（抽帧收敛为中点 1 帧）。 */
 	stable: boolean;
+	/** 运动量分级信号（add-material-motion-signal）：**去重后**帧间分的分位。
+	 * 为何不用 maxScore 当运动量：含真实切点的平稳场景其 max 反而更高（打样实测干净窗口
+	 * max=0.5262 > 高运动窗口 0.2903）——max 量的是「有没有切点」，不是「抖不抖」。
+	 * 为何必须去重：倍帧素材近半数是复制帧，不去重会把中位数腰斩（同一快摇窗口 0.0068 → 0.2747）。 */
+	motion: SceneMotion;
+}
+
+/** 场景运动量与倍帧注记（add-material-motion-signal）。 */
+export interface SceneMotion {
+	/** 去重后帧间分中位数；样本不足时为 null（不可判，MUST NOT 当 0 消费）。 */
+	p50: number | null;
+	/** 去重后帧间分 p90；样本不足时为 null。 */
+	p90: number | null;
+	/** 参与统计的去重后帧数——长静止镜头去重后可能只剩个位数，此时分位不可靠。 */
+	samples: number;
+	/** 推定有效帧率（倍帧素材低于容器帧率）；判不出时为 null。 */
+	effectiveFps: number | null;
+	/** 该场景是否判为倍帧（低帧率内容装进高帧率容器）。 */
+	doubled: boolean;
 }
 
 /** 场景区间 → 稳定性注记（双指针单趟；scenes 与 frameScores 均按时间升序）。
@@ -353,23 +449,114 @@ export function annotateSceneStability(
 	scenes: { st: number; ed: number }[],
 	frameScores: { ts: number; score: number }[],
 	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
+	containerFps?: number,
 ): SceneSpan[] {
-	const out: SceneSpan[] = scenes.map((s) => ({ st: s.st, ed: s.ed, maxScore: 0, stable: true }));
+	const buckets: number[][] = scenes.map(() => []);
+	const out: SceneSpan[] = scenes.map((s) => ({
+		st: s.st,
+		ed: s.ed,
+		maxScore: 0,
+		stable: true,
+		motion: { p50: null, p90: null, samples: 0, effectiveFps: null, doubled: false },
+	}));
 	let si = 0;
 	for (const f of frameScores) {
 		while (si < out.length && f.ts >= out[si]!.ed) si++;
 		if (si >= out.length) break;
 		const s = out[si]!;
-		if (f.ts > s.st && f.score > s.maxScore) s.maxScore = f.score;
+		if (f.ts > s.st) {
+			if (f.score > s.maxScore) s.maxScore = f.score;
+			buckets[si]!.push(f.score);
+		}
 	}
-	for (const s of out) s.stable = s.maxScore < stabilityThreshold;
+	for (let i = 0; i < out.length; i++) {
+		out[i]!.stable = out[i]!.maxScore < stabilityThreshold;
+		out[i]!.motion = computeSceneMotion(buckets[i]!, containerFps);
+	}
 	return out;
 }
 
-/** 场景边界检测：返回场景区间（秒）+ 稳定性注记。源文件与其所在目录不产生任何新媒体文件。
+/** 近零帧判据（复制帧）：低于此分视为与前帧无差异。 */
+const DUP_FRAME_EPS = 0.004;
+/** 倍帧判定：近零帧占比下限（30fps→60fps 理论 50%，留裕度）。 */
+const DUP_RATIO_MIN = 0.35;
+/** 倍帧判定：近零帧最长连续长度上限——倍帧在运动段是**单帧交替**（实测连零 ≤2），
+ * 而静止镜头是长串连零（实测 15–118 帧）。「近零帧占比高」本身判不了倍帧，多数只是固定机位。 */
+const DUP_MAX_RUN = 2;
+/** 运动量分位可信所需的最小去重样本数（长静止镜头去重后可能只剩个位数）。 */
+const MOTION_MIN_SAMPLES = 12;
+
+/**
+ * 场景内逐帧分 → 运动量与倍帧注记（add-material-motion-signal D1/D2，纯函数供单测直调）。
+ *
+ * 倍帧判据取**近零帧的连续长度**而非占比：二者都产生大量近零帧，区别在倍帧运动段呈单帧交替
+ * （连零 ≤2），静止镜头呈长串连零。且判定仅在区段确有运动时作出——静止段无从判也不需要判。
+ */
+export function computeSceneMotion(scores: number[], containerFps?: number): SceneMotion {
+	if (!scores.length) return { p50: null, p90: null, samples: 0, effectiveFps: null, doubled: false };
+	let zeros = 0;
+	let run = 0;
+	let maxRun = 0;
+	const kept: number[] = [];
+	for (const s of scores) {
+		if (s < DUP_FRAME_EPS) {
+			zeros++;
+			run++;
+			if (run > maxRun) maxRun = run;
+		} else {
+			run = 0;
+			kept.push(s);
+		}
+	}
+	const ratio = zeros / scores.length;
+	const moving = kept.length >= MOTION_MIN_SAMPLES;
+	const doubled = moving && ratio >= DUP_RATIO_MIN && maxRun <= DUP_MAX_RUN;
+	if (!moving) {
+		// 去重后样本不足：静止/极短场景，分位不可信 —— 如实报 null，MUST NOT 拿它当「平稳」的证据
+		return { p50: null, p90: null, samples: kept.length, effectiveFps: null, doubled: false };
+	}
+	const v = [...kept].sort((a, b) => a - b);
+	const at = (q: number): number => v[Math.min(v.length - 1, Math.floor(v.length * q))]!;
+	const effectiveFps =
+		doubled && typeof containerFps === "number" && Number.isFinite(containerFps) && containerFps > 0
+			? Math.round(containerFps * (1 - ratio) * 10) / 10
+			: null;
+	return { p50: at(0.5), p90: at(0.9), samples: kept.length, effectiveFps, doubled };
+}
+
+/** 场景检测三产物（fix-broll-flash-frames）：场景区间 + 稳定性注记 + **切点全集**（秒，升序，
+ * 含被 buildScenes 0.5s 合并吞并、未成为场景边界的微切点——快切蒙太奇的段内隐藏切点即在此）。 */
+export interface SceneDetection {
+	scenes: SceneSpan[];
+	cuts: number[];
+}
+
+/** 场景边界检测：返回场景区间（秒）+ 稳定性注记 + 切点全集。源文件与其所在目录不产生任何新媒体文件。
  * 单趟解码双产物（spec MUST NOT 为判定新增解码 pass）：select 表达式放到 gte(scene,0)（全帧通过，
- * scene score 本就逐帧计算，解码量不变），metadata=print 打出每帧 score——切点改为客户端按
- * score>θ 判定，与旧 select gt(scene,θ) 的选帧集合定义相同（真机对拍切点逐字节一致）。 */
+ * scene score 本就逐帧计算，解码量不变），metadata=print 打出每帧 score——切点由客户端按
+ * score>θ 判定（与旧 select gt(scene,θ) 的选帧集合定义相同，真机对拍逐字节一致）。 */
+export async function detectScenesAndCuts(
+	ffmpeg: string,
+	path: string,
+	durationSec: number,
+	threshold: number = SCENE_THRESHOLD_DEFAULT,
+	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
+	containerFps?: number,
+): Promise<SceneDetection> {
+	const stderr = await runFfmpegCaptureStderr(ffmpeg, [
+		"-i", path,
+		"-vf", "select='gte(scene,0)',metadata=print",
+		"-f", "null", "-",
+	]);
+	const frames = parseSceneScores(stderr);
+	const cuts = detectCutsFromScores(frames, threshold);
+	return {
+		scenes: annotateSceneStability(buildScenes(cuts, durationSec), frames, stabilityThreshold, containerFps),
+		cuts,
+	};
+}
+
+/** 兼容包装（旧签名，只要场景区间）：既有调用/对拍测试零改动。 */
 export async function detectScenes(
 	ffmpeg: string,
 	path: string,
@@ -377,14 +564,7 @@ export async function detectScenes(
 	threshold: number = SCENE_THRESHOLD_DEFAULT,
 	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
 ): Promise<SceneSpan[]> {
-	const stderr = await runFfmpegCaptureStderr(ffmpeg, [
-		"-i", path,
-		"-vf", "select='gte(scene,0)',metadata=print",
-		"-f", "null", "-",
-	]);
-	const frames = parseSceneScores(stderr);
-	const cuts = frames.filter((f) => f.score > threshold).map((f) => f.ts);
-	return annotateSceneStability(buildScenes(cuts, durationSec), frames, stabilityThreshold);
+	return (await detectScenesAndCuts(ffmpeg, path, durationSec, threshold, stabilityThreshold)).scenes;
 }
 
 // ── 场景自适应抽帧计划（POC plan_frames 逐行对齐）──────────────────────────
@@ -438,9 +618,13 @@ export interface PlannedMaterial {
 	/** 场景区间（毫秒取整）；图片恒统一形态一行 0..0（无场景轴，D1）。
 	 * stable（add-index-stability-sampling）：缺省 undefined = unstable 语义（旧注入面零改动）；
 	 * 图片行不参与判定（本就单帧），恒不带该标记。 */
-	scenes: { st_ms: number; ed_ms: number; stable?: boolean }[];
+	scenes: { st_ms: number; ed_ms: number; stable?: boolean; motion?: SceneMotion }[];
 	/** 抽帧计划（sceneIdx 指向 scenes 下标）——计划总数即计量会话 planned_units；图片恒单帧 ts_ms=0。 */
 	framePlan: { sceneIdx: number; ts_ms: number }[];
+	/** 切点全集（毫秒，升序；fix-broll-flash-frames D4）：含被 0.5s 合并吞并的微切点。
+	 * 缺省 undefined = 无数据（旧注入面零改动）→ 落库 cuts_indexed=NULL、检索不透出 cuts；
+	 * `[]` = 真无切点（cuts_indexed=1）。图片素材恒缺省（无时间轴）。 */
+	cutsMs?: number[];
 }
 
 /** 阶段二产物：帧向量（sceneIdx 指向 PlannedMaterial.scenes 下标）。 */
@@ -573,7 +757,9 @@ async function planMaterialDefault(
 	}
 	const geo = probeGeometry(path, ffmpegPathOpt);
 	if (!(geo.duration > 0)) throw new Error("探测不到有效时长（疑似损坏/非视频文件）");
-	const scenes = await detectScenes(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold, ctx.stabilityThreshold);
+	// 容器帧率透传给运动量注记（倍帧判定后据此推有效帧率）
+	const det = await detectScenesAndCuts(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold, ctx.stabilityThreshold, geo.fps);
+	const scenes = det.scenes;
 	const plan = planFrames(scenes); // stable 场景在此收敛为中点 1 帧
 	return {
 		materialId,
@@ -582,8 +768,14 @@ async function planMaterialDefault(
 		width: geo.width,
 		height: geo.height,
 		fps: geo.fps,
-		scenes: scenes.map((s) => ({ st_ms: Math.round(s.st * 1000), ed_ms: Math.round(s.ed * 1000), stable: s.stable })),
+		scenes: scenes.map((s) => ({
+			st_ms: Math.round(s.st * 1000),
+			ed_ms: Math.round(s.ed * 1000),
+			stable: s.stable,
+			motion: s.motion,
+		})),
 		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: Math.round(p.ts * 1000) })),
+		cutsMs: det.cuts.map((t) => Math.round(t * 1000)),
 	};
 }
 
@@ -751,7 +943,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 					}
 				}
 				db.run(
-					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at, cuts_indexed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
 					[
 						p.planned.materialId,
 						p.path,
@@ -763,18 +955,35 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 						kind === "image" ? (p.planned.height > 0 ? p.planned.height : null) : p.planned.height,
 						kind === "image" ? null : p.planned.fps,
 						new Date().toISOString(),
+						// cuts_indexed（fix-broll-flash-frames D4）：有切点全集数据=1（空集=真无切点）；
+						// 旧注入面/图片缺省 undefined → NULL（检索侧不透出 cuts）
+						p.planned.cutsMs !== undefined ? 1 : null,
 					],
 				);
 				const matRowId = Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id);
+				if (p.planned.cutsMs !== undefined) {
+					for (const t of p.planned.cutsMs) {
+						db.run("INSERT OR IGNORE INTO cuts(material_id, t_ms, origin) VALUES (?,?,'detected')", [matRowId, t]);
+					}
+				}
 				const sceneIds: number[] = [];
 				for (const s of p.planned.scenes) {
 					// stable：video 按判定写 1/0；无标记（旧注入面/图片行）写 NULL——消费侧 NULL 恒按 unstable
-					db.run("INSERT INTO scenes(material_id, st_ms, ed_ms, stable) VALUES (?,?,?,?)", [
-						matRowId,
-						s.st_ms,
-						s.ed_ms,
-						s.stable === undefined ? null : s.stable ? 1 : 0,
-					]);
+					// motion：缺席或样本不足时各列写 NULL（「不可判」），消费侧 MUST NOT 当 0 用
+					db.run(
+						"INSERT INTO scenes(material_id, st_ms, ed_ms, stable, motion_p50, motion_p90, motion_samples, effective_fps, doubled) VALUES (?,?,?,?,?,?,?,?,?)",
+						[
+							matRowId,
+							s.st_ms,
+							s.ed_ms,
+							s.stable === undefined ? null : s.stable ? 1 : 0,
+							s.motion?.p50 ?? null,
+							s.motion?.p90 ?? null,
+							s.motion?.samples ?? null,
+							s.motion?.effectiveFps ?? null,
+							s.motion ? (s.motion.doubled ? 1 : 0) : null,
+						],
+					);
 					sceneIds.push(Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id));
 				}
 				for (const f of frames) {
