@@ -29,7 +29,8 @@ import { pollToolTask } from "../lib/tool-runner";
 import { log, routeLogsToStderr } from "../lib/log";
 
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
-export const AUDIO_LAY_VOLUME_DEFAULT = 0.3;
+// ★ 主理人 2026-08-19 拍板:BGM 垫底口径 -20dB=线性 0.10(契约 volume 只写线性,MUST NOT 写 dB——composition-contract-v1 §4)
+export const AUDIO_LAY_VOLUME_DEFAULT = 0.1;
 /** 自产音轨素材 id 前缀（同源幂等的身份锚在素材 path，不在 id 前缀）。 */
 export const AUDIO_LAY_MATERIAL_PREFIX = "audio-lay-";
 /** 上轨最短可用长度（秒）：低于此长度视为无处可放。 */

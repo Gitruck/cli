@@ -40,7 +40,7 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 ⑦ B-roll      matrix --local --dirs → describe --plan → lay --mark-weight 0.3
 ⑧ 抽帧检查    对字卡挂点抽帧看底轨构图（gtrk-mg SOP）
 ⑨ MG 字卡     按 §六 轻量规约产颗粒 → mg lint → gtrk mg --project
-⑩ BGM        gtrk audio lay --volume 0.2 --beat-align
+⑩ BGM        gtrk audio lay --volume 0.1 --beat-align（-20dB 口径）
 ⑪ 交付        客户端打开工程出片（gtrk render 仅主轨快照预览，见 §八）
 ```
 
@@ -133,12 +133,12 @@ gtrk mg lint "<工程目录>/mg/<composition_id>.html" --dispatch "<工程目录
 gtrk mg --project "<工程目录>" --json
 
 # ⑩ BGM（音量口径见下）
-gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.2 --beat-align --json
+gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-align --json
 ```
 
 **配方级参数口径**（打样标定）：
 - `--mark-weight 0.3`：美观度加权起步值（mark 缺失素材中性不受罚）；
-- **BGM 音量 0.2-0.25 起步、宁低勿高、客户端终调**（★ 主理人拍板固化）：配音主导原则——BGM 是垫底不是主角；成品音乐响度天然高于 TTS 电平，宁可低了让用户在客户端拉高；
+- **BGM 音量口径 = -20dB（线性 0.10，★ 主理人 2026-08-19 拍板定值）**：配音主导原则——BGM 是垫底不是主角，成品音乐响度天然高于 TTS 电平。⚠️ 契约 volume 字段**只写线性增益、MUST NOT 写 dB**（composition-contract-v1 §4 明文，dB 残档曾致客户端打不开工程）——-20dB 换算=10^(-20/20)=0.10 写入。用户嫌低在客户端拉高（终调权在客户端）；
 - 时间窗（`--source-window`）：二创场景解说序≈素材序时按 beat 对应的原片区间约束检索（可选增强，全库检索在几百场景规模下命中率已够）；
 - 素材不二用、黑片叠底、层序（黑底最低号<common<concept<local，契约=大号在上）均由 lay 内建，MUST NOT 绕过。
 

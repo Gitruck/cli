@@ -1391,7 +1391,10 @@ export function layBrollTracks(opts: {
 		.map(([track_index, clips]) => ({
 			track_index,
 			track_size: [canvas[0], canvas[1]],
-			muted: false,
+			// ★ 走查实锤(2026-08-19 主理人):B-roll 候选轨恒静音——素材原声(如原片博主解说)会与配音/口播打架;
+			// 此前恒 false 未暴露是因矩阵影视切片多为无声,本地素材路(原片带声)首次拍出。要听原声在客户端
+			// 点开该轨 muted 即可(轨级开关,契约双层语义)。黑片轨同步置 true(png 无音轨,语义统一)。
+			muted: true,
 			track_timeline: clips.sort((a, b) => (a.track_st as number) - (b.track_st as number)),
 		}));
 
@@ -1480,7 +1483,7 @@ export function layBrollTracks(opts: {
 				blackTrackObj = {
 					track_index: blackTrack,
 					track_size: [width, height],
-					muted: false,
+					muted: true,
 					track_timeline: segments.map((s, i) => ({
 						clip_id: `blackbed-${i}`,
 						material: solidId,
