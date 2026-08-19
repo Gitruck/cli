@@ -27,17 +27,19 @@
 |---|---|---|
 | 🎬 | `gtrk oralcut <raw>` | Full talking-head editing loop: emits gtrk + Jianying + Premiere projects in one pass and opens the output folder |
 | ✂️ | `gtrk long2short <raw>` | Long-to-short loop: semantic segment selection + jump cuts on a long video (optional 720p-proxy smart split-screen) → per-clip gtrk + Jianying + Premiere projects (the raw file is never uploaded). **If you only want a finished cut and will not edit further, use fine-cut** `gtrk tool video_long2short_pro` |
-| 📝 | `gtrk transcript <local video>` | Video to transcript: the original video is not uploaded, only locally extracted audio, producing one Markdown file with a summary, timecoded record and plain text |
+| 📝 | `gtrk transcript <local video\|voice-over audio>` | Video/audio to transcript: the original file is not uploaded, only the locally extracted (or, for audio input, transcoded) 16 kHz audio derivative, producing one Markdown file with a summary, timecoded record and plain text; with `--json` it also emits a sentence-timecoded `transcript.json` (the input for the `gtrk project init` fallback path) |
 | 🎵 | `gtrk music-visualizer <audio>` | Music visualization: one song → a spectrum-visualizer video (`--template` required, optional background/cover and template/color styling), with the companion driver skill `gtrk-music-visualizer` |
 | ✂️ | `gtrk split [split doc]` | Visual split dispatcher: finished cut × transcript projection → validated beat storyboard (`struct_meta.split` + `dispatch.json`), driving four lanes; `--column <id>` validates against your show's vocabulary |
 | ⚙️ | `gtrk init` | Guided one-time setup (API key + Jianying draft folder), then forget about it |
 | 🩺 | `gtrk doctor` | Health check: config / cloud connectivity / Jianying folder / runtime in one shot |
 | 📦 | `gtrk deps` | Runtime assets: `status` shows where ffmpeg/fonts come from and under which licence, `install` fetches them from the Gitruck Cloud mirror (**must be triggered explicitly — never a silent auto-download**) |
-| 🤖 | `gtrk skills install` | Installs the 10 bundled CLI skills into the agents detected on this machine, via the generic `skills` adapter plus a gtrk supplement layer; `--all` covers every registered host |
+| 🤖 | `gtrk skills install` | Installs the 11 bundled CLI skills into the agents detected on this machine, via the generic `skills` adapter plus a gtrk supplement layer; `--all` covers every registered host |
 | ⬆️ | `gtrk upgrade` | Upgrade the CLI to the latest version + refresh skills (config preserved); `--check` only reports |
 | 🎞️ | `gtrk render` | Render a gtrk project (EDL) locally → finished mp4 (requires ffmpeg) |
-| 🔎 | `gtrk matrix` | B-roll retrieval + **candidate track laying**: consumes the FILM_BROLL dispatch → produces a candidate list + downloads preview proxies and lays N candidate tracks (`--lay N`, default 1; open it in opencut and toggle track visibility to compare; `--lay 0` produces the list only); `matrix search "<query>"` is a one-off ad-hoc search |
+| 🔎 | `gtrk matrix` | B-roll retrieval + **candidate track laying**: consumes the FILM_BROLL dispatch → produces a candidate list + downloads preview proxies and lays N candidate tracks (`--lay N`, default 1; open it in opencut and toggle track visibility to compare; `--lay 0` produces the list only); `matrix search "<query>"` is a one-off ad-hoc search; **local-footage mode**: `matrix index --dirs <folders>` builds a slice-free index → `--local --dirs` retrieves and lays tracks (**your footage never leaves your machine**) → `matrix lay` consumes the (editable) plan; `matrix describe` understands candidates on demand |
 | 🎨 | `gtrk mg` | MG motion-graphics particle laying: consumes the MG dispatch → lays html-particle assets (transparent overlay / full-screen bed, produced by your show's MG skill) into the `.gtrk` `beat_track`; `mg lint <particle.html>` runs the statically checkable subset of the house rules, `mg status --project <dir>` is an orchestration dashboard; aux overlay particles can be layered on the same span (one beat derives a main particle plus `-aux<n>`). The old name `gtrk rrv` remains as a deprecated alias |
+| 🎙️ | `gtrk project init` | Audio-first project bootstrap: build a `.gtrk` project from a voice-over — main path `--tts-task <task_id>` references a completed TTS task (fetches the audio plus sentence timecodes directly, zero ASR); fallback path `--audio`+`--transcript` takes your own voice-over as a pair. Once landed, `gtrk split --project` continues the production pipeline as usual |
+| 🎼 | `gtrk audio lay` | Audio-track atom: appends an audio track to a `.gtrk` project (BGM/score; idempotent same-source replacement, no track pile-up); `--beat-align` runs cloud beat analysis and snaps the in-point to the nearest downbeat (billed once; degrades gracefully without a key or on failure) |
 | 🧰 | `gtrk tool <name>` | Single-shot tool family: image-to-camera-move, image/video matting, image black-border removal / aspect adaptation / cleanup / square conversion / LivePhoto, smart collage covers and vertical stitching (multi-image input), video black-border removal / aspect adaptation / stabilization / vaporwave filter / mechanical & semantic shot segmentation / motion highlights / AI subtitles, vocal-accompaniment separation / speaker diarization / pitch-and-tempo shift, piano-to-MIDI and piano restoration, audio denoising, silence removal, MAD, and more; `gtrk tool list` shows every input/output/live price/status. Single request, single result, shared runner — adding a tool means adding one descriptor |
 | 🚧 | `struct` | (planned) convert an existing gtrk project into the three formats |
 
@@ -88,18 +90,22 @@ The output folder is named `<raw-name>-video-project-<YYMMDD-HHMMSS>/` and conta
 
 **Per video (an ordered SOP with checkpoints — you talk to the agent, and it is not a one-shot parallel fan-out)**
 
-Lanes are laid **in order, with a checkpoint at every step**: lay B-roll first to fix the base layer → you adjust it → then stack MG on top → finally add AI re-enactment. You drive each step by conversation and the agent runs the matching command.
+Lanes are laid **in order, with a checkpoint at every step**: first fill the B-roll base layer from all three sources (film footage / your local footage / AI scene clips) → you adjust it → sample frames to check the final composition → only then stack MG (incl. ov) on top. You drive each step by conversation and the agent runs the matching command.
 
 | Step | What you say to the agent | What the agent does | Where you step in |
 |:--:|---|---|---|
 | ① | "**cut a version** of this talking-head" | `/gtrk-oralcut` → `gtrk oralcut` → three projects + transcript | — |
 | ② | "now **split it into a storyboard dispatch**" | `/gtrk-splitter` → `gtrk split` → `dispatch.json` with four lanes | review the dispatch |
-| ③ | "**lay the B-roll first**" | `/gtrk-matrix` → `gtrk matrix` → candidate tracks laid | **pick/adjust B-roll in opencut** (toggle track visibility to compare) |
-| ④ | "B-roll is settled, **lay the MG**" | `/gtrk-mg` → `gtrk mg` → MG particles stacked on top of the B-roll | fine-tune particles (by hand in opencut) |
-| ⑤ | "**add the AI re-enactment**" | `/gtrk-ai-drama` (skill, no command) → four-part description docs (Chinese/English blocks) | generate on an external platform, drop the clips back in by hand |
+| ③ | "**lay the B-roll base**" (two legs, one stage) | `/gtrk-matrix` → `gtrk matrix` → film/local-footage candidate tracks laid; `/gtrk-ai-drama` (skill, no command) → four-part description docs (Chinese/English blocks) | **pick/adjust B-roll in opencut** (toggle track visibility to compare); generate AI clips on an external platform and **drop them back in by hand** |
+| ④ | "B-roll is settled, **check the composition**" | samples frames from the **merged three-source base layer** (an agent discipline, no dedicated command) | **confirm the composition** (subject position / safe areas / facing / brightness) |
+| ⑤ | "composition looks good, **lay the MG**" | `/gtrk-mg` → `gtrk mg` → MG (incl. ov) stacked on the settled base layer | fine-tune particles (by hand in opencut) |
 | ⑥ | "**produce the final cut**" | the desktop client's production chain (multi-lane compositing + cloud particle rendering / export to Jianying); `gtrk render` only produces a **main-track snapshot preview** | final polish inside the client |
 
-> The order exists for a reason: **MG stacks on top of B-roll**, so the B-roll base has to be settled and approved before MG goes on; AI re-enactment comes last. Skip lanes you do not need (an empty queue in `dispatch` simply lays nothing).
+> The order exists for a reason: **AI scene clips belong to the base-layer B-roll family, not to an overlay layer** — the only overlay layer in the pipeline is MG (incl. ov). MG placement shapes itself around the picture and **depends on the final composition of the base layer**, so all three sources (film / local / AI) must land and the composition must be checked before MG goes on. Skip lanes you do not need (an empty queue in `dispatch` simply lays nothing).
+>
+> ⚠️ **Older docs said "④ lay MG → ⑤ AI re-enactment last", reasoning "the later it comes, the higher it stacks" — that mistook work order for layer order, corrected on 2026-08-17.** If your installed skills predate this, run `gtrk upgrade` to pick up the new order.
+>
+> **AI generation is asynchronous**: external platforms can take days of rerolls, and strict serialization would block ④⑤ indefinitely. The gate into ⑤ is therefore "**AI clips are back in ∨ you explicitly say skip for now**"; when you skip, the agent marks the MG particles adjacent to or overlapping the AI spans as "recheck composition once AI clips land" and repeats that list at wrap-up.
 >
 > ③④⑤⑥ all require **going back to the desktop client** to select, polish, re-insert and produce — the CLI lays material into `.gtrk`, and the client turns `.gtrk` into a finished video. See the "**CLI × desktop client**" section below.
 
@@ -111,6 +117,7 @@ Lanes are laid **in order, with a checkpoint at every step**: lay B-roll first t
 | Lost the report / want the artifacts on another machine | "fetch the previous one by taskId" → `gtrk oralcut-result <taskId>` (skips the cloud re-run) |
 | You want to choose between several B-roll candidates | "lay a few more B-roll candidates" → `gtrk matrix --lay N`, then toggle track visibility in opencut |
 | B-roll fill is poor / there are empty slots | Adjust `--score-floor` / `--top-k` and re-run, or "search a single query" → `matrix search "<query>"` to patch it |
+| You want to lay B-roll from your own footage | "use my local footage" → `gtrk matrix index --dirs <folders>` to build the index, then `gtrk matrix --local --dirs … --project …` (**your footage never leaves your machine**; see the matrix section in the command reference) |
 | Picture / particles need frame-level polish | Open the project in opencut and adjust by hand (what the agent laid is an **editable project**, not a flattened render) |
 | Cannot connect / config problems | "run a health check" → `gtrk doctor` (config / cloud / Jianying folder / version in one shot) |
 | A new version is out | "upgrade" → `gtrk upgrade` (upgrades the CLI + refreshes skills, config preserved) |
@@ -137,7 +144,7 @@ CLI 写 .gtrk ─▶ 客户端打开(自动感知外部改动、先存脏改再�
 | **Choosing B-roll candidates** | `gtrk matrix` lays N candidate tracks; you toggle each track's visibility to compare, pick one, and delete the rest — an aesthetic call only a person in the client can make |
 | **MG / particle polish** | The client renders html-particles as **live transparent previews** with frame-level Transform/Blending/Effects tuning |
 | **Talking-head fine cut** | Magnetic main-track ripple editing, manual nudging of cut points / pauses / split-screens |
-| **Re-inserting AI re-enactment** | AI clips generated on external platforms are **dragged into the AI_DRAMA lane by hand** and aligned to their spans (`/gtrk-ai-drama` only emits description docs; the footage is produced externally — see SOP ⑤) |
+| **Re-inserting AI re-enactment** | AI clips generated on external platforms are **dragged into the AI_DRAMA lane by hand** and aligned to their spans (`/gtrk-ai-drama` only emits description docs; the footage is produced externally — see SOP ③: it belongs to the base-layer stage, and MG waits until it has landed) |
 | **Final production** | Multi-lane compositing (overlay / MG / cloud-rendered particles stacked) plus Jianying draft export both live in the client's production chain |
 
 > **`gtrk render` ≠ the final cut.** `gtrk render` is a local ffmpeg **snapshot preview of the main track (the rough talking-head cut)** — it merges only the main video and audio tracks and **does not composite overlays (B-roll candidates) / MG particles / AI re-enactment**. For a **real multi-lane finished video** (all lanes stacked, particles cloud-rendered, Jianying draft exported), use the **client's production chain**. In one line: **the CLI puts material into the project; the client turns the project into a video.**
@@ -202,18 +209,20 @@ Then just say "**cut a version of this talking-head**", or explicitly pick `gtrk
 |:--:|---|---|---|
 | ① | `/gtrk-oralcut` | `gtrk oralcut` | Smart talking-head cut → desktop client / Jianying / Premiere projects + transcript |
 | ② | `/gtrk-splitter` | `gtrk split` | Storyboard dispatch → `dispatch.json` (A_ROLL/MG/AI_DRAMA/FILM_BROLL, four lanes) |
-| ③ | `/gtrk-matrix` | `gtrk matrix` | **Lay B-roll first** as candidate tracks → **you adjust/choose** (toggle visibility in opencut) |
-| ④ | `/gtrk-mg` | `gtrk mg` | **Then lay MG particles** (stacked on the approved B-roll) |
-| ⑤ | `/gtrk-ai-drama` | (no command, pure authoring) | **AI re-enactment last**: emits four-part description docs (backstory / characters / shots / source text, in Chinese and English blocks) → generate on any external platform and re-insert by hand (the artifact is description text with no mechanical tail, same as `/gtrk-style-maker`: skill only, no command) |
+| ③ | `/gtrk-matrix` | `gtrk matrix` | **B-roll base · film/local-footage leg**: lays candidate tracks → **you adjust/choose** (toggle visibility in opencut) |
+| ③ | `/gtrk-ai-drama` | (no command, pure authoring) | **B-roll base · AI scene-clip leg (same stage as matrix, not last)**: emits four-part description docs (backstory / characters / shots / source text, in Chinese and English blocks) → generate on any external platform and re-insert by hand (the artifact is description text with no mechanical tail, same as `/gtrk-style-maker`: skill only, no command) |
+| ④ | (no skill) | (no command) | **Global frame-sampling composition check**: sample frames from the merged three-source base layer and have the user confirm the composition — a hard agent-discipline gate feeding ⑤'s placement decisions |
+| ⑤ | `/gtrk-mg` | `gtrk mg` | **MG (incl. ov) goes on last** (stacked on the settled, composition-checked base layer) |
 | — | `/gtrk-style-maker` | (no command, builds a show) | A one-time interview that builds your show's style system (skill family + show config, see next section) |
 | — | (wrap-up) | `gtrk render` | Render a gtrk project locally → finished mp4 |
-| 📝 | `/gtrk-transcript` | `gtrk transcript` | Local video → one Markdown file with an agent-written summary, timecoded record and plain text; **not part of the production SOP** |
+| ✂️ | `/gtrk-long2short` | `gtrk long2short` | Long-to-short rough cut: semantic segment selection + jump cuts → per-clip client/Jianying/Premiere projects (the raw file is never uploaded); **not part of the production SOP**, usable standalone at any time |
+| 📝 | `/gtrk-transcript` | `gtrk transcript` | Local video / voice-over audio → one Markdown file with an agent-written summary, timecoded record and plain text; **not part of the production SOP** |
 | 🧰 | `/gtrk-tools` | `gtrk tool <name>` | The single-shot tool family (image-to-camera-move / image & video matting …) — single request, single result, **not part of the production SOP**, usable standalone at any time |
 | 🎵 | `/gtrk-music-visualizer` | `gtrk music-visualizer` | One song → a spectrum-visualizer video (template + optional background/cover + colour styling), **not part of the production SOP**, used standalone for audience acquisition |
 | 🖼️ | `/gtrk-cover` | (no command, pure authoring) | The two-stage cover workbench: design diagnosis + text-to-image prompts in three sizes and two languages → you generate images on an external platform → an HTML5 typesetting workbench (drag/scroll fine-tuning, one-click export to multiple PNG sizes). Show-specific cover aesthetics are injected through the show config's `style.skills` (`produces:"cover"`); **not part of the production SOP** (it is the "stage zero" companion to distribution) |
 
-> **Skill vs command**: `/gtrk-mg` is the **brain** — it knows it belongs at SOP step ④ (MG only after B-roll is settled), asks for your confirmation, and resolves which particle type to produce from the show config; `gtrk mg` is the **hands** — purely deterministic lint + track laying. You trigger the skill by talking, and the skill runs the command for you.
-> The 10 `/gtrk-X` skills above are **framework skills bundled with the CLI** (installed by `gtrk skills install`) — `/gtrk-transcript` independently drives video-to-transcript, `/gtrk-tools` covers only the single-shot tool family, `/gtrk-cover` handles covers, and none of the three belong to the production SOP; `/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` are pure authoring skills (no command). Show-specific **visual style and content** come instead from your own show's production skills (created by `/gtrk-style-maker`, bound through the show config's `style.skills`) and are never hardcoded into these framework skills.
+> **Skill vs command**: `/gtrk-mg` is the **brain** — it knows it belongs at SOP step ⑤ (MG only after all three B-roll sources have landed and the composition is checked), asks for your confirmation, and resolves which particle type to produce from the show config; `gtrk mg` is the **hands** — purely deterministic lint + track laying. You trigger the skill by talking, and the skill runs the command for you.
+> The 11 `/gtrk-X` skills above are **framework skills bundled with the CLI** (installed by `gtrk skills install`) — `/gtrk-long2short` independently drives long-to-short, `/gtrk-transcript` independently drives video/audio-to-transcript, `/gtrk-tools` covers only the single-shot tool family, `/gtrk-cover` handles covers, and none of the four belong to the production SOP; `/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` are pure authoring skills (no command). Show-specific **visual style and content** come instead from your own show's production skills (created by `/gtrk-style-maker`, bound through the show config's `style.skills`) and are never hardcoded into these framework skills.
 
 **How each lane's actual visuals/content get produced** — what the MG looks like, what tone the AI re-enactment has — is not hardcoded into the CLI. It comes from **your own show's production skills** (created interactively with `/gtrk-style-maker`, kept locally). They are bound through the show config's **`style.skills[].produces`** (the value is the lane name), and **general-purpose drivers** such as `gtrk mg` / `gtrk matrix` consume them accordingly. **The direction is: the CLI drives the show skills** — show skills only supply style/content and carry no "which command to run" orchestration; the framework only knows lanes and pipeline interfaces, and the look always belongs to your show. Without a show, the built-in defaults are used and everything still runs end to end.
 
@@ -273,9 +282,9 @@ Run `gtrk doctor` any time for a self-check:
 
 ## Command reference
 
-### `gtrk transcript <local video>`
+### `gtrk transcript <local video|voice-over audio>`
 
-Turns a local video into a multi-level Markdown transcript. It accepts local video paths only: the CLI extracts 16 kHz mono audio on your machine and uploads only that derivative. The original video is never uploaded, and URLs or platform video downloads are not supported.
+Turns a local video or voice-over audio file into a multi-level Markdown transcript. It accepts local file paths only: video is extracted — and audio input transcoded — to 16 kHz mono audio on your machine, and only that derivative is uploaded. The original file is never uploaded, and URLs or platform video downloads are not supported.
 
 ```bash
 gtrk transcript "D:/素材/采访视频.mp4"
@@ -288,7 +297,9 @@ By default it produces only `D:/素材/采访视频-transcript.md`, whose struct
 2. `## 文字记录` (Transcript record): readable paragraphs each starting with `[00:01:23]`;
 3. `## 纯文本` (Plain text): the complete recognized text, easy to copy in one go.
 
-Live pricing is queried from the website's price table under `asr` before the run; neither the CLI nor the docs store price numbers. With `--json`, stdout contains only `{ok,taskId,fileId,output,summaryPending}`, where `output` points at that single Markdown file; `summaryPending:true` means `/gtrk-transcript` still needs the agent to write the semantic summary and replace the pending marker in place — the deliverable remains the same single file.
+Live pricing is queried from the website's price table under `asr` before the run; neither the CLI nor the docs store price numbers. With `--json`, stdout contains only `{ok,taskId,fileId,output,transcriptJson,summaryPending}`, where `output` points at that single Markdown file; `summaryPending:true` means `/gtrk-transcript` still needs the agent to write the semantic summary and replace the pending marker in place — the deliverable remains the same single file.
+
+> With `--json` it additionally drops a sentence-timecoded `<name>-transcript.json` next to the source file (`utterances[]{id,text,st,ed}` + `material_id` + `text_hash` + `duration`, field-for-field aligned with the transcript structure `gtrk split` consumes), which the `gtrk project init --transcript` fallback path can consume directly. **Do not re-run ASR here on TTS-synthesized voice-overs** — `gtrk project init --tts-task` fetches the server-side sentence timecodes directly, zero ASR and zero extra billing.
 
 ### `gtrk oralcut <raw>`
 
@@ -365,6 +376,23 @@ Finished cut × transcript projection → beat storyboard. **No positional argum
 >
 > **The solid black bed track**: by default a solid black track is laid beneath all candidate tracks and above the talking-head main track (`struct_meta.broll.black_track` records its `track_index`), covering the full landed beat envelope so that during B-roll (including the empty spots on candidate tracks) the talking-head picture underneath is not exposed. **The cost is "black holes"**: wherever candidate tracks are not filled, pure black covers the talking-head, and track laying computes exactly that — `--json` always emits `lay.blackBedHoleSec` plus per-span `lay.blackBedHoles`, and a non-fatal warning is added when a single span is ≥ 3 s or a single beat's ratio is ≥ 15 % (it does not change the exit code or block laying). Use it to adjust `--score-floor`, switch to `--no-black-bed`, or patch by hand in the client. The bytes land at `assets/builtin/solid-000000-<W>x<H>.png`, sharing an id namespace with the client's built-in solid material and reused idempotently. Do not delete it by accident when removing candidate tracks; to swap footage, drag onto a candidate track's clip and **not onto the black bed** — since client 0.2.10 (force-updated release on 2026-07-31) **dropping onto the black bed is rejected outright with a message**. On clients older than 0.2.10 (force update not yet pulled) the old behaviour silently creates a new video track and inserts there; if it lands in the lower half you cannot see it in the preview at all (one `Ctrl+Z` undoes the whole thing) — restart the client first to pick up the force update. If you do not want the black bed, re-run with `--no-black-bed` and it is stripped clean.
 
+**Local-footage mode (`matrix index` / `--local`)**: footage does not have to live in the cloud library — retrieve and lay tracks straight from your local footage folders (video and images mixed):
+
+```bash
+gtrk matrix index --dirs <folder1,folder2>                     # ① build a slice-free index: content-fingerprint incremental, resumable; renames/moves are not recomputed
+gtrk matrix --local --dirs <folder1,folder2> --project <dir>   # ② local retrieval + track laying (--lay 0 = plan only, no laying)
+gtrk matrix lay --project <dir> [--plan <path>]                # ③ consume the (edited) plan and lay tracks, zero retrieval cost
+```
+
+- **Your footage never leaves your machine**: only 512px sampled frames are sent to Gitruck Cloud's own embed endpoint for vectorization, discarded on arrival; results reference your local originals by absolute path (no downloads, no proxies). Indexing is metered by frames actually sampled (pre-held before the run, settled to actual usage afterwards); text-side retrieval costs zero credits.
+- **Images are first-class**: images are indexed, retrievable and layable; when selected, an image goes through cloud `image_move` and lands as a 5-second camera-move video — **the image itself does go to the cloud** (2 credits per image, summarized for confirmation before laying; same image + same params is reused forever, never re-billed). Zero images to the cloud → `--no-image-broll`.
+- **No material reuse**: within one laying round each material unit is used once globally (local video per scene, images per file); when candidates run dry, slots stay empty rather than repeat; `--dedup-scope material` tightens to file level.
+- **Projects containing local footage cannot cloud-render**: submission is rejected (`local_broll_cloud_render_rejected`) — produce locally in the desktop client or via `gtrk render`.
+- **Optional atoms**: `matrix describe --plan <path> [--top-k N]` / `--materials <a,b>` understands candidates on demand (VLM description / tags / quality mark / watermark·subtitle·black-border·blur signals; 1 credit per frame, results injected into the plan and cached locally, cache hits are free, >20 frames triggers a confirmation guard); `--source-window <start,end>` filters by source-time window (only with `--local`; the film-commentary pattern "segment N of the narration gets footage from around segment N of the film"); `matrix lay --mark-weight <0..1>` blends describe's quality mark into candidate ranking (fused score = sim×(1-w)+(mark/100)×w; reorders only, never changes admission; candidates without a cached mark are treated as neutral).
+- **Index knobs and score scale**: `--scene-threshold` tunes scene-split granularity, `--stability-threshold` collapses static-camera scenes to fewer sampled frames, `--rebuild` forces a rebuild (describe caches are kept); the index is not portable across machines (keys are absolute paths — just re-run `index` on the new machine). Local score scale differs from the cloud's (a perfect hit can score as low as ~0.25), so do not raise `--score-floor` on cloud instincts.
+
+Orchestration recipes (pure matching / describe-then-lay / time-window / footage-first scripting / three-layer stacking) and the plan-editing contract live in the bundled skill `/gtrk-matrix`.
+
 ### `gtrk mg` — MG motion-graphics particles (lay / lint / status)
 
 Consumes the `dispatch.mg` dispatch landed by `gtrk split`, laying html-particle assets produced by **your show's MG skill** into the `.gtrk` project's `beat_track`. Three modes are dispatched by the first positional word: **no argument = lay**, `mg lint <file>` = single-file validation, `mg status` = orchestration dashboard. The old name `gtrk rrv` remains a deprecated alias (it prints a notice; prefer `gtrk mg`).
@@ -396,6 +424,19 @@ Consumes the `dispatch.mg` dispatch landed by `gtrk split`, laying html-particle
 
 > **Aux overlay particles**: if `gtrk split` dispatched an `overlay` particle in some beat's `aux_layers`, it derives a `<beat>-aux<n>` composition entry into `dispatch.mg` — `gtrk mg` lays it too, giving you "a main visual on the base track plus a transparent conceptual diagram stacked on the same span".
 > **Dual-read compatibility**: `dispatch.mg` (also reads the old `rrv_mg`), the source directory `mg/` (also reads the old `rrv/`), the material prefix `mg-` (also reads the old `rrv-`) — projects created before the de-branding need zero migration.
+
+### `gtrk project init` / `gtrk audio lay` — audio-first project atoms (voice-over first)
+
+Project entry points that start from **a voice-over** instead of a talking-head raw: with the voice-over in hand (TTS-synthesized or self-recorded), `project init` builds the `.gtrk` project, and `gtrk split --project` continues the production pipeline as usual; `audio lay` adds an audio track (BGM/score) to any project.
+
+| Command | What it does |
+|---|---|
+| `gtrk project init --tts-task <task_id>` | **Main path**: references a completed `audio_tts_clone` task — the server hands over the audio and sentence timecodes directly (zero ASR, zero extra billing); the audio download lands in the project's `audio/` |
+| `gtrk project init --audio <voice-over> --transcript <transcript.json>` | **Fallback path**: your own voice-over audio plus its sentence-timecoded transcript as a pair (produced by `gtrk transcript <voice-over> --json`; for TTS-synthesized voice-overs take the main path instead of re-running ASR) |
+| `gtrk audio lay --project <dir> --file <bgm.mp3>` | Appends an audio track to the project; **idempotent same-source replacement** (re-running with the same source replaces instead of piling up tracks; zero-reference protection when stripping the old one); `--volume <0..1>` (default 0.3, bed volume), `--offset <ms>` sets the in-point |
+| `gtrk audio lay … --beat-align` | Cloud beat analysis (`audio_music_analyze`, billed once) snaps the in-point to the nearest downbeat; without a key / on analysis failure / out of range it degrades to no alignment — the command never fails over it |
+
+`project init` also takes `--canvas <WxH>` (default 1080x1920), `-o/--out`, `--reupload`, `--no-open` and `--json` with the same semantics as `oralcut`; with `--json` both commands emit a single-line result JSON on stdout (human logs go to stderr).
 
 ### `gtrk tool <name> [inputs...]` — the single-shot tool family
 
@@ -529,7 +570,7 @@ The companion skill is `/gtrk-tools` (one skill covering the whole tool family).
 ```
 gtrk-cli/
 ├── src/index.ts              # commander 入口
-├── src/commands/             # 子命令：install / init / oralcut / transcript / split / doctor / upgrade / skills
+├── src/commands/             # subcommands: install / init / oralcut / long2short / transcript / split / matrix / mg / project / audio / tool / render / doctor / upgrade / skills / …
 ├── src/lib/                  # cloud / column-config / splitdoc / projection / user-config / jianying / …
 ├── skills/                   # 打包的框架 skills：oralcut / splitter / matrix / mg / ai-drama / style-maker / transcript / tools / music-visualizer / cover
 ├── contracts/                # 框架契约库正本（gsap-emit v1 + handoff→契约映射表）
