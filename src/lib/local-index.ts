@@ -192,6 +192,9 @@ CREATE INDEX IF NOT EXISTS idx_frames_material ON frames(material_id);
 CREATE TABLE IF NOT EXISTS cuts (
   material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
   t_ms INTEGER NOT NULL,                -- 切点全集：含被 buildScenes 0.5s 合并吞并的微切点（fix-broll-flash-frames D4）
+  -- 来源（add-material-motion-signal）：'detected'=检测所得（缺省，旧行 NULL 同义）；
+  -- 'qc_confirmed'=成片像素上确认后回流（治 θ 临界漏网）。分来源存是为了保住检测口径的可复算性。
+  origin TEXT,
   PRIMARY KEY (material_id, t_ms)
 );
 CREATE TABLE IF NOT EXISTS describes (
@@ -235,6 +238,9 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		] as const) {
 			if (!sceneCols2.includes(col)) db.exec(`ALTER TABLE scenes ADD COLUMN ${col} ${type}`);
 		}
+		// cuts.origin 幂等迁移：旧行 NULL 与 'detected' 同义（检测所得）
+		const cutCols = db.all<{ name: string }>("PRAGMA table_info(cuts)").map((c) => c.name);
+		if (!cutCols.includes("origin")) db.exec("ALTER TABLE cuts ADD COLUMN origin TEXT");
 		// materials.cuts_indexed 幂等迁移（fix-broll-flash-frames D4）：NULL=旧行无切点全集数据
 		// （检索侧不透出 cuts、消费方按无已知切点兜底）；1=本素材已落切点全集（空集=真无切点）。
 		if (!cols.some((c) => c.name === "cuts_indexed")) {
@@ -272,6 +278,31 @@ export function deleteMaterialRows(db: SqlDb, materialRowId: number): void {
 	db.run("DELETE FROM scenes WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM cuts WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM materials WHERE id = ?", [materialRowId]);
+}
+
+/** 确认切点回流（add-material-motion-signal D3 · local-material-index「确认切点回流」）：把成片
+ * 像素上确认、映射回源时码的切点补录进索引，标 `qc_confirmed` 以区别于检测所得。
+ *
+ * 为何需要：检测存在**阈值临界漏网**——打样实测源 618.483 处一刀真实硬切（抽帧确认为两个不同
+ * 场景）仅得 0.290296 分，差 0.01 未过默认 θ=0.3。索引对自身判据是忠实的（全片重扫复现全部
+ * 切点），故这类缺口 MUST NOT 靠调低 θ 全局解决（会引入误检、且 θ 是用户可调参数），
+ * 而应由「成片像素上看得见的一方」补录。
+ *
+ * 返回实际新增条数（已存在的时码不重复计）。调用方须确保这是**显式动作**——常规扫描不写库。 */
+export function recordConfirmedCuts(db: SqlDb, materialId: string, tsMs: number[]): number {
+	const row = db.get<{ id: number }>("SELECT id FROM materials WHERE material_id = ?", [materialId]);
+	if (!row) return 0;
+	let added = 0;
+	withTransaction(db, () => {
+		for (const t of tsMs) {
+			const ms = Math.round(t);
+			const exists = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM cuts WHERE material_id = ? AND t_ms = ?", [row.id, ms]);
+			if (exists && exists.n > 0) continue;
+			db.run("INSERT INTO cuts(material_id, t_ms, origin) VALUES (?,?,'qc_confirmed')", [row.id, ms]);
+			added++;
+		}
+	});
+	return added;
 }
 
 /** 清一个素材的全部理解缓存（describes 键=字符串材料 id；add-matrix-describe-and-window D1）。
@@ -932,7 +963,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				const matRowId = Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id);
 				if (p.planned.cutsMs !== undefined) {
 					for (const t of p.planned.cutsMs) {
-						db.run("INSERT OR IGNORE INTO cuts(material_id, t_ms) VALUES (?,?)", [matRowId, t]);
+						db.run("INSERT OR IGNORE INTO cuts(material_id, t_ms, origin) VALUES (?,?,'detected')", [matRowId, t]);
 					}
 				}
 				const sceneIds: number[] = [];
