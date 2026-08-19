@@ -88,7 +88,15 @@ export type DedupScope = "scene" | "material";
 
 /** 来源层（D2 层序铁律，写死不配置）：自上而下 local > concept > common（common 最下、紧贴口播/黑底之上）。 */
 export type SourceLayer = "local" | "concept" | "common";
-/** 层带自上而下顺序（track_index 升序=渲染自上而下：local 最小号、common 最大号、黑底更下）。 */
+/** 层带语义序（自上而下 local > concept > common）。
+ * ★ fix-broll-zorder-contract-drift（2026-08-19 打样实锤）：gtrk v1 契约与客户端一致为
+ * **track_index 越大越靠前（上层）**（composition-contract-v1 §video_track:「最小=底轨 main，
+ * 越大越靠前」；客户端 project-to-timeline 同口径）——本模块此前以相反世界观（小=上层）分配
+ * index：黑底落 bandEnd 最大号=按契约盖住全部候选轨、层带 local 落最小号=按契约沉底，
+ * 与层序铁律「local 最上」正好相反。音频驱动工程首个客户端走查（黑片压顶截图）拍出实锤。
+ * 修正后分配：黑底=baseIndex（最小、垫底），带区自 baseIndex+1 起按 common→concept→local
+ * 升号排布（local 号最大=契约上层=铁律「本地最上」）。本常量保持**语义序**（自上而下）不变，
+ * index 分配处按其反序遍历。 */
 export const SOURCE_LAYER_ORDER: readonly SourceLayer[] = ["local", "concept", "common"];
 
 const isSourceLayer = (v: unknown): v is SourceLayer => v === "local" || v === "concept" || v === "common";
@@ -1098,29 +1106,33 @@ export function layBrollTracks(opts: {
 		}
 	}
 
-	// 手工黑底轨检测：用户此前手加的黑底轨会被当用户轨保留并顶高 baseIndex，令新候选轨落到它之下
-	// 被整片遮住。宁可告警不猜删（登记缺失宁留勿删铁律）。
+	// 手工黑底轨检测（★ fix-broll-zorder-contract-drift 文案随契约口径修正）：用户手加的纯色轨
+	// 会被当用户轨保留——契约下（大号=上层）新候选轨号更大、恒在其上不被遮，但会与自动黑底
+	// 重复垫底、且占着 keptOther 位顶高整段带区号。宁可告警不猜删（登记缺失宁留勿删铁律）。
 	for (const t of keptTracks) {
 		const clips = t.track_timeline ?? [];
 		if (!clips.length) continue;
 		if (clips.every((c) => typeof c.material === "string" && c.material.startsWith(SOLID_MATERIAL_PREFIX))) {
 			warnings.push(
-				`检测到疑似手工纯色底轨（track_index=${t.track_index}）：新候选轨会落到它之下被遮住。建议删除该轨后重跑，或用 --no-black-bed。`,
+				`检测到疑似手工纯色底轨（track_index=${t.track_index}）：与自动黑底垫轨功能重复。建议删除该轨后重跑，或用 --no-black-bed 保留手工轨。`,
 			);
 		}
 	}
 
 	// ── 层带布局（D2 三带区间制）：baseIndex 只数「非带区保留轨」（用户轨/过渡轨），带区从其上叠放；
-	// 自上而下 local → concept → common（track_index 升序=渲染自上而下），目标层带宽=lay（保留既有
-	// baseIndex+k 的带内排布与空轨槽占位语义），他层带宽=该层保留轨数；黑底恒压全部带区之下。
+	// ★ fix-broll-zorder-contract-drift：契约=track_index 越大越靠前（上层）。黑底占 baseIndex
+	// （最小号、垫底，blackBedOn 时恒预留——最终未铺成则留空号，index 不要求连续无害）；
+	// 带区自 baseIndex+1 起按 SOURCE_LAYER_ORDER **反序**（common→concept→local）升号排布：
+	// common 最小号（紧贴黑底之上）、local 最大号（契约上层=层序铁律「本地最上」）。
 	const canvas = Array.isArray(gtrk.video_size) ? (gtrk.video_size as number[]) : [1920, 1080];
 	const baseIndex =
 		keptOtherTracks.reduce((mx, t) => Math.max(mx, typeof t.track_index === "number" ? t.track_index : 0), -1) + 1;
+	const blackBedReserved = opts.blackBed !== false ? 1 : 0;
 	const bandCounts: Record<SourceLayer, number> = { local: 0, concept: 0, common: 0 };
 	for (const b of keptBandTracks) bandCounts[b.layer]++;
 	const bandStart = {} as Record<SourceLayer, number>;
-	let bandEnd = baseIndex;
-	for (const layer of SOURCE_LAYER_ORDER) {
+	let bandEnd = baseIndex + blackBedReserved;
+	for (const layer of [...SOURCE_LAYER_ORDER].reverse()) {
 		bandStart[layer] = bandEnd;
 		bandEnd += layer === targetLayer ? Math.max(0, lay) : bandCounts[layer];
 	}
@@ -1322,7 +1334,9 @@ export function layBrollTracks(opts: {
 					path: solidRelPath({ hex: BLACK_BED_HEX, width, height }),
 					video_size: [width, height],
 				});
-				blackTrack = bandEnd;
+				// ★ fix-broll-zorder-contract-drift：黑底取预留的 baseIndex（最小号=契约底层垫底），
+				// 不再取 bandEnd（旧值=最大号，按契约会盖住全部候选轨——打样客户端截图实锤）
+				blackTrack = baseIndex;
 				blackTrackObj = {
 					track_index: blackTrack,
 					track_size: [width, height],

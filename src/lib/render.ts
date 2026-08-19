@@ -31,10 +31,14 @@ interface Clip {
 	clip_st?: number;
 	track_st: number;
 	duration: number;
+	/** clip 级音量（契约双层语义：覆盖轨级；★ fix-render-audio-volume——此前渲染混音全然不消费）。 */
+	volume?: number;
 }
 interface Track {
 	track_index?: number;
 	track_timeline: Clip[];
+	/** 轨级默认音量（契约：clip 级缺省时生效）。 */
+	volume?: number;
 }
 interface GtrkMaterial {
 	id: string | number;
@@ -46,10 +50,24 @@ export interface GtrkV1 {
 	materials?: GtrkMaterial[];
 	video_track?: Track[];
 	audio_track?: Track[];
+	struct_meta?: { broll?: { black_track?: number | null } };
+}
+
+/** 快照预览的主轨选择：track_index 最小的**非黑底垫轨**。
+ * ★ fix-broll-zorder-contract-drift 连锁：层序修正后黑底=最小号（契约底层），
+ * 原「sortedV[0]=主轨」会渲出纯黑垫轨。黑底判据=struct_meta.broll.black_track 登记
+ * （契约字段；缺键 ?? null 兜底，MUST NOT 当 0——composition-contract-v1 §broll 明文）。 */
+function pickPreviewMainTrack(gtrk: GtrkV1, sortedV: Track[]): Track {
+	const black = gtrk.struct_meta?.broll?.black_track ?? null;
+	if (typeof black === "number") {
+		const nonBlack = sortedV.filter((t) => t.track_index !== black);
+		if (nonBlack.length > 0) return nonBlack[0];
+	}
+	return sortedV[0];
 }
 
 type Element =
-	| { kind: "clip"; material: string | number; clip_st: number; duration: number }
+	| { kind: "clip"; material: string | number; clip_st: number; duration: number; volume?: number }
 	| { kind: "gap"; duration: number };
 
 const isGap = (clip: Clip): boolean => clip.material === null || clip.material === undefined;
@@ -62,7 +80,7 @@ function sortedTracks(tracks: Track[]): Track[] {
 }
 
 /** track_timeline → 连续 clip/gap 元素序列（铺满、无重叠），返回 [elements, cursor]。 */
-function normalizeTrack(trackTimeline: Clip[]): [Element[], number] {
+function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[], number] {
 	const items = [...trackTimeline].sort((a, b) => Number(a.track_st) - Number(b.track_st));
 	const elements: Element[] = [];
 	let cursor = 0;
@@ -75,11 +93,14 @@ function normalizeTrack(trackTimeline: Clip[]): [Element[], number] {
 		}
 		if (trackSt > cursor + 1e-6) elements.push({ kind: "gap", duration: trackSt - cursor });
 		if (!isGap(clip)) {
+			// 契约双层音量：clip 级覆盖轨级，均缺省=1（不产生 volume 滤镜）
+			const vol = typeof clip.volume === "number" ? clip.volume : trackVolume;
 			elements.push({
 				kind: "clip",
 				material: clip.material as string | number,
 				clip_st: Number(clip.clip_st),
 				duration,
+				...(typeof vol === "number" && vol !== 1 ? { volume: vol } : {}),
 			});
 		} else {
 			elements.push({ kind: "gap", duration });
@@ -106,7 +127,7 @@ export function buildFilterGraph(
 
 	const sortedV = sortedTracks(gtrk.video_track || []);
 	if (sortedV.length === 0) throw new Error("gtrk v1 缺少 video_track");
-	const mainVideoTrack = sortedV[0];
+	const mainVideoTrack = pickPreviewMainTrack(gtrk, sortedV);
 	const audioTracks = sortedTracks(gtrk.audio_track || []);
 
 	const totalClips = [mainVideoTrack, ...audioTracks].reduce(
@@ -140,7 +161,7 @@ export function buildFilterGraph(
 	const normTracks: Element[][] = [];
 	const aLens: number[] = [];
 	for (const t of audioTracks) {
-		const [els, end] = normalizeTrack(t.track_timeline);
+		const [els, end] = normalizeTrack(t.track_timeline, typeof t.volume === "number" ? t.volume : undefined);
 		normTracks.push(els);
 		aLens.push(end);
 	}
@@ -188,6 +209,9 @@ export function buildFilterGraph(
 					`aresample=${AUDIO_SAMPLE_RATE}`,
 					`aformat=sample_fmts=fltp:channel_layouts=${AUDIO_LAYOUT}`,
 				];
+				// ★ fix-render-audio-volume：消费契约双层音量（此前 amix 等权、volume 全然未消费——
+				// BGM 压不下去的打样实锤根因之一）
+				if (typeof el.volume === "number") steps.push(`volume=${f3(el.volume)}`);
 				if (fade > 0) {
 					steps.push(`afade=t=in:d=${f3(fade)}`);
 					steps.push(`afade=t=out:st=${f6(Math.max(el.duration - fade, 0))}:d=${f3(fade)}`);
@@ -226,7 +250,8 @@ export function buildFilterGraph(
 export function materialPathsFromGtrk(gtrk: GtrkV1): Record<string, string> {
 	const used = new Set<string>();
 	const sortedV = sortedTracks(gtrk.video_track || []);
-	const consumers = [sortedV[0], ...(gtrk.audio_track || [])];
+	// 与快照渲染同一主轨口径（跳过黑底垫轨——fix-broll-zorder-contract-drift 连锁）
+	const consumers = sortedV.length ? [pickPreviewMainTrack(gtrk, sortedV), ...(gtrk.audio_track || [])] : [...(gtrk.audio_track || [])];
 	for (const t of consumers) {
 		if (!t) continue;
 		for (const c of t.track_timeline || []) {
