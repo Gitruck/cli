@@ -79,6 +79,20 @@ function sortedTracks(tracks: Track[]): Track[] {
 		.map((x) => x.t);
 }
 
+/** ★ fix-render-audio-volume 存量兼容（与客户端 opencut-rewrite `fix-gtrk-volume-consumption`
+ *  同款取值域启发式，两侧口径 MUST 一致）：旧客户端曾把编辑器 dB 原值直写 `volume`
+ *  （稠密缺省 `0` = 全音量、调低为负值）——按线性硬读会把这些存档渲成全静音/反相。分流：
+ *   · v < 0  → 旧 dB（线性域无负值，构造性无歧义）→ 10^(clamp(v,−60,20)/20) 换线性；
+ *   · v === 0 → 旧稠密缺省（写方本意 0dB 全音量）→ 视为缺省不产滤镜——
+ *              MUST NOT 读成线性 0 全静音；显式静音走 `muted` 表达；
+ *   · v > 0  → 契约线性（CLI/后端主链路）原样。 */
+function normalizeVolume(v: number): number | undefined {
+	if (!Number.isFinite(v)) return undefined;
+	if (v < 0) return 10 ** (Math.max(-60, Math.min(20, v)) / 20);
+	if (v === 0) return undefined;
+	return v;
+}
+
 /** track_timeline → 连续 clip/gap 元素序列（铺满、无重叠），返回 [elements, cursor]。 */
 function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[], number] {
 	const items = [...trackTimeline].sort((a, b) => Number(a.track_st) - Number(b.track_st));
@@ -93,8 +107,10 @@ function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[]
 		}
 		if (trackSt > cursor + 1e-6) elements.push({ kind: "gap", duration: trackSt - cursor });
 		if (!isGap(clip)) {
-			// 契约双层音量：clip 级覆盖轨级，均缺省=1（不产生 volume 滤镜）
-			const vol = typeof clip.volume === "number" ? clip.volume : trackVolume;
+			// 契约双层音量：clip 级覆盖轨级，均缺省=1（不产生 volume 滤镜）；
+			// 折叠后的原始值再过存量启发式（normalizeVolume）换成可消费线性。
+			const raw = typeof clip.volume === "number" ? clip.volume : trackVolume;
+			const vol = typeof raw === "number" ? normalizeVolume(raw) : undefined;
 			elements.push({
 				kind: "clip",
 				material: clip.material as string | number,
