@@ -422,10 +422,16 @@ function sourceWindowFor(p: Pair, d: number): { clipSt: number; clipEd: number }
 }
 
 /** 窗口精修（fix-broll-flash-frames D1）：①端点残片收缩（只收不移）——窗内切点（seg.cuts）距
- * 端点 <SLIVER_MIN_SEC 时端点吸附至切点（恰落切点=无残片不动）；收缩后短于 MIN_SHOT_SEC 返回
- * null（该对不采纳，走既有换候选/留空路径）。②帧网格吸附——端点按素材帧率（result.fps）就近
- * 吸附整帧边界（VFR/非常规 time_base 消除 ±1 帧边界抖动；fps 缺失跳过）。图片候选原样返回。 */
-function refineWindow(p: Pair, win: { clipSt: number; clipEd: number }): { clipSt: number; clipEd: number } | null {
+ * 端点 <SLIVER_MIN_SEC 时端点吸附至切点（恰落切点=无残片不动）；②帧网格吸附——端点按素材帧率
+ * （result.fps）就近吸附整帧边界（VFR/非常规 time_base 消除 ±1 帧边界抖动；fps 缺失跳过）。
+ * 两步**只许缩短不许撑长**：吸附取整可能把槽长撑出 1 帧，`maxD`（剩余 beat 空间）与段界是硬上限
+ * ——越界会顶掉下一 beat 的首槽造成时间线重叠（渲染器 normalizeTrack 直接硬拒）。
+ * 精修后短于 MIN_SHOT_SEC 返回 null（该对不采纳，走既有换候选/留空路径）。图片候选原样返回。 */
+function refineWindow(
+	p: Pair,
+	win: { clipSt: number; clipEd: number },
+	maxD: number,
+): { clipSt: number; clipEd: number } | null {
 	if (isImagePair(p)) return win;
 	const EPS = 1e-6;
 	let { clipSt, clipEd } = win;
@@ -438,17 +444,21 @@ function refineWindow(p: Pair, win: { clipSt: number; clipEd: number }): { clipS
 			const tail = inWin[inWin.length - 1]!;
 			if (tail > clipSt + EPS && clipEd - tail < SLIVER_MIN_SEC) clipEd = tail;
 		}
-		if (clipEd - clipSt < MIN_SHOT_SEC) return null;
 	}
 	const fps = p.cand.fps;
 	if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) {
-		const st = Math.round(clipSt * fps) / fps;
-		const ed = Math.round(clipEd * fps) / fps;
+		// 起点就近吸附后钳回段内（向下取整会越过段头）；终点同理钳回段尾
+		const st = Math.min(Math.max(Math.round(clipSt * fps) / fps, p.seg.start), clipEd);
+		let ed = Math.min(Math.round(clipEd * fps) / fps, p.seg.end);
+		// 吸附撑长的硬上限：超出剩余空间即把终点**向下**取整到帧网格（宁短一帧不越界）
+		if (ed - st > maxD + EPS) ed = st + Math.floor((maxD + EPS) * fps) / fps;
 		if (ed - st > EPS) {
 			clipSt = st;
 			clipEd = ed;
 		}
 	}
+	if (clipEd - clipSt > maxD + EPS) clipEd = clipSt + maxD; // 无 fps 分支的兜底上限
+	if (clipEd - clipSt < MIN_SHOT_SEC) return null;
 	return { clipSt, clipEd };
 }
 
@@ -566,9 +576,10 @@ export function fillBeatTrack(opts: {
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			return owner === undefined || owner === trackOrder;
 		};
-		// 将落位窗口 = 基础源窗（best 居中钳段）+ 精修（残片收缩/帧吸附）；null=收缩后不足不采纳
+		// 将落位窗口 = 基础源窗（best 居中钳段）+ 精修（残片收缩/帧吸附，受剩余 beat 空间上限约束）；
+		// null = 精修后不足最小槽长，该对不采纳
 		const resolveWindow = (p: Pair): { clipSt: number; clipEd: number } | null =>
-			refineWindow(p, sourceWindowFor(p, dFor(p)));
+			refineWindow(p, sourceWindowFor(p, dFor(p)), remaining);
 		// 跳剪豁免版相邻避让（D1）：相邻槽位（间隔 <2 槽）∧ 同素材 ∧ |后颗粒 clip_st − 前颗粒 clip_ed| < 2s
 		const jumpCutBlocked = (p: Pair, win: { clipSt: number }): boolean => {
 			if (!lastPlaced || slotIdx - lastPlaced.slotIdx >= 2) return false;
@@ -649,7 +660,9 @@ export function fillBeatTrack(opts: {
 			const hi = isImagePair(lastPick) ? Number.POSITIVE_INFINITY : lastPick.seg.end;
 			const ext = Math.min(tail, Math.max(0, hi - last.clip_ed));
 			if (ext > 1e-6) {
-				const refined = refineWindow(lastPick, { clipSt: last.clip_st, clipEd: last.clip_ed + ext });
+				// 上限 = 该槽起点到 beat 末端的全部空间（吸收后仍 MUST NOT 越过 beat 包络）
+				const maxD = beat.track_ed - last.track_st;
+				const refined = refineWindow(lastPick, { clipSt: last.clip_st, clipEd: last.clip_ed + ext }, maxD);
 				// 精修失败（收缩后不足下限）= 维持吸收前窗口，如实留空
 				if (refined && refined.clipEd > last.clip_ed + 1e-6) {
 					const grew = refined.clipEd - last.clip_ed;
