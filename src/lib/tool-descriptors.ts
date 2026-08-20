@@ -1642,13 +1642,16 @@ const videoSplitScreen: ToolDescriptor = {
  * audio_tts_clone —— 声音克隆配音（none 零上传直提交首个成员）。
  * 文本二选一（--text 短文本 / --text-file UTF-8 文件）+ --speaker 必填（服务端 ext_code 白名单，
  * 传错时报错自带可用列表=发现路径）；speed/text_split_method 缺省跟随该音色服务端调好的参数（不注默认）。
- * 计费按文本字数折算分钟（约 200 字/分钟，服务端估算）；字数上限 2000 如实转述、服务端为真相。
+ * 计费按文本字符数算；**计量单位与单价 MUST NOT 在本文件写死**——`measure` 由服务端原样透传，
+ * `gtrk tool list` 实时显示的那个就是真相。此处写死过一次「约 200 字/分钟」，而服务端实为 240，
+ * 且服务端计量口径日后还会变（infra refactor-billing-measure-kchar）⇒ 任何硬编码都会变成错的文案。
+ * 字数上限 5000（服务端 _MAX_TEXT_LEN）如实转述、服务端为真相。
  */
 const audioTtsClone: ToolDescriptor = {
 	name: "audio_tts_clone",
 	title: "声音克隆配音",
 	description:
-		"输入一段文字，用指定音色合成配音音频（--text 短文本或 --text-file 文本文件二选一，≤2000 字）。按文本字数折算分钟计费。",
+		"输入一段文字，用指定音色合成配音音频（--text 短文本或 --text-file 文本文件二选一，≤5000 字）。按文本字符数计费，计量单位与单价以 `gtrk tool list` 实时显示为准。",
 	kind: "cloud",
 	input: { kind: "none" },
 	priceKey: "audio_tts_clone",
@@ -1661,8 +1664,9 @@ const audioTtsClone: ToolDescriptor = {
 		{ flag: "--speaker <code>", desc: "音色代号（必填；可用列表见官网文档「可用音色」，传错时报错会列出全部可用项）" },
 		{ flag: "--text-lang <lang>", desc: "文本语言（未传则服务端默认 zh）" },
 		{ flag: "--output-format <fmt>", desc: "输出音频格式 wav/mp3（未传则服务端默认 wav）" },
-		{ flag: "--split-method <m>", desc: "长文切分法 cut0~cut5（未传则跟随该音色调好的参数）" },
+		{ flag: "--split-method <m>", desc: "长文切分法 cut0~cut5（未传则跟随该音色调好的参数）；它也决定字幕的断句粒度，要一句一条传 cut5" },
 		{ flag: "--batch-size <n>", desc: "分段并发批大小 1~16（未传则服务端默认）" },
+		{ flag: "--subtitle-format <fmt>", desc: "同时产出字幕文件，如 srt（未传则不出字幕；不额外计费，取值以服务端为准）" },
 	],
 	buildPayloadNone(ctx) {
 		const o = ctx.opts;
@@ -1686,6 +1690,13 @@ const audioTtsClone: ToolDescriptor = {
 			if (!Number.isInteger(bs)) throw new Error(`--batch-size 需要整数，拿到「${String(o.batchSize)}」`);
 			p.batch_size = bs;
 		}
+		// 字幕（link-add-tts-subtitle-output-cli）：给了才写键，不给一个键都不加——
+		// 与 --split-method / --output-format 同口径，保证不传时 payload 逐字节与从前一致。
+		// 取值**不在 CLI 冻结**（同 --speaker 的既有规矩）：合法值由服务端校验并在报错里列出，
+		// 服务端日后加 .ass，本文件一个字都不用改。
+		if (typeof o.subtitleFormat === "string" && o.subtitleFormat.trim()) {
+			p.subtitle_format = o.subtitleFormat.trim();
+		}
 		return p;
 	},
 	mapOutputs(out, ctx) {
@@ -1693,7 +1704,12 @@ const audioTtsClone: ToolDescriptor = {
 		if (!url) return [];
 		const fallback = typeof ctx.opts.outputFormat === "string" ? `.${ctx.opts.outputFormat}` : ".wav";
 		const speaker = typeof ctx.opts.speaker === "string" && ctx.opts.speaker.trim() ? ctx.opts.speaker : "voice";
-		return [{ url, filename: `tts-${speaker}${extFromUrl(url, fallback)}` }];
+		const files = [{ url, filename: `tts-${speaker}${extFromUrl(url, fallback)}` }];
+		// 字幕是附赠产物：服务端降级时 subtitle_file_download_url 是空串，此时**不落文件**——
+		// 留一个 0 字节的 .srt 比没有更糟（用户会以为字幕出了、拖进剪辑软件才发现是空的）。
+		const subUrl = pickUrl(out, ["subtitle_file_download_url"]);
+		if (subUrl) files.push({ url: subUrl, filename: `tts-${speaker}${extFromUrl(subUrl, ".srt")}` });
+		return files;
 	},
 };
 
