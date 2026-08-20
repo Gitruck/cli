@@ -16,7 +16,14 @@ import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { projectTranscript, type Transcript, type ProjectionView } from "../lib/projection";
+import {
+	describeProjectionSource,
+	projectTranscript,
+	type GtrkProject,
+	type ProjectionSourceReport,
+	type ProjectionView,
+	type Transcript,
+} from "../lib/projection";
 import { validateSplitDoc, buildLanding, renderSplitMarkdown, type SplitDoc } from "../lib/splitdoc";
 import { resolveColumnConfig, effectiveVocab } from "../lib/column-config";
 import { readUserConfig } from "../lib/user-config";
@@ -124,6 +131,42 @@ export async function runSplit(splitdoc: string | undefined, opts: SplitOpts): P
 		: runView(baseDir, gtrkPath, transcriptPath, opts);
 }
 
+/**
+ * 投影源诊断 + 「零命中」告警（view / land 共用；话术与消费侧重投影同源于 `projection.ts`）。
+ *
+ * 立题（fix-projection-main-track-black-bed）：主轨零命中时全部 utterance 判 dropped，视图里与
+ * 「整段真被剪光」**同形**——只报「N 条被剪」等于把关联断裂说成用户自己剪的。故 MUST 报真因。
+ * 正常态只留一行（MUST NOT 刷屏）。
+ */
+function reportProjectionSource(gtrk: Record<string, unknown>, materialId: string): ProjectionSourceReport {
+	const report = describeProjectionSource(gtrk as GtrkProject, materialId);
+	const lines = report.text.split("\n");
+	if (report.matched_clips > 0) {
+		log.info(lines[0]);
+		return report;
+	}
+	log.warn(
+		`当刻工程里没有命中口播素材（material_id=${report.material_id}）的 clip——` +
+			`视图里会表现为「全部被剪」，但真因未必是被剪：`,
+	);
+	for (const line of lines) log.info(line);
+	log.warn(report.hint);
+	return report;
+}
+
+/** `--json` 的投影源字段（结构化承载，人读话术不入机读面）。 */
+function mainTrackField(report: ProjectionSourceReport): Record<string, unknown> {
+	return {
+		source: report.source,
+		track_index: report.track_index,
+		material_id: report.material_id,
+		total_clips: report.total_clips,
+		matched_clips: report.matched_clips,
+		skipped: report.skipped,
+		tracks: report.tracks,
+	};
+}
+
 async function runView(
 	baseDir: string,
 	gtrkPath: string,
@@ -135,6 +178,7 @@ async function runView(
 	const transcript = await loadTranscript(transcriptPath);
 	const { gtrk } = readGtrk(gtrkPath);
 	const view = projectTranscript(transcript, gtrk, { words: opts.words });
+	const source = reportProjectionSource(gtrk, transcript.material_id);
 
 	const splitDir = join(baseDir, "split");
 	await mkdir(splitDir, { recursive: true });
@@ -151,6 +195,8 @@ async function runView(
 		transcript_hash: view.transcript_hash,
 		projected_at: view.projected_at,
 		counts: { entries: view.utterances.length, dropped },
+		// 投影源诊断（纯追加）：让机读侧也能分辨「全被剪」与「主轨没关联上口播素材」
+		main_track: mainTrackField(source),
 		view,
 	};
 	if (opts.json) console.log(JSON.stringify(result));
@@ -199,6 +245,19 @@ async function runLand(
 	// ③ 现场投影 + 落地计算（内存）
 	const projectedAt = new Date().toISOString();
 	const view: ProjectionView = projectTranscript(transcript, gtrk, { projectedAt });
+	const source = reportProjectionSource(gtrk, transcript.material_id);
+	// 零命中拒写（fix-projection-main-track-black-bed G1，主理人 2026-08-20 拍板）：
+	// 此时全部 beat 必被跳过，而 ④ 的 writeStructMetaSplit 是**无条件**写回——空 beats 会把工程里
+	// 原本正确的拆分账本覆写掉。判据 MUST 取「命中素材 clip 数 = 0」而**不是**「落轨 beat 数 = 0」：
+	// 后者与「用户真把内容剪光了」不可分辨，前者构造性地只在关联断裂时成立。
+	// 位置在 ④ 之前 ⇒ 与既有校验失败同款「零副作用」。
+	if (source.matched_clips === 0) {
+		throw new Error(
+			`当刻工程里没有命中口播素材（material_id=${source.material_id}）的 clip：落地会把空 beats 覆写进 ` +
+				`struct_meta.split（工程里原有的拆分账本会被清掉），已拒写、未改动任何产物。\n` +
+				`${source.text}\n${source.hint}`,
+		);
+	}
 	const projectSlug = slugify(basename(baseDir));
 	const landing = buildLanding(doc, view, {
 		utteranceIds: ctx.utteranceIds,
@@ -243,6 +302,7 @@ async function runLand(
 		transcript_hash: doc.transcript_hash,
 		projected_at: projectedAt,
 		beats: { total: doc.beats.length, landed: landing.split.beats.length, skipped: landing.skipped, shrunk: landing.shrunk },
+		main_track: mainTrackField(source),
 		queues: {
 			mg: landing.dispatch.mg.length,
 			film_broll: landing.dispatch.film_broll.length,
