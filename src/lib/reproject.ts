@@ -21,7 +21,9 @@ import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
 	countMainTrackMaterialClips,
+	describeProjectionSource,
 	projectTranscript,
+	PROJECTION_SOURCE_HINT,
 	type GtrkProject,
 	type ProjectionView,
 	type Transcript,
@@ -185,6 +187,14 @@ export interface ReprojectResult {
 	 * MUST NOT 拿派单快照时码去内插。被全剪的句不在表内（同 degraded 语义）。
 	 */
 	utteranceIndex?: Map<string, { track_st: number; track_ed: number; text: string }>;
+	/**
+	 * 人读诊断（`no_material_clip` 降级时给出，口径同源于 `describeProjectionSource`）。
+	 *
+	 * **刻意不进 `summary`**：`summary` 就是 `--json` 的 `reprojection` 字段本体，
+	 * 而 `consume-side-reprojection` 的「降级失败面不被改写」要求其字段集合逐字不变。
+	 * 机读侧靠既有的 `reason: "no_material_clip"` 足够分辨；诊断是给人看的。
+	 */
+	diagnostic?: string;
 }
 
 export interface ReprojectRequest {
@@ -271,8 +281,8 @@ function loadTranscriptShape(raw: string): Transcript | undefined {
 	return c;
 }
 
-/** 整体降级：全部条目回退快照时码。 */
-function degradeAll(entries: ReprojectEntryInput[], reason: DegradeReason): ReprojectResult {
+/** 整体降级：全部条目回退快照时码。`diagnostic` 只进人读告警，不进 `summary`（= `--json` 字段集合不变）。 */
+function degradeAll(entries: ReprojectEntryInput[], reason: DegradeReason, diagnostic?: string): ReprojectResult {
 	const outcomes: ReprojectEntryOutcome[] = entries.map((e) => ({
 		key: e.key,
 		beat: e.beat,
@@ -301,6 +311,7 @@ function degradeAll(entries: ReprojectEntryInput[], reason: DegradeReason): Repr
 		},
 		entries: outcomes,
 		windows: new Map(outcomes.map((o) => [o.key, { track_st: o.track_st, track_ed: o.track_ed }])),
+		...(diagnostic ? { diagnostic } : {}),
 	};
 }
 
@@ -328,7 +339,9 @@ export async function reprojectDispatchWindows(req: ReprojectRequest): Promise<R
 
 	const gtrkProject = req.gtrk as unknown as GtrkProject;
 	if (countMainTrackMaterialClips(gtrkProject, transcript.material_id) === 0) {
-		return degradeAll(entries, "no_material_clip");
+		// 诊断指向真因（fix-projection-main-track-black-bed）：真因可能是 CLI 自己铺的黑底垫轨 /
+		// B-roll 候选轨，而不是用户删轨或 relink——话术与投影层同源，别在此另写一份。
+		return degradeAll(entries, "no_material_clip", describeProjectionSource(gtrkProject, transcript.material_id).text);
 	}
 
 	// ── 现场重投影：transcript × 当刻 .gtrk，同一段代码（projectTranscript）──
@@ -473,6 +486,9 @@ export function reportReprojection(reproj: ReprojectResult): void {
 	const s = reproj.summary;
 	if (s.mode === "dispatch_snapshot") {
 		log.warn(reprojectSummaryLine(s));
+		// 主轨零命中的诊断（fix-projection-main-track-black-bed）：光说「查不到口播素材」会把用户支去
+		// 查一个不存在的问题——真因常常是 CLI 自己铺的黑底垫轨。
+		for (const line of (reproj.diagnostic ?? "").split("\n").filter(Boolean)) log.info(line);
 		log.warn(`正在用**可能已过期**的派单快照时码继续。${reprojectRecoveryHint(s.reason!)}`);
 		return;
 	}
@@ -537,6 +553,8 @@ export function reprojectRecoveryHint(reason: DegradeReason): string {
 		case "project_not_v1":
 			return "复原：用新链路重产 v1 工程后重跑本命令。";
 		case "no_material_clip":
-			return "复原：确认口播主轨还在、且 relink 没换掉素材 id；拿另一个工程的 dispatch 来跑也会命中本情形。";
+			// 口径同源：与 `describeProjectionSource().hint` 是**同一份**文案（projection.ts 的常量），
+			// 别在此另写一句——旧文案只提「口播主轨被删 / relink」，把用户支去查不存在的问题。
+			return PROJECTION_SOURCE_HINT;
 	}
 }
