@@ -93,6 +93,46 @@ gtrk transcript "D:/素材/采访视频.mp4"
 
 各车道**按次序铺、每步留检查点**：先把 B-roll 底轨三源铺齐（影视素材 / 本地素材 / AI 情景片段）→ 你调好 → 抽帧核一遍画面构图 → 最后才把 MG（含 ov）叠上去。你对话推进每一步，agent 替你跑对应命令。
 
+**三种入链，一个汇合点。** 素材长什么样决定你走哪条；拿到「工程 + 文稿」之后，三条链完全一样：
+
+```
+  ① 口播链      你对着镜头讲的一条口播          gtrk oralcut
+                短视频口播 / 人文社科杂谈        照稿剪掉重来·口误·长停顿
+                                                      ↓
+  ② 配音链      你写的一段稿子 → AI 配音        gtrk project init
+                电影解说 / 美食解说              先把配音调舒服，再建工程
+                                                      ↓
+  ③ 长剪短      一条几十分钟的长素材            gtrk long2short
+                播客·圆桌·脱口秀·访谈·直播回放   挑出值得单发的，逐条出工程
+                                                      ↓
+              ══════════ 工程 + 文稿 ══════════   ← 汇合点：往下三条链一样
+                                ↓
+        ┌───────────────────────┴───────────────────────┐
+        │                                               │
+   配画面（可选，次序不能跳）                       只想快点出片
+        │                                               │
+   gtrk split      把文稿分段派活                        │
+        ↓                                               │
+   gtrk matrix     按文稿铺 B-roll                       │
+        ↓                                               │
+   AI 再现（可选）  外部平台出片 → 手动回铺               │
+        ↓                                               │
+   客户端挑选      抽帧核构图 ← 底轨定稿前别往下走        │
+        ↓                                               │
+   gtrk mg         MG 主颗粒 + OV 叠层，最后才叠         │
+        ↓                                               │
+   gtrk audio lay  全片加 BGM（可选）                    │
+        │                                               │
+        └───────────────────────┬───────────────────────┘
+                                ↓
+                    客户端：上字幕 → 出片
+                     （或导出剪映草稿 / PR 工程）
+```
+
+**记两件事就够**：① **底下的先铺、盖在上面的最后叠**——B-roll 与 AI 再现同属底轨画面（并列的两条腿），动态图（MG 主颗粒 + OV 透明叠层）是唯一的叠加层，底轨没定稿就叠等于白做；② 出片永远在客户端或你自己的剪辑软件里完成，CLI 只负责把料铺进工程。
+
+> 三条链各自的完整走法（含每步产物、常见问题）见使用教程的子页：**口播链**（短视频口播 / 人文社科杂谈）· **配音链**（电影解说 / 美食解说）· **长剪短**（播客 / 圆桌 / 脱口秀 / 访谈 / 直播回放）。
+
 | 步 | 你对 agent 说 | agent 替你做 | 你可以介入 |
 |:--:|---|---|---|
 | ① | 「帮我把这条口播**剪一版**」 | `/gtrk-oralcut` → `gtrk oralcut` → 三方工程 + transcript | — |
@@ -463,7 +503,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 | `video_motion_cut` | 单条本地视频 | 运镜/高光片段结构 `result-output.json`（结构化数据，非下载文件） | 运行前实时查询 | 已上线 |
 | `video_speaker_detect` | 单条本地视频；可选 `--language`/`--max-faces-per-frame`/`--detect-body`/`--track-sample-fps`（重 GPU） | 可见说话人结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_face_track` | 单条本地视频；可选 `--sample-fps`/`--max-faces`/`--min-face-ratio`/`--enable-body-match`/`--similarity-threshold`；`time_ranges` 走 `--params-json`（重 GPU） | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
-| `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤2000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法 | 配音音频 wav/mp3（按文本字数折算分钟计费） | 运行前实时查询 | 已上线 |
+| `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤5000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法/字幕 | 配音音频 wav/mp3（+ 可选字幕）；按文本字符数计费，计量单位与单价以 `gtrk tool list` 实时显示为准 | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color`。默认只传本地抽出的音频（毛片不上传） | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `video_long2short_pro` | 单条长视频（整片上传）；`--language <码>` 必填；可选 `--output-language`、`--main-topic`、`--output-size`、`--no-jump-cut`、`--duration-pref`、`--max-clip-sec`、`--split-screen`、`--split-orientation`、`--speed-factor`、`--no-camera-move`、`--no-subtitle`、`--subtitle-translate-language` | 逐条成片 `clip{i}.mp4` + 人读报告 `clips.md`（含润色降级明细） + `result-output.json` | 运行前实时查询 | 已上线 |
 | `audio_separation` | 单条音频；可选 `--mode fast\|turbo` | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |

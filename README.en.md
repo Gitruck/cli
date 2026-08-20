@@ -93,6 +93,48 @@ The output folder is named `<raw-name>-video-project-<YYMMDD-HHMMSS>/` and conta
 
 Lanes are laid **in order, with a checkpoint at every step**: first fill the B-roll base layer from all three sources (film footage / your local footage / AI scene clips) → you adjust it → sample frames to check the final composition → only then stack MG (incl. ov) on top. You drive each step by conversation and the agent runs the matching command.
 
+**Three entry chains, one merge point.** What your material looks like decides which chain you take; once you hold a project plus its transcript, all three are identical:
+
+```
+  ① 口播链      你对着镜头讲的一条口播          gtrk oralcut
+                短视频口播 / 人文社科杂谈        照稿剪掉重来·口误·长停顿
+                                                      ↓
+  ② 配音链      你写的一段稿子 → AI 配音        gtrk project init
+                电影解说 / 美食解说              先把配音调舒服，再建工程
+                                                      ↓
+  ③ 长剪短      一条几十分钟的长素材            gtrk long2short
+                播客·圆桌·脱口秀·访谈·直播回放   挑出值得单发的，逐条出工程
+                                                      ↓
+              ══════════ 工程 + 文稿 ══════════   ← 汇合点：往下三条链一样
+                                ↓
+        ┌───────────────────────┴───────────────────────┐
+        │                                               │
+   配画面（可选，次序不能跳）                       只想快点出片
+        │                                               │
+   gtrk split      把文稿分段派活                        │
+        ↓                                               │
+   gtrk matrix     按文稿铺 B-roll                       │
+        ↓                                               │
+   AI 再现（可选）  外部平台出片 → 手动回铺               │
+        ↓                                               │
+   客户端挑选      抽帧核构图 ← 底轨定稿前别往下走        │
+        ↓                                               │
+   gtrk mg         MG 主颗粒 + OV 叠层，最后才叠         │
+        ↓                                               │
+   gtrk audio lay  全片加 BGM（可选）                    │
+        │                                               │
+        └───────────────────────┬───────────────────────┘
+                                ↓
+                    客户端：上字幕 → 出片
+                     （或导出剪映草稿 / PR 工程）
+```
+
+Chain names above: *口播链* = talking-head (you shot yourself: short-form monologue, humanities commentary) · *配音链* = voice-over (you wrote a script: film recaps, food recaps) · *长剪短* = long-to-short (podcasts, roundtables, stand-up, interviews, stream VODs).
+
+**Two things to remember**: (1) **lay the bottom first, stack the top last** — B-roll and AI scene clips are both base-layer picture (two legs of one stage), while motion graphics (MG main particles + OV transparent overlays) are the only overlay layer, so stacking before the base is final is wasted work; (2) the final render always happens in the desktop client or your own NLE — the CLI only fills the project.
+
+> Full walkthroughs for each chain (artifacts per step, troubleshooting) live in the tutorial's sub-pages.
+
 | Step | What you say to the agent | What the agent does | Where you step in |
 |:--:|---|---|---|
 | ① | "**cut a version** of this talking-head" | `/gtrk-oralcut` → `gtrk oralcut` → three projects + transcript | — |
@@ -463,7 +505,7 @@ Standalone single-request capabilities, kept separate from the pipeline's lane c
 | `video_motion_cut` | One local video | Camera-move / highlight segment structure in `result-output.json` (structured data, not a downloadable file) | Queried live before the run | Live |
 | `video_speaker_detect` | One local video; optional `--language`/`--max-faces-per-frame`/`--detect-body`/`--track-sample-fps` (GPU heavy) | Visible-speaker structure in `result-output.json` (the time base follows the server output) | Queried live before the run | Live |
 | `video_face_track` | One local video; optional `--sample-fps`/`--max-faces`/`--min-face-ratio`/`--enable-body-match`/`--similarity-threshold`; `time_ranges` goes through `--params-json` (GPU heavy) | Person id / time span / trajectory structure in `result-output.json` (the time base follows the server output) | Queried live before the run | Live |
-| `audio_tts_clone` | **No file**: one of `--text`/`--text-file` (≤ 2000 characters) plus a required `--speaker`; optional language/format/speed/segmentation | Voice-over audio wav/mp3 (billed in minutes derived from the character count) | Queried live before the run | Live |
+| `audio_tts_clone` | **No file**: one of `--text`/`--text-file` (≤ 5000 characters) plus a required `--speaker`; optional language/format/speed/segmentation/subtitles | Voice-over audio wav/mp3 (plus optional subtitles); billed by character count — the unit and unit price come from what `gtrk tool list` shows live | Queried live before the run | Live |
 | `video_ai_subtitle` | One video or audio file; `--language <code>` required; optional `--translate-language`, `--need-render`, `--need-pure`, `--subtitle-type`, `--subtitle-color`. By default only locally extracted audio is uploaded (the raw file never leaves your machine) | `.ass` subtitles + optional burned-in / subtitle-stripped `.mp4` + `result-output.json` (summary + word-level timeline) | Queried live before the run | Live |
 | `video_long2short_pro` | One long video (uploaded whole); `--language <code>` required; optional `--output-language`, `--main-topic`, `--output-size`, `--no-jump-cut`, `--duration-pref`, `--max-clip-sec`, `--split-screen`, `--split-orientation`, `--speed-factor`, `--no-camera-move`, `--no-subtitle`, `--subtitle-translate-language` | Finished clips `clip{i}.mp4` + the human-readable report `clips.md` (including polish-degradation details) + `result-output.json` | Queried live before the run | Live |
 | `audio_separation` | One audio file; optional `--mode fast\|turbo` | Vocal and accompaniment audio (one or two items, depending on what is returned) | Queried live before the run | Live |
