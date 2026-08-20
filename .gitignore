@@ -32,3 +32,11 @@ package-lock.json
 # 保留本条是兜底：万一哪天 submodule 被 deinit，openspec/ 变回普通目录时仍有屏蔽。
 # 真正的硬闸是 .git/hooks/pre-commit（装法见 openspec/hooks/install.sh）。
 openspec/
+
+# 真机跑 CLI 时落在仓根的产物目录（2026-08-20 补）。
+# 这些是 `gtrk tool` / `gtrk project init` 等命令的默认输出落点，含音频、视频工程
+# 与**素材绝对路径**。发版前审计实测仓根积了 7 个，一次 `git add -A` 就会把它们
+# 连同素材路径提进这个**公开 GitHub 仓**。全部加前导 / 只匹配仓根，不影响 test/fixtures。
+/audio_tts_clone-*/
+/tts-*-video-project-*/
+/qc-verify-*/
