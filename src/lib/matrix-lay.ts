@@ -1026,6 +1026,11 @@ export interface LayResult {
 		keptEditedTracks: number[];
 		/** ②-B：本次因存在已编辑自产轨而整体拒铺（工程零改动）。 */
 		refused: boolean;
+		/** 音频驱动工程跳铺黑底（adjust-black-bed-audio-driven-skip，主理人 2026-08-21 拍板）：
+		 * 剥离后无「保留轨」（非自产 video 内容轨 = 黑底的遮挡对象）而判定跳铺时为 "audio_driven"，
+		 * 其余（照铺 / --no-black-bed / 拒铺 / 零内容轨）恒 null。跳铺 MUST NOT 静默——
+		 * 命令层人读完成行与 lay JSON（仅跳铺时出现该键）同口径明示。 */
+		blackBedSkipped: "audio_driven" | null;
 		/** 全片累计黑底空洞秒数（= blackBedHoles 各段 sec 之和；未铺黑底时恒 0）。 */
 		blackBedHoleSec: number;
 		/**
@@ -1384,6 +1389,8 @@ export function layBrollTracks(opts: {
 				removedTracks: [],
 				keptEditedTracks,
 				refused: true,
+				// 拒铺 = 工程零改动，黑底既没铺也没走到形态判定，跳铺标记恒 null
+				blackBedSkipped: null,
 				// 拒铺 = 工程零改动、黑底也没铺，空洞统计恒静默
 				blackBedHoleSec: 0,
 				blackBedHoles: [],
@@ -1460,7 +1467,25 @@ export function layBrollTracks(opts: {
 	const canvas = Array.isArray(gtrk.video_size) ? (gtrk.video_size as number[]) : [1920, 1080];
 	const baseIndex =
 		keptOtherTracks.reduce((mx, t) => Math.max(mx, typeof t.track_index === "number" ? t.track_index : 0), -1) + 1;
-	const blackBedReserved = opts.blackBed !== false ? 1 : 0;
+	// ── 形态判定（adjust-black-bed-audio-driven-skip，主理人 2026-08-21 拍板）──
+	// 黑底的全部职责 = B-roll 空档遮住底下的口播 A-roll。剥离后保留集里没有「保留轨」（非自产
+	// video 内容轨 = 遮挡对象）⇒ 音频驱动形态（TTS 工程：video 轨全自产 B-roll，底下没有 A-roll，
+	// 空档露的本来就是画布底色）⇒ 跳铺黑底、也不预留黑底号（候选轨带区自 baseIndex 起）。
+	// 判定复用既有自产口径（自产素材恒为 broll-/ex-solid- 前缀，与 timeline-projection 的
+	// isSelfLaidTrackByMaterial 同族取反）；只扫 keptOtherTracks 即完备——removedTracks 与
+	// keptBandTracks 按定义均为自产，self-produced-edited 在非 forceRelay 下已走 ②-B 整轮拒铺。
+	// material 非 string 的 clip 按非自产计（保守方向 = 多铺黑底，MUST NOT 误跳）。
+	const hasShieldTargetTrack = keptOtherTracks.some((t) => {
+		const clips = Array.isArray(t.track_timeline) ? t.track_timeline : [];
+		return (
+			clips.length > 0 &&
+			clips.some((c) => {
+				const m = typeof c?.material === "string" ? c.material : "";
+				return !(m.startsWith(BROLL_MATERIAL_PREFIX) || m.startsWith(SOLID_MATERIAL_PREFIX));
+			})
+		);
+	});
+	const blackBedReserved = blackBedOn && hasShieldTargetTrack ? 1 : 0;
 	const bandCounts: Record<SourceLayer, number> = { local: 0, concept: 0, common: 0 };
 	for (const b of keptBandTracks) bandCounts[b.layer]++;
 	const bandStart = {} as Record<SourceLayer, number>;
@@ -1647,9 +1672,14 @@ export function layBrollTracks(opts: {
 	//   `next: gtrk` 原样返回，黑底因此天然保住，不需要也不应在此重复兜。
 	const hasSelfProducedContentInPlace =
 		createdTracks.length > 0 || rebasedBandTracks.length > 0 || transitionKeptIndices.length > 0;
+	// ★ adjust-black-bed-audio-driven-skip（2026-08-21 拍板）：剥后无保留轨（遮挡对象）⇒ 跳铺黑底。
+	// 音频驱动工程的空档露的是画布底色，黑底零遮挡作用还被客户端用户误读成事故轨；跳铺标记
+	// blackBedSkipped 走 summary 明示（人读完成行 + lay JSON），MUST NOT 静默。
+	const blackBedSkipped: "audio_driven" | null =
+		blackBedOn && !hasShieldTargetTrack && hasSelfProducedContentInPlace ? "audio_driven" : null;
 	let blackTrack: number | null = null;
 	let blackTrackObj: Record<string, unknown> | null = null;
-	if (blackBedOn && hasSelfProducedContentInPlace) {
+	if (blackBedOn && hasShieldTargetTrack && hasSelfProducedContentInPlace) {
 		if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
 			warnings.push(
 				`画布尺寸非法（${canvas[0]}x${canvas[1]}），跳过铺纯黑底轨（候选轨照常铺）。`,
@@ -1700,7 +1730,9 @@ export function layBrollTracks(opts: {
 	// 将来若新增别的 null 分支，会重蹈同一种静默。这里补一条：凡走到该组合，MUST 出告警。
 	// （画布非法与 PNG 落盘失败两条既有 null 分支自带告警，此处会与之叠加，属可接受的重复提示；
 	//  宁可多说一句，也不要再让「黑底没了」无声无息。）
-	if (blackBedOn && hasSelfProducedContentInPlace && blackTrack === null) {
+	// ★ adjust-black-bed-audio-driven-skip：组合补入 hasShieldTargetTrack 一元——音频驱动跳铺的
+	// null 是拍板内有意结果（底下没有口播 A-roll 可露），MUST NOT 误鸣本兜底；其明示走 blackBedSkipped。
+	if (blackBedOn && hasShieldTargetTrack && hasSelfProducedContentInPlace && blackTrack === null) {
 		warnings.push(
 			`异常：本轮有 B-roll 内容轨在场、也没有 --no-black-bed，却没能铺出纯黑底垫轨 —— ` +
 				`这些 B-roll 段落底下会直接露出口播 A-roll。请回报此告警（含本轮命令行）以便定位。`,
@@ -1814,6 +1846,7 @@ export function layBrollTracks(opts: {
 			// forceRelay 下被强剥的轨已进 removedTracks，不再算「保留」
 			keptEditedTracks: forceRelay ? [] : keptEditedTracks,
 			refused: false,
+			blackBedSkipped,
 			blackBedHoleSec,
 			blackBedHoles,
 		},

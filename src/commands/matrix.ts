@@ -1801,9 +1801,11 @@ async function layIntoProject(
 	const bedNote =
 		summary.blackTrack !== null
 			? ` · 纯黑底垫轨 track_index ${summary.blackTrack}`
-			: blackBed
-				? " · 未铺纯黑底垫轨"
-				: " · 纯黑底垫轨已关闭（--no-black-bed）";
+			: summary.blackBedSkipped === "audio_driven"
+				? " · 黑底垫轨跳过（音频驱动工程无口播保留轨，无遮挡对象——2026-08-21 拍板）"
+				: blackBed
+					? " · 未铺纯黑底垫轨"
+					: " · 纯黑底垫轨已关闭（--no-black-bed）";
 	// 剥离/保留如实呈现（ADDED「剥离与保留必须如实呈现」）：今天的完成日志对删除只字不提，是静默铲轨的帮凶
 	const stripNote =
 		`剥离 ${summary.removedTracks.length} 条旧自产轨` +
@@ -1877,6 +1879,9 @@ async function layIntoProject(
 			removedTracks: summary.removedTracks,
 			keptEditedTracks: summary.keptEditedTracks,
 			blackTrack: summary.blackTrack,
+			// 音频驱动跳铺明示（adjust-black-bed-audio-driven-skip）：仅跳铺时出现该键——
+			// 口播 / --no-black-bed 路径的 lay JSON 逐字节零新键
+			...(summary.blackBedSkipped ? { blackBedSkipped: summary.blackBedSkipped } : {}),
 			// 空洞是「告知」不是「阻断」：人读走上面的 warnings 通道单独成行，机读全量出这两个字段，
 			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。
 			blackBedHoleSec: summary.blackBedHoleSec,

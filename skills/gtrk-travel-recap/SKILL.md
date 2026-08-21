@@ -1,13 +1,13 @@
 ---
 name: gtrk-travel-recap
-description: 旅拍解说一站式成片图纸——输入一个旅拍素材文件夹（长视频或素材集），AI 理解素材、写三段式解说稿、一次确认后全自动跑完配音/建工程/拆分/B-roll/字卡/BGM，直达客户端可出片工程。当用户想「旅拍解说 / 旅行视频解说 / 把这条旅行长视频做成解说视频 / 旅拍素材做成片 / 长视频二创解说 / vlog 解说化 / travel recap」时使用本 skill。凡涉及把旅拍素材（自拍或网络长视频）做成中文解说成片，优先用本 skill 编排 gtrk CLI 全链，不要手搓单命令、别让用户逐步驱动。
+description: 旅拍解说一站式成片图纸——输入一个旅拍素材文件夹（长视频或素材集），AI 理解素材、写三段式解说稿、一次确认后全自动跑完配音/建工程/拆分/B-roll/字卡/BGM/字幕，直达客户端可出片工程。当用户想「旅拍解说 / 旅行视频解说 / 把这条旅行长视频做成解说视频 / 旅拍素材做成片 / 长视频二创解说 / vlog 解说化 / travel recap」时使用本 skill。凡涉及把旅拍素材（自拍或网络长视频）做成中文解说成片，优先用本 skill 编排 gtrk CLI 全链，不要手搓单命令、别让用户逐步驱动。
 ---
 
 # gtrk-travel-recap（旅拍解说 · 组合成片图纸）
 
-把**一个旅拍素材文件夹**变成**一条中文解说成片工程**：理解素材 → 三段式写稿 → 检查点①一次拍板 → 配音/建工程/拆分/B-roll/字卡/BGM 全自动 → 客户端出片。
+把**一个旅拍素材文件夹**变成**一条中文解说成片工程**：理解素材 → 三段式写稿 → 检查点①一次拍板 → 配音/建工程/拆分/B-roll/字卡/BGM/字幕 全自动 → 客户端出片。
 
-> **定位**：本 skill 是第一张 **structure 级组合图纸**——它不新增任何命令，只编排既有原子零件（transcript / matrix / project init / split / mg / audio lay / TTS 工具）。零件的参数细节以各自 skill（`gtrk-matrix` / `gtrk-splitter` / `gtrk-mg` / `gtrk-transcript`）与 `--help` 为准，**本图纸引用不复制**；但**编排次序、检查点、配方级参数**以本图纸为准。**CLI 是手，你是脑**：写稿、切 beat、挑候选信号、产字卡颗粒、管检查点，都是你的活。
+> **定位**：本 skill 是第一张 **structure 级组合图纸**——它不新增任何命令，只编排既有原子零件（transcript / matrix / project init / split / mg / audio lay / subtitle lay / TTS 工具）。零件的参数细节以各自 skill（`gtrk-matrix` / `gtrk-splitter` / `gtrk-mg` / `gtrk-transcript`）与 `--help` 为准，**本图纸引用不复制**；但**编排次序、检查点、配方级参数**以本图纸为准。**CLI 是手，你是脑**：写稿、切 beat、挑候选信号、产字卡颗粒、管检查点，都是你的活。
 >
 > **本 skill 已含跑通全链需要的全部编排信息**。打样验证：2026-08-19 黄石公园 20 分钟长视频二创，双轮真机全链通过。
 
@@ -41,7 +41,8 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 ⑧ 抽帧检查    对字卡挂点抽帧看底轨构图（gtrk-mg SOP）
 ⑨ MG 字卡     按 §六 轻量规约产颗粒 → mg lint → gtrk mg --project
 ⑩ BGM        gtrk audio lay --volume 0.1 --beat-align（-20dB 口径）
-⑪ 交付        客户端打开工程出片（gtrk render 仅主轨快照预览，见 §八）
+⑪ 字幕        gtrk subtitle lay --style <检查点①拍板样式>（用户没选用 default）
+⑫ 交付        客户端打开工程出片（gtrk render 仅主轨快照预览，见 §八）
 ```
 
 检查点①之后一路跑完不再打扰用户（快速模式默认）；用户要精修则按 §七 逐步停。
@@ -98,7 +99,7 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
    - 用户有本地音乐 → 询问是否 `gtrk tool audio_separation` 伴奏分离后取伴奏（缺省建议分离——TTS 配音不与歌曲人声打架）；
    - 用户未提供 → **搜同和素材矩阵**（`POST {apiBase}/task/material_search`，`{scope:"audio", query:"<按稿件情绪+地理文化写>", top_k:4, diversity:true}`，1 积分/次）推荐 3-5 首、**每首附试听链接**（返回的 download_url）；`audio_type:"pure"` 纯音乐直接用，`"song"` 直接取返回的 `accompaniment_url` 现成伴奏（零处理成本）；注意曲长 vs 成片时长（audio lay 不循环，短曲只垫前段）；
    - **试听链接义务（MUST）**：音色与 BGM 的推荐没有试听链接=未完成推荐。
-5. **字幕样式**：同合云 8 种字幕样式挑选（客户端字幕支持落地后启用此项；未落地期间如实告知字幕暂缺）。
+5. **字幕样式**：7 种样式（default/outline/cinema_yellow/immersive_box/wide_spacing/deep_shadow/boxed）× 11 色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金）挑选；**用户没选就用 default+雅黑**（不追问不阻塞）。拍板值在 ⑪ `gtrk subtitle lay` 落地，客户端里仍可整轨换样式（悔棋通道）。
 
 ## 五、快速模式逐步编排（打样验证过的真实命令）
 
@@ -136,6 +137,9 @@ gtrk mg --project "<工程目录>" --json
 
 # ⑩ BGM（音量口径见下）
 gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-align --json
+
+# ⑪ 字幕（样式/颜色 = 检查点①拍板值；用户没选用 default/雅黑；纯本地零计费、重跑幂等替换）
+gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --json
 ```
 
 **配方级参数口径**（打样标定）：
@@ -166,6 +170,7 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 | B-roll | broll-plan.json | 编辑 plan（删候选/换段/pinned 钉选） | `gtrk matrix lay`（消费 plan 零检索零计费） |
 | 字卡 | mg/*.html | 改颗粒 HTML | `gtrk mg --project --only <beatId>` 单颗重铺 |
 | BGM | audio_track | 换歌/换音量 | `gtrk audio lay` 同文件幂等替换 |
+| 字幕 | cve 字幕 lane | 换样式/颜色 | `gtrk subtitle lay --style/--color` 重跑幂等替换（手加 text 不受影响）；逐条微调在客户端 |
 
 改口播轨后 matrix/mg 消费侧自带现场重投影，无需回跑 split。
 
@@ -174,7 +179,7 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 - **成片出口 = 客户端**（OpenCut Gitruck Edition「打开工程」选 `gtrk/project.gtrk`）：多轨合成（B-roll+字卡+黑底+双音轨混音）只有客户端出片链完整支持；
 - **`gtrk render` 仅是主轨快照预览**（★ 打样误用教训）：只渲一条视频轨、不合成字卡 overlay——可以当粗查混音与 B-roll 落位的预览片，**MUST NOT 当成片交付**；
 - **云渲必拒**：含本地 B-roll 的工程提交云渲会被直接拒绝（`local_broll_cloud_render_rejected`）——出片走客户端本地导出或 `gtrk render` 预览，如实告知用户；
-- 交付话术：报产物目录+客户端打开指引+各环节计费实耗；候选轨小眼睛切换、字卡可删可改、BGM 音量客户端可终调——把悔棋通道讲清楚。
+- 交付话术：报产物目录+客户端打开指引+各环节计费实耗；候选轨小眼睛切换、字卡可删可改、BGM 音量客户端可终调、字幕客户端可整轨换样式——把悔棋通道讲清楚。
 
 ## 九、计费速查
 
@@ -184,7 +189,7 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 | matrix index（embed） | 会话计量按实际用量 | 同合云内部成员豁免 |
 | matrix describe | 1 积分/张 | 内部成员豁免；同帧缓存永不重复计费 |
 | TTS 配音 | 按成本档 1-12 积分/计费分钟（240 字/分钟折算） | 音色 catalog 可查档位；同参重合成走缓存不重复扣费 |
-| project init / split / audio lay | 0 积分 | producer 同步口 0 元留痕；beat 分析（--beat-align）走 audio_music_analyze 计费 |
+| project init / split / audio lay / subtitle lay | 0 积分 | producer 同步口 0 元留痕；beat 分析（--beat-align）走 audio_music_analyze 计费 |
 | BGM 矩阵搜索 | 1 积分/次 | |
 | image_move 图片运镜 | 2 积分/张 | 素材夹含图片且被选中上轨时 |
 
@@ -194,7 +199,7 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 
 - **闪帧**：VFR 素材的场景切点可能产生闪帧（专项修复中）——用户报闪帧时告知已立案，客户端可手动微调切点避开；
 - **拆分注释投影**：客户端暂不显示 beat 注释（调查中）；
-- **字幕**：8 样式客户端支持落地前成片暂无字幕，检查点①如实告知；
+- **字幕**：⑪ `gtrk subtitle lay` 已直接上好（7 样式 × 11 色，客户端可整轨换样式、逐条可编辑）；改稿重跑 TTS 后须重跑 subtitle lay（时码变了）；
 - describe 的 `text_overlay` 信号命中多为撞上原片烧录字幕区（片头片尾高发）——裁定换段或保留交客户端；
 - `matrix lay` 拒铺（`tracks_edited`）不是失败：用户在客户端动过候选轨，plan 照产（`planReusable:true`），提示用户后按其意愿 `--replace-all` 或保留；
 - BGM 曲长 < 成片：audio lay 不循环，垫不满如实告知（客户端可复制 clip 补尾）。
