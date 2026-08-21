@@ -43,6 +43,9 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 | `--main-topic <text>` | 主题引导，影响选段偏好 |
 | `--duration-pref <p>` / `--max-clip-sec <n>` | 成片时长偏好 / 单条上限秒。**成片条数由内容语义决定，不能指定条数** |
 | `--no-jump-cut` | 关闭跳剪（默认开：片内去水词冗余，只删不重排） |
+| `--subtitle-file <path>` | **现成单语字幕**（.srt/.ass）作转写来源，替代云端 ASR（用户手里有片源字幕/人工校对稿时用，省一次识别）。切点精度降为**字幕行边界**；双语/多层 .ass 会被拒；与 stt 类参数互斥 |
+| `--subtitle-out` | 逐 clip 另产**单语 .srt 字幕**（按目标画布档位智能拆行：横屏约 20 字/行、竖屏约 13 字/行），落 `clip{i}/srt/` |
+| `--keep-punctuation` | 字幕保留全部标点。缺省按统一口径去标点：逗号句号→空格、`？！` 等保留 |
 | `--output-size <s>` | 画布 `9:16|16:9|1:1` 或 `WxH`（缺省 9:16 竖版） |
 | `-f, --formats <list>` | 三方格式，缺省 `gtrk,jianying,xml`（云端逐 clip 直产；gtrk 恒有） |
 | `--jianying-draft-dir <dir>` | 剪映草稿根（或 `auto`）；各 clip 草稿落 `<草稿根>/<产物根名>_clip{i}` |
@@ -55,7 +58,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 
 ## 产物（跑完把这些讲给用户）
 
-- 产物根 `<毛片名>-long2short/`：`report.json`（选段报告）+ `result.json` + 逐 clip 子目录 `clip0/ clip1/ …`（各含 `gtrk/` 客户端工程、`jianying/` 草稿、`xml/` PR 工程）。
+- 产物根 `<毛片名>-long2short/`：`report.json`（选段报告）+ `result.json` + 逐 clip 子目录 `clip0/ clip1/ …`（各含 `gtrk/` 客户端工程、`jianying/` 草稿、`xml/` PR 工程；开了 `--subtitle-out` 另有 `srt/clip{i}.srt` 单语字幕）。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
 - 开了 `--split-screen` 时：**分屏素材落在毛片旁的 `split_screen/` 子目录**（工程素材路径指向那里，别移动/删除，移动了工程会缺素材）——这点要提前告知用户。
 - 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`。**判据**：草稿目录里必须是 `draft_content.json` + `draft_meta_info.json` 两个精确文件名（云端产物侧的 `clip{i}_` 前缀在拷进草稿根这一跳被剥掉，产物目录 `clip{i}/jianying/` 里保留带前缀的归档原名）。CLI 日志按实际齐全条数报「N/M 条两件套齐全」，不齐的记进 `result.json` 的 `errors`、该 clip 的 `jianyingDraftPath` 为 `null`。
