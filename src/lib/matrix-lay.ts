@@ -91,6 +91,97 @@ export const ANCHOR_LEAD_SEC = 0.5;
 /** 单 beat 单轨槽位上限（防呆）。 */
 export const MAX_SLOTS_PER_BEAT = 32;
 
+// ── 句界吸附（adjust-shot-cut-sentence-align，主理人 2026-08-21 拍板「三七开」）────────
+//
+// TTS 解说类成片约七成「讲新台词」的瞬间画面同步切换、三成有意错开——全对齐机械、全错开涣散。
+// 吸附对象 = transcript utterance 起点的**当刻 track 时码**（重投影 utteranceIndex，与锚 at_sec
+// 内插同一来源）；吸附率由**确定性负反馈闭环**控制（零新随机源，「同种子幂等」不破）。
+
+/** 句界吸附目标比例缺省（--cut-align 覆盖；0=关闭回旧行为）。 */
+export const CUT_ALIGN_DEFAULT = 0.7;
+/** 对齐判定容差（秒）：句起点与槽位边界距离 ≤ 此值即算「恰逢切点」。
+ * 0.1s ≈ 2–3 帧@24–30fps——帧网格吸附（refineWindow）的 ≤1 帧漂移恒在容差内。 */
+export const CUT_ALIGN_EPS = 0.1;
+/** 吸附带宽系数（相对节奏区间 [shotMin, shotMax]）：吸附候选带 =
+ * [max(MIN_SHOT_SEC, 0.75×shotMin), min(1.25×shotMax, remaining)]。
+ * ±25% 下探/上探才够到相邻句距的实测分布（黄石句距 p10=2.12s / p90=4.97s，节奏下限 2.24–2.96s
+ * 不下探够不着短句）；MIN_SHOT_SEC 槽长硬地板与 beat 包络是不可越过的既有铁律。 */
+export const CUT_SNAP_BAND_LO = 0.75;
+export const CUT_SNAP_BAND_HI = 1.25;
+
+/** 主轨 gap 填充模式（adjust-main-track-gap-fill，主理人 2026-08-21 拍板）：
+ * fast=快速模式随便填候选（放宽地板）→ 延长相邻颗粒 → 退黑片；solid=黑片垫齐（缺省，精修可见）；
+ * none=留 gap（逃生口——客户端主轨磁吸开启时 gap 会被吸除、后续画面整体前移与配音错位）。 */
+export type GapFillMode = "fast" | "solid" | "none";
+
+/** gap 填充明细（summary gap_fill.fills 条目；track_st/track_ed = 被该动作覆盖的时间区间）。 */
+export interface GapFillEntry {
+	beat: string;
+	kind: "candidate" | "extend" | "solid";
+	track_st: number;
+	track_ed: number;
+	sec: number;
+	/** candidate=填入的 plan clip；extend=被延长的槽位 clip；solid 无此键。 */
+	clip_id?: string;
+}
+
+/** 闭环控制器状态（每轨一份、跨 beat 共享）：机会数 / 已吸数。 */
+export interface CutAlignState {
+	chances: number;
+	snapped: number;
+}
+
+/** 句界吸附入参（fillBeatTrack / fillBeatTrackWithAnchors）：缺席 = 吸附不激活（旧行为逐字节）。 */
+export interface CutAlignOpts {
+	/** 目标对齐比例 (0,1]；≤0 等价缺席。 */
+	ratio: number;
+	/** 全片句起点 track 时码（升序、去重）。 */
+	starts: number[];
+	/** 控制器状态（planBeatFills 按轨各建一份）。 */
+	state: CutAlignState;
+}
+
+/**
+ * 对齐实测（纯函数；summary 与测试共用一份口径）：
+ *   分母 = 落在任一已铺 beat `[track_st − ε, track_ed − ε)` 内的句起点（跨 beat 去重）；
+ *   分子 = 与任一槽位边界（track_st/track_ed）距离 ≤ ε 者。
+ * 计量按**最终产物**（gap 填充之后的首轨槽位）如实执行，不问边界成因（吸附/锚/免费对齐同权计入）。
+ */
+export function measureCutAlignment(opts: {
+	beats: { track_st: number; track_ed: number; slots: { track_st: number; track_ed: number }[] }[];
+	starts: number[];
+	eps?: number;
+}): { starts_total: number; aligned: number; ratio: number } {
+	const eps = opts.eps ?? CUT_ALIGN_EPS;
+	const cuts: number[] = [];
+	for (const b of opts.beats) for (const s of b.slots) cuts.push(s.track_st, s.track_ed);
+	cuts.sort((a, b) => a - b);
+	const seen = new Set<number>();
+	let total = 0;
+	let aligned = 0;
+	for (const s of opts.starts) {
+		const key = Math.round(s * 1000);
+		if (seen.has(key)) continue;
+		if (!opts.beats.some((b) => s >= b.track_st - eps && s < b.track_ed - eps)) continue;
+		seen.add(key);
+		total++;
+		// cuts 已升序：二分找最近邻
+		let lo = 0;
+		let hi = cuts.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (cuts[mid]! < s) lo = mid + 1;
+			else hi = mid;
+		}
+		const near = Math.min(
+			lo < cuts.length ? Math.abs(cuts[lo]! - s) : Number.POSITIVE_INFINITY,
+			lo > 0 ? Math.abs(cuts[lo - 1]! - s) : Number.POSITIVE_INFINITY,
+		);
+		if (near <= eps) aligned++;
+	}
+	return { starts_total: total, aligned, ratio: total > 0 ? Math.round((aligned / total) * 1000) / 1000 : 0 };
+}
+
 // ── 全局去重与层带（add-broll-dedup-and-layering）─────────────────────────
 
 /** 跳剪豁免阈值（秒，D1 ★ 主理人 2026-08-12 拍板，常量不暴露配置）：同素材相邻槽位，两颗粒源时间
@@ -180,6 +271,10 @@ export interface FillSlot {
 	/** 图片候选（add-matrix-local-image-broll）：运镜/静态兜底材料 id 覆盖（命令层运镜准备阶段注入；
 	 * 缺省 = 既有 `broll-`+clip_id 拼接）。材料实体经 layBrollTracks 的 injectedMaterials 登记。 */
 	material_id?: string;
+	/** gap 填充溯源（adjust-main-track-gap-fill）：该槽位由主轨 gap 填充产出（candidate/solid）。
+	 * 随 laid[].slots 入 struct_meta.broll（消费方白名单解析防线覆盖）；应用段据此在填充
+	 * 不适用（口播/他层主轨）时把规划槽位滤出落轨。常规槽位无此键（旧产物逐字节不变）。 */
+	gap_fill?: true;
 }
 
 export interface BrollMetaCandidate {
@@ -598,12 +693,22 @@ export function fillBeatTrack(opts: {
 	markLookup?: MarkLookup;
 	/** mark 融合统计收集器（planBeatFills 聚合）。 */
 	markStats?: MarkStatsSets;
+	/** 句界吸附（adjust-shot-cut-sentence-align）：缺席/ratio≤0 = 不激活（旧行为逐字节零回归）。 */
+	cutAlign?: CutAlignOpts;
 }): FillSlot[] {
 	const { beat, trackOrder, consumed, scoreFloor } = opts;
 	const span = beat.track_ed - beat.track_st;
 	if (!(span > 0)) return [];
 	const [shotMin, shotMax] = shotRange(beat, span);
 	const rand = mulberry32(hashStr(`${beat.beat}#${trackOrder}`));
+
+	// 句界吸附激活判定 + 免费对齐入账：beat 起点恰逢句起点（音频驱动工程 beat 边界 = utterance span
+	// 包络，首槽起点天然对齐）——不入账会让实测系统性超出目标比例（design §2 论据 2）
+	const ca = opts.cutAlign && opts.cutAlign.ratio > 0 && opts.cutAlign.starts.length ? opts.cutAlign : undefined;
+	if (ca && ca.starts.some((s) => Math.abs(s - beat.track_st) <= CUT_ALIGN_EPS)) {
+		ca.state.chances++;
+		ca.state.snapped++;
+	}
 
 	const pools = buildQueryPools(beat, scoreFloor, {
 		noImage: opts.noImage,
@@ -630,6 +735,38 @@ export function fillBeatTrack(opts: {
 		else if (remaining < shotMax + shotMin) dTarget = remaining / 2;
 		else dTarget = shotMin + rand() * (shotMax - shotMin);
 
+		// 句界吸附（adjust-shot-cut-sentence-align）：带内取距 cursor+dTarget 最近的句起点，闭环放行才吸。
+		// 只改 dTarget 取值、不消耗随机序列（上面的 rand() 调用次数与旧行为恒等——关闭即逐字节回旧）。
+		let snapTarget: number | undefined;
+		const preSnapDTarget = dTarget; // 吸附放弃时恢复的随机槽长（供长不足踩不到点 → 回普通选取）
+		if (ca) {
+			const bandLo = cursor + Math.max(MIN_SHOT_SEC, shotMin * CUT_SNAP_BAND_LO);
+			const bandHi = cursor + Math.min(shotMax * CUT_SNAP_BAND_HI, remaining);
+			let best: number | undefined;
+			let bestDist = Number.POSITIVE_INFINITY;
+			for (const s of ca.starts) {
+				if (s < bandLo - 1e-6) continue;
+				if (s > bandHi + 1e-6) break; // starts 升序，越带即止
+				const tailRoom = beat.track_ed - s;
+				if (tailRoom > 1e-6 && tailRoom < MIN_SHOT_SEC) continue; // beat 尾死残段保护（吸了填不进颗粒）
+				const dist = Math.abs(s - (cursor + dTarget));
+				if (dist < bestDist) {
+					best = s;
+					bestDist = dist;
+				}
+			}
+			if (best !== undefined) {
+				ca.state.chances++;
+				// 负反馈闭环：已实现比例低于目标才吸（三成错开由「不低于则有意跳过」产生）；
+				// 确定性纯函数，密度自适应——句密多跳、句疏多吸（design §2）
+				if (ca.state.snapped / ca.state.chances < ca.ratio - 1e-9) {
+					ca.state.snapped++;
+					snapTarget = best;
+					dTarget = best - cursor;
+				}
+			}
+		}
+
 		const minLen = Math.min(MIN_SHOT_SEC, remaining);
 		const dFor = (p: Pair): number => Math.min(dTarget, pairAvail(p), remaining);
 		// 基础合格：未被全局消费 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
@@ -649,19 +786,35 @@ export function fillBeatTrack(opts: {
 			return Math.abs(win.clipSt - lastPlaced.clipEd) < JUMP_CUT_GAP_SEC;
 		};
 
-		// query 叙事序轮转：本槽位从 slotIdx 对应的 query 起，池干涸/无合格对则轮下一条
+		// query 叙事序轮转：本槽位从 slotIdx 对应的 query 起，池干涸/无合格对则轮下一条。
+		// 吸附感知选取（adjust-shot-cut-sentence-align）：吸附槽位先只接受**踩得到吸附点**的对
+		// （精修后窗口长 ≥ 吸附槽长 − 容差）——否则边界被供长/精修拉离句起点，吸了白吸（真机重放实锤）。
+		const attempt = (requireReach: boolean): { p: Pair; win: { clipSt: number; clipEd: number } } | null => {
+			for (let t = 0; t < pools.length; t++) {
+				const { pool } = pools[(slotIdx + t) % pools.length];
+				for (const p of pool) {
+					if (!eligible(p)) continue;
+					const win = resolveWindow(p);
+					if (!win || jumpCutBlocked(p, win)) continue;
+					if (requireReach && snapTarget !== undefined && win.clipEd - win.clipSt < snapTarget - cursor - CUT_ALIGN_EPS) continue;
+					return { p, win };
+				}
+			}
+			return null;
+		};
 		let pick: Pair | null = null;
 		let pickWin: { clipSt: number; clipEd: number } | null = null;
-		for (let t = 0; t < pools.length && !pick; t++) {
-			const { pool } = pools[(slotIdx + t) % pools.length];
-			for (const p of pool) {
-				if (!eligible(p)) continue;
-				const win = resolveWindow(p);
-				if (!win || jumpCutBlocked(p, win)) continue;
-				pick = p;
-				pickWin = win;
-				break;
-			}
+		let got = attempt(snapTarget !== undefined);
+		if (!got && snapTarget !== undefined && ca) {
+			// 无对踩得到吸附点：放弃本槽吸附（如实退账，闭环续补），恢复随机槽长走普通选取
+			ca.state.snapped--;
+			snapTarget = undefined;
+			dTarget = preSnapDTarget;
+			got = attempt(false);
+		}
+		if (got) {
+			pick = got.p;
+			pickWin = got.win;
 		}
 		// 精修弃用归因（tune-shot-rhythm-thresholds 代价观察项）：本槽位是否**只**因窗口精修
 		// （残片收缩后不足 MIN_SHOT_SEC）而找不到对——即存在基础合格但精修返回 null 的候选
@@ -701,6 +854,8 @@ export function fillBeatTrack(opts: {
 		// 落位窗口即避让判定用的窗口（精修后 d 可短于抽取槽长——钳段/收缩/吸附皆只收不涨）
 		const win = pickWin;
 		const d = win.clipEd - win.clipSt;
+		// 句界吸附退账：供长不足/窗口精修把边界拉离吸附点 → 本次实际未对齐，退还闭环账（后续机会续补）
+		if (ca && snapTarget !== undefined && Math.abs(cursor + d - snapTarget) > CUT_ALIGN_EPS) ca.state.snapped--;
 
 		slots.push({
 			clip_id: pick.cand.clip_id,
@@ -810,6 +965,8 @@ export function fillBeatTrackWithAnchors(opts: {
 	markWeight?: number;
 	markLookup?: MarkLookup;
 	markStats?: MarkStatsSets;
+	/** 句界吸附（adjust-shot-cut-sentence-align）：锚槽窗口零改动（锚 > 句吸附），锚点分割区间内透传照常吸附。 */
+	cutAlign?: CutAlignOpts;
 }): { slots: FillSlot[]; anchors: AnchorOutcome[] } {
 	const { beat } = opts;
 	const anchorsIn = Array.isArray(beat.anchors) ? beat.anchors : [];
@@ -925,6 +1082,146 @@ export function fillBeatTrackWithAnchors(opts: {
 	return { slots, anchors: outcomes };
 }
 
+// ── 主轨 gap 填充 · fast 规划段（adjust-main-track-gap-fill）──────────────
+
+/** beat 内首轨槽位未覆盖区间（> EPS；beat 间隙不在职责内）。 */
+function beatGaps(beat: { track_st: number; track_ed: number }, slots: FillSlot[]): { st: number; ed: number }[] {
+	const sorted = [...slots].sort((a, b) => a.track_st - b.track_st);
+	const gaps: { st: number; ed: number }[] = [];
+	let cur = beat.track_st;
+	for (const s of sorted) {
+		if (s.track_st - cur > BLACK_BED_MERGE_EPS) gaps.push({ st: cur, ed: s.track_st });
+		cur = Math.max(cur, s.track_ed);
+	}
+	if (beat.track_ed - cur > BLACK_BED_MERGE_EPS) gaps.push({ st: cur, ed: beat.track_ed });
+	return gaps;
+}
+
+/**
+ * fast 填充规划（纯函数，破坏性写入 slots——candidate 槽位并入首轨随常规链路走下载/落轨/登记，
+ * extend 就地改写相邻槽位窗口）：candidate（放宽地板取剩余候选）→ extend（段界内延长相邻颗粒）；
+ * 段界耗尽的残余留给应用段的 solid 兜底（layBrollTracks 洞检测自动接住）。
+ *
+ * 判据（design §2）：地板放宽至 0（「随便填」拍板原话）；不二用/同 beat 归属互斥/负词排除照旧；
+ * 紧邻避让等节奏机制不适用；图片候选不参与（避免顺带触发运镜计费）；延长上限=段界
+ * （fix-broll-flash-frames 段界口径优先于「素材长度」字面），延长不做残片收缩（覆盖优先——
+ * 延长被撤销即回到留 gap，比多一帧异景更糟）；图片槽位（material_id 在册）不延长。
+ */
+function fastFillBeatGaps(o: {
+	beat: PlanBeat;
+	slots: FillSlot[];
+	consumed: Set<string>;
+	beatOwners: Map<string, number>;
+	noImage?: boolean;
+	dedupScope?: DedupScope;
+	entries: GapFillEntry[];
+}): void {
+	const { beat, slots } = o;
+	const EPS = BLACK_BED_MERGE_EPS;
+	let merged: Pair[] | undefined; // 惰性构建（无 gap 的 beat 零开销）；序=等效分降序（剩余里也先取好的）
+	const pairsRelaxed = (): Pair[] => {
+		if (!merged) {
+			merged = buildQueryPools(beat, 0, { noImage: o.noImage, dedupScope: o.dedupScope })
+				.flatMap((q) => q.pool)
+				.filter((p) => !isImagePair(p))
+				.sort((a, b) => b.rank - a.rank || b.fused - a.fused || b.seg.score - a.seg.score);
+		}
+		return merged;
+	};
+	// 槽位的段界回查（延长上限）：找包含该窗口的命中段；整片伪段候选（无 segments）以素材时长为界。
+	// dur = 素材物理时长（微残量借帧的硬上限）。
+	const segBoundsOf = (slot: FillSlot): { lo: number; hi: number; dur?: number } | undefined => {
+		for (const q of beat.queries) {
+			for (const rr of q.results ?? []) {
+				if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
+				for (const sg of rr.segments ?? []) {
+					if (sg.start <= slot.clip_st + 1e-6 && slot.clip_ed <= sg.end + 1e-6) {
+						return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+					}
+				}
+				if (!rr.segments?.length) return { lo: 0, hi: rr.duration ?? slot.clip_ed, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+			}
+		}
+		return undefined;
+	};
+
+	for (const g of beatGaps(beat, slots)) {
+		let cursor = g.st;
+		// ① 候选填充：放宽地板取剩余候选（不二用/归属互斥/负词照旧；节奏机制不适用）
+		while (g.ed - cursor >= MIN_SHOT_SEC - EPS) {
+			let placed = false;
+			for (const p of pairsRelaxed()) {
+				if (o.consumed.has(p.key)) continue;
+				const room = g.ed - cursor;
+				if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
+				const owner = o.beatOwners.get(p.cand.clip_id);
+				if (owner !== undefined && owner !== 0) continue;
+				const win = refineWindow(p, sourceWindowFor(p, Math.min(room, pairAvail(p))), room);
+				if (!win) continue;
+				const d = win.clipEd - win.clipSt;
+				const slot: FillSlot = {
+					clip_id: p.cand.clip_id,
+					query: p.query,
+					score: p.seg.score,
+					clip_st: r3(win.clipSt),
+					clip_ed: r3(win.clipEd),
+					track_st: r3(cursor),
+					track_ed: r3(cursor + d),
+					gap_fill: true,
+				};
+				slots.push(slot);
+				o.consumed.add(p.key);
+				o.beatOwners.set(p.cand.clip_id, 0);
+				o.entries.push({ beat: beat.beat, kind: "candidate", clip_id: p.cand.clip_id, track_st: slot.track_st, track_ed: slot.track_ed, sec: r3(d) });
+				cursor += d;
+				placed = true;
+				break;
+			}
+			if (!placed) break;
+		}
+		// ② 相邻颗粒延长：先前一颗 clip_ed、再后一颗 clip_st（就近；后颗起点若被句界吸附踩中也尽量保住）。
+		// 微残量借帧（≤ 0.05s ≈ 一帧@20fps+）：帧网格吸附与 beat 端点的网格错位会留下毫秒级残洞
+		// （黄石实测 1–6ms），做成黑片即亚帧碎片——此档允许延长越过段界（借入邻场景 ≤1 帧，肉眼不可辨），
+		// 硬上限仍为素材物理时长/0。
+		const MICRO_SLOP = 0.05;
+		if (g.ed - cursor > EPS) {
+			const prev = slots.find((s) => Math.abs(s.track_ed - cursor) <= EPS);
+			if (prev && prev.material_id === undefined) {
+				const seg = segBoundsOf(prev);
+				if (seg) {
+					const residue = g.ed - cursor;
+					const hi = residue <= MICRO_SLOP ? Math.min(seg.hi + residue, seg.dur ?? seg.hi + residue) : seg.hi;
+					const ext = Math.min(residue, Math.max(0, hi - prev.clip_ed));
+					if (ext > EPS) {
+						prev.clip_ed = r3(prev.clip_ed + ext);
+						prev.track_ed = r3(prev.track_ed + ext);
+						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: prev.clip_id, track_st: r3(cursor), track_ed: r3(cursor + ext), sec: r3(ext) });
+						cursor = prev.track_ed;
+					}
+				}
+			}
+		}
+		if (g.ed - cursor > EPS) {
+			const next = slots.find((s) => Math.abs(s.track_st - g.ed) <= EPS);
+			if (next && next.material_id === undefined) {
+				const seg = segBoundsOf(next);
+				if (seg) {
+					const residue = g.ed - cursor;
+					const lo = residue <= MICRO_SLOP ? Math.max(0, seg.lo - residue) : seg.lo;
+					const ext = Math.min(residue, Math.max(0, next.clip_st - lo));
+					if (ext > EPS) {
+						next.clip_st = r3(next.clip_st - ext);
+						next.track_st = r3(next.track_st - ext);
+						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: next.clip_id, track_st: next.track_st, track_ed: r3(g.ed), sec: r3(ext) });
+					}
+				}
+			}
+		}
+		// ③ 残余中段（两端段界都到顶）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
+	}
+	slots.sort((a, b) => a.track_st - b.track_st);
+}
+
 /** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。
  * pinned 结算（plan 可编辑契约）：铺完统计 plan 内钉选候选的入选/让位（冲突后到让位不报错，
  * summary 明示——stats.pinnedYielded；yielded 名单由 pinnedOutcome 给出供告警指名）。 */
@@ -932,7 +1229,18 @@ export function planBeatFills(
 	plan: BrollPlan,
 	lay: number,
 	scoreFloor: number,
-	opts: { noImage?: boolean; dedupScope?: DedupScope; markWeight?: number; markLookup?: MarkLookup } = {},
+	opts: {
+		noImage?: boolean;
+		dedupScope?: DedupScope;
+		markWeight?: number;
+		markLookup?: MarkLookup;
+		/** 句界吸附（adjust-shot-cut-sentence-align）：缺席/ratio≤0/starts 空 = 不激活（旧行为逐字节）。
+		 * `calibrated` 为内部标定标记（密度自适应两遍法的第二遍/标定遍自带，调用方 MUST NOT 传）。 */
+		cutAlign?: { ratio: number; starts: number[]; calibrated?: boolean };
+		/** 主轨 gap 填充（adjust-main-track-gap-fill）：仅 "fast" 触发规划段（candidate/extend）；
+		 * 调用方（命令层）已按音频驱动形态预判门控——口播工程 MUST NOT 传（零回归）。 */
+		gapFill?: GapFillMode;
+	} = {},
 ): {
 	fills: Map<string, FillSlot[][]>;
 	clipIds: Set<string>;
@@ -942,6 +1250,11 @@ export function planBeatFills(
 	markStats: { hit: number; neutral: number };
 	/** 逐锚落位结果（add-keyword-anchored-broll）：plan 无 anchors 时恒空数组（零回归）。 */
 	anchors: AnchorOutcome[];
+	/** 对齐实测（adjust-shot-cut-sentence-align）：首轨口径；吸附未激活时 undefined（lay JSON 零新键）。 */
+	cutAlign?: { target: number; starts_total: number; aligned: number; ratio: number };
+	/** fast 规划明细（adjust-main-track-gap-fill）：candidate/extend 条目；仅 gapFill==="fast" 时给出
+	 * （solid 的黑片兜底由应用段 layBrollTracks 产出）。 */
+	gapFills?: GapFillEntry[];
 } {
 	const fills = new Map<string, FillSlot[][]>();
 	const clipIds = new Set<string>();
@@ -950,9 +1263,36 @@ export function planBeatFills(
 	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set() };
 	const anchorOutcomes: AnchorOutcome[] = [];
+	// 句界吸附：每轨一份闭环控制器（跨 beat 共享——比例是全片口径，不是逐 beat 口径）。
+	// 密度自适应标定（design §2）：闭环控制的是「吸附机会的放行份额」，而实测比例的分母是**句起点**
+	// ——够不着的句起点（带宽外/锚槽内/供长不足）把实测系统性压到份额×可达覆盖率。先以全吸（份额 1）
+	// 跑一遍标定出本工程的可达覆盖率 C，再按份额 = ratio / C 跑正式遍，实测即贴目标。两遍全确定性。
+	const cutAlignOn = opts.cutAlign && opts.cutAlign.ratio > 0 && opts.cutAlign.starts.length > 0 ? opts.cutAlign : undefined;
+	let cutEffRatio = cutAlignOn?.ratio ?? 0;
+	if (cutAlignOn && !cutAlignOn.calibrated && cutAlignOn.ratio < 1) {
+		const cal = planBeatFills(plan, lay, scoreFloor, {
+			...opts,
+			cutAlign: { ratio: 1, starts: cutAlignOn.starts, calibrated: true },
+		});
+		const cov = cal.cutAlign?.ratio ?? 0;
+		cutEffRatio = cov > 0 ? Math.min(1, cutAlignOn.ratio / cov) : 1;
+	}
+	const cutStates = new Map<number, CutAlignState>();
+	const cutAlignFor = (k: number): CutAlignOpts | undefined => {
+		if (!cutAlignOn) return undefined;
+		let st = cutStates.get(k);
+		if (!st) {
+			st = { chances: 0, snapped: 0 };
+			cutStates.set(k, st);
+		}
+		return { ratio: cutEffRatio, starts: cutAlignOn.starts, state: st };
+	};
+	// 同槽候选组互斥（同 beat 跨轨同素材互斥）；按 beat 留存——gap 填充规划段（两阶段在后）要接着记账
+	const ownersByBeat = new Map<string, Map<string, number>>();
 	for (const beat of plan.beats) {
 		const perTrack: FillSlot[][] = [];
-		const beatOwners = new Map<string, number>(); // 同槽候选组互斥：同 beat 跨轨同素材互斥
+		const beatOwners = new Map<string, number>();
+		ownersByBeat.set(beat.beat, beatOwners);
 		for (let k = 0; k < Math.max(0, lay); k++) {
 			const trackOpts = {
 				beat,
@@ -966,6 +1306,7 @@ export function planBeatFills(
 				markStats: markSets,
 				beatOwners,
 				stats,
+				cutAlign: cutAlignFor(k),
 			};
 			// 锚点优先布局只作用于首轨（口径注记见 fillBeatTrackWithAnchors 头注）；无锚 beat 走原路零回归
 			let slots: FillSlot[];
@@ -986,8 +1327,40 @@ export function planBeatFills(
 	for (const beat of plan.beats) {
 		for (const q of beat.queries) for (const r of q.results ?? []) if (r.pinned === true) pinnedRequested.add(r.clip_id);
 	}
+	// ── 主轨 gap 填充 · fast 规划段（adjust-main-track-gap-fill）──
+	// 两阶段：全部 beat 常规填充完成后再补 gap——gap 填充 MUST NOT 抢先消费掉后续 beat
+	// 常规填充要用的候选（不二用消费集跨 beat 共享）。candidate 槽位并入首轨（gap_fill 标记，
+	// 随常规链路走下载/落轨/登记），extend 就地改写；solid 兜底归应用段（layBrollTracks）。
+	let gapFillEntries: GapFillEntry[] | undefined;
+	if (opts.gapFill === "fast" && Math.max(0, lay) > 0) {
+		gapFillEntries = [];
+		for (const beat of plan.beats) {
+			const slots = fills.get(beat.beat)?.[0];
+			if (!slots) continue;
+			fastFillBeatGaps({
+				beat,
+				slots,
+				consumed,
+				beatOwners: ownersByBeat.get(beat.beat)!,
+				noImage: opts.noImage,
+				dedupScope: opts.dedupScope,
+				entries: gapFillEntries,
+			});
+			for (const s of slots) clipIds.add(s.clip_id); // 新填候选进下载集
+		}
+	}
 	const yielded = [...pinnedRequested].filter((id) => !clipIds.has(id));
 	stats.pinnedYielded = yielded.length;
+	// 对齐实测（adjust-shot-cut-sentence-align）：首轨最终槽位口径——主轨 gap 填充
+	// （adjust-main-track-gap-fill）已在上方完成，计量恒按最终产物如实执行
+	let cutAlignStats: { target: number; starts_total: number; aligned: number; ratio: number } | undefined;
+	if (cutAlignOn) {
+		const m = measureCutAlignment({
+			beats: plan.beats.map((b) => ({ track_st: b.track_st, track_ed: b.track_ed, slots: fills.get(b.beat)?.[0] ?? [] })),
+			starts: cutAlignOn.starts,
+		});
+		cutAlignStats = { target: cutAlignOn.ratio, ...m };
+	}
 	return {
 		fills,
 		clipIds,
@@ -995,6 +1368,8 @@ export function planBeatFills(
 		pinnedOutcome: { requested: [...pinnedRequested], yielded },
 		markStats: { hit: markSets.hit.size, neutral: markSets.neutral.size },
 		anchors: anchorOutcomes,
+		...(cutAlignStats ? { cutAlign: cutAlignStats } : {}),
+		...(gapFillEntries ? { gapFills: gapFillEntries } : {}),
 	};
 }
 
@@ -1008,6 +1383,26 @@ interface LooseTrack {
 interface LooseMaterial {
 	id?: unknown;
 	[k: string]: unknown;
+}
+
+/**
+ * 形态判据（adjust-black-bed-audio-driven-skip / adjust-main-track-gap-fill 共用纯函数）：
+ * 给定轨集内是否存在「保留轨/遮挡对象」= `track_timeline` 非空且含**任一** material 非自产前缀
+ * （`broll-`/`ex-solid-` 之外）clip 的 video 轨。material 非 string 的 clip 按非自产计
+ * （保守方向 = 判口播形态：多铺黑底/不动主轨，MUST NOT 误跳/误填）。
+ * 无保留轨 ⇒ 音频驱动形态（TTS 工程：video 轨全自产 B-roll，底下没有 A-roll）。
+ */
+export function projectHasShieldTrack(tracks: { track_timeline?: unknown }[]): boolean {
+	return tracks.some((t) => {
+		const clips = Array.isArray(t.track_timeline) ? (t.track_timeline as { material?: unknown }[]) : [];
+		return (
+			clips.length > 0 &&
+			clips.some((c) => {
+				const m = typeof c?.material === "string" ? c.material : "";
+				return !(m.startsWith(BROLL_MATERIAL_PREFIX) || m.startsWith(SOLID_MATERIAL_PREFIX));
+			})
+		);
+	});
 }
 
 export interface LayResult {
@@ -1038,6 +1433,9 @@ export interface LayResult {
 		 * 阈值只门控人读告警，机读字段一旦被过滤，`0` 就会同时意味着「没空洞」与「有但没超阈值」。
 		 */
 		blackBedHoles: BlackBedHole[];
+		/** 主轨 gap 填充账面（adjust-main-track-gap-fill）：仅音频驱动形态且 mode ≠ none 时出现
+		 * （口播工程 / none / 不适用路径 MUST NOT 出现该键——lay JSON 零新键）。 */
+		gapFill?: { mode: GapFillMode; filledSec: number; fills: GapFillEntry[] };
 	};
 	broll: StructMetaBroll;
 	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
@@ -1295,6 +1693,10 @@ export function layBrollTracks(opts: {
 	/** 本轮铺轨的来源层（add-broll-dedup-and-layering D2/D3）：按层剥旧与带区分配的目标层。
 	 * 缺省按 plan.member_type 推导（local → local；云端 → common）；概念层由命令层显式传入。 */
 	sourceLayer?: SourceLayer;
+	/** 主轨 gap 填充（adjust-main-track-gap-fill）：mode + fast 规划明细（candidate/extend）。
+	 * 应用与否由本函数以剥离后终态权威判定（音频驱动形态 ∧ 目标层首轨=最低号内容轨）；
+	 * 不适用时规划槽位（gap_fill 标记）被滤出落轨。缺席/mode none = 现状零回归。 */
+	gapFill?: { mode: GapFillMode; planned: GapFillEntry[] };
 }): LayResult {
 	const { gtrk, plan, lay, fills, downloads } = opts;
 	const blackBedOn = opts.blackBed !== false;
@@ -1475,16 +1877,8 @@ export function layBrollTracks(opts: {
 	// isSelfLaidTrackByMaterial 同族取反）；只扫 keptOtherTracks 即完备——removedTracks 与
 	// keptBandTracks 按定义均为自产，self-produced-edited 在非 forceRelay 下已走 ②-B 整轮拒铺。
 	// material 非 string 的 clip 按非自产计（保守方向 = 多铺黑底，MUST NOT 误跳）。
-	const hasShieldTargetTrack = keptOtherTracks.some((t) => {
-		const clips = Array.isArray(t.track_timeline) ? t.track_timeline : [];
-		return (
-			clips.length > 0 &&
-			clips.some((c) => {
-				const m = typeof c?.material === "string" ? c.material : "";
-				return !(m.startsWith(BROLL_MATERIAL_PREFIX) || m.startsWith(SOLID_MATERIAL_PREFIX));
-			})
-		);
-	});
+	// 判据抽为 projectHasShieldTrack 纯函数（adjust-main-track-gap-fill 复用同一形态口径，两处不写两遍）
+	const hasShieldTargetTrack = projectHasShieldTrack(keptOtherTracks);
 	const blackBedReserved = blackBedOn && hasShieldTargetTrack ? 1 : 0;
 	const bandCounts: Record<SourceLayer, number> = { local: 0, concept: 0, common: 0 };
 	for (const b of keptBandTracks) bandCounts[b.layer]++;
@@ -1509,6 +1903,21 @@ export function layBrollTracks(opts: {
 	const candById = new Map<string, PlanResult>();
 	for (const beat of plan.beats) for (const c of mergedCandidates(beat)) if (!candById.has(c.clip_id)) candById.set(c.clip_id, c);
 
+	// ── 主轨 gap 填充 · 应用段判定（adjust-main-track-gap-fill）──
+	// 权威形态判定以**剥离后终态**为准（与黑底形态判定同口径）：音频驱动（无保留轨/keptOther 全空）
+	// ∧ 目标层首轨号 = 最低号内容轨（= 主轨）。多层音频驱动工程目标层首轨非最低号（主轨是他层
+	// 保留轨）时不填——改保留轨会砸他层登记指纹（L2 条数吻合链路）。不适用时规划槽位（gap_fill
+	// 标记）在下方过滤中被滤出落轨（extend 的窗口改写保留——仍是段界内合法窗口，不产生 gap）。
+	const gapFillReq = opts.gapFill && opts.gapFill.mode !== "none" ? opts.gapFill : undefined;
+	const mainTrackIdx = bandStart[targetLayer];
+	const lowerBandOccupied = SOURCE_LAYER_ORDER.some(
+		(l) => l !== targetLayer && bandCounts[l] > 0 && bandStart[l] < mainTrackIdx,
+	);
+	const gapFillOn =
+		gapFillReq !== undefined && !hasShieldTargetTrack && keptOtherTracks.length === 0 && !lowerBandOccupied && Math.max(0, lay) > 0;
+	const gapSolidEntries: GapFillEntry[] = [];
+	let gapFillCanvasWarned = false;
+
 	const metaBeats: BrollMetaBeat[] = [];
 	const newMaterialsById = new Map<string, LooseMaterial>();
 	const trackClips = new Map<number, Record<string, unknown>[]>();
@@ -1522,9 +1931,12 @@ export function layBrollTracks(opts: {
 		const laid: BrollMetaBeat["laid"] = [];
 
 		for (let k = 0; k < perTrack.length; k++) {
-			// 下载失败的槽位丢弃（留空）；图片槽位以 material_id 指向注入材料（运镜/静态兜底）；全空轨槽不建 laid 条目
+			// 下载失败的槽位丢弃（留空）；图片槽位以 material_id 指向注入材料（运镜/静态兜底）；全空轨槽不建 laid 条目；
+			// gap 填充规划槽位在填充不适用时滤出（adjust-main-track-gap-fill 应用段门控）
 			const slots = perTrack[k].filter(
-				(s) => downloads.has(s.clip_id) || (s.material_id !== undefined && opts.injectedMaterials?.has(s.material_id)),
+				(s) =>
+					(!s.gap_fill || gapFillOn) &&
+					(downloads.has(s.clip_id) || (s.material_id !== undefined && opts.injectedMaterials?.has(s.material_id))),
 			);
 			if (!slots.length) continue;
 			const trackIndex = bandStart[targetLayer] + k;
@@ -1567,6 +1979,64 @@ export function layBrollTracks(opts: {
 			laid.push({ order: k, clip_id: slots[0].clip_id, track_index: trackIndex, slots, source_layer: targetLayer });
 		}
 
+		// ── 主轨 gap 填充 · solid 兜底（adjust-main-track-gap-fill）：首轨幸存槽位盖不住的洞
+		// （solid 模式全部 gap / fast 段界耗尽残余 / 下载失败退化 / 整 beat 零槽位）逐洞落黑片
+		// ——磁吸安全不变量（beat 包络内主轨零 gap）在此收口，不依赖下载成败。
+		if (gapFillOn) {
+			const mainLaid = laid.find((l) => l.order === 0);
+			const { holes } = computeBlackBedHoles({
+				beats: [{ beat: beat.beat, track_st: beat.track_st, track_ed: beat.track_ed, slots: mainLaid?.slots ?? [] }],
+			});
+			if (holes.length) {
+				if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
+					if (!gapFillCanvasWarned) {
+						gapFillCanvasWarned = true;
+						warnings.push(
+							`画布尺寸非法（${canvas[0]}x${canvas[1]}），主轨 gap 黑片兜底跳过——主轨仍有 gap，客户端若开主轨磁吸请注意与配音错位的风险。`,
+						);
+					}
+				} else {
+					const width = canvas[0]!;
+					const height = canvas[1]!;
+					const solidId = solidMaterialId({ hex: BLACK_BED_HEX, width, height });
+					if (!newMaterialsById.has(solidId)) {
+						// 黑片 material MUST NOT 带 duration（客户端 resolveTrim 铁律，与黑底垫轨同条）
+						newMaterialsById.set(solidId, {
+							id: solidId,
+							path: solidRelPath({ hex: BLACK_BED_HEX, width, height }),
+							video_size: [width, height],
+						});
+					}
+					const bucket = trackClips.get(mainTrackIdx) ?? [];
+					let entry = mainLaid;
+					if (!entry) {
+						// 整 beat 零常规槽位：为其新建首轨 laid 条目（clip_id=黑片材料 id，整段黑片精修可见）
+						entry = { order: 0, clip_id: solidId, track_index: mainTrackIdx, slots: [], source_layer: targetLayer };
+						laid.push(entry);
+						laid.sort((a, b) => a.order - b.order);
+					}
+					holes.forEach((h, i) => {
+						const len = r3(h.track_ed - h.track_st);
+						bucket.push({
+							clip_id: `${beat.beat}-gapfill-${i}`,
+							material: solidId,
+							clip_st: 0,
+							clip_ed: len,
+							track_st: h.track_st,
+							track_ed: h.track_ed,
+							duration: len,
+						});
+						// 黑片槽位照进 slots 登记（幂等硬约束：轨上 clip 数 === 登记 slots 数，L2 指纹闭环）
+						entry!.slots.push({ clip_id: solidId, query: "gap_fill", score: 0, clip_st: 0, clip_ed: len, track_st: h.track_st, track_ed: h.track_ed, gap_fill: true });
+						gapSolidEntries.push({ beat: beat.beat, kind: "solid", track_st: h.track_st, track_ed: h.track_ed, sec: h.sec });
+						laidClips++;
+					});
+					trackClips.set(mainTrackIdx, bucket);
+					entry.slots.sort((a, b) => a.track_st - b.track_st);
+				}
+			}
+		}
+
 		const metaBeat: BrollMetaBeat = {
 			beat: beat.beat,
 			track_st: beat.track_st,
@@ -1601,6 +2071,16 @@ export function layBrollTracks(opts: {
 		};
 		if (typeof beat.per_shot_sec === "number") metaBeat.per_shot_sec = beat.per_shot_sec;
 		metaBeats.push(metaBeat);
+	}
+
+	// gap_fill summary（adjust-main-track-gap-fill）：规划明细中素材仍在下载集者 + solid 兜底明细，
+	// 时间升序。下载失败的 candidate 槽位已被丢弃、其窗口由洞检测落黑片——明细 MUST NOT 以成功姿态保留。
+	// 有键但 fills 空 = 「填充开着、本轮无洞可填」（与「没开」机读可分）。
+	let gapFillSummary: { mode: GapFillMode; filledSec: number; fills: GapFillEntry[] } | undefined;
+	if (gapFillOn && gapFillReq) {
+		const surviving = gapFillReq.planned.filter((e) => e.clip_id !== undefined && downloads.has(e.clip_id));
+		const fillsAll = [...surviving, ...gapSolidEntries].sort((a, b) => a.track_st - b.track_st || a.track_ed - b.track_ed);
+		gapFillSummary = { mode: gapFillReq.mode, filledSec: r3(fillsAll.reduce((n, f) => n + f.sec, 0)), fills: fillsAll };
 	}
 
 	const createdTracks = [...trackClips.entries()]
@@ -1849,6 +2329,7 @@ export function layBrollTracks(opts: {
 			blackBedSkipped,
 			blackBedHoleSec,
 			blackBedHoles,
+			...(gapFillSummary ? { gapFill: gapFillSummary } : {}),
 		},
 		broll,
 		warnings,

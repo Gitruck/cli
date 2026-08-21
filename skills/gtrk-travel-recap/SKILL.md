@@ -129,7 +129,7 @@ gtrk split "<拆分稿>" --project "<工程目录>" --json
 gtrk matrix --project "<工程目录>" --local --dirs "<素材夹>" --lay 0 --json
 gtrk matrix describe --plan "<工程目录>/split/broll-plan.json" --yes --json
 #   ↑ describe 结果里的 usable_flags 由你裁定（text_overlay 命中=撞原片字幕区,考虑换段或保留交客户端悔棋）
-gtrk matrix lay --project "<工程目录>" --mark-weight 0.3 --json
+gtrk matrix lay --project "<工程目录>" --mark-weight 0.3 --gap-fill fast --json
 
 # ⑧⑨ 字卡（§六 规约产颗粒 → lint → 铺）
 gtrk mg lint "<工程目录>/mg/<composition_id>.html" --dispatch "<工程目录>/split/dispatch.json"
@@ -144,6 +144,8 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 
 **配方级参数口径**（打样标定）：
 - `--mark-weight 0.3`：美观度加权起步值（mark 缺失素材中性不受罚）；
+- `--gap-fill fast`（★ 主理人 2026-08-21 拍板：快速模式不留空）：主轨空洞放宽地板随便填候选→延长相邻颗粒→黑片兜底——客户端主轨磁吸开启时 gap 会被吸除、画面与配音错位，快速成片以画面连续性优先；CLI 缺省是 solid（黑片垫齐，精修可见），本配方须**显式传 fast**；
+- 句界吸附（`--cut-align`）默认 0.7 即三七开拍板值，不用传——约七成字幕句起点恰逢镜头切点、三成有意错开；
 - **BGM 音量口径 = -20dB（线性 0.10，★ 主理人 2026-08-19 拍板定值）**：配音主导原则——BGM 是垫底不是主角，成品音乐响度天然高于 TTS 电平。⚠️ 契约 volume 字段**只写线性增益、MUST NOT 写 dB**（composition-contract-v1 §4 明文，dB 残档曾致客户端打不开工程）——-20dB 换算=10^(-20/20)=0.10 写入。**客户端音量面板显示的就是 dB 值（标准 20·log10 换算，两侧同一标尺）**：写 0.10 打开面板即显示 -20.0，主理人实测该值听感最佳且偏保守（宁小声不大声）。用户嫌低在客户端拉高（终调权在客户端）；
 - 时间窗（`--source-window`）：二创场景解说序≈素材序时按 beat 对应的原片区间约束检索（可选增强，全库检索在几百场景规模下命中率已够）；
 - 素材不二用、黑片叠底、层序（黑底最低号<common<concept<local，契约=大号在上）均由 lay 内建，MUST NOT 绕过。
