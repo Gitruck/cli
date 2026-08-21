@@ -13,7 +13,7 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 
 成片是**有序 SOP + 用户检查点**，不是并行一次铺完。全序：
 
-> ① `/gtrk-oralcut`（剪口播）→ ② `/gtrk-splitter`（拆分派单出 `dispatch.json`）→ **③ B-roll 底轨全铺齐**（`/gtrk-matrix` 铺影视/本地素材 + `/gtrk-ai-drama` 产稿→外部出片→用户手动回铺，**两条腿同一阶段**）→ **④ 全局抽帧检查画面构图（用户确认）** → **⑤ 本 skill：MG（含 ov）最后叠上** → `gtrk render` 收口
+> ① `/gtrk-oralcut`（剪口播）→ ② `/gtrk-splitter`（拆分派单出 `dispatch.json`）→ **③ B-roll 底轨全铺齐**（`/gtrk-matrix` 铺影视/本地素材 + `/gtrk-ai-drama` 产稿→外部出片→用户手动回铺，**两条腿同一阶段**）→ **④ 全局抽帧检查画面构图（用户确认）** → **⑤ 本 skill：MG（含 ov）最后叠上** → `gtrk subtitle lay` 上字幕（快速成片模式必做）→ `gtrk render` 收口
 
 **你是第 ⑤ 步、也是最后一层。** MG 颗粒是**唯一的叠加层**——底下那整层底轨必须先定死（**三源全落齐**），否则你的排版避让是对着一个不完整的画面做的。
 
@@ -165,7 +165,7 @@ gtrk mg --project "<split产物目录>" --json
 
 ## 交棒 `render` 收口（你是最后一层，别停在铺完）
 
-`dispatch.mg` 全铺满、`gtrk mg status` 全绿后**别收工**——你已是最后一层，顺势 `gtrk render` 收口成片。一句话交代即推进：「MG 颗粒已叠铺完，我接着出片」。
+`dispatch.mg` 全铺满、`gtrk mg status` 全绿后**别收工**——你已是最后一层，顺势收口。快速成片模式先 `gtrk subtitle lay --project <目录>` 把字幕上好（样式取用户拍板值，没选用 default）再 `gtrk render` 出片。一句话交代即推进：「MG 颗粒已叠铺完，我接着上字幕出片」。
 
 ★ **若你是走前置硬门 2 的「明示跳过 AI」进来的**：收口前 MUST 把那份「**AI 回铺后待复查构图**」清单复述给用户（哪几颗颗粒、对应哪几个 AI beat 区间），并说明「AI 片段回铺后这几颗可能要重产」。**MUST NOT 静默收口。**
 
