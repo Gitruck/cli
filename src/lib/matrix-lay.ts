@@ -775,9 +775,29 @@ export interface AnchorOutcome {
  *     的系统选取，取到 pinned 对时 status="pinned"）；片段钉 `max(beat.track_st, at_sec − 提前量)`，
  *     时长 = min(命中段可用长, per_shot_sec×2)，出界钳回 beat 窗口。
  *   - 锚间时间重叠：按 at_sec 先到先钉，后锚只后移不重叠；挤到不足最小槽长即 degraded（不硬锚）。
- *   - 锚 query 无 ≥score 地板命中 / at_sec 缺失（内插失败）→ 该锚 degraded 退化普通槽 + summary 明示。
+ *   - 锚 query 无 ≥score 地板命中 / at_sec 缺失（内插失败）→ 该锚 degraded 退化普通槽 + summary 明示；
+ *     锚池为空时 reason 按 anchorPoolEmptyReason 如实归因（检索失败/零命中/被旧版 plan 去重折叠分案，
+ *     真机验收发现①：折叠致池空曾被误报成「无 ≥score 地板的命中」）。
  *   - 锚片段消费照走全局不二用记账（consumed/beatOwners）；黑片叠底/mark-weight/层带零改动。
  */
+/** 锚池为空的如实归因（degraded reason，add-keyword-anchored-broll 发现①修订）：
+ * 「无 ≥score 地板的命中」只在**命中确实存在但全被地板/负词/排除开关拦下**时报；plan 内无检索
+ * 记录、检索失败、零命中、命中被旧版 plan 的 beat 内去重折进其他 query（plan 构建现已对锚 query
+ * 免折，此案只剩旧版/手编 plan 可达——防御性保留）各自分案明示。 */
+function anchorPoolEmptyReason(beat: PlanBeat, query: string): string {
+	const q = beat.queries.find((x) => x.query === query);
+	if (!q) return `锚 query「${query}」在 plan 内无检索记录（该 query 被编辑删除或检索未跑）——重跑 gtrk matrix 可恢复`;
+	if (q.error) return `锚 query「${query}」检索失败（${q.error.msg}）`;
+	if (!q.results?.length) {
+		// also_matched_queries 里出现本 query = 命中明明存在、被 beat 内去重折进了别的 query
+		const folded = beat.queries.some((x) => x !== q && (x.results ?? []).some((r) => r.also_matched_queries?.includes(query)));
+		return folded
+			? `锚 query「${query}」的命中被 beat 内去重折进同 beat 其他 query（旧版 plan 形态）——重跑 gtrk matrix 生成新 plan 即恢复`
+			: `锚 query「${query}」检索零命中`;
+	}
+	return `锚 query「${query}」无 ≥score 地板的命中`;
+}
+
 export function fillBeatTrackWithAnchors(opts: {
 	beat: PlanBeat;
 	trackOrder: number;
@@ -839,7 +859,7 @@ export function fillBeatTrackWithAnchors(opts: {
 		}
 		const pool = poolByQuery.get(a.query);
 		if (!pool?.length) {
-			degraded(a, `锚 query「${a.query}」无 ≥score 地板的命中`);
+			degraded(a, anchorPoolEmptyReason(beat, a.query));
 			continue;
 		}
 		// 取该 query 池首个合格对：不二用/同 beat 归属/精修口径与序贯填充完全同一套

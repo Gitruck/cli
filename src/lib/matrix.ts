@@ -483,11 +483,21 @@ export function markExcluded(results: PlanResult[], exclude: string[] | undefine
 	}
 }
 
-/** beat 内跨 query 按 clip_id 去重：保 score 最高的出现，其余 query 记进 also_matched_queries。跨 beat 不去重。 */
-export function dedupeBeatQueries(queries: PlanQuery[]): void {
-	// clip_id(字符串) → 当前最优 { query 下标, result 引用 }
+/** beat 内跨 query 按 clip_id 去重：保 score 最高的出现，其余 query 记进 also_matched_queries。跨 beat 不去重。
+ *
+ * 锚 query 免折（add-keyword-anchored-broll 真机验收发现①修订）：`keepQueries` 里的 query 对去重
+ * **完全透明**——它的命中不并进别的 query，也不吸走别的 query 的命中。lay 的锚点布局只查
+ * `poolByQuery.get(锚.query)`，锚命中一旦被折进同 beat 分更高的 query，锚池即空、开箱首轮全
+ * degraded（黄石工程三锚实锤）；免折让每条锚 query 的命中（含它自己的 score/segments 语义匹配
+ * 数据）保留在自己名下。副作用=同一 clip 可能同时出现在锚 query 与一条普通 query 名下（至多
+ * 锚数 ≤2 条/beat），落轨不二用由全局 consumed 记账兜住，不会重复铺。无锚 beat（keepQueries
+ * 缺省/空）行为与本修订之前逐字节一致。 */
+export function dedupeBeatQueries(queries: PlanQuery[], keepQueries?: ReadonlySet<string>): void {
+	const exempt = (q: PlanQuery): boolean => keepQueries?.has(q.query) ?? false;
+	// clip_id(字符串) → 当前最优 { query 下标, result 引用 }（免折 query 不参与竞争）
 	const bestByClip = new Map<string, { qi: number; r: PlanResult }>();
 	for (let qi = 0; qi < queries.length; qi++) {
+		if (exempt(queries[qi])) continue;
 		for (const r of queries[qi].results ?? []) {
 			const prev = bestByClip.get(r.clip_id);
 			if (!prev || r.score > prev.r.score) bestByClip.set(r.clip_id, { qi, r });
@@ -495,7 +505,7 @@ export function dedupeBeatQueries(queries: PlanQuery[]): void {
 	}
 	for (let qi = 0; qi < queries.length; qi++) {
 		const q = queries[qi];
-		if (!q.results) continue;
+		if (!q.results || exempt(q)) continue;
 		q.results = q.results.filter((r) => {
 			const best = bestByClip.get(r.clip_id)!;
 			if (best.qi === qi && best.r === r) return true;
@@ -539,7 +549,11 @@ export function buildPlanBeat(entry: FilmDispatch, outcomes: QueryOutcome[]): Pl
 		if (typeof o.data?.recalled === "number") pq.recalled = o.data.recalled; // results 的兄弟字段
 		beat.queries.push(pq);
 	}
-	dedupeBeatQueries(beat.queries);
+	// 锚 query 免折（add-keyword-anchored-broll 发现①）：锚命中留在自己名下，lay 锚池才取得到
+	const anchorQueries = new Set(
+		(entry.anchors ?? []).map((a) => a.query).filter((q): q is string => typeof q === "string" && q.length > 0),
+	);
+	dedupeBeatQueries(beat.queries, anchorQueries.size ? anchorQueries : undefined);
 	return beat;
 }
 
