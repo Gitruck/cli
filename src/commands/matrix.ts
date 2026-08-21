@@ -434,7 +434,7 @@ export async function runMatrix(
 	// ① 身份探针（每次运行探一次，不缓存；探针失败=整体失败）
 	log.step("▶ 身份探针（matrix_member_type）…");
 	const tier = await probeMemberType(cfg);
-	log.info(`档位：${tier}${tier === "internal" ? "（矩阵成员口 /task/custom/search）" : "（通用口 /task/video_clip_search）"}`);
+	log.info(`档位：${tier}${tier === "internal" ? "（矩阵成员口 /task/custom/video_clip_search）" : "（通用口 /task/video_clip_search）"}`);
 
 	// ② 栏目配置（成片层显式消费；external 不注入只提示）
 	const columnId = opts.column ?? readUserConfig().defaultColumn;
