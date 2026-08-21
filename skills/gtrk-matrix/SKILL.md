@@ -123,6 +123,8 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 每段多给几个候选 | `--top-k <n>` | 整数 · 派单 `shots` 值（服务端上限 50） | 每 query 候选数上限 |
 | 指定素材类型 | `--material-class <c>` | `real_shot` \| `concept` · 栏目策略 | 仅 internal 矩阵成员口 |
 | 填充门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | 低于不采纳、槽位留空露黑底；调完必看空洞告警 |
+| 切点对齐字幕句 | `--cut-align <r>` | 浮点 0–1 · `0.7`（`0`=关闭） | 三七开拍板：约七成字幕句起点恰逢镜头切点、三成有意错开；句级时码取 transcript 重投影（降级自动回旧节奏并告警）；开启时结果 JSON `lay.cut_align` 报实测比例 |
+| 主轨空洞填充 | `--gap-fill <m>` | `fast` \| `solid`（默认）\| `none` | **仅音频驱动工程主轨**（口播工程不适用零回归）：fast=放宽地板随便填候选→延长相邻颗粒→黑片兜底；solid=黑片垫齐（精修一眼看出没匹配到）；none=留 gap（客户端主轨磁吸会吸除 gap 致画面与配音错位，慎用）；生效时结果 JSON `lay.gap_fill` 报明细 |
 | 不要黑底垫轨 | `--no-black-bed` | 开关 · 默认铺 | 黑底按 beat 包络整条铺，B-roll 期间遮口播 |
 | 已编辑轨强铺逃生门 | `--force-relay` | 开关 · 关 | 用户明确点头才带；raw 登记删除不可恢复 |
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
@@ -160,7 +162,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
 | 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 手工组的 plan 从这进 |
 | 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
-| 其余铺轨参数 | `--lay/--score-floor/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
+| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
 ## plan 编辑口径（法定通道的边界）
 

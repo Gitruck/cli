@@ -1,10 +1,12 @@
 /**
  * gtrk subtitle —— 字幕零件族（add-subtitle-lay-command，★ 主理人 2026-08-21 口头拍板）。
  *
- * `gtrk subtitle lay --project <dir> [--style <7 选 1>] [--color <11 选 1>] [--json]`：
+ * `gtrk subtitle lay --project <dir> [--style <7 选 1>] [--color <11 选 1>] [--keep-punctuation] [--json]`：
  * 读工程 transcript（行粒度 utterances）→ 既有投影器（与 split/matrix 同一口径）投到轨道时基 →
  * 逐句转客户端契约形态的 text 元素 → 写进 `.gtrk` 的 `struct_meta.client_visual_elements` text lane。
  * 快速成片模式产出的工程由此直接带好字幕——客户端打开即见、字幕面板认得、可整轨换样式。
+ * content 缺省做逗号句号清洗（★ 2026-08-21 真机走查拍板，见 lib/subtitle-lay.ts
+ * stripSubtitlePunctuation）；`--keep-punctuation` 保留原始标点。
  *
  *   - 纯本地零云端零计费；写回复用原子写回口径（writeGtrkAtomic：临时文件+rename，mtime 冲突拒写）；
  *     除 `struct_meta.client_visual_elements` 外 MUST NOT 改 `.gtrk` 任何其他键。
@@ -55,6 +57,8 @@ export interface SubtitleLayOpts {
 	transcript?: string;
 	style?: string;
 	color?: string;
+	/** 保留原始标点（逃生口）；缺省对 content 清洗逗号句号（★ 2026-08-21 拍板）。 */
+	keepPunctuation?: boolean;
 	json?: boolean;
 }
 
@@ -73,6 +77,8 @@ export interface SubtitleLayResult {
 	canvas: [number, number];
 	orientation: SubtitleOrientation;
 	fontFamily: string;
+	/** true = 本次保留了原始标点（--keep-punctuation）；false = 已做逗号句号清洗。 */
+	keepPunctuation: boolean;
 }
 
 /** 第一个存在的候选路径（都不存在返回 undefined）。 */
@@ -176,6 +182,10 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 	}
 
 	// ── 逐句构造契约形态 text 元素 → cve 幂等替换 ──
+	// 文本清洗（逗号句号→空格）缺省开启，只影响写出的 content；重跑恒以 transcript
+	// 原文重新生成再清洗（transcript.json 本身 MUST NOT 改），幂等替换机制照旧。
+	const keepPunctuation = opts.keepPunctuation === true;
+	if (keepPunctuation) log.info("保留原始标点（--keep-punctuation）：跳过逗号句号清洗");
 	const elements = captions.map((c, index) =>
 		buildCaptionElement({
 			index,
@@ -185,6 +195,7 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 			presetId,
 			colorId,
 			canvas,
+			keepPunctuation,
 		}),
 	);
 	const structMeta = (gtrk.struct_meta as Record<string, unknown> | undefined) ?? {};
@@ -216,6 +227,7 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 		canvas: [canvas.width, canvas.height],
 		orientation,
 		fontFamily: SUBTITLE_FONT_FAMILY,
+		keepPunctuation,
 	};
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
@@ -232,6 +244,7 @@ export function registerSubtitle(program: Command): void {
 		.option("--transcript <path>", "显式指定 transcript.json（非标准布局兜底）")
 		.option("--style <id>", "字幕样式（default/outline/cinema_yellow/immersive_box/wide_spacing/deep_shadow/boxed，默认 default）")
 		.option("--color <id>", "字幕颜色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金，默认 雅黑）")
+		.option("--keep-punctuation", "保留原始标点（默认清洗：中英逗号句号替换为空格，小数/千分位/缩写不误伤）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action((words: string[] | undefined, opts: SubtitleLayOpts) => {
 			parseSubtitlePositional(words);

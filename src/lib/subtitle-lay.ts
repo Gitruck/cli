@@ -230,6 +230,48 @@ export function normalizeSubtitleContent(text: string): string {
 		.join("\n");
 }
 
+/** 中日韩后继判据（U+3000-30FF 标点/假名、U+3400-9FFF 表意、U+F900-FAFF 兼容、U+FF00-FFEF 全角）。 */
+const CJK_NEXT = /[　-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
+
+/**
+ * 字幕文本去标点（★ 主理人 2026-08-21 真机走查拍板）：中英逗号（，,）与中英句号（。.）
+ * 替换为空格——「有些标点符号在字幕里也不好看」；其余标点（引号「」『』、顿号、问号、
+ * 感叹号、破折号等）一律保留（裁定只点名逗号句号）。
+ *
+ *  - 英文句号防误伤小数/缩写：只替换后面跟空白、行尾或中日韩字符的 `.`；
+ *    `3.5`、`U.S.`（词内）、`example.com` 这类后接字母/数字的句点不动。
+ *  - 英文逗号防误伤千分位：两侧都是数字的 `,`（`1,000`）不动，其余全换（同一
+ *    「别误伤数字」原则的逗号侧最小豁免）。
+ *  - 中文逗号句号无此顾虑，全换。
+ *
+ * 只做「标点 → 空格」一步；收尾（连续空格折叠为一、行首行尾空格裁掉——行尾句号
+ * 换出的空格因此直接消失、结尾干净）交由既有 normalizeSubtitleContent 统一完成。
+ * 只影响写出的字幕 content；transcript.json 原文 MUST NOT 改。
+ */
+export function stripSubtitlePunctuation(text: string): string {
+	let out = "";
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "，" || ch === "。") {
+			out += " ";
+			continue;
+		}
+		if (ch === ",") {
+			const prev = i > 0 ? text[i - 1] : "";
+			const next = i + 1 < text.length ? text[i + 1] : "";
+			out += /[0-9]/.test(prev) && /[0-9]/.test(next) ? ch : " ";
+			continue;
+		}
+		if (ch === ".") {
+			const next = i + 1 < text.length ? text[i + 1] : "";
+			out += next === "" || /\s/.test(next) || CJK_NEXT.test(next) ? " " : ch;
+			continue;
+		}
+		out += ch;
+	}
+	return out;
+}
+
 /** 秒 → 整数 tick（客户端 mediaTimeFromSeconds 的取整同义；cve 读侧硬闸要求整数非负）。 */
 export function secondsToTicks(seconds: number): number {
 	return Math.round(seconds * SUBTITLE_TICKS_PER_SECOND);
@@ -352,6 +394,7 @@ export function buildCaptionElement({
 	presetId,
 	colorId,
 	canvas,
+	keepPunctuation = false,
 }: {
 	/** 落轨序（0 起）；name = `Caption <index+1>`。 */
 	index: number;
@@ -361,8 +404,12 @@ export function buildCaptionElement({
 	presetId: SubtitlePresetId;
 	colorId: SubtitleColorId;
 	canvas: { width: number; height: number };
+	/** true = 保留原始标点（--keep-punctuation 逃生口）；缺省清洗逗号句号。 */
+	keepPunctuation?: boolean;
 }): SubtitleElement {
-	const content = normalizeSubtitleContent(text);
+	const content = normalizeSubtitleContent(
+		keepPunctuation ? text : stripSubtitlePunctuation(text),
+	);
 	return {
 		id: randomUUID(),
 		type: "text",

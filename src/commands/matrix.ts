@@ -23,15 +23,18 @@ import {
 	BROLL_COVER_DIR,
 	BROLL_META_CANDIDATE_CAP,
 	BROLL_PREVIEW_DIR,
+	CUT_ALIGN_DEFAULT,
 	SCORE_FLOOR_DEFAULT,
 	brollMaterialIdFor,
 	layBrollTracks,
 	mergedCandidates,
 	planBeatFills,
 	previewUrlFor,
+	projectHasShieldTrack,
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
+	type GapFillMode,
 	type MarkLookup,
 	type SourceLayer,
 } from "../lib/matrix-lay";
@@ -164,6 +167,12 @@ interface MatrixOpts {
 	// ── 美观度权重（add-audio-project-atoms，仅 matrix lay）──
 	/** `--mark-weight <0..1>`：融合分 = sim×(1-w)+(mark/100)×w；默认 0 零回归。 */
 	markWeight?: string;
+	// ── 句界吸附（adjust-shot-cut-sentence-align）──
+	/** `--cut-align <ratio>`：字幕句起点吸附目标比例（默认 0.7；0=关闭回旧节奏切槽）。 */
+	cutAlign?: string;
+	// ── 主轨 gap 填充（adjust-main-track-gap-fill）──
+	/** `--gap-fill <fast|solid|none>`：音频驱动工程主轨空洞填充（缺省 solid）。 */
+	gapFill?: string;
 }
 
 /** 测试注入面（MUST NOT 真调云端）：图片运镜生成与计费确认；缺省 = 真实云链 / stdin 确认。
@@ -221,6 +230,17 @@ export function registerMatrix(program: Command): void {
 		.option(
 			"--mark-weight <w>",
 			"仅 matrix lay：美观度权重 0..1（默认 0 关闭零回归）——候选融合分 = sim×(1-w)+(mark/100)×w，mark 取 describe 理解缓存（素材内就近帧）；无缓存候选按中性处理（融合分=sim，不惩罚不加分）",
+		)
+		.option(
+			"--cut-align <ratio>",
+			"句界吸附目标比例 0..1（默认 0.7）：约七成字幕句起点恰逢镜头切点、三成有意错开（全对齐会机械）；0=关闭回旧节奏切槽。" +
+				"句级时码取 transcript 现场重投影（与关键词锚同源），重投影降级时自动回旧行为并告警",
+		)
+		.option(
+			"--gap-fill <mode>",
+			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、再不够垫黑片；" +
+				"solid=黑片垫齐（精修时一眼看出「这里没匹配到」）；none=留 gap（客户端主轨磁吸开启时 gap 会被吸除、后续画面整体前移与配音错位，慎用）。" +
+				"口播工程主轨为 A-roll，本参数不适用（照旧留空语义）",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -997,6 +1017,9 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 			dedupScope: parseDedupScope(opts.dedupScope),
 			markWeight,
 			markLookup,
+			cutAlign: parseCutAlign(opts.cutAlign),
+			gapFill: parseGapFill(opts.gapFill),
+			gapFillExplicit: opts.gapFill !== undefined,
 		});
 	} finally {
 		markDb?.close();
@@ -1224,6 +1247,9 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 				deps,
 				sourceLayer: ctx.sourceLayer,
 				dedupScope: parseDedupScope(opts.dedupScope),
+				cutAlign: parseCutAlign(opts.cutAlign),
+				gapFill: parseGapFill(opts.gapFill),
+				gapFillExplicit: opts.gapFill !== undefined,
 			},
 		);
 	}
@@ -1280,6 +1306,22 @@ export function parseMarkWeight(raw: string | undefined): number {
 	if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
 	log.warn(`--mark-weight 取值非法（${raw}），按 0（关闭）处理`);
 	return 0;
+}
+
+/** --cut-align 解析：[0,1] 浮点，缺省按 CUT_ALIGN_DEFAULT（0.7），非法值按默认（告警）；0=关闭。 */
+export function parseCutAlign(raw: string | undefined): number {
+	if (raw === undefined) return CUT_ALIGN_DEFAULT;
+	const n = Number(raw);
+	if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+	log.warn(`--cut-align 取值非法（${raw}），按默认 ${CUT_ALIGN_DEFAULT} 处理`);
+	return CUT_ALIGN_DEFAULT;
+}
+
+/** --gap-fill 解析：fast|solid|none，缺省 solid（保守：黑片垫齐）；越界即参数错误（不做静默忽略）。 */
+export function parseGapFill(raw: string | undefined): GapFillMode {
+	if (raw === undefined || raw === "solid") return "solid";
+	if (raw === "fast" || raw === "none") return raw;
+	throw new Error(`--gap-fill 只支持 fast、solid 或 none（得到「${raw}」）`);
 }
 
 /** --score-floor 解析：[0,1] 浮点，非法值按默认（告警）。 */
@@ -1557,6 +1599,12 @@ async function layIntoProject(
 		markWeight?: number;
 		/** mark 查询闭包（runLayMode 供给；缺省=全部中性）。 */
 		markLookup?: MarkLookup;
+		/** 句界吸附目标比例（adjust-shot-cut-sentence-align）：缺省 CUT_ALIGN_DEFAULT；0=关闭。 */
+		cutAlign?: number;
+		/** 主轨 gap 填充模式（adjust-main-track-gap-fill）：缺省 solid；仅音频驱动工程主轨生效。 */
+		gapFill?: GapFillMode;
+		/** 用户是否显式传了 --gap-fill（口播工程「不适用」提示只对显式传参出，缺省态不制造噪音）。 */
+		gapFillExplicit?: boolean;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -1568,14 +1616,52 @@ async function layIntoProject(
 	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 
+	// ── 句界吸附供数（adjust-shot-cut-sentence-align）：句起点 = 重投影 utteranceIndex 的句级
+	// track 时码（与锚 at_sec 内插同一份投影产物）。降级链无中间档：拿不到就整体回旧行为并告警，
+	// MUST NOT 拿派单快照时码硬吸；--cut-align 0 显式关闭时不出该告警（显式意图不制造噪音）。
+	const cutRatio = layOpts.cutAlign ?? CUT_ALIGN_DEFAULT;
+	let cutStarts: number[] | undefined;
+	if (cutRatio > 0) {
+		const starts = [...new Set([...(reproj.utteranceIndex?.values() ?? [])].map((u) => Math.round(u.track_st * 1000)))]
+			.sort((a, b) => a - b)
+			.map((v) => v / 1000);
+		if (starts.length) {
+			cutStarts = starts;
+		} else {
+			log.warn(
+				`句界吸附不可用（${reproj.summary.mode === "dispatch_snapshot" ? (reproj.summary.reason_text ?? "重投影降级") : "当刻无存活句"}）——本轮按旧节奏切槽（--cut-align 0 可显式关闭本提示对应的功能）`,
+			);
+		}
+	}
+
+	// ── 主轨 gap 填充形态预判（adjust-main-track-gap-fill）：规划段门控——口播工程（任一 video 轨
+	// 含非自产前缀 clip）一律不启用（fast 不消费候选、不改槽位，零回归）；权威判定仍在 layBrollTracks
+	// 以剥离后终态复核（两处同一 projectHasShieldTrack 判据，剥离只删自产轨、二者在常规路径恒一致）。
+	const gapMode = layOpts.gapFill ?? "solid";
+	const audioDrivenPre = !projectHasShieldTrack((gtrk.video_track as { track_timeline?: unknown }[] | undefined) ?? []);
+	const gapModeEff: GapFillMode = audioDrivenPre ? gapMode : "none";
+	if (!audioDrivenPre && gapMode !== "none" && layOpts.gapFillExplicit) {
+		log.info(
+			"主轨 gap 填充未生效：口播工程的主轨是你的 A-roll（磁吸风险不在 B-roll 候选轨），--gap-fill 只作用于音频驱动工程的最低号 B-roll 主轨——本轮按既有留空语义铺轨。",
+		);
+	}
+
 	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重；--no-image-broll 时图片不进池；
 	// 全局不二用消费集与跳剪豁免避让在此生效（add-broll-dedup-and-layering D1/D4）
-	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes } = planBeatFills(plan, layN, scoreFloor, {
+	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = planBeatFills(plan, layN, scoreFloor, {
 		noImage: !layOpts.imageBroll,
 		dedupScope: layOpts.dedupScope,
 		markWeight: layOpts.markWeight,
 		markLookup: layOpts.markLookup,
+		...(cutStarts ? { cutAlign: { ratio: cutRatio, starts: cutStarts } } : {}),
+		...(gapModeEff !== "none" ? { gapFill: gapModeEff } : {}),
 	});
+	// 对齐实测明示（人读；机读走 lay JSON 的 cut_align 条件键）
+	if (cutAlignStats) {
+		log.info(
+			`句界吸附：字幕句起点 ${cutAlignStats.starts_total} · 恰逢镜头切点 ${cutAlignStats.aligned}（实测 ${Math.round(cutAlignStats.ratio * 100)}% · 目标 ${Math.round(cutAlignStats.target * 100)}%——三成错开是拍板内的自然节奏，非缺陷）`,
+		);
+	}
 	// 关键词锚落位回报（add-keyword-anchored-broll）：逐锚明示，degraded MUST NOT 静默
 	if (anchorOutcomes.length) {
 		const cnt = { planned: 0, pinned: 0, degraded: 0 };
@@ -1722,6 +1808,7 @@ async function layIntoProject(
 		planPath: "split/broll-plan.json",
 		blackBed,
 		forceRelay,
+		...(gapModeEff !== "none" ? { gapFill: { mode: gapModeEff, planned: gapFills ?? [] } } : {}),
 	});
 
 	// ── ②-B 拒铺：存在「自产内容但已被你编辑」的轨且未开逃生门 → 一个字节都不动工程 ──
@@ -1757,9 +1844,11 @@ async function layIntoProject(
 		};
 	}
 
-	// 黑底 PNG 落盘：客户端能凭 id 现画重建，但剪映导出/云渲/第三方读的是盘上的文件，故必须真写字节。
-	// 落盘失败 → 撤掉黑轨重铺（宁可无黑底，也不留「.gtrk 说有、盘上没有」）。
-	if (summary.blackTrack !== null) {
+	// 黑底/黑片 PNG 落盘：客户端能凭 id 现画重建，但剪映导出/云渲/第三方读的是盘上的文件，故必须真写字节。
+	// 落盘失败 → 撤掉黑轨与主轨黑片填充重铺（宁可无黑底/留 gap，也不留「.gtrk 说有、盘上没有」）。
+	// gap 填充的 solid 兜底与黑底垫轨共用同一确定性 ex-solid 素材（adjust-main-track-gap-fill）。
+	const gapSolidUsed = (summary.gapFill?.fills ?? []).some((f) => f.kind === "solid");
+	if (summary.blackTrack !== null || gapSolidUsed) {
 		const canvas = gtrk.video_size as number[];
 		const spec = { hex: BLACK_BED_HEX, width: canvas[0]!, height: canvas[1]! };
 		const rel = solidRelPath(spec);
@@ -1773,7 +1862,11 @@ async function layIntoProject(
 				await rename(tmp, abs);
 			}
 		} catch (e) {
-			log.warn(`纯黑底 PNG 落盘失败（${rel}）：${(e as Error).message} —— 本次不铺黑底垫轨，候选轨照常。`);
+			log.warn(
+				`纯黑 PNG 落盘失败（${rel}）：${(e as Error).message} —— 本次不铺黑底垫轨${
+					gapSolidUsed ? "、主轨黑片填充一并回退（留 gap——客户端若开主轨磁吸请注意与配音错位的风险）" : ""
+				}，候选轨照常。`,
+			);
 			({ next, summary, warnings } = layBrollTracks({
 				gtrk,
 				plan,
@@ -1788,6 +1881,8 @@ async function layIntoProject(
 				blackBed: false,
 				// 重跑必须原样带上 forceRelay：漏传会让「已授权强剥」的这次退回拒铺态（半截行为）
 				forceRelay,
+				// PNG 无字节 ⇒ solid 兜底不可用 ⇒ gap 填充整体回退 none（fast 的 candidate 槽位同滤；
+				// 半套填充比已知现状更糟——磁吸风险以告警明示）
 			}));
 		}
 	}
@@ -1823,6 +1918,17 @@ async function layIntoProject(
 			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.local ? ` · 本地直引 ${dlStats.local}` : ""}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}${imageNote}）${bedNote}${keptNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
+	// 主轨 gap 填充明示（adjust-main-track-gap-fill）：生效才出（口播 / none / 不适用零噪音）
+	if (summary.gapFill) {
+		const gf = summary.gapFill;
+		const cnt = { candidate: 0, extend: 0, solid: 0 };
+		for (const f of gf.fills) cnt[f.kind]++;
+		log.info(
+			gf.fills.length
+				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend} · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
+				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填（主轨本就零 gap）`,
+		);
+	}
 	for (const w of warnings) log.warn(w);
 	if (dlStats.raw > 0) {
 		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
@@ -1855,6 +1961,17 @@ async function layIntoProject(
 						},
 					}
 				: {}),
+			// 对齐实测账面（adjust-shot-cut-sentence-align）：吸附激活才出现（关闭/降级时 lay JSON 逐字节零新键）
+			...(cutAlignStats
+				? {
+						cut_align: {
+							target: cutAlignStats.target,
+							starts_total: cutAlignStats.starts_total,
+							aligned: cutAlignStats.aligned,
+							ratio: cutAlignStats.ratio,
+						},
+					}
+				: {}),
 			// 关键词锚账面（add-keyword-anchored-broll）：plan 里有锚才出现（无锚时 lay JSON 逐字节不变）
 			...(anchorOutcomes.length
 				? {
@@ -1882,6 +1999,10 @@ async function layIntoProject(
 			// 音频驱动跳铺明示（adjust-black-bed-audio-driven-skip）：仅跳铺时出现该键——
 			// 口播 / --no-black-bed 路径的 lay JSON 逐字节零新键
 			...(summary.blackBedSkipped ? { blackBedSkipped: summary.blackBedSkipped } : {}),
+			// 主轨 gap 填充账面（adjust-main-track-gap-fill）：仅音频驱动形态且 mode ≠ none 时出现
+			...(summary.gapFill
+				? { gap_fill: { mode: summary.gapFill.mode, filled_sec: summary.gapFill.filledSec, fills: summary.gapFill.fills } }
+				: {}),
 			// 空洞是「告知」不是「阻断」：人读走上面的 warnings 通道单独成行，机读全量出这两个字段，
 			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。
 			blackBedHoleSec: summary.blackBedHoleSec,
