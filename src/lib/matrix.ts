@@ -1,7 +1,8 @@
 /**
  * gtrk matrix —— B-roll 双口检索纯逻辑（matrix-command / broll-plan-contract spec）。
  *
- * 身份路由（档位主/子类型次，不降级不缓存）：matrix_member_type === "internal" → /task/custom/search；
+ * 身份路由（档位主/子类型次，不降级不缓存）：matrix_member_type === "internal" → /task/custom/video_clip_search
+ * （原 /task/custom/search，网关 add-custom-search-alignment 改名，adjust-matrix-custom-route-alignment 切换）；
  * 其他任何值（external/缺失/未知新档位）→ /task/video_clip_search（与网关「仅 internal 放行」对齐）。
  * 栏目配置显式消费（成片层）：column_tag_ids **字符串数组原样**传（雪花 id >2^53，parse 成 number 必丢精度）。
  * 错误按 body.code 分支（403 与 6401/6402 均伪装成 HTTP 500；master 层参数错经网关代理一律 6401——双语义）。
@@ -398,7 +399,7 @@ export interface SearchRespData {
 export type Tier = "internal" | "external";
 
 export const ENDPOINTS: Record<Tier, string> = {
-	internal: "/task/custom/search",
+	internal: "/task/custom/video_clip_search",
 	external: "/task/video_clip_search",
 };
 
@@ -586,7 +587,7 @@ export function classifyApiError(code: number | undefined, msg?: string): string
 		case 6502:
 			return "鉴权失败——检查 API Key（gtrk init 重配）";
 		case 403:
-			return "非矩阵成员或身份可能已变更——矩阵成员口（custom/search）仅对 internal 档位开放";
+			return "非矩阵成员或身份可能已变更——矩阵成员口（custom/video_clip_search）仅对 internal 档位开放";
 		case 6401:
 			// 双语义：master 层参数错误经网关代理后也以 6401 呈现
 			return "检索上游故障，或检索参数/栏目配置非法（如 facets 值拼写）——稍后重试仍失败请检查栏目配置的 broll 块";
