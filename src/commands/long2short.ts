@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { loadConfig } from "../lib/config";
 import { download, type OralCutOutput } from "../lib/cloud";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
+import { uploadCached } from "../lib/upload-cache";
 import { copyJianyingDraft, resolveJianyingDraftDir } from "../lib/jianying";
 import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
 import { materializeResult, type MaterializeResult } from "../lib/materialize";
@@ -39,6 +40,12 @@ export interface Long2ShortOpts {
 	outputSize?: string;
 	formats: string;
 	jianyingDraftDir?: string;
+	/** 现成单语字幕文件（.srt/.ass）作转写来源：上传后经 subtitle_file_id 替代云端 ASR（与 stt 互斥）。 */
+	subtitleFile?: string;
+	/** 逐 clip 另产单语 .srt（outputs 并入 subtitle；落 clip{i}/srt/clip{i}.srt）。 */
+	subtitleOut?: boolean;
+	/** 字幕保留全部标点（缺省服务端 B 案：逗号句号→空格、其余保留）→ subtitle.strip_punctuation=false。 */
+	keepPunctuation?: boolean;
 	out?: string;
 	ffmpegPath?: string;
 	param: string[];
@@ -80,6 +87,7 @@ export function buildLong2ShortPayload(
 	inputAbs: string,
 	formats: string[],
 	draftTarget?: string,
+	subtitleFileId?: string,
 ): Record<string, unknown> {
 	if (!opts.language || !opts.language.trim()) {
 		throw new Error("--language 必填（源语种，如 zh-CN；取值以服务端支持列表为准）");
@@ -96,6 +104,10 @@ export function buildLong2ShortPayload(
 	if (opts.mainTopic) p.main_topic = opts.mainTopic;
 	if (opts.outputSize) p.output_size = opts.outputSize;
 	if (opts.jumpCut === false) p.jump_cut = false;
+	// 字幕三参（link-long2short-subtitle-input-cli）：来源 / 产出 / 标点各自独立可组合
+	if (subtitleFileId) p.subtitle_file_id = subtitleFileId;
+	if (opts.subtitleOut) p.outputs = ["project", "report", "subtitle"];
+	if (opts.keepPunctuation) p.subtitle = { strip_punctuation: false };
 	const duration: Record<string, unknown> = {};
 	if (opts.durationPref) duration.pref = opts.durationPref;
 	if (opts.maxClipSec != null) {
@@ -164,6 +176,9 @@ export function registerLong2Short(program: Command): void {
 		.option("--duration-pref <p>", "成片时长偏好（缺省服务端 auto；成片条数由内容语义决定、不可指定）")
 		.option("--max-clip-sec <n>", "单条成片时长安全上限（秒；缺省服务端默认）")
 		.option("--no-jump-cut", "关闭跳剪（默认开：片内去水词/冗余，只删不重排）")
+		.option("--subtitle-file <path>", "现成单语字幕文件（.srt/.ass）作转写来源，替代云端 ASR（切点=字幕行边界；双语/多层 .ass 会被拒）")
+		.option("--subtitle-out", "逐 clip 另产单语 .srt 字幕（按目标画布档位智能拆行，落 clip{i}/srt/）")
+		.option("--keep-punctuation", "字幕保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
 		.option("--output-size <s>", "输出画布 9:16|16:9|1:1 或自定义 WxH（缺省服务端 9:16）")
 		.option("-f, --formats <list>", "三方格式（逗号分隔，云端逐 clip 直产）", "gtrk,jianying,xml")
 		.option("--jianying-draft-dir <dir>", "剪映草稿根目录；传路径或 auto（默认读 gtrk init 配置 / 自动探测）")
@@ -216,15 +231,29 @@ async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void>
 	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
 	log.info(opts.splitScreen ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`);
 
+	// ②a 可选：现成字幕作转写来源（先于主上传独立上传；扩展名先在本地拦，省一次白上传）
+	let subtitleFileId: string | undefined;
+	if (opts.subtitleFile) {
+		const subAbs = resolve(opts.subtitleFile);
+		if (!existsSync(subAbs)) throw new Error(`字幕文件不存在：${subAbs}`);
+		const subExt = extname(subAbs).toLowerCase();
+		if (subExt !== ".srt" && subExt !== ".ass") {
+			throw new Error(`--subtitle-file 只接受单语 .srt/.ass，拿到「${subExt || "无扩展名"}」`);
+		}
+		const up = await uploadCached(cfg, subAbs, { force: opts.reupload });
+		subtitleFileId = up.fileId;
+		log.info(`${up.cached ? "命中上传缓存，复用" : "已上传"}字幕文件（转写来源，跳过云端 ASR）：${basename(subAbs)}`);
+	}
+
 	// ② 上传抽出物 → 提交（--language 必填在拼 payload 时前置校验，缺失零上传零提交）
-	const payloadProbe = buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget);
+	const payloadProbe = buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget, subtitleFileId);
 	void payloadProbe; // 干跑一遍触发必填/数值校验；真实 payload 由下方闭包按 file_id 重拼
 	log.step("② 上传抽出物到云端…");
 	const submitted = await uploadAndSubmitTask(
 		cfg,
 		artifact,
 		TASK_TYPE,
-		(fid) => buildLong2ShortPayload(fid, opts, geo, inputAbs, formats, draftTarget),
+		(fid) => buildLong2ShortPayload(fid, opts, geo, inputAbs, formats, draftTarget, subtitleFileId),
 		{
 			force: opts.reupload,
 			onUploaded: (uploaded) => {
