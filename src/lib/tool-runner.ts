@@ -130,7 +130,8 @@ export function validateToolInput(descriptor: ToolDescriptor, inputAbs: string |
 		const e = extname(inputAbs).toLowerCase();
 		if (!exts.includes(e)) {
 			throw new Error(
-				`${descriptor.name} 需要 ${spec.kind} 输入，但拿到「${e || "无扩展名"}」（支持：${exts.join(" ")}）`,
+				`${descriptor.name} 需要 ${spec.kind} 输入，但拿到「${e || "无扩展名"}」（支持：${exts.join(" ")}）` +
+					(spec.rejectHint ? `。${spec.rejectHint}` : ""),
 			);
 		}
 	}
