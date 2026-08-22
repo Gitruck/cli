@@ -1,6 +1,6 @@
 ---
 name: gtrk-matrix
-description: B-roll 检索铺轨编排手册——成片管线里第一个铺的车道（SOP ③ B-roll 底轨阶段的影视/本地素材腿），也是素材智能铺轨「乐高架构」的裁定层指引。消费拆分派单的 FILM_BROLL 队列（`dispatch.film_broll`），双口向量检索 + 下载 preview 代理，在工程里平铺 N 条候选 B-roll 轨，供用户在 opencut 里用轨道小眼睛切换对比、挑选/调整；确认后交棒同阶段的 AI 情景片段腿（`/gtrk-ai-drama`，车道非空时），三源落齐再进 ④ 全局抽帧检查构图、⑤ 才铺 MG。另支持**本地素材模式**（`matrix index` 建免切片索引、`--local` 本地检索铺轨，素材本体不上云）、**按需理解零件**（`matrix describe`：VLM 描述/标签/质量分/可用性信号，plan 注入或素材直理解）、**源时间窗检索**（`--source-window`，电影解说式逐段推进）与 **plan 可编辑通路**（agent 改 plan 后 `matrix lay` 消费）。当用户想「铺 B-roll / 检索素材 / 找空镜 / 给空镜配画面 / 填 B-roll 候选 / 单独搜个词补个空槽 / 用我自己的素材铺 B-roll / 给素材文件夹建索引 / 理解一下这些素材能不能用 / 把这堆素材剪成片 / 影视解说配画面」时使用本 skill。凡涉及把素材检索并铺进工程，优先用本 skill 驱动 gtrk CLI 的 `matrix` 命令族，别让用户自己去终端敲、也别手搓检索。
+description: B-roll 检索铺轨编排手册——成片管线里第一个铺的车道（SOP ③ B-roll 底轨阶段的影视/本地素材腿），也是素材智能铺轨「乐高架构」的裁定层指引。消费拆分派单的 FILM_BROLL 队列（`dispatch.film_broll`），双口向量检索 + 下载 preview 代理，在工程里平铺 N 条候选 B-roll 轨，供用户在 opencut 里用轨道小眼睛切换对比、挑选/调整；确认后交棒同阶段的 AI 情景片段腿（`/gtrk-ai-drama`，车道非空时），三源落齐再进 ④ 全局抽帧检查构图、⑤ 才铺 MG。另支持**本地素材模式**（`matrix index` 建免切片索引、`--local` 本地检索铺轨，素材本体不上云）、**按需理解零件**（`matrix describe`：VLM 描述/标签/质量分/可用性信号，plan 注入或素材直理解）、**源时间窗检索**（`--source-window`，电影解说式逐段推进）、**通用三态素材检索**（`matrix material`：clip/image/audio 下载向整条素材，BGM/配图主场，2×2 身份路由下半行）与 **plan 可编辑通路**（agent 改 plan 后 `matrix lay` 消费）。当用户想「铺 B-roll / 检索素材 / 找空镜 / 给空镜配画面 / 填 B-roll 候选 / 单独搜个词补个空槽 / 找 BGM / 搜配乐 / 搜张配图 / 用我自己的素材铺 B-roll / 给素材文件夹建索引 / 理解一下这些素材能不能用 / 把这堆素材剪成片 / 影视解说配画面」时使用本 skill。凡涉及把素材检索并铺进工程，优先用本 skill 驱动 gtrk CLI 的 `matrix` 命令族，别让用户自己去终端敲、也别手搓检索。
 ---
 
 # B-roll 检索铺轨编排手册（gtrk-matrix）
@@ -14,8 +14,8 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 ```
 裁定层（你）：按题材/素材形态/文稿有无/用户偏好，选配方或自创编排
 配方层（本手册 §配方库）：原子命令的调用序列——只是起手式，可变奏可自创
-原子层（gtrk CLI）：index / search(--local/--source-window) / describe / matrix(plan) / lay / tool image_move
-服务层（云端）：embed 端点 / material_describe / 检索双口 / image_move
+原子层（gtrk CLI）：index / search(--local/--source-window) / material / describe / matrix(plan) / lay / tool image_move
+服务层（云端）：embed 端点 / material_describe / 检索 2×2 四口（剪辑向×通用三态 × 公开×成员） / image_move
 ```
 
 1. **零件不裁定**：原子命令不猜用户意图，行为全由显式参数决定。`describe` 出的 `usable_flags`（水印/字幕/黑边/模糊）只是**给你的信号**——CLI 永远不会依据它自动剔除候选，剔不剔由你编辑 plan 裁定。
@@ -130,6 +130,33 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
 | 机读（你必带） | `--json` | 开关 · 关 | 人读日志转 stderr，stdout 只出结果 JSON |
 
+**通用三态素材检索零件**（`gtrk matrix material`，云端素材库、**下载向**出参）：
+
+与上面那张表的剪辑向检索是**并列的第二条线**，出参契约独立（下载向直链 vs 剪辑向 segments），别混用：要 B-roll 段落走 `matrix search`/派单主路，要整条素材（BGM、配图、整条原片）走本零件。
+
+> **2×2 路由矩阵**（身份自动判定，每次运行探一次、不降级不缓存）：
+>
+> | | external 公开口 | internal 矩阵成员口 |
+> |---|---|---|
+> | 剪辑向 | `/task/video_clip_search` | `/task/custom/video_clip_search` |
+> | 通用三态 | `/task/material_search` | `/task/custom/material_search` |
+>
+> 成员口搜**全库**（含非商用/概念素材）且 **0 积分**；公开口只含可商用实拍素材、**1 积分/次**。差距不是理论值：Artlist 全库 2397 条音乐 `is_copyright=0`，同一 query 公开口 0 条、成员口 5/5 命中。
+
+| 用户想要 | CLI 怎么传 | 取值 · 默认 | 说明 |
+|---|---|---|---|
+| 搜整条素材（BGM 主场） | `gtrk matrix material "<词>"` | 字符串 · — | 单条检索；`--out <file>` 落盘或缺省 stdout |
+| 指定素材形态 | `--scope <s>` | `clip` \| `image` \| `audio` · `audio` | 三态通用；clip 要的是**整条**原片直链（要段落用 `matrix search`） |
+| 只要可商用 | `--commercial-only` | 开关 · 关（搜全库） | 成员口传 `copyright_scope=commercial`；公开口本就只含可商用，该档位会**显式提示**而非静默忽略 |
+| 按成片时长挑 | `--min-duration <秒>` / `--max-duration <秒>` | 数字 · 不过滤 | 可单独或组合给；成员口透传服务端 `filters`，公开口无该入参（CLI 按结果 `duration` 本地过滤并提示）；负数 / 上界小于下界=参数错误 |
+| 多给几条候选 | `--top-k <n>` | 整数 · `5`（服务端上限 50） | BGM 推荐 3-5 首的量级 |
+| 去同质化 | `--diversity` | 开关 · 关 | 避免返回雷同素材 |
+| 机读（你必带） | `--json` | 开关 · 关 | `mode:"material"`，stdout 只出结果 JSON |
+
+出参逐条：`{id, note, duration, audio_type, tags, score, download_url, cover_url}`；`audio_type`（`pure` 纯音乐 / `song` 歌曲）与 `accompaniment_url`（song 类现成伴奏直链，零处理成本）**两档通用**；**只有 `is_copyright`（及 clip 的 `material_class`）是成员口独有**——公开口**没有**这个字段，零件如实缺省不伪造，你也别把「没有该字段」读成「不可商用」。`download_url` 带 24h 签名（过期重跑即重签）。
+
+**upsell 口径**：`--json` 出参可能带一个**独立顶层字段** `upsell`（人读模式则是末尾一行提示）——**当且仅当**公开口档位且结果不足（0 条或少于请求量一半）时才有，内容是「加入同和新媒体矩阵可免费搜全库」+ 链接。它**不在 `results` 里、不改写任何候选**：原样转述给用户，别把它当成一条素材。成员档恒无此字段。
+
 **本地素材零件**（`matrix index` / `--local`）：
 
 | 用户想要 | CLI 怎么传 | 取值 · 默认 | 说明 |
@@ -189,6 +216,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 |---|---|---|---|---|
 | embed（`matrix index` 抽帧图） | **0.1 积分/张** | **会话计量**：开跑前按抽帧计划预扣 `ceil(N×0.1)`，跑完按实际用量结算多退少不补（用量>0 最低 1 积分） | ✅ gc_member_type=internal 免会话零计费 | **文本 embed 免费**——`--local` 检索本身零积分 |
 | describe（`matrix describe`） | **1 积分/张** | **异步任务**（提交预扣→完成结算，失败自动退款），无会话 | ✅ 同上（豁免时 >20 张护栏免确认仅提示） | 缓存命中零调用零计费；>20 张确认护栏（`--yes` 跳过） |
+| 通用素材检索（`matrix material`） | 公开口 **1 积分/次**；矩阵成员口 **0 积分** | 同步返回按次计费（成员口 0 元也照留痕带 task_id） | 看的是 **matrix_member_type**（走哪个口就按哪个口计价，非 gc 豁免维度） | 云端检索双口；剪辑向 `matrix search` 同款口径（成员口 0 元、公开口 1 积分/次） |
 | image_move（图片运镜入轨） | **2 积分/张** | 按任务计费 | **internal 不豁免、照常计费**（已查证：走标准任务计费链路无 gc_member_type 豁免；豁免只存在于 embed/describe 两个原子口） | 工程内同图同参恒复用不再扣费；铺轨前有预估确认（`--yes` 跳过，拒绝=整轮中止零调用） |
 
 - 豁免看的是 **gc_member_type**（同合云内部成员），与检索档位 `matrix_member_type` 是两个维度——`memberType:"internal"`（检索口）≠ 计费豁免，别混。
