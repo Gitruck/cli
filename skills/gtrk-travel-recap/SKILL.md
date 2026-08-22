@@ -115,6 +115,8 @@ gtrk tool audio_tts_clone --text-file <稿.txt> --speaker <voice_id> --json
 
 # ⑤ 建工程（画幅按检查点①拍板；产物目录含 gtrk/transcript/audio）
 gtrk project init --tts-task <TTS任务id> --canvas 1920x1080 --no-open --json
+#   ↑ 产的 transcript 文稿缺省去逗号句号（成片字幕口径）；要**带标点的文稿版本**
+#     （回头改稿、转投他处、给人读）加 --keep-punctuation，工程结构与时码不受影响
 
 # ⑥ 拆分：先投影拿句表，再写拆分稿，再落地
 gtrk split --project "<工程目录>" --json          # 投影：拿 utterance id/时码/hash
