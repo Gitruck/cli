@@ -77,6 +77,7 @@ import {
 	probeGcMemberType,
 	probeMemberType,
 	searchOnce,
+	TOP_K_DEFAULT,
 	validatePlanForLay,
 	type BrollPlan,
 	type PlanAnchor,
@@ -90,6 +91,7 @@ import {
 	MATERIAL_SCOPE_DEFAULT,
 	MATERIAL_TOP_K_DEFAULT,
 	buildMaterialSearchBody,
+	decideLayUpsell,
 	decideMaterialUpsell,
 	filterMaterialsByDuration,
 	materialEndpointFor,
@@ -1125,6 +1127,14 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 	const declined = laid?.declined === true;
 	let resultCount = 0;
 	for (const b of effPlan.beats) for (const q of b.queries) resultCount += q.results?.length ?? 0;
+	// 卡脖子 upsell（extend-upsell-to-clip-search）：external 档留了空槽才提示——
+	// 空槽落到成片就是黑底空洞，是 B-roll 主链路上最直观的「素材池不够」信号。
+	// 独立顶层字段，lay 账面一字不改；internal 与本地模式恒不提示。
+	const layUpsell = decideLayUpsell(
+		plan.member_type,
+		Number((laySummary as { dedup?: { emptySlots?: number } } | undefined)?.dedup?.emptySlots ?? 0),
+	);
+
 	const result: MatrixResult = {
 		ok: refused === undefined && !declined,
 		mode: "lay",
@@ -1135,10 +1145,12 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 		...(laid?.imageBilling ? { image_move_billing: laid.imageBilling } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
 		...(laid?.integrity ? { integrity: laid.integrity } : {}),
+		...(layUpsell ? { upsell: layUpsell } : {}),
 		reprojection: reproj.summary,
 		counts: { beats: beats.length, queries: 0, results: resultCount, errors: 0 },
 	};
 	if (!result.ok) process.exitCode = 1;
+	if (layUpsell && !opts.json) log.warn(layUpsell.message);
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }
@@ -1357,6 +1369,12 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	const refused = laySummary?.refused === true ? (laySummary.keptEditedTracks as number[]) : undefined;
 	// 图片运镜计费确认被拒（add-matrix-local-image-broll D5）：整轮铺轨中止、工程零改动、零云端调用
 	const declined = laid?.declined === true;
+	// 卡脖子 upsell（extend-upsell-to-clip-search）：external 档留了空槽才提示——
+	// 空槽落到成片就是黑底空洞。独立顶层字段，lay 账面一字不改；internal 与本地模式恒不提示。
+	const layUpsell = decideLayUpsell(
+		ctx.memberType,
+		Number((laySummary as { dedup?: { emptySlots?: number } } | undefined)?.dedup?.emptySlots ?? 0),
+	);
 	const result: MatrixResult = {
 		ok: refused === undefined && !declined,
 		mode: "plan",
@@ -1371,10 +1389,12 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 		// 素材落盘自检（material-integrity-check）：只在**真写回过**的路径上出现。
 		// 字段缺席 = 「本次没查」，MUST NOT 用空结果冒充「查过且干净」；与 `gtrk mg` 同名同形。
 		...(laid?.integrity ? { integrity: laid.integrity } : {}),
+		...(layUpsell ? { upsell: layUpsell } : {}),
 		reprojection: reproj.summary,
 		counts: { beats: beats.length, queries: totalQueries, results: resultCount, errors: errCount },
 	};
 	if (!result.ok) process.exitCode = 1;
+	if (layUpsell && !opts.json) log.warn(layUpsell.message);
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }
@@ -2156,6 +2176,14 @@ async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promis
 	const results = data.results ?? [];
 	log.ok(`${results.length} 条候选（召回 ${data.recalled ?? "?"}）`);
 
+	// 卡脖子 upsell（extend-upsell-to-clip-search）：external 档搜不到才提示；
+	// 本地索引模式（memberType==="local"）恒不提示——本地素材与矩阵无关，提了驴唇不对马嘴。
+	// `--top-k` 缺省时按服务端默认值计，口径与 matrix material 完全一致。
+	const adhocUpsell =
+		ctx.memberType === "local"
+			? undefined
+			: decideMaterialUpsell(ctx.memberType, results.length, opts.topK ? Number(opts.topK) : TOP_K_DEFAULT);
+
 	const result: MatrixResult = {
 		ok: true,
 		mode: "search",
@@ -2163,6 +2191,8 @@ async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promis
 		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		results,
 		counts: { beats: 0, queries: 1, results: results.length, errors: 0 },
+		// 独立顶层字段：MUST NOT 混进 results（agent 拿 results 当候选消费）
+		...(adhocUpsell ? { upsell: adhocUpsell } : {}),
 	};
 	if (opts.out) {
 		const outPath = resolve(opts.out);
@@ -2177,6 +2207,7 @@ async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promis
 			log.info(`clip ${r.clip_id} · score ${r.score}${seg ? ` · 最佳段 ${seg.start}s–${seg.end}s（锚点 ${seg.best}s）` : ""}${where}${r.note ? ` · ${String(r.note).slice(0, 40)}` : ""}`);
 		}
 	}
+	if (adhocUpsell && !opts.json) log.warn(adhocUpsell.message);
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }

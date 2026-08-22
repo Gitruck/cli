@@ -47,11 +47,19 @@ export const MATERIAL_BILLING_NOTE: Record<Tier, string> = {
 };
 
 // ── 卡脖子 upsell（收敛触发，不污染候选）──────────────────────────────────
+// 定位：**检索族通用**（非 material 专属）——通用素材检索、ad-hoc 剪辑检索、B-roll 铺轨
+// 三个入口共用本节的文案正本与判定纯函数（extend-upsell-to-clip-search）。
+// 铁律：调用方一律把返回值挂**独立顶层字段**，MUST NOT 混进 results / lay 账面
+// （agent 会把 results 当候选素材消费，混入推广文案等于污染裁定输入）。
 
 export const MATRIX_UPSELL_URL = "https://ai-mcn.tv/#creator-network";
 
 export const MATRIX_UPSELL_MESSAGE =
 	`加入同和新媒体矩阵可免费搜全库（含非商用/概念素材）：${MATRIX_UPSELL_URL}`;
+
+/** 铺轨专用文案：空槽是用户肉眼可见的损失（成片上就是黑底空洞），把因果说破更有说服力。 */
+export const MATRIX_UPSELL_MESSAGE_LAY =
+	`部分槽位没铺上（素材池填不满，成片对应位置会留黑底）——加入同和新媒体矩阵可免费搜全库（含非商用/概念素材）：${MATRIX_UPSELL_URL}`;
 
 export interface MaterialUpsell {
 	message: string;
@@ -61,11 +69,27 @@ export interface MaterialUpsell {
 /**
  * upsell 判定（纯函数）：**当且仅当** external 档 且 结果条数不足（0 条，或少于请求量的一半）时出。
  * internal 档恒不出（成员已在全库，提示无意义）。返回 undefined = 不提示。
+ *
+ * 检索类入口通用（通用素材检索 / ad-hoc 剪辑检索）——两处口径必须一致，
+ * 否则同一个用户在两条线上会看到两套「什么算搜不到」的标准。
  */
 export function decideMaterialUpsell(tier: Tier, resultCount: number, topK: number): MaterialUpsell | undefined {
 	if (tier !== "external") return undefined;
 	if (resultCount === 0 || resultCount < topK / 2) {
 		return { message: MATRIX_UPSELL_MESSAGE, url: MATRIX_UPSELL_URL };
+	}
+	return undefined;
+}
+
+/**
+ * 铺轨 upsell 判定（纯函数）：external 档且**留了空槽**时出——空槽即「候选池填不满」，
+ * 是 B-roll 主链路上最直观的卡脖子信号（口播/长剪短/旅拍都走它）。铺满（emptySlots===0）
+ * 恒不提示，internal 档与本地索引模式恒不提示（本地素材与矩阵无关）。
+ */
+export function decideLayUpsell(tier: Tier | "local", emptySlots: number): MaterialUpsell | undefined {
+	if (tier !== "external") return undefined;
+	if (emptySlots > 0) {
+		return { message: MATRIX_UPSELL_MESSAGE_LAY, url: MATRIX_UPSELL_URL };
 	}
 	return undefined;
 }
