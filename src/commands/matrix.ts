@@ -86,6 +86,22 @@ import {
 } from "../lib/matrix";
 import type { PlanResult } from "../lib/matrix";
 import {
+	MATERIAL_BILLING_NOTE,
+	MATERIAL_SCOPE_DEFAULT,
+	MATERIAL_TOP_K_DEFAULT,
+	buildMaterialSearchBody,
+	decideMaterialUpsell,
+	filterMaterialsByDuration,
+	materialEndpointFor,
+	parseMaterialDurationBounds,
+	parseMaterialScope,
+	parseMaterialTopK,
+	searchMaterialOnce,
+	type MaterialResult,
+	type MaterialScope,
+	type MaterialUpsell,
+} from "../lib/matrix-material";
+import {
 	describeImages,
 	getNearestCachedMark,
 	resolveDescribeUrl,
@@ -173,6 +189,16 @@ interface MatrixOpts {
 	// ── 主轨 gap 填充（adjust-main-track-gap-fill）──
 	/** `--gap-fill <fast|solid|none>`：音频驱动工程主轨空洞填充（缺省 solid）。 */
 	gapFill?: string;
+	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
+	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
+	scope?: string;
+	/** `--commercial-only`：仅可商用（internal 档传 copyright_scope=commercial；external 公开口本就只含可商用）。 */
+	commercialOnly?: boolean;
+	/** `--min-duration <秒>` / `--max-duration <秒>`：时长区间（BGM 按成片时长挑）。 */
+	minDuration?: string;
+	maxDuration?: string;
+	/** `--diversity`：去同质化（避免返回雷同素材）。 */
+	diversity?: boolean;
 }
 
 /** 测试注入面（MUST NOT 真调云端）：图片运镜生成与计费确认；缺省 = 真实云链 / stdin 确认。
@@ -194,12 +220,12 @@ export function registerMatrix(program: Command): void {
 	program
 		.command("matrix [words...]")
 		.description(
-			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 检索；`matrix index --dirs <a,b>`=本地素材索引；`matrix describe`=按需理解零件（plan 注入/素材文件）；`matrix lay`=消费（agent 编辑后的）plan 文件铺轨",
+			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 剪辑向检索；`matrix material \"<query>\"`=通用三态素材检索（下载向，clip/image/audio，BGM 主场）；`matrix index --dirs <a,b>`=本地素材索引；`matrix describe`=按需理解零件（plan 注入/素材文件）；`matrix lay`=消费（agent 编辑后的）plan 文件铺轨",
 		)
 		.option("--project <dir>", "oralcut 产物目录（定位 split/dispatch.json 与产物落点）")
 		.option("--dispatch <path>", "显式指定 dispatch.json（非标准布局兜底）")
 		.option("--column <id>", "栏目配置 id（缺省取 config defaultColumn，再缺省内置默认栏目；仅云端模式）")
-		.option("--top-k <n>", "每 query 候选数上限（覆盖派单 shots 翻译；云端服务端上限 50）")
+		.option("--top-k <n>", `每 query 候选数上限（覆盖派单 shots 翻译；云端服务端上限 50；matrix material 缺省 ${MATERIAL_TOP_K_DEFAULT}）`)
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
 		.option("--dirs <a,b,...>", "本地素材文件夹（逗号分隔）——matrix index 的索引范围 / --local 的检索域")
@@ -254,6 +280,17 @@ export function registerMatrix(program: Command): void {
 			"候选轨已被你在客户端编辑过（改过 clip / 确认过原片）时仍强制剥离重铺：缺省会拒铺并保留那条轨，本开关是逃生门——" +
 				"会删除已确认原片的 broll-raw-* 素材登记，盘上已下载的原片文件就地成孤儿，且那条轨上的编辑不可恢复",
 		)
+		.option(
+			"--scope <s>",
+			`matrix material：素材形态 clip|image|audio（缺省 ${MATERIAL_SCOPE_DEFAULT}——本零件第一场景是 BGM；要剪辑向 segments 请用 matrix search）`,
+		)
+		.option(
+			"--commercial-only",
+			"matrix material：只搜可商用素材（矩阵成员口传 copyright_scope=commercial；缺省搜全库含非商用）——公开口本就只含可商用素材，该档位会显式提示",
+		)
+		.option("--min-duration <sec>", "matrix material：最短时长（秒）——BGM 按成片时长挑")
+		.option("--max-duration <sec>", "matrix material：最长时长（秒）")
+		.option("--diversity", "matrix material：去同质化，避免返回雷同素材")
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
@@ -261,17 +298,23 @@ export function registerMatrix(program: Command): void {
 		});
 }
 
-/** positional 解析结果：plan（派单消费）/ search（ad-hoc）/ index（本地索引）/ describe（理解零件）/ lay（消费编辑后 plan）。 */
+/** positional 解析结果：plan（派单消费）/ search（剪辑向 ad-hoc）/ material（通用三态素材）/ index（本地索引）/ describe（理解零件）/ lay（消费编辑后 plan）。 */
 export type MatrixPositional =
 	| { kind: "plan" }
 	| { kind: "search"; query: string }
+	| { kind: "material"; query: string }
 	| { kind: "index" }
 	| { kind: "describe" }
 	| { kind: "lay" };
 
-/** positional 解析：空 = 派单消费；`search <query…>`；`index`；`describe`；`lay`；其他开头 = 报错给正确用法。 */
+/** positional 解析：空 = 派单消费；`search <query…>`；`material <query…>`；`index`；`describe`；`lay`；其他开头 = 报错给正确用法。 */
 export function parseMatrixPositional(words: string[] | undefined): MatrixPositional {
 	if (!words || words.length === 0) return { kind: "plan" };
+	if (words[0] === "material") {
+		const q = words.slice(1).join(" ").trim();
+		if (!q) throw new Error('检索词不能为空：gtrk matrix material "<query>"');
+		return { kind: "material", query: q };
+	}
 	if (words[0] === "index") {
 		if (words.length > 1) throw new Error(`matrix index 不接受多余参数「${words.slice(1).join(" ")}」——用法：gtrk matrix index --dirs <a,b,...>`);
 		return { kind: "index" };
@@ -290,7 +333,7 @@ export function parseMatrixPositional(words: string[] | undefined): MatrixPositi
 	}
 	if (words[0] !== "search") {
 		throw new Error(
-			`未知子命令「${words[0]}」——ad-hoc 检索：gtrk matrix search "<query>"；派单消费：gtrk matrix --project <dir>；本地索引：gtrk matrix index --dirs <a,b,...>；理解零件：gtrk matrix describe；消费编辑后 plan：gtrk matrix lay`,
+			`未知子命令「${words[0]}」——ad-hoc 剪辑向检索：gtrk matrix search "<query>"；通用三态素材检索：gtrk matrix material "<query>"；派单消费：gtrk matrix --project <dir>；本地索引：gtrk matrix index --dirs <a,b,...>；理解零件：gtrk matrix describe；消费编辑后 plan：gtrk matrix lay`,
 		);
 	}
 	const query = words.slice(1).join(" ").trim();
@@ -313,13 +356,44 @@ export function parseDirsOption(raw: string | undefined): string[] {
  *   - --local 与仅云端语义参数（--column / --material-class）互斥；
  *   - 云端模式反向拒绝本地专属参数（--dirs / --scene-threshold / --rebuild / --source-window）；
  *   - describe：--plan xor --materials；lay：需 --project 或 --plan；
+ *   - material：仅云端通用素材线，拒本地/派单/剪辑向专属参数；
  *   - --plan / --materials / --source-window 出现在不适用模式一律参数错误。
  */
 export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void {
 	const dirs = parseDirsOption(opts.dirs);
+	// 通用素材检索专属参数（add-matrix-material-search）：出现在别的模式一律参数错误（不静默忽略）
+	if (pos.kind !== "material") {
+		const materialOnly: [unknown, string][] = [
+			[opts.scope, "--scope"],
+			[opts.commercialOnly, "--commercial-only"],
+			[opts.minDuration, "--min-duration"],
+			[opts.maxDuration, "--max-duration"],
+			[opts.diversity, "--diversity"],
+		];
+		for (const [v, flag] of materialOnly) {
+			if (v !== undefined && v !== false) {
+				throw new Error(`${flag} 仅用于 gtrk matrix material（通用三态素材检索），不做静默忽略`);
+			}
+		}
+	}
 	// --mark-weight 仅 lay 模式（spec 只对 matrix lay 立法；不做静默忽略）
 	if (opts.markWeight !== undefined && pos.kind !== "lay") {
 		throw new Error("--mark-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
+	}
+	if (pos.kind === "material") {
+		if (opts.local || dirs.length) {
+			throw new Error(
+				"matrix material 不接受 --local/--dirs：本零件是云端素材库检索（本地索引无音频语义面）；本地素材检索走 gtrk matrix --local --dirs",
+			);
+		}
+		if (opts.plan || opts.materials) throw new Error("--plan/--materials 仅用于 matrix describe / matrix lay（不做静默忽略）");
+		if (opts.sourceWindow !== undefined) throw new Error("--source-window 仅用于 --local 检索（不做静默忽略）");
+		if (opts.column) throw new Error("matrix material 不接受 --column：栏目检索偏好（column_tag_ids/facets）是剪辑向语义，通用素材口不适用");
+		if (opts.materialClass) {
+			throw new Error("matrix material 不接受 --material-class：素材形态用 --scope clip|image|audio；概念/实拍分层是剪辑向语义");
+		}
+		if (opts.project || opts.dispatch) throw new Error("matrix material 不接受 --project/--dispatch：本零件是 ad-hoc 检索，不消费派单也不铺轨");
+		return;
 	}
 	if (pos.kind === "describe") {
 		if (!!opts.plan === !!opts.materials) {
@@ -382,6 +456,25 @@ export interface MatrixResult {
 	[k: string]: unknown;
 }
 
+/** 通用三态素材检索出参（add-matrix-material-search；`mode:"material"`，与剪辑向契约独立）。
+ * `upsell` 是**独立顶层字段**：MUST NOT 混进 `results` 或改写任何候选（防污染 agent 的候选判断）。 */
+export interface MatrixMaterialResult {
+	ok: boolean;
+	mode: "material";
+	memberType: Tier;
+	endpoint: string;
+	scope: MaterialScope;
+	query: string;
+	top_k: number;
+	/** 计费口径（公开口 1 积分/次、custom 口 0 元）。 */
+	billing: string;
+	results: MaterialResult[];
+	counts: { results: number };
+	upsell?: MaterialUpsell;
+	outPath?: string;
+	[k: string]: unknown;
+}
+
 /** 计量会话账面（--json 机读；infra 计费细案第 6 条：0.1 积分/张、文本免费、同合云内部成员豁免、预扣-实结）。 */
 export interface MatrixIndexBilling {
 	/** 同合云内部成员（gc_member_type=internal）豁免：true 时零计费无会话（其余积分字段缺席）。 */
@@ -428,7 +521,7 @@ export async function runMatrix(
 	pos: MatrixPositional,
 	opts: MatrixOpts,
 	deps: MatrixRunDeps = {},
-): Promise<MatrixResult | MatrixIndexResult | MatrixDescribeResult> {
+): Promise<MatrixResult | MatrixIndexResult | MatrixDescribeResult | MatrixMaterialResult> {
 	if (opts.json) routeLogsToStderr();
 	assertModeOptions(pos, opts);
 	const cfg = loadConfig();
@@ -441,6 +534,9 @@ export async function runMatrix(
 
 	// ── 消费编辑后 plan（matrix lay：plan 可编辑通路的落轨腿）──
 	if (pos.kind === "lay") return withEmbedJsonGuard("lay", opts, () => runLayMode(opts, deps));
+
+	// ── 通用三态素材检索（matrix material：2×2 路由下半行，下载向出参）──
+	if (pos.kind === "material") return withEmbedJsonGuard("material", opts, () => runMaterialMode(pos.query, cfg, opts));
 
 	// ── 本地检索模式（--local）：跳过身份探针，不触任何云端检索端点 ──
 	if (opts.local) {
@@ -2081,6 +2177,106 @@ async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promis
 			log.info(`clip ${r.clip_id} · score ${r.score}${seg ? ` · 最佳段 ${seg.start}s–${seg.end}s（锚点 ${seg.best}s）` : ""}${where}${r.note ? ` · ${String(r.note).slice(0, 40)}` : ""}`);
 		}
 	}
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
+}
+
+// ── matrix material（通用三态素材检索：2×2 路由下半行）────────────────────
+
+/** 单条人读摘要（下载向：BGM 场景要能直接点开试听，故直链恒出）。 */
+function materialLines(r: MaterialResult, idx: number, scope: MaterialScope): string[] {
+	const title = typeof r.title === "string" && r.title ? r.title : typeof r.note === "string" && r.note ? r.note.slice(0, 40) : String(r.id);
+	const bits = [`${idx + 1}. ${title}`];
+	if (typeof r.author === "string" && r.author) bits.push(String(r.author));
+	if (typeof r.duration === "number") bits.push(`${Math.round(r.duration)}s`);
+	if (r.audio_type) bits.push(r.audio_type === "song" ? "song（歌曲）" : r.audio_type === "pure" ? "pure（纯音乐）" : String(r.audio_type));
+	if (typeof r.score === "number") bits.push(`score ${r.score}`);
+	// external 档没有 is_copyright 字段——如实不显示（MUST NOT 补假值当「不可商用」讲）
+	if (typeof r.is_copyright === "boolean") bits.push(r.is_copyright ? "可商用" : "非商用");
+	if (typeof r.material_class === "string") bits.push(r.material_class);
+	const lines = [`${bits.join(" · ")}（id ${r.id}）`];
+	if (typeof r.download_url === "string" && r.download_url) lines.push(`   ${scope === "audio" ? "试听/下载" : "下载"}：${r.download_url}`);
+	if (typeof r.accompaniment_url === "string" && r.accompaniment_url) lines.push(`   伴奏直链（off-vocal，song 类现成）：${r.accompaniment_url}`);
+	if (Array.isArray(r.tags) && r.tags.length) lines.push(`   标签：${r.tags.slice(0, 8).join(" / ")}`);
+	return lines;
+}
+
+/**
+ * 通用素材检索：身份路由（复用 probeMemberType→decideRoute 同一判据）→ 请求构建 → 归一 → upsell 判定。
+ * 与剪辑向 `matrix search` 两条线出参契约独立（下载向 vs segments），MUST NOT 互相影响。
+ */
+async function runMaterialMode(query: string, cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts): Promise<MatrixMaterialResult> {
+	// ① 参数（非法值参数错误拒绝，零网络零计费）
+	const scope = parseMaterialScope(opts.scope);
+	const topK = parseMaterialTopK(opts.topK);
+	const bounds = parseMaterialDurationBounds(opts.minDuration, opts.maxDuration);
+
+	// ② 身份探针（每次运行探一次，不缓存不降级——与剪辑向同一条获取路径）
+	log.step("▶ 身份探针（matrix_member_type）…");
+	const tier = await probeMemberType(cfg);
+	const endpoint = materialEndpointFor(tier);
+	log.info(
+		`档位：${tier}（${tier === "internal" ? "矩阵成员口" : "通用口"} ${endpoint}）· 计费 ${MATERIAL_BILLING_NOTE[tier]}` +
+			`${tier === "internal" ? "（搜全库，含非商用/概念素材）" : "（服务端固定只含可商用实拍素材）"}`,
+	);
+
+	// ③ 两档入参差异显式提示（公开口服务端入参白名单只有 scope/query/top_k/diversity，不静默忽略）
+	if (opts.commercialOnly && tier === "external") {
+		log.warn("--commercial-only 在公开口无区别：公开口本就只含可商用素材（服务端固定 is_copyright=true），该参数未随请求发出");
+	}
+	if (tier === "external" && (bounds.min !== undefined || bounds.max !== undefined)) {
+		log.warn("公开口入参不含时长过滤（服务端只收 scope/query/top_k/diversity）——--min-duration/--max-duration 改由 CLI 按结果 duration 本地过滤后再出参");
+	}
+
+	const body = buildMaterialSearchBody(tier, {
+		scope,
+		query,
+		topK,
+		diversity: opts.diversity === true,
+		commercialOnly: opts.commercialOnly === true,
+		...(bounds.min !== undefined ? { minDuration: bounds.min } : {}),
+		...(bounds.max !== undefined ? { maxDuration: bounds.max } : {}),
+	});
+	const range =
+		bounds.min !== undefined || bounds.max !== undefined ? ` · 时长 ${bounds.min ?? 0}s–${bounds.max !== undefined ? `${bounds.max}s` : "不限"}` : "";
+	log.step(`▶ 通用素材检索「${query}」（scope=${scope} · top_k=${topK}${range}${opts.commercialOnly ? " · 仅可商用" : ""}）…`);
+
+	const data = await searchMaterialOnce(cfg, tier, body);
+	// 公开口没有 filters 入参 → 本地按 duration 兜底过滤（已在上面显式提示，不静默）
+	const results = tier === "external" ? filterMaterialsByDuration(data.results, bounds) : data.results;
+	log.ok(`${results.length} 条候选${typeof data.total === "number" && data.total !== results.length ? `（服务端返回 ${data.total}）` : ""}`);
+
+	// ④ upsell（仅 external 档 且 结果不足；独立字段不进 results）
+	const upsell = decideMaterialUpsell(tier, results.length, topK);
+
+	const result: MatrixMaterialResult = {
+		ok: true,
+		mode: "material",
+		memberType: tier,
+		endpoint,
+		scope,
+		query,
+		top_k: topK,
+		billing: MATERIAL_BILLING_NOTE[tier],
+		results,
+		counts: { results: results.length },
+		...(data.task_id ? { task_id: data.task_id } : {}),
+		...(upsell ? { upsell } : {}),
+	};
+
+	if (opts.out) {
+		const outPath = resolve(opts.out);
+		await writeFile(
+			outPath,
+			JSON.stringify({ query, scope, top_k: topK, member_type: tier, results, ...(upsell ? { upsell } : {}) }, null, 2),
+		);
+		log.ok(`结果已落盘：${outPath}`);
+		result.outPath = outPath;
+	} else if (!opts.json) {
+		for (const [i, r] of results.entries()) for (const line of materialLines(r, i, scope)) log.info(line);
+	}
+	// 人类可读一行（--json 下承载于独立顶层字段，不重复打扰 stdout）
+	if (upsell) log.warn(upsell.message);
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }

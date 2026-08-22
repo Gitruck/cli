@@ -33,7 +33,7 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 ```
 ① 理解        transcript 原片（二创）/ matrix index + describe（原创）
 ② 写稿        三段式规约（见 §三）→ 解说稿 + 标题 + HashTag
-③ 检查点①     【必停】稿件确认 · 画幅 · 音色 · BGM · 字幕样式（§四）
+③ 检查点①     【必停】稿件确认 · 画幅 · 音色 · BGM（gtrk matrix material --scope audio）· 字幕样式（§四）
 ④ 配音        gtrk tool audio_tts_clone（≤5000 字，句级时码直出）
 ⑤ 建工程      gtrk project init --tts-task <id> --canvas <WxH>
 ⑥ 拆分派单    gtrk split 投影 → 你写拆分稿（含字卡 overlay aux）→ split 落地
@@ -97,7 +97,8 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 3. **TTS 音色**：拉 catalog（`GET {apiBase}/task/tts/voices`，免鉴权）按内容调性挑 2-4 个候选，**每个附试听链接**（catalog 的 audition_url 字段，api.ai-mcn.tv:9000 静态直链）——用户在对话框里直接点开听。internal 标注的音色注明「仅内部成员」。也可按用户描述语义挑（「要个温柔女声」）；
 4. **BGM 处置（双来源）**：
    - 用户有本地音乐 → 询问是否 `gtrk tool audio_separation` 伴奏分离后取伴奏（缺省建议分离——TTS 配音不与歌曲人声打架）；
-   - 用户未提供 → **搜同和素材矩阵**（`POST {apiBase}/task/material_search`，`{scope:"audio", query:"<按稿件情绪+地理文化写>", top_k:4, diversity:true}`，1 积分/次）推荐 3-5 首、**每首附试听链接**（返回的 download_url）；`audio_type:"pure"` 纯音乐直接用，`"song"` 直接取返回的 `accompaniment_url` 现成伴奏（零处理成本）；注意曲长 vs 成片时长（audio lay 不循环，短曲只垫前段）；
+   - 用户未提供 → **搜同和素材矩阵**：`gtrk matrix material "<按稿件情绪+地理文化写的检索词>" --scope audio --top-k 5 --diversity --json`（按成片时长挑可加 `--min-duration <秒>`）。身份路由（矩阵成员搜全库 / 非成员搜公开库）、版权范围、计费口径全由零件持有，你只管写好检索词并从结果里挑；出参 `results[]` 直接用，`upsell` 是独立顶层字段（非成员且没搜够时才有，原样转述给用户即可，**不要**把它当候选）。
+     推荐 3-5 首、**每首附试听链接**（结果的 `download_url`）；`audio_type:"pure"` 纯音乐直接用，`"song"` 直接取 `accompaniment_url` 现成伴奏（零处理成本，两档都有）；注意曲长 vs 成片时长（`duration` 字段，audio lay 不循环，短曲只垫前段）；
    - **试听链接义务（MUST）**：音色与 BGM 的推荐没有试听链接=未完成推荐。
 5. **字幕样式**：7 种样式（default/outline/cinema_yellow/immersive_box/wide_spacing/deep_shadow/boxed）× 11 色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金）挑选；**用户没选就用 default+雅黑**（不追问不阻塞）。拍板值在 ⑪ `gtrk subtitle lay` 落地，客户端里仍可整轨换样式（悔棋通道）。
 
@@ -109,6 +110,8 @@ gtrk transcript "<原片>" --lang <原片语言 en-US/zh-CN> --json
 # 原创场景改跑：gtrk matrix index --dirs "<素材夹>" && gtrk matrix describe --materials ...
 
 # ②③ 写稿（你执笔，§三规约）→ 检查点①拍板
+#   BGM 候选（用户没自带音乐时，检查点①之前搜好一起拍板；试听链接=结果的 download_url）
+gtrk matrix material "<情绪+地理文化检索词>" --scope audio --top-k 5 --diversity --json
 
 # ④ 配音（音色 code 用 catalog 的 voice_id；稿子存 txt 传 --text-file）
 gtrk tool audio_tts_clone --text-file <稿.txt> --speaker <voice_id> --json
@@ -194,7 +197,7 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 | matrix describe | 1 积分/张 | 内部成员豁免；同帧缓存永不重复计费 |
 | TTS 配音 | 按成本档 1-12 积分/计费分钟（240 字/分钟折算） | 音色 catalog 可查档位；同参重合成走缓存不重复扣费 |
 | project init / split / audio lay / subtitle lay | 0 积分 | producer 同步口 0 元留痕；beat 分析（--beat-align）走 audio_music_analyze 计费 |
-| BGM 矩阵搜索 | 1 积分/次 | |
+| BGM 矩阵搜索（`gtrk matrix material`） | 公开口 1 积分/次；矩阵成员口 0 积分 | 档位由零件自动路由，命令输出如实报口径与计费 |
 | image_move 图片运镜 | 2 积分/张 | 素材夹含图片且被选中上轨时 |
 
 起跑前把预估总消耗报给用户（检查点①一并确认），结束报实耗。
