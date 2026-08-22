@@ -415,7 +415,8 @@ export function decideRoute(memberType: unknown): { tier: Tier; endpoint: string
 const WIDE_RECALL_FACTOR = 3;
 const TOP_K_MIN = 10;
 const TOP_K_MAX = 50; // 服务端硬上限（超 50 静默钳位）
-const TOP_K_DEFAULT = 10;
+/** 未显式指定 `--top-k` 时的候选数缺省值（导出供 ad-hoc upsell 判定用同一正本，防两处各写一个 10）。 */
+export const TOP_K_DEFAULT = 10;
 
 function asPositiveInt(v: unknown): number | undefined {
 	return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
