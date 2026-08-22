@@ -12,6 +12,10 @@
  *     `gtrk transcript <音频> --json` 产出）；CLI 先走既有上传基建（uploadCached，6004 共享恢复口径）
  *     归一到 {file_id, utterances, duration} 形态；落地时 materials[].path 改写为本地音频绝对路径。
  *
+ * 服务端产的 transcript 已按画布档位拆成可直接落轨的字幕行，行文本**缺省去掉中英逗号句号**
+ * （2026-08-22 全线统一口径）；`--keep-punctuation` 逐字保留标点（要带标点的文稿版本用它），
+ * 语义与 `gtrk subtitle lay` / `gtrk long2short` 的同名 flag 一致，且只影响文稿文本、不动工程结构。
+ *
  * 产物目录对齐 oralcut 惯例：`<名>-video-project-<YYMMDD-HHMMSS>/` 含 gtrk/project.gtrk +
  * transcript/transcript.json + result.json；完成话术含客户端 openHint 并默认自动打开。
  * 计费：本接口 0 积分不计费（infra 契约）。
@@ -163,6 +167,8 @@ export interface ProjectInitOpts {
 	canvas?: string;
 	out?: string;
 	reupload?: boolean;
+	/** 字幕行保留全部标点（缺省服务端 B 案：逗号句号→空格、其余保留）→ strip_punctuation=false。 */
+	keepPunctuation?: boolean;
 	open?: boolean;
 	json?: boolean;
 }
@@ -248,6 +254,12 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 	}
 	const canvas = parseCanvas(opts.canvas);
 
+	// 字幕行标点口径（--keep-punctuation，语义与 `gtrk subtitle lay` / `gtrk long2short` 同名 flag 一致）：
+	// 给了才传 `strip_punctuation: false`，**不给不加键**——payload 对老服务端逐字节向后兼容，
+	// 缺省口径由服务端持有（2026-08-22 全线统一：缺省去中英逗号句号、其余标点保留）。
+	// 只影响 transcript 的字幕行文本；.gtrk 工程结构、时码与行数不受影响。
+	const punctuation: Record<string, unknown> = opts.keepPunctuation ? { strip_punctuation: false } : {};
+
 	// 兜底路纯本地前置：文件存在性 + 音频白名单 + transcript 归一（失败零网络零副作用）
 	let audioAbs: string | undefined;
 	let submitBody: { utterances: SubmitUtterance[]; duration: number } | undefined;
@@ -287,19 +299,20 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 
 	log.step(`▶ 音频驱动工程起盘：${hasTts ? `TTS 任务 ${opts.ttsTask}` : basename(audioAbs!)}（画布 ${canvas[0]}x${canvas[1]}）`);
 	log.info("工程 JSON 由服务端 producer 同步口生成（emit 链单一权威源）；本接口 0 积分不计费。");
+	if (opts.keepPunctuation) log.info("保留原始标点（--keep-punctuation）：transcript 文稿逐字保留逗号句号");
 
 	// ── 调服务端同步口 ──
 	let resp: AudioProjectStructResp;
 	let fileId: string | undefined;
 	if (hasTts) {
 		log.step("① 服务端拼装工程（TTS 产物 segments 直出，零 ASR）…");
-		resp = await callAudioProjectStruct(cfg, { tts_task_id: opts.ttsTask!.trim(), canvas }, deps.fetchFn);
+		resp = await callAudioProjectStruct(cfg, { tts_task_id: opts.ttsTask!.trim(), canvas, ...punctuation }, deps.fetchFn);
 	} else {
 		log.step("① 上传配音并请求服务端拼装工程…");
 		const got = await uploadAndCall(
 			cfg,
 			audioAbs!,
-			(fid) => ({ file_id: fid, utterances: submitBody!.utterances, duration: submitBody!.duration, canvas }),
+			(fid) => ({ file_id: fid, utterances: submitBody!.utterances, duration: submitBody!.duration, canvas, ...punctuation }),
 			{ force: opts.reupload },
 			deps,
 		);
@@ -393,6 +406,7 @@ export function registerProject(program: Command): void {
 		.option("--canvas <WxH>", "画布尺寸（默认 1080x1920）")
 		.option("-o, --out <dir>", "产物目录（缺省 = <基目录>/<名>-video-project-<YYMMDD-HHMMSS>）")
 		.option("--reupload", "兜底路：强制重新上传配音音频，忽略本地上传缓存")
+		.option("--keep-punctuation", "transcript 文稿保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
 		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: ProjectInitOpts) => {
