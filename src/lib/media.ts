@@ -49,6 +49,36 @@ export function probeGeometry(inputAbs: string, ffmpegPath?: string): Geometry {
 }
 
 /** 探任意媒体文件时长（秒），用于抽出物一致性自检。 */
+/**
+ * 探音频声道布局（`stereo` / `mono` / …），拿不到返回 undefined。
+ *
+ * 用途：写音频 material 的 `audio_channel` 字段——客户端 `materialMediaKind` 的音频判据是
+ * 「无 video_size ∧ 有 audio_channel」的合取，漏写该字段会让音频素材在素材库里显示成视频
+ * （2026-08-22 真机实锤：BGM mp3 显示为「视频 4:59」）。后端 `video_project_struct` 写出的
+ * 音频 material 一直带此字段，CLI 自产音轨与它对齐。
+ */
+export function probeAudioChannel(path: string, ffmpegPath?: string): string | undefined {
+	// 探不到就返回 undefined（调用方不写该键）：它只服务素材库的图标/类型呈现，
+	// **MUST NOT 因为探测失败而阻断音频上轨**——时长探测已经在上游把「这是不是有效音频」判过了。
+	let info: { streams?: Array<Record<string, unknown>> };
+	try {
+		const { ffprobe } = requireFfmpeg(ffmpegPath);
+		info = ffprobeJson(ffprobe, [
+			"-v", "error", "-select_streams", "a:0",
+			"-show_entries", "stream=channel_layout,channels", "-of", "json", path,
+		]) as { streams?: Array<Record<string, unknown>> };
+	} catch {
+		return undefined;
+	}
+	const st = info.streams?.[0];
+	if (!st) return undefined;
+	const layout = typeof st.channel_layout === "string" ? st.channel_layout.trim() : "";
+	if (layout) return layout;
+	const n = Number(st.channels);
+	if (n === 1) return "mono";
+	if (n === 2) return "stereo";
+	return n > 0 ? String(n) : undefined;
+}
 export function probeDuration(path: string, ffmpegPath?: string): number {
 	const { ffprobe } = requireFfmpeg(ffmpegPath);
 	const info = ffprobeJson(ffprobe, [

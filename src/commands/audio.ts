@@ -19,7 +19,7 @@ import { basename, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic } from "../lib/gtrk-writeback";
-import { probeDuration } from "../lib/media";
+import { probeDuration, probeAudioChannel } from "../lib/media";
 import { defaultExtsFor } from "../lib/tool-descriptors";
 import { analyzeBgm } from "../lib/mad/cloud-beat";
 import type { BeatAnalysis } from "../lib/mad/beat";
@@ -107,6 +107,7 @@ export interface AudioLayOpts {
 /** 测试注入面（MUST NOT 真调云端）；缺省 = ffprobe / 真云端节拍分析。 */
 export interface AudioLayDeps {
 	probeDur?: (path: string) => number;
+	probeChannel?: (path: string) => string | undefined;
 	loadCfg?: () => CloudConfig;
 	analyze?: (cfg: CloudConfig, bgmAbs: string) => Promise<BeatAnalysis>;
 }
@@ -172,6 +173,7 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	assertGtrkV1(gtrk);
 
 	const probeDur = deps.probeDur ?? ((p: string) => probeDuration(p));
+	const probeChannel = deps.probeChannel ?? ((p: string) => probeAudioChannel(p));
 	const audioDur = probeDur(audioAbs);
 	if (!(audioDur > 0)) throw new Error(`探测不到有效音频时长：${audioAbs}`);
 	log.step(`▶ 音频上轨：${basename(audioAbs)}（${audioDur.toFixed(1)}s · 音量 ${volume}${opts.beatAlign ? " · beat 对齐" : ""}）`);
@@ -270,7 +272,16 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 		volume,
 	};
 	const newTrack: LooseTrack = { track_index: trackIndex, muted: false, track_timeline: [clip] };
-	const newMaterial: LooseMaterial = { id: materialId, path: audioAbs, duration: r3(audioDur) };
+	// audio_channel：客户端 materialMediaKind 的音频判据是「无 video_size ∧ 有 audio_channel」的合取，
+	// 漏写会让音频素材在素材库里显示成视频（2026-08-22 真机实锤 BGM mp3 显示「视频 4:59」）。
+	// 与后端 video_project_struct 写出的音频 material 形态对齐；探不到就不写键（不塞假值）。
+	const audioChannel = probeChannel(audioAbs);
+	const newMaterial: LooseMaterial = {
+		id: materialId,
+		path: audioAbs,
+		duration: r3(audioDur),
+		...(audioChannel ? { audio_channel: audioChannel } : {}),
+	};
 
 	const next: Record<string, unknown> = {
 		...gtrk,
