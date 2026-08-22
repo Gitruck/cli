@@ -17,7 +17,20 @@ import { renderProReport } from "./clip-brief";
 // ---------------------------------------------------------------- 类型
 
 export type ToolKind = "cloud" | "local";
-export type ToolInputKind = "image" | "video" | "audio" | "images" | "videos" | "directory" | "none";
+/**
+ * `subtitle` 是族内**首个文本类文件输入**（add-tool-subtitle-translate）。
+ * 单列而非复用 `video` + `exts` 覆盖：`src/commands/tool.ts` 的 `tool list` 直接渲 `input.kind`，
+ * 挂 `video` 会让一个吃 `.ass` 的工具在清单里标着「video」——为一行显示说谎，不值。
+ */
+export type ToolInputKind =
+	| "image"
+	| "video"
+	| "audio"
+	| "subtitle"
+	| "images"
+	| "videos"
+	| "directory"
+	| "none";
 
 /** 多文件扁平输入类别（add-tool-multifile-images 建 images、add-tool-video-split-screen 推广 videos）。 */
 export const MULTI_INPUT_KINDS: ReadonlySet<ToolInputKind> = new Set(["images", "videos"]);
@@ -35,6 +48,12 @@ export interface ToolInputSpec {
 	exts?: string[];
 	/** 视频类硬上限（秒）：上传前以 ffprobe 探测，超限直接拒绝（不上传不提交）。 */
 	maxDurationSec?: number;
+	/**
+	 * 扩展名不匹配时追加的一句指引（add-tool-subtitle-translate）。
+	 * 用于「用户多半是走错了工具」的场景——只说「不支持这个后缀」等于让人自己猜该用哪个。
+	 * 保持一句话、指向具体工具名。
+	 */
+	rejectHint?: string;
 }
 
 /** buildPayload / preprocess / mapOutputs 的执行上下文。 */
@@ -140,6 +159,12 @@ export interface ToolDescriptor {
 const IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".heic", ".heif", ".avif"];
 const VIDEO_EXTS = [".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".m2ts"];
 const AUDIO_EXTS = [".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"];
+/**
+ * 字幕文件（add-tool-subtitle-translate）。与服务端 `input_ext='["sub_ext"]'` 同集：
+ * `utils/base/__init__.py` 的 `sub_ext = [ass_ext, srt_ext]`。服务端按它机器执行边界，
+ * 提交音视频会拿到 TYPE_NOT_MATCH——本地这份白名单只是提前一步给出可读报错。
+ */
+const SUBTITLE_EXTS = [".ass", ".srt"];
 
 /** 输入本身是否已是音频文件（音频输入无画面可探、也不必再抽一遍）。 */
 const isAudioFile = (p: string): boolean => AUDIO_EXTS.includes(extname(p).toLowerCase());
@@ -166,6 +191,7 @@ export function defaultExtsFor(kind: ToolInputKind): string[] | undefined {
 	if (kind === "image" || kind === "images") return IMAGE_EXTS;
 	if (kind === "video" || kind === "videos") return VIDEO_EXTS;
 	if (kind === "audio") return AUDIO_EXTS;
+	if (kind === "subtitle") return SUBTITLE_EXTS;
 	return undefined; // directory / none 不做扩展名校验
 }
 
@@ -1212,7 +1238,7 @@ const imageToLive: ToolDescriptor = {
 	},
 };
 
-// ---------------------------------------------------------------- 智能视频字幕（add-tool-video-ai-subtitle）
+// ---------------------------------------------------------------- 智能字幕识别（add-tool-video-ai-subtitle）
 
 /** 服务端 subtitle_type 样式枚举（7 种小稳集，bundle 校验；--param 可绕过作前向兼容逃生）。 */
 const AI_SUBTITLE_TYPES = ["default", "outline", "cinema_yellow", "immersive_box", "wide_spacing", "deep_shadow", "boxed"];
@@ -1220,14 +1246,18 @@ const AI_SUBTITLE_TYPES = ["default", "outline", "cinema_yellow", "immersive_box
 const AI_SUBTITLE_COLORS = ["雅黑", "淡绿", "森林绿", "湖蓝", "道奇蓝", "钢蓝", "浅粉红", "深橙", "珊瑚橙", "橙红", "土豪金"];
 
 /**
- * video_ai_subtitle —— 智能视频字幕。一进多出的混合能力：
+ * video_ai_subtitle —— 智能字幕识别（原名「智能视频字幕」）。一进多出的混合能力：
  * mapOutputs 收 .ass 字幕（恒有）+ 可选烧录/去字幕 .mp4；mapResult 落 summary + asr 结构。
  * --language 必填（服务端校验支持列表）；内部编排较重，pollTimeoutMs 放宽 4h。
  */
 const videoAiSubtitle: ToolDescriptor = {
 	name: "video_ai_subtitle",
-	title: "智能视频字幕",
-	description: "为视频（或音频）智能生成字幕，可选双语翻译、烧录进视频、去除原字幕；另产 LLM 摘要与字级时间轴。",
+	// 展示名 2026-08-21 由「智能视频字幕」改（服务端 id 17 同步改名）。
+	// name / taskType / priceKey / flag 一律不动——那个 key 是四条路径的物理标识，
+	// 且有外部付费客户在打 /task/video_ai_subtitle。
+	title: "智能字幕识别",
+	description:
+		"为视频（或音频）智能生成字幕，可选双语翻译、烧录进视频、去除原字幕；另产 LLM 摘要与字级时间轴。翻译已有字幕文件请用 subtitle_translate。",
 	kind: "cloud",
 	input: { kind: "video", exts: [...PUBLIC_VIDEO_EXTS, ...AUDIO_EXTS] },
 	priceKey: "video_ai_subtitle",
@@ -1337,6 +1367,150 @@ const videoAiSubtitle: ToolDescriptor = {
 	},
 	mapResult(out) {
 		return { summary: typeof out.summary === "string" ? out.summary : "", asr: out.asr ?? null };
+	},
+};
+
+// ---------------------------------------------------------------- 智能字幕翻译（add-tool-subtitle-translate）
+
+/** 产物格式。缺省跟随输入（.ass 进 .ass 出、.srt 进 .srt 出，由服务端决定）。 */
+const SUBTITLE_OUTPUT_FORMATS = ["ass", "srt"];
+/** 翻译粒度。resegment 译文更通顺但改时码；keep 时码逐条对齐输入。 */
+const SUBTITLE_LINE_MODES = ["resegment", "keep"];
+
+/**
+ * subtitle_translate —— 智能字幕翻译（服务端 id 65）。
+ *
+ * 与 `video_ai_subtitle` 的分界是**输入形态**不是功能名：17 是全仓唯一的「音视频 → 字幕」通道
+ * （含 ASR），本条是唯一的「字幕 → 字幕」通道（不含 ASR）。手上已有校对好的字幕想换语种时用它——
+ * 不必重跑 ASR，也不会覆盖掉已有校对。
+ *
+ * 三条刻意不做：
+ * - **不内置语种白名单**：服务端 `ai_subtitle_support_language_list` 是唯一正本，客户端抄一份必漂。
+ * - **不内置「srt 输出 + 样式」互斥判据**：服务端已在扣费前拒且文案可操作；而该判据判的是
+ *   **输出格式不是输入格式**（`.srt` 进 + `.ass` 出 + 样式完全合法），抄错会误杀这个合法组合。
+ * - **无 preprocess**：输入是文本文件，没有可抽取/可代理的东西，原文件直传。
+ */
+const subtitleTranslate: ToolDescriptor = {
+	name: "subtitle_translate",
+	title: "智能字幕翻译",
+	description:
+		"把已有字幕文件（.ass / .srt）翻译成另一种语言，可选套用字幕样式与颜色、输出双语。不含语音识别——要从音视频生成字幕请用 video_ai_subtitle。",
+	kind: "cloud",
+	input: {
+		kind: "subtitle",
+		rejectHint: "本工具只吃字幕文件；要从音视频生成字幕请用 gtrk tool video_ai_subtitle",
+	},
+	priceKey: "subtitle_translate",
+	outputHint: "译文字幕 .ass 或 .srt + 条数统计与降级标记",
+	enabled: true,
+	taskType: "subtitle_translate",
+	// 墙钟几乎全在等 LLM 批量翻译，与条目数线性相关；服务端闸是 2000 条 / 8 万字符。
+	// 不含 ASR/烧录那类重活，故不必照抄 video_ai_subtitle 的 4h。
+	pollTimeoutMs: 60 * 60 * 1000,
+	options: [
+		{ flag: "--language <code>", desc: "源语种代码（必填；取值由服务端支持列表校验）" },
+		{ flag: "--translate-language <code>", desc: "译文目标语种代码（必填）" },
+		{ flag: "--output-format <fmt>", desc: `产物格式 ${SUBTITLE_OUTPUT_FORMATS.join("/")}（未传则跟随输入）` },
+		{
+			flag: "--line-mode <mode>",
+			desc: `翻译粒度 ${SUBTITLE_LINE_MODES.join("/")}（缺省 resegment：先合并回自然句再翻，更通顺但行数与时码会变；keep 严格逐行、时码与输入逐条一致）`,
+		},
+		{ flag: "--bilingual", desc: "输出双语字幕（原文与译文同框；仅 ass 输出有效）" },
+		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（仅 ass 输出有效）` },
+		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（仅 ass 输出有效）` },
+		{
+			flag: "--canvas <WxH>",
+			desc: "画布几何，决定译文按哪一档折行（未传则：.ass 用文件里的 PlayRes，.srt 无从推断、服务端按横屏 1920x1080）。竖屏务必显式传",
+		},
+	],
+	buildPayload(fileId, ctx) {
+		// 双语种必填：在**提交前**报错，别让用户传完文件才失败（照 videoAiSubtitle 对 --language 的既有写法）
+		const language = ctx.opts.language == null ? "" : String(ctx.opts.language).trim();
+		const translateLanguage =
+			ctx.opts.translateLanguage == null ? "" : String(ctx.opts.translateLanguage).trim();
+		if (!language || !translateLanguage) {
+			throw new Error(
+				"--language 与 --translate-language 都必填：本工具是「字幕 → 字幕」翻译，源语种与目标语种缺一不可" +
+					"（具体取值见云端 API 文档 / 服务端支持列表）",
+			);
+		}
+		const payload: Record<string, unknown> = {
+			file_id: fileId,
+			language,
+			translate_language: translateLanguage,
+		};
+
+		if (ctx.opts.outputFormat != null) {
+			const v = String(ctx.opts.outputFormat).trim().toLowerCase();
+			if (!SUBTITLE_OUTPUT_FORMATS.includes(v)) {
+				throw new Error(`--output-format 只支持 ${SUBTITLE_OUTPUT_FORMATS.join("、")}`);
+			}
+			payload.output_format = v;
+		}
+		if (ctx.opts.lineMode != null) {
+			const v = String(ctx.opts.lineMode).trim().toLowerCase();
+			if (!SUBTITLE_LINE_MODES.includes(v)) {
+				throw new Error(`--line-mode 只支持 ${SUBTITLE_LINE_MODES.join("、")}`);
+			}
+			payload.line_mode = v;
+		}
+		// 对用户是个开关，对服务端是二选一枚举；缺省单语，故只在开时提交。
+		if (ctx.opts.bilingual === true) payload.lingual_type = "bilingual";
+		if (ctx.opts.subtitleType != null) {
+			const v = String(ctx.opts.subtitleType);
+			if (!AI_SUBTITLE_TYPES.includes(v)) throw new Error(`--subtitle-type 只支持 ${AI_SUBTITLE_TYPES.join("、")}`);
+			payload.subtitle_type = v;
+		}
+		if (ctx.opts.subtitleColor != null) {
+			const v = String(ctx.opts.subtitleColor);
+			if (!AI_SUBTITLE_COLORS.includes(v)) throw new Error(`--subtitle-color 只支持 ${AI_SUBTITLE_COLORS.join("、")}`);
+			payload.subtitle_color = v;
+		}
+		if (ctx.opts.canvas != null) {
+			const raw = String(ctx.opts.canvas).trim().toLowerCase();
+			const m = /^(\d+)x(\d+)$/.exec(raw);
+			if (!m) throw new Error(`--canvas 需要 WxH 形式的两个正整数（如 1080x1920），拿到「${raw}」`);
+			const w = Number(m[1]);
+			const h = Number(m[2]);
+			if (!w || !h) throw new Error(`--canvas 的宽高都必须为正整数，拿到「${raw}」`);
+			payload.video_size = [w, h];
+		}
+		return payload;
+	},
+	mapOutputs(out, ctx) {
+		const url = pickUrl(out, ["subtitle_file_download_url"]);
+		if (!url) return [];
+		// 扩展名跟随实际产物格式（服务端会在 output_format 里告知），URL 推断兜底。
+		const fmt = typeof out.output_format === "string" ? out.output_format : "";
+		const fallback = fmt === "srt" ? ".srt" : ".ass";
+		return [{ url, filename: `${ctx.baseName}-translated${extFromUrl(url, fallback)}` }];
+	},
+	mapResult(out) {
+		return {
+			output_format: out.output_format ?? null,
+			line_mode: out.line_mode ?? null,
+			stats: out.stats ?? null,
+			degraded: out.degraded ?? null,
+		};
+	},
+	/**
+	 * 三处降级**必须落到用户眼前**：它们让产物出现「可感知但不报错」的差异，
+	 * 只落进 result-output.json 等于没说。文案说**用户能观察到什么**，不说内部机制。
+	 * 降级 MUST NOT 让任务判失败——产物照下载。
+	 */
+	postprocess(ctx, _landed, out) {
+		const d = out.degraded;
+		if (!d || typeof d !== "object") return;
+		const flags = d as Record<string, unknown>;
+		if (flags.summary === true) {
+			ctx.warn("上下文摘要求取失败，全篇术语一致性可能下降（产物照常可用，介意可重跑）");
+		}
+		if (flags.width_budget === true) {
+			ctx.warn("渲染宽度预算算不出，本次仅按语义长度折行，个别行可能超出画面——竖屏建议显式传 --canvas");
+		}
+		if (flags.translation === true) {
+			ctx.warn("翻译链路退化到分片重试或机器翻译兜底，译文质量可能下降（介意可重跑）");
+		}
 	},
 };
 
@@ -1774,6 +1948,7 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	imageToSquare,
 	imageToLive,
 	videoAiSubtitle,
+	subtitleTranslate,
 	imageClassicTemplate,
 	imageVerticalStitch,
 	videoSplitScreen,
@@ -1814,6 +1989,11 @@ export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): vo
 			if (d.input.maxDurationSec != null) throw new Error(`多文件工具不支持 maxDurationSec：「${d.name}」`);
 		} else if (d.buildPayloadMulti) {
 			throw new Error(`非多文件工具不得声明 buildPayloadMulti：「${d.name}」`);
+		}
+		// 字幕（文本文件）没有时长可探——声明 maxDurationSec 会静默失效，不如当场拒
+		// （add-tool-subtitle-translate）。
+		if (d.input.kind === "subtitle" && d.input.maxDurationSec != null) {
+			throw new Error(`字幕类工具不支持 maxDurationSec（文本文件无时长）：「${d.name}」`);
 		}
 		// none 零上传双路径恰一（add-tool-audio-tts-clone）：preprocess（产上传物）或 buildPayloadNone（零上传）二选一
 		if (d.buildPayloadNone) {
