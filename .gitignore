@@ -40,4 +40,15 @@ openspec/
 /audio_tts_clone-*/
 /tts-*-video-project-*/
 /qc-verify-*/
-anchor-verify-*/
+/anchor-verify-*/
+
+# 2026-08-23 补：上面「按名字逐个列举」的写法挡不住新起的走查工作区——
+# yellowstone-final-260821/（279MB 成片 + 含素材绝对路径的 broll-plan.json）
+# 和 yellowstone-linesplit-260821/ 就是这样漏进 git status 的。改挂两条通用闸：
+#
+# 1) 走查工作区一律落到仓根 .runs/ 下（跑命令时 `--out .runs/<名字>`），整目录屏蔽，
+#    今后再起什么名字都不用回来改这个文件。
+/.runs/
+# 2) 单条命令的 JSON 回执落在仓根的（audio-lay-out.json / render-out.json 这类，
+#    正文里带 E:\file\... 绝对路径），按后缀兜底。日志已由上面的 *.log 覆盖。
+/*-out.json
