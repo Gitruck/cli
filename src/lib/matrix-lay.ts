@@ -2285,7 +2285,14 @@ export function layBrollTracks(opts: {
 		plan_path: opts.planPath,
 		// 黑轨也登记进 lay_tracks：老版 CLI 只读这个键剥旧，不在册就会把黑轨当用户轨保留、
 		// 顶高 baseIndex，令下次新候选轨落到黑轨之下整片黑。
-		lay_tracks: blackTrack === null ? registeredIndices : [...registeredIndices, blackTrack],
+		// ⚠️ **升序**：本数组的全部用途是**成员判定**（「号在不在册」，见 classifyTrack 与
+		//    自产指纹那几处），零处依赖顺序。层序镜像（fix-broll-zorder-contract-drift）之前
+		//    黑轨号最大、append 在末尾恰好就是升序；镜像后黑轨落到 baseIndex（最小），
+		//    append 就变成 [2,1] 这种降序了。显式排一次是零语义成本的：
+		//    产物 JSON 可读、可 diff、重跑稳定，且保住既有那条「lay_tracks 升序」的契约断言。
+		lay_tracks: (blackTrack === null ? registeredIndices : [...registeredIndices, blackTrack])
+			.slice()
+			.sort((a, b) => a - b),
 		track_layers: trackLayers,
 		black_track: blackTrack,
 		confirmed: false,
