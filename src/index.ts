@@ -18,6 +18,7 @@
  *   gtrk deps             运行时资产：status 查来源/授权、install 显式装 ffmpeg 与渲染字体
  *   gtrk upgrade          升级 CLI 到最新版 + 刷新 skill（配置保留）
  *   gtrk skills install   通过通用 skills 适配器安装到各类 Agent
+ *   gtrk feedback <话>    把使用中的不顺手反馈上去（告知式提交：助手代提必须先念给用户听）
  */
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
@@ -43,6 +44,7 @@ import { registerDeps } from "./commands/deps";
 import { registerProject } from "./commands/project";
 import { registerAudio } from "./commands/audio";
 import { registerSubtitle } from "./commands/subtitle";
+import { registerFeedback } from "./commands/feedback";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -99,6 +101,7 @@ registerDeps(program); // 运行时资产：gtrk deps status / install（显式�
 registerProject(program); // 音频驱动工程：gtrk project init 从配音起盘建工程（服务端 producer 同步口消费端）
 registerAudio(program); // 音频轨零件：gtrk audio lay 往 .gtrk 追加 audio_track（BGM 上轨 + beat 对齐）
 registerSubtitle(program); // 字幕零件：gtrk subtitle lay 把 transcript 投影成客户端契约字幕写进 cve text lane（快速成片直接带字幕）
+registerFeedback(program); // 用户摩擦上报：gtrk feedback <话> —— 告知式提交，非 TTY 且未声明已告知时拒绝上报（-y 不构成豁免）
 
 program.parseAsync(process.argv).catch((e: unknown) => {
 	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);
