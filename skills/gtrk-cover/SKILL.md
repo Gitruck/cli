@@ -91,3 +91,21 @@ description: 封面工作台——把一期视频的封面从「设计诊断 + �
 - **建栏目风格体系（含封面风格资产）** → `/gtrk-style-maker`
 - **成片剪辑 / 拆分 / 铺轨 / 渲染** → 成片 SOP 各步（`/gtrk-oralcut` 起）
 - **替用户抽图、替用户拖字导出** → 做不到也不该做：抽图在外部平台、排字在用户浏览器，这两步是用户检查点，交代清楚后**停下等用户**。
+
+---
+
+## 改工程：走 `gtrk patch`，不要裸手改 JSON
+
+跑完之后要**微调某个片段**（挪位置 / 改时长 / 切开 / 改音量）时，一律用 `gtrk patch`：
+
+```bash
+gtrk patch move --project <dir> --clip <clip_id> --to 5.0
+gtrk patch trim --project <dir> --clip <clip_id> --out -1s
+```
+
+**MUST NOT 直接编辑 `.gtrk` 的 JSON。** 片段时码是两套并存的（`clip_st`+`clip_ed` 与
+`clip_st`+`duration`）：改一份不改另一份，客户端优先读 `clip_ed`、后端又不强校验它 ⇒
+**没人报错，成片却用了陈旧出点**。`gtrk patch` 替你做恒等式同步 + 帧对齐 + 写前全档校验。
+
+> 参数手册在 `AGENT.md` 的「元素级编辑：`gtrk patch`」一节与 README 命令参考。
+> 本节**只指路不搬手册** —— 搬过来就会长出会漂移的副本。

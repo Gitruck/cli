@@ -34,6 +34,21 @@
 
 ---
 
+## 工程文件改动纪律（全局 MUST · 2026-08-25 立）
+
+- **agent MUST NOT 裸手改 `.gtrk` JSON。** 元素级编辑（挪位置 / 改时长 / 切开 / 改参数）
+  一律走 **`gtrk patch`**。
+- **为什么不是「小心点就行」**：`.gtrk` 一个片段的时码是**两套并存**的
+  （`clip_st`+`clip_ed` 与 `clip_st`+`duration`）。改 `duration` 不同步 `clip_ed`，
+  **客户端 importer 优先读 `clip_ed`** ⇒ 用的是陈旧出点；而**后端 Profile A 反而不强校验它**
+  ⇒ 没人报错。这是**静默失败**：命令说成功、你以为改了、实际没改。
+- 另外轨道时基端点要落在 `video_rate` 的帧边界上，浮点秒累加会漂。这两件 `gtrk patch`
+  都替你做（恒等式同步 + 帧对齐 + 写前全档校验 + 原子写回 + 机器可读回执）。
+- **例外只有一个**：铺自产物的那几条既有链路（`gtrk matrix` 铺轨、`gtrk mg` 铺颗粒、
+  `gtrk audio` / `gtrk subtitle` 建新轨）—— 它们只动自己新建的东西，不改既有 clip 的时码。
+
+---
+
 ## 0. 一句话流程
 
 ```
@@ -221,6 +236,60 @@ gtrk transcript "D:/素材/采访视频.mp4" --json
 - CLI 不负责总结：它在 `## 总结` 下写入 `<!-- gtrk:agent-summary-pending -->`，并返回 `summaryPending:true`。驱动 Agent 必须阅读全文，生成简洁、忠于原文的语义总结，**原地替换标记及提示语**；不得另建总结文件。
 - 写回时只改 `## 总结` 到 `## 文字记录` 之间，保留后两段原样；建议 3–7 条要点，覆盖主题、关键论点/事实和结论，不补原文没有的信息。
 - `output` 就是最终 Markdown 的绝对路径；确认文件存在、三段标题齐全且待总结标记已消失后，才能回给用户。ASR 实时价格运行前从官网价格表查询，严禁引用记忆价格。
+
+---
+
+## 2.4 元素级编辑：`gtrk patch`（改工程唯一入口）
+
+```bash
+gtrk patch move  --project <dir> --clip c2 --to 5.0        # 挪位置
+gtrk patch trim  --project <dir> --clip c2 --out -1s       # 改时长（出点相对增量）
+gtrk patch split --project <dir> --clip c2 --cut 5.5       # 切成两段
+gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
+gtrk patch set   --project <dir> --total max               # 改顶层总长（工程级）
+```
+
+**寻址两条路**（互斥，二选一）：
+
+| | 用法 | 说明 |
+|---|---|---|
+| 按 id | `--clip <clip_id>` | 最常用。命中 video/audio **镜像对**时视为**一个编辑单元** |
+| 按位置 | `--track <video\|audio\|beat>:<track_index> --at <sec>` | 命中条件 `track_st ≤ at < track_ed` |
+
+⚠️ **`--at` 是寻址参数，不是 split 的切点**；split 的切点是独立的 **`--cut`**。
+两者可同时给：`patch split --track video:0 --at 5.0 --cut 5.5` = 「定位 5.0s 处那个元素，在 5.5s 切开」。
+
+⚠️ **空档（gap）不能用 `--clip ""` 寻址** —— 契约允许多个 gap 共享 `clip_id=""`，它不构成地址；用 `--track/--at`。
+
+**四个动作的参数**：
+
+| 动作 | 参数 | 语义 |
+|---|---|---|
+| `move` | `--to <sec\|Nf>` | 只改落点，时长与源窗都不动 |
+| `trim` | `--in` / `--out` | **相对增量**。`--in` 让源窗与轨上入点**同动**（标准 trim）；`--out` 只改出点 |
+| | `--set-in` / `--set-out` | 同上，但给**绝对时码** |
+| | `--slip <delta>` | **只换源窗**：轨上落点与时长都不动。⚠️ trim-in 有两种业界语义，所以必须你显式选一种 |
+| `split` | `--cut <sec\|Nf>` | 切点。两段各须 ≥1 帧；新片段 id 为 `<orig>-2` 递增 |
+| `set` | `--muted` / `--no-muted` / `--volume <gain>` / `--opaque` | 元素级参数。`--volume` 是**线性增益不是 dB** |
+| | `--total <sec\|Nf\|max>` | 顶层总长。**工程级 op，与元素寻址互斥** |
+
+**通用**：`--dry-run` 只算不写；`--json` 回执到 stdout（人读日志转 stderr）；
+`--ops <file|->` 批量事务（一次读、全算、全校验、一次写；**任一条失败零写**并报第几条）。
+
+**时码字面**：秒（`3.5` / `3.5s`）或帧（`105f`）；相对量带正负号（`-1s` / `-2f`）。
+
+**回执字段**：`applied`（是否真写了）、`ops[]`（每条含 `action` / `scope` / `resolved` 定位三元组
+`{track, clip_id, track_st}`、改前改后时码）、`warnings[]`、`preexisting[]`（入档既存问题，非本次造成）。
+⇒ **下一轮据 `resolved` 复核「我上轮改的还是这一个吗」**。
+
+**它会拒你的几种情况**（都是零副作用、文件逐字节未变）：
+
+- 幻觉 id / `--track/--at` 没命中
+- `clip_id` 真撞名（同轨重复 id）⇒ 列出候选，改用 `--track/--at`
+- 镜像对上做**参数类**改动 ⇒ 参数是投影私有的，要 `--track` 指明改哪个投影
+- 本次改动会造成时码不变量违规（如同轨重叠）⇒ 硬拒；**入档既存的**违规只报 `preexisting` 不阻断
+- 顶层 `duration` 键不在场时用 `--total` ⇒ 缺席自带「按末端机械算出」语义，新增该键会改消费与计费口径
+- 只给 `--track` 不给 `--at` ⇒ v1 射程是**元素级**，不写轨对象上的键
 
 ---
 

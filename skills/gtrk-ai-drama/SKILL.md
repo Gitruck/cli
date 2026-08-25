@@ -219,3 +219,21 @@ face / hair / eyes / wardrobe / signature prop + do-not-change + one line on how
    ⚠️ **MUST NOT 从你这里直接跳到 `render`**（旧文档曾这么写，那是错的——它把 AI 再现当成了最后一层）。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill，用户只对话**。但 AI_DRAMA 车道天然有「用户去外部平台出片 + 手动拼回」的手工环节——那部分是外部的手，无法替跑；除此之外的解析、生成、落盘、交代，全由你（脑）一次做完，别让用户自己去拼描述。
+
+---
+
+## 改工程：走 `gtrk patch`，不要裸手改 JSON
+
+跑完之后要**微调某个片段**（挪位置 / 改时长 / 切开 / 改音量）时，一律用 `gtrk patch`：
+
+```bash
+gtrk patch move --project <dir> --clip <clip_id> --to 5.0
+gtrk patch trim --project <dir> --clip <clip_id> --out -1s
+```
+
+**MUST NOT 直接编辑 `.gtrk` 的 JSON。** 片段时码是两套并存的（`clip_st`+`clip_ed` 与
+`clip_st`+`duration`）：改一份不改另一份，客户端优先读 `clip_ed`、后端又不强校验它 ⇒
+**没人报错，成片却用了陈旧出点**。`gtrk patch` 替你做恒等式同步 + 帧对齐 + 写前全档校验。
+
+> 参数手册在 `AGENT.md` 的「元素级编辑：`gtrk patch`」一节与 README 命令参考。
+> 本节**只指路不搬手册** —— 搬过来就会长出会漂移的副本。

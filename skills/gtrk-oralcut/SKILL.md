@@ -132,3 +132,21 @@ gtrk oralcut "<毛片绝对路径>" [--script "<txt路径>"] [--preset steady|co
 口播工程剪好只是成片一条龙的第一站。确认 `ok=true`、`files.gtrk[0]` 与 transcript 就绪后，**别停下等用户开口**——顺势接力到视觉拆分：触发 `/gtrk-splitter`（把这条工程 + transcript 拆成 beat 级分镜派单，agent 再跑 `gtrk split` 产 `dispatch.json`），驱动后续各车道生产+铺轨。一句话交代即推进：「口播工程已就绪，我接着把它拆成分镜派单」，除非用户表示只要这版剪辑工程、暂不往下。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill，用户只对话**——别让用户自己去终端敲下一条 gtrk 命令。
+
+---
+
+## 改工程：走 `gtrk patch`，不要裸手改 JSON
+
+跑完之后要**微调某个片段**（挪位置 / 改时长 / 切开 / 改音量）时，一律用 `gtrk patch`：
+
+```bash
+gtrk patch move --project <dir> --clip <clip_id> --to 5.0
+gtrk patch trim --project <dir> --clip <clip_id> --out -1s
+```
+
+**MUST NOT 直接编辑 `.gtrk` 的 JSON。** 片段时码是两套并存的（`clip_st`+`clip_ed` 与
+`clip_st`+`duration`）：改一份不改另一份，客户端优先读 `clip_ed`、后端又不强校验它 ⇒
+**没人报错，成片却用了陈旧出点**。`gtrk patch` 替你做恒等式同步 + 帧对齐 + 写前全档校验。
+
+> 参数手册在 `AGENT.md` 的「元素级编辑：`gtrk patch`」一节与 README 命令参考。
+> 本节**只指路不搬手册** —— 搬过来就会长出会漂移的副本。

@@ -74,3 +74,21 @@ gtrk music-visualizer <音频> --template <模板id> [可选样式/文件] [--js
 - **`--cover` 报「仅接受图片」**：封面只能是图片；视频素材放 `--background`。
 - **样式参数报错**：`--fps` 30-60、`--blur` 0-40、`--resolution` 必须 `宽x高`、`--c1/--c2` 必须十六进制——按报错提示改。
 - **产物下载失败（ok=false）**：网络波动或链接过期；凭 `taskId` 恢复，不整条重跑。
+
+---
+
+## 改工程：走 `gtrk patch`，不要裸手改 JSON
+
+跑完之后要**微调某个片段**（挪位置 / 改时长 / 切开 / 改音量）时，一律用 `gtrk patch`：
+
+```bash
+gtrk patch move --project <dir> --clip <clip_id> --to 5.0
+gtrk patch trim --project <dir> --clip <clip_id> --out -1s
+```
+
+**MUST NOT 直接编辑 `.gtrk` 的 JSON。** 片段时码是两套并存的（`clip_st`+`clip_ed` 与
+`clip_st`+`duration`）：改一份不改另一份，客户端优先读 `clip_ed`、后端又不强校验它 ⇒
+**没人报错，成片却用了陈旧出点**。`gtrk patch` 替你做恒等式同步 + 帧对齐 + 写前全档校验。
+
+> 参数手册在 `AGENT.md` 的「元素级编辑：`gtrk patch`」一节与 README 命令参考。
+> 本节**只指路不搬手册** —— 搬过来就会长出会漂移的副本。

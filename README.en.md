@@ -392,6 +392,45 @@ Finished cut × transcript projection → beat storyboard. **No positional argum
 >
 > **Dispatch entries carry their own `span:{from,to}`** (the utterance range that entry covers; `overlay` aux entries carry **their own** span, which may be a sub-range of the main beat's). **`track_st/track_ed` are a snapshot taken at projection time** — `gtrk mg` / `gtrk matrix` **re-project on the spot** when consuming them (see below), so after editing the talking-head track you do **not** need to re-run `gtrk split`; only a change to the split doc itself requires that.
 
+### `gtrk patch <move|trim|split|set>` — element-level editing (the only way to edit a project)
+
+Edit the timecode or parameters of a single clip / gap / particle. **Agents must not hand-edit `.gtrk` JSON** —
+a clip carries **two parallel timecode representations** (`clip_st`+`clip_ed` and `clip_st`+`duration`).
+Changing one without the other is a **silent failure**: the desktop client reads `clip_ed` first while the
+backend does not strictly validate it, so nothing errors out yet the render uses a stale out-point.
+This command handles identity synchronisation + frame alignment + a whole-file check before writing.
+
+```bash
+gtrk patch move  --project <dir> --clip c2 --to 5.0
+gtrk patch trim  --project <dir> --clip c2 --out -1s
+gtrk patch split --project <dir> --clip c2 --cut 5.5
+gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
+```
+
+| Flag | Purpose | Default |
+|---|---|---|
+| `--project <dir>` / `--gtrk <path>` | Project dir (auto-locates `gtrk/project.gtrk`) or an explicit path | — |
+| `--clip <clip_id>` | Address by id. A video/audio **mirror pair** counts as one editing unit | — |
+| `--track <kind:idx> --at <sec>` | Address by position (`track_st ≤ at < track_ed`). Mutually exclusive with `--clip` | — |
+| `--to <sec\|Nf>` | Target position for `move` | — |
+| `--in` / `--out` / `--set-in` / `--set-out` / `--slip` | The five `trim` semantics (first two relative, next two absolute, `--slip` shifts only the source window) | — |
+| `--cut <sec\|Nf>` | Cut point for `split`. ⚠️ Distinct from the addressing flag `--at` | — |
+| `--muted` / `--volume <gain>` / `--opaque` | Element-level parameters for `set` (`--volume` is linear gain, not dB) | — |
+| `--total <sec\|Nf\|max>` | Top-level duration for `set` (project-scoped op, mutually exclusive with element addressing) | — |
+| `--ops <file\|->` | Batch transaction: read once, compute all, validate all, write once; any failure writes **nothing** | off |
+| `--dry-run` | Compute and validate only, do not write | off |
+| `--json` | Machine-readable receipt on stdout (human logs go to stderr) | off |
+
+> Time literals: seconds (`3.5` / `3.5s`) or frames (`105f`); relative values take a sign (`-1s`).
+>
+> The receipt carries `ops[].resolved`, a locator triple `{track, clip_id, track_st}` — use it on the next
+> round to confirm you are still pointing at the same element.
+> `preexisting[]` lists invariant problems that were **already in the file** (not caused by this run, not
+> blocking); violations caused by this run mean **zero writes and a non-zero exit**.
+>
+> ⚠️ A gap cannot be addressed with `--clip ""`: the contract lets multiple gaps share that value, so it is
+> not an address. Use `--track/--at` instead.
+
 ### `gtrk matrix` — B-roll retrieval + candidate track laying
 
 **No positional argument = consume the dispatch**: reads the `film_broll` queue from `split/dispatch.json` → dual-endpoint retrieval → produces the candidate list `split/broll-plan.json`, downloads preview proxies, and lays N candidate tracks in the project (open it in opencut and toggle track visibility to compare and choose). **`matrix search "<query>"` = a one-off ad-hoc search** (independent of any dispatch).

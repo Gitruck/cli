@@ -390,6 +390,40 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 >
 > **派单条目自带 `span:{from,to}`**（该条目对应的 utterance 区间；`overlay` aux 派生条目写 **aux 自己的** span，可为主 beat span 的子区间）。**`track_st/track_ed` 是投影时刻的快照**——`gtrk mg` / `gtrk matrix` 消费时会**现场重投影**（见下），所以改完口播轨**不必**回来重跑 `gtrk split`，只有拆分稿本身变了才要重跑。
 
+### `gtrk patch <move|trim|split|set>` — 元素级编辑（改工程唯一入口）
+
+改一个 clip / gap / 颗粒的时码或参数。**agent 勿裸手改 `.gtrk` JSON** —— 片段时码是两套并存的
+（`clip_st`+`clip_ed` 与 `clip_st`+`duration`），改一份不改另一份是**静默失败**：客户端优先读 `clip_ed`，
+而后端不强校验它，于是没人报错、成片却用了陈旧出点。本命令负责恒等式同步 + 帧对齐 + 写前全档校验。
+
+```bash
+gtrk patch move  --project <dir> --clip c2 --to 5.0
+gtrk patch trim  --project <dir> --clip c2 --out -1s
+gtrk patch split --project <dir> --clip c2 --cut 5.5
+gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
+```
+
+| 参数 | 作用 | 缺省 |
+|---|---|---|
+| `--project <dir>` / `--gtrk <path>` | 工程目录（自动定位 `gtrk/project.gtrk`）或直接给路径 | — |
+| `--clip <clip_id>` | 按 id 寻址。命中 video/audio **镜像对**时视为一个编辑单元 | — |
+| `--track <kind:idx> --at <sec>` | 按位置寻址（`track_st ≤ at < track_ed`）。与 `--clip` 互斥 | — |
+| `--to <sec\|Nf>` | `move` 的落点 | — |
+| `--in` / `--out` / `--set-in` / `--set-out` / `--slip` | `trim` 的五种语义（前两个相对、中两个绝对、`--slip` 只换源窗） | — |
+| `--cut <sec\|Nf>` | `split` 的切点。⚠️ 与寻址用的 `--at` 是两个参数 | — |
+| `--muted` / `--volume <gain>` / `--opaque` | `set` 的元素级参数（`--volume` 是线性增益不是 dB） | — |
+| `--total <sec\|Nf\|max>` | `set` 的顶层总长（工程级 op，与元素寻址互斥） | — |
+| `--ops <file\|->` | 批量事务：一次读、全算、全校验、一次写；任一条失败**零写** | 关 |
+| `--dry-run` | 只算与校验、不写文件 | 关 |
+| `--json` | 机读回执到 stdout（人读日志转 stderr） | 关 |
+
+> 时码字面：秒（`3.5` / `3.5s`）或帧（`105f`）；相对量带正负号（`-1s`）。
+>
+> 回执含 `ops[].resolved` 定位三元组 `{track, clip_id, track_st}` —— 下一轮据它复核「所指是否仍是同一元素」。
+> `preexisting[]` 是**入档既存**的不变量问题（非本次造成，不阻断）；本次改动造成违规则**零写非 0**。
+>
+> ⚠️ 空档（gap）不能用 `--clip ""` 寻址：契约允许多个 gap 共享该取值，它不构成地址；用 `--track/--at`。
+
 ### `gtrk matrix` — B-roll 检索 + 候选铺轨
 
 **无 positional = 派单消费**：读 `split/dispatch.json` 的 `film_broll` 队列 → 双口检索 → 产候选清单 `split/broll-plan.json` + 下载 preview 代理、在工程里平铺 N 条候选轨（opencut 打开即可用轨道小眼睛对比挑选）。**`matrix search "<query>"` = 单条 ad-hoc 检索**（不依赖派单）。

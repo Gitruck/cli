@@ -180,3 +180,21 @@ gtrk mg --project "<split产物目录>" --json
 要单独复查某条成片：`gtrk qc <成片.mp4> --gtrk <工程.gtrk>`（带 `--gtrk` 才认得出段内跳切）。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill、驱动栏目生产 skill，用户只对话**——别让用户自己去终端敲 `gtrk mg`，也别让用户手动去 call 栏目生产 skill。
+
+---
+
+## 改工程：走 `gtrk patch`，不要裸手改 JSON
+
+跑完之后要**微调某个片段**（挪位置 / 改时长 / 切开 / 改音量）时，一律用 `gtrk patch`：
+
+```bash
+gtrk patch move --project <dir> --clip <clip_id> --to 5.0
+gtrk patch trim --project <dir> --clip <clip_id> --out -1s
+```
+
+**MUST NOT 直接编辑 `.gtrk` 的 JSON。** 片段时码是两套并存的（`clip_st`+`clip_ed` 与
+`clip_st`+`duration`）：改一份不改另一份，客户端优先读 `clip_ed`、后端又不强校验它 ⇒
+**没人报错，成片却用了陈旧出点**。`gtrk patch` 替你做恒等式同步 + 帧对齐 + 写前全档校验。
+
+> 参数手册在 `AGENT.md` 的「元素级编辑：`gtrk patch`」一节与 README 命令参考。
+> 本节**只指路不搬手册** —— 搬过来就会长出会漂移的副本。
