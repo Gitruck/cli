@@ -13,6 +13,8 @@
  *   gtrk oralcut <毛片>   智能口播剪辑最小闭环（云端剪辑 → 拉回三方工程文件 → 打开）
  *   gtrk transcript <视频> 本地视频转单个妙记式 Markdown（原视频不上传）
  *   gtrk split [拆分稿]   视觉拆分派单器（transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch）
+ *   gtrk patch <动作>  元素级编辑 .gtrk：move / trim / split / set
+ *                     （恒等式同步 + 帧对齐；agent MUST NOT 裸手改 JSON）
  *   gtrk tool <name>      单点工具族（image_move/image_matting/video_matting…）；gtrk tool list 查全部
  *   gtrk doctor           体检（配置 / 云端连通 / 剪映目录 / 运行时 / 版本）
  *   gtrk deps             运行时资产：status 查来源/授权、install 显式装 ffmpeg 与渲染字体
@@ -35,6 +37,7 @@ import { registerUpgrade } from "./commands/upgrade";
 import { registerRender } from "./commands/render";
 import { registerQc } from "./commands/qc";
 import { registerSplit } from "./commands/split";
+import { registerPatch } from "./commands/patch";
 import { registerMatrix } from "./commands/matrix";
 import { registerMg } from "./commands/mg";
 import { registerTool } from "./commands/tool";
@@ -91,6 +94,7 @@ registerUpgrade(program);
 registerRender(program); // 本地渲染 gtrk 工程（EDL）→ 成片 mp4
 registerQc(program); // 成片质量扫描（闪帧/段内跳切/黑帧/冻结/爆音/静音/音画规整）
 registerSplit(program); // 视觉拆分派单器：transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch
+registerPatch(program); // 元素级编辑：move/trim/split/set —— 恒等式同步 + 帧对齐（agent 勿裸手改 JSON）
 // registerStruct(program);   // 已有 gtrk → 三方工程文件
 registerMatrix(program); // B-roll 检索：dispatch.film_broll → split/broll-plan.json 候选清单（双口路由）
 registerMg(program); // MG 颗粒铺轨：dispatch.mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track（弃用别名 gtrk rrv）

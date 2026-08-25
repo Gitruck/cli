@@ -79,11 +79,18 @@ export function writeGtrkAtomic(
 	path: string,
 	next: Record<string, unknown>,
 	expectedMtimeMs: number,
+	/**
+	 * 冲突文案里的操作名。缺省 `"matrix"` —— 既有调用方**逐字节不变**（零回归）。
+	 * `patch` 等新调用方显式传自己的名字，免得报出「在 matrix 运行期间被修改」这种指错凶手的话。
+	 */
+	operation = "matrix",
 ): void {
 	const cur = statSync(path).mtimeMs;
 	if (cur !== expectedMtimeMs) {
 		throw new Error(
-			"工程文件在 matrix 运行期间被外部修改（保存冲突），已拒绝写入；请关闭客户端未保存的工程或重跑（plan 与已下载代理均保留）",
+			operation === "matrix"
+				? "工程文件在 matrix 运行期间被外部修改（保存冲突），已拒绝写入；请关闭客户端未保存的工程或重跑（plan 与已下载代理均保留）"
+				: `工程文件在 ${operation} 运行期间被外部修改（保存冲突），已拒绝写入；请关闭客户端未保存的工程后重试`,
 		);
 	}
 	const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
