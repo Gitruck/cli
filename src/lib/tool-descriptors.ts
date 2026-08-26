@@ -1216,25 +1216,67 @@ const imageToSquare: ToolDescriptor = {
 	},
 };
 
-/** image_to_live —— 智能 LivePhoto（图 → .mp4 短视频，产物是视频非图片）。
+/** image_to_live 的 --output-format 白名单（交付格式，非生成参数）。
+ *  源 = gitruck-infra `utils/process/media/vision/image_to_live_formats.py` 的
+ *  `user_selectable_output_format_set`（零依赖轻模块，与 image_move_motions.py 同范式）。
+ *  infra 侧扩枚举（已挂 followup：GIF / WebP）MUST 联动更新本白名单与 skills/gtrk-tools/SKILL.md
+ *  （link-image-to-live-motion-photo-cli）。 */
+export const IMAGE_TO_LIVE_FORMATS = new Set(["mp4", "motion_photo"]);
+
+/** image_to_live —— 智能 LivePhoto（图 → 约 4 秒短视频，或直出安卓动态照片）。
  *  2026-08-05 曾因上游供给停摆回收（adjust-gate-image-to-live），换供应商后经
- *  restore-tool-image-to-live 翻回启用态；服务端门控须先解除，否则直调会拿 6029/503。 */
+ *  restore-tool-image-to-live 翻回启用态；服务端门控须先解除，否则直调会拿 6029/503。
+ *  2026-08-26 经 link-image-to-live-motion-photo-cli 接上服务端既有的 output_format 交付格式。 */
 const imageToLive: ToolDescriptor = {
 	name: "image_to_live",
 	title: "智能 LivePhoto",
-	description: "让一张静态照片动起来，生成约 4 秒的短视频（产物是视频）。",
+	description:
+		"让一张静态照片动起来，生成约 4 秒的短视频；" +
+		"--output-format motion_photo 改为直出安卓动态照片（单个 .jpg，长按即播，并附带同一条视频）。",
 	kind: "cloud",
 	input: { kind: "image" },
 	priceKey: "image_to_live",
-	outputHint: "约 4 秒短视频（.mp4，无声）",
+	outputHint: "约 4 秒短视频（.mp4，无声）；或安卓动态照片（.jpg + 附带同一条 .mp4）",
 	enabled: true,
 	taskType: "image_to_live",
-	buildPayload(fileId) {
-		return { file_id: fileId };
+	options: [
+		{
+			flag: "--output-format <fmt>",
+			desc:
+				"交付格式（只决定产物怎么封装，不改生成参数、不改计费）。" +
+				"mp4=默认，约 4 秒短视频；" +
+				"motion_photo=安卓动态照片（单个 .jpg 内嵌该视频，长按即播；" +
+				"另附同一条 .mp4。iOS 不识别、按普通静图打开，少数安卓机型可能只显示静图）",
+		},
+	],
+	buildPayload(fileId, ctx) {
+		const p: Record<string, unknown> = { file_id: fileId };
+		if (ctx.opts.outputFormat != null) {
+			const value = String(ctx.opts.outputFormat);
+			if (!IMAGE_TO_LIVE_FORMATS.has(value)) {
+				throw new Error(
+					`--output-format 不支持「${value}」。合法值：mp4（默认，约 4 秒短视频）、` +
+						"motion_photo（安卓动态照片 .jpg，另附同一条 .mp4）",
+				);
+			}
+			p.output_format = value;
+		}
+		// 未传不带键：服务端缺省即 mp4，键缺席与显式 mp4 等价，少一个键少一层歧义。
+		return p;
 	},
 	mapOutputs(out, ctx) {
-		const url = pickUrl(out, ["download_url", "video_download_url", "url"]);
-		return url ? [{ url, filename: `${ctx.baseName}-live${extFromUrl(url, ".mp4")}` }] : [];
+		const files: DownloadItem[] = [];
+		// 主产物：mp4 时是视频，motion_photo 时是动态照片 .jpg。扩展名一律以服务端 URL 为准
+		// （下载链接恒为 {blake3[:2]}/{file_id}{ext}），兜底 .mp4 只在服务端漏扩展名时才顶上。
+		const main = pickUrl(out, ["download_url", "video_download_url", "url"]);
+		if (main) files.push({ url: main, filename: `${ctx.baseName}-live${extFromUrl(main, ".mp4")}` });
+		// motion_photo 时服务端另给同一条视频本体：外采已付费、白给的一份，丢掉即是浪费。
+		// main 回落到 video_download_url 时二者同源，去重免得重复下载。
+		const video = pickUrl(out, ["video_download_url"]);
+		if (video && video !== main) {
+			files.push({ url: video, filename: `${ctx.baseName}-live${extFromUrl(video, ".mp4")}` });
+		}
+		return files;
 	},
 };
 

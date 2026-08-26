@@ -48,7 +48,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `piano_audio_to_midi` | 「钢琴扒谱 / 钢琴音频转 MIDI / 提取 MIDI」 | 单条音频 | MIDI 文件 `.mid` | 运行前实时查询 | 已上线 |
 | `piano_audio_enhance` | 「钢琴录音修复 / 增强钢琴音质」 | 单条音频 | 高质量 WAV + 配套 MIDI（双产物） | 运行前实时查询 | 已上线 |
 | `image_to_square` | 「长图转方图 / 把长图变方的」 | 单张图片；可选 `--max-line`（≤20000） | 方形图片 | 运行前实时查询 | 已上线 |
-| `image_to_live` | 「图片变 LivePhoto / 静图微动 / 让照片动起来」 | 单张图片 | 约 4 秒短视频 `.mp4`（无声，产物是视频） | 运行前实时查询 | 已上线 |
+| `image_to_live` | 「图片变 LivePhoto / 静图微动 / 让照片动起来 / 要能长按播放的动态照片」 | 单张图片；可选 `--output-format`（见下文） | 约 4 秒短视频 `.mp4`（无声）；或安卓动态照片 `.jpg` + 附带同一条 `.mp4` | 运行前实时查询 | 已上线 |
 | `image_classic_template` | 「做封面 / 智能拼图 / 标题配图出封面图」 | **多张图片**（可传多个路径，文件顺序即拼装顺序）；**`--main-title <标题>` 必填**；可选 `--sub-title`、`--template-mode`、`--aspect`、`--quality`、`--output-pic-count`（服务端钳制 ≤20）、`--output-text-count`（≤20）、`--title-layout` | 封面/拼图成品（text/pic/render 三组、各组可空可多张） | 运行前实时查询 | 已上线 |
 | `image_vertical_stitch` | 「拼长图 / 多图竖拼 / 截图接成一张长图」 | **多张图片**（可传多个路径，顺序=自上而下拼接顺序） | 一张垂直拼接长图 | 运行前实时查询 | 已上线 |
 | `audio_tts_clone` | 「配音 / 文字转语音 / TTS / 用 xx 音色念这段 / 把这段稿子合成音频」 | **无文件**：`--text <短文本>` 或 `--text-file <txt>` 二选一（≤2000 字，服务端为真相）+ **`--speaker <音色代号>` 必填**（可用音色见官网文档，传错时报错会列出全部可用项）；可选 `--text-lang`/`--output-format wav\|mp3`/`--speed`/`--split-method`/`--batch-size`（speed/切分法缺省跟随该音色调好的参数）。**计费按文本字数折算分钟（约 200 字/分钟）** | 配音音频（wav/mp3） | 运行前实时查询 | 已上线 |
@@ -107,6 +107,17 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | 平移 8（值=运动朝向） | `up_to_down` `down_to_up` `left_to_right` `right_to_left` `left_up_to_right_down` `right_down_to_left_up` `right_up_to_left_down` `left_down_to_right_up` | 画面沿该方向平移扫过 |
 | 放大 9（值=画布锚点方位） | `zoom_in_center` `zoom_in_up` `zoom_in_down` `zoom_in_left` `zoom_in_right` `zoom_in_left_up` `zoom_in_right_up` `zoom_in_left_down` `zoom_in_right_down` | 以中心 / 边中点 / 角为锚点推近 |
 | 缩小 9（锚点同上） | `zoom_out_center` 及 `zoom_out_` 同九方位 | 以对应锚点拉远 |
+
+智能 LivePhoto 可选交付格式：`gtrk tool image_to_live ./photo.jpg --output-format motion_photo --json`。两个取值——
+
+| 取值 | 产物 | 什么时候用 |
+|---|---|---|
+| `mp4`（缺省，不传即此） | 一个约 4 秒的短视频（无声） | 要拿去剪辑、投放、当 B-roll 素材 |
+| `motion_photo` | **一个 `.jpg`**（静图末尾内嵌该视频，相册里长按即播）**外加**同一条 `.mp4` | 用户明说要「像手机拍的那种动态照片」「能长按播放的一张图」「发相册/发朋友的一个文件」 |
+
+两种格式**同价**（交付格式只决定产物怎么封装，不改生成参数、不改计费），所以选哪个纯看用户想要什么形态。`motion_photo` 时那条附带的 `.mp4` 是白给的，不必为了拿视频再跑一次。
+
+⚠️ **兼容边界，用户问起时如实说，别打包票**：支持该标准的安卓相册可识别并长按播放；**iOS 不识别**，在 iPhone 上就是一张普通静态图片（能正常打开、不报错）；少数安卓机型可能只显示静图。用户若明确要 iPhone 上能动的，这个格式满足不了，如实讲。
 
 这七个公共视频工具（去黑边、比例转换、防抖、蒸汽波、净化、超分、插帧）都只接本地文件，允许扩展名为 `.mp4/.avi/.mpg/.mov/.flv/.mxf/.mpeg/.ogg/.3gp/.wmv/.h264/.m4v/.ts`；不要把 `.mkv`、`.webm` 或 URL 交给它们。
 
