@@ -27,6 +27,7 @@
 |---|---|---|
 | 🎬 | `gtrk oralcut <毛片>` | 智能口播剪辑闭环：一次出 gtrk + 剪映 + PR 三方工程，自动打开 |
 | ✂️ | `gtrk long2short <毛片>` | 长剪短闭环：长视频语义选段+跳剪（可选 720p 代理智能分屏）→ 逐 clip 出 gtrk + 剪映 + PR 三方工程（毛片不上传）。**只要成片、不再二次编辑请走精剪** `gtrk tool video_long2short_pro` |
+| ⏱ | 时长上限 | `oralcut` / `long2short` 的源片 **> 2 小时会在上传前被拦下**（零抽取、零上传、零扣费）。超长源片先分段再逐段跑，建议 40 分钟/段：`ffmpeg -ss 0 -t 2400 -i "<源片>" -c copy "<源片名>_seg01.mp4"`（流拷贝，秒级完成） |
 | 📝 | `gtrk transcript <本地视频\|配音音频>` | 视频/音频转文字稿：原文件不上传，只传本地抽取（音频输入则转码）的 16k 音频衍生物，生成一个含总结、时码记录和纯文本的 Markdown；`--json` 时另产句级时码 `transcript.json`（`gtrk project init` 兜底路输入） |
 | 🎵 | `gtrk music-visualizer <音频>` | 音乐可视化：一首歌 → 频谱可视化成片（`--template` 必填 + 可选背景/封面 + 模板/配色样式），配套 driver skill `gtrk-music-visualizer` |
 | ✂️ | `gtrk split [拆分稿]` | 视觉拆分派单器：成片 × transcript 投影 → beat 分镜校验落地（`struct_meta.split` + `dispatch.json`），驱动四车道派单；`--column <id>` 按栏目词表校验 |

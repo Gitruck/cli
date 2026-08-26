@@ -138,6 +138,58 @@ export function assertDurationConsistent(
 	}
 }
 
+// ---------------------------------------------------------------- 上传前时长硬闸（add-pre-upload-duration-gate）
+
+/**
+ * 服务端媒体探测层的**全局**时长硬上限（秒）——所有按时长计费的任务类型（`modal_type` 为
+ * audio/video 者）在**建单前**都吃这一条，超限直接 `6019 媒体时长无效或超过业务限制`。
+ *
+ * ⚠️ **这是服务端常量的镜像，真相源不在本仓**：
+ *   gitruck-infra `biz/gitruck_cloud/public/services/media_probe_services.py:29`
+ *   `MAX_ALLOWED_DURATION_SECONDS = 60 * 60 * 2`（判定在同文件 `:300`，严格大于才拒）。
+ * 服务端改值 ⇒ **MUST 同步改这里**。镜像的先例与理由见 change `add-pre-upload-duration-gate`
+ * 的 proposal「口径判定」节：`catalog` 明写不收「数值域参数约束」，而本仓 `tool-descriptors.ts`
+ * 的 `maxDurationSec`（`video_matting` 600 / `video_upscale` 60）早已是同形态镜像。
+ * P3 留痕：日后 catalog 若推翻其 P4 拍板、收编数值域参数约束，本常量 MUST 改为从 catalog 取。
+ */
+export const MAX_MEDIA_DURATION_SEC = 60 * 60 * 2;
+
+/** 超限报错的逐命令尾句（前面四要素共用，只有「分段之后干什么」不同）。 */
+export interface DurationLimitHint {
+	/** 分段后要跑的命令名，用于示例与动作句，如 `long2short`。 */
+	command: string;
+	/** 分段跑完之后的一句话，如「各段产出的 clip 可事后汇总成一张选题清单」。 */
+	afterward: string;
+}
+
+/**
+ * 上传前时长硬闸：源片时长**严格大于**服务端上限时抛人话错误。
+ *
+ * 判据 MUST 与服务端逐字同构（`>`，不是 `>=`）——用「大于等于」会拒掉服务端本会接收的边界片，
+ * 那是比白传更坏的失败（用户没有逃生口）。
+ *
+ * 边界带如实告知（change P2 拍板：接受该残留、MUST NOT 加余量）：本闸判的是**源片**时长，
+ * 服务端判的是**上传物**（16k mp3 / 720p 代理）时长，二者由 `assertDurationConsistent`
+ * 绑定在 < 1s 容差内 ⇒ 存在一条 < 1s 宽的边界带，带内可能本闸放行而服务端仍拒——
+ * 那只是退化回未加闸前的行为，不更差。本闸是**加法不是替代**，服务端恒为最终真相源。
+ */
+export function assertWithinMediaDurationLimit(durationSec: number, hint: DurationLimitHint): void {
+	if (!(durationSec > MAX_MEDIA_DURATION_SEC)) return;
+	const mins = (durationSec / 60).toFixed(1);
+	const hours = (durationSec / 3600).toFixed(2);
+	const limitHours = MAX_MEDIA_DURATION_SEC / 3600;
+	throw new Error(
+		`源片时长 ${mins}min（${hours}h）超过服务端 ${limitHours} 小时上限，已在上传前拦下` +
+			`（零抽取、零上传、零提交、零扣费）。\n` +
+			`出路：先把源片分段，再逐段跑 ${hint.command}。建议每段 ≤ 40 分钟` +
+			`（依据：轮询墙钟 60min ÷ 开分屏实测耗时比上界 1.25× ≈ 48min，取 40 留余量）。\n` +
+			`切段示例（流拷贝、不重编码、秒级完成）：\n` +
+			`  ffmpeg -ss 0 -t 2400 -i "<源片>" -c copy "<源片名>_seg01.mp4"\n` +
+			`  ffmpeg -ss 2400 -t 2400 -i "<源片>" -c copy "<源片名>_seg02.mp4"  # 依次类推\n` +
+			`${hint.afterward}`,
+	);
+}
+
 // ---------------------------------------------------------------- 本地字幕烧录（align-ai-subtitle-audio-only）
 
 /** 从 .ass 的 `Style:` 行取出所声明的字体名集合（第 2 个字段）。 */

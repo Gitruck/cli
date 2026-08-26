@@ -15,7 +15,13 @@ import { loadConfig } from "../lib/config";
 import { pollTask } from "../lib/cloud";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { resolveJianyingDraftDir } from "../lib/jianying";
-import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
+import {
+	probeGeometry,
+	extractAudio,
+	compress720p,
+	assertDurationConsistent,
+	assertWithinMediaDurationLimit,
+} from "../lib/media";
 import { materializeResult } from "../lib/materialize";
 import { log, routeLogsToStderr } from "../lib/log";
 
@@ -54,6 +60,32 @@ const collectParam = (v: string, acc: string[]): string[] => {
 	acc.push(v);
 	return acc;
 };
+
+/**
+ * 可注入的前置区依赖（缺省 = 真实实现），与 `long2short.ts` 的 `Long2ShortDeps` 同形状同理由：
+ * 前置校验区拦下后云端交互根本不会发生，故离线测试替换这几个即可把「零抽取零上传」证成调用次数 0。
+ */
+export interface OralCutDeps {
+	loadConfig: typeof loadConfig;
+	probe: typeof probeGeometry;
+	extract: typeof extractAudio;
+	compress: typeof compress720p;
+}
+
+function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
+	return {
+		loadConfig: o.loadConfig ?? loadConfig,
+		probe: o.probe ?? probeGeometry,
+		extract: o.extract ?? extractAudio,
+		compress: o.compress ?? compress720p,
+	};
+}
+
+/** 超限报错的尾句：分段之后该干什么（口播侧 = 逐段剪、各段工程独立可精修）。 */
+const DURATION_LIMIT_HINT = {
+	command: "oralcut",
+	afterward: "各段各出一份工程，逐段精修互不影响。",
+} as const;
 
 /** k=v 的 value 智能转型：true/false→bool、纯数字→number、否则原样字符串。 */
 function coerceValue(v: string): unknown {
@@ -112,9 +144,14 @@ export function registerOralCut(program: Command): void {
 		});
 }
 
-async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
+export async function runOralCut(
+	input: string,
+	opts: OralCutOpts,
+	overrides: Partial<OralCutDeps> = {},
+): Promise<void> {
 	if (opts.json) routeLogsToStderr(); // 机读模式：人读日志转 stderr，stdout 只留结果 JSON
-	const cfg = loadConfig();
+	const deps = buildDeps(overrides);
+	const cfg = deps.loadConfig();
 	const inputAbs = resolve(input);
 	if (!existsSync(inputAbs)) throw new Error(`毛片不存在：${inputAbs}`);
 
@@ -152,13 +189,20 @@ async function runOralCut(input: string, opts: OralCutOpts): Promise<void> {
 
 	const extraParams = parseExtraParams(opts.param, opts.paramsJson);
 
-	// ① 本地预处理：探原片几何 + 抽音频(默认) / 压 720p(视觉兜底)。毛片永不上传。
+	// ① 本地预处理：探原片几何 → 时长硬闸 → 抽音频(默认) / 压 720p(视觉兜底)。毛片永不上传。
 	log.step("① 本地预处理（探几何 + 抽音频/720p）…");
-	const geo = probeGeometry(inputAbs, opts.ffmpegPath);
+	const geo = deps.probe(inputAbs, opts.ffmpegPath);
 	log.info(`原片几何 ${geo.width}x${geo.height} @ ${geo.fps.toFixed(2)}fps · ${geo.duration.toFixed(1)}s`);
+
+	// ①a 上传前时长硬闸（add-pre-upload-duration-gate）——MUST 排在抽取之前：
+	//   本任务类型 `video_oral_cut_for_cli` 在服务端是按时长计费的（gc_task_type id 43，
+	//   modal_type=audio），建单前一律过公共媒体探测层，超 2h 直接 6019 硬拒。
+	//   本地此刻已经知道时长，没有理由先花几分钟转码、再传几百 MB 才让服务端说不行。
+	assertWithinMediaDurationLimit(geo.duration, DURATION_LIMIT_HINT);
+
 	const artifact = opts.visualAssist
-		? await compress720p(inputAbs, opts.ffmpegPath)
-		: await extractAudio(inputAbs, opts.ffmpegPath);
+		? await deps.compress(inputAbs, opts.ffmpegPath)
+		: await deps.extract(inputAbs, opts.ffmpegPath);
 	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
 	log.info(
 		opts.visualAssist ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`,

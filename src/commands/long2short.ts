@@ -17,7 +17,13 @@ import { download, type OralCutOutput } from "../lib/cloud";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { uploadCached } from "../lib/upload-cache";
 import { copyJianyingDraft, resolveJianyingDraftDir } from "../lib/jianying";
-import { probeGeometry, extractAudio, compress720p, assertDurationConsistent } from "../lib/media";
+import {
+	probeGeometry,
+	extractAudio,
+	compress720p,
+	assertDurationConsistent,
+	assertWithinMediaDurationLimit,
+} from "../lib/media";
 import { materializeResult, type MaterializeResult } from "../lib/materialize";
 import { renderClipBrief, renderClipsOverview } from "../lib/clip-brief";
 import { pollToolTask, parseExtraParams, mergeParams } from "../lib/tool-runner";
@@ -75,6 +81,37 @@ const collectParam = (v: string, acc: string[]): string[] => {
 	acc.push(v);
 	return acc;
 };
+
+/**
+ * 可注入的前置区依赖（缺省 = 真实实现），形状对齐 `transcript.ts` 的 `TranscriptDeps` 惯例。
+ *
+ * 只覆盖「读配置 → 探几何 → 抽取 → 字幕上传」这一段：零成本前置校验区一旦拦下，后面的云端交互
+ * 根本不会发生，故离线测试只需替换这几个，就能把「零抽取零上传」证成**调用次数为 0**，
+ * 而不是只证「抛了个错」（add-pre-upload-duration-gate tasks §2.3）。
+ */
+export interface Long2ShortDeps {
+	loadConfig: typeof loadConfig;
+	probe: typeof probeGeometry;
+	extract: typeof extractAudio;
+	compress: typeof compress720p;
+	uploadSubtitle: typeof uploadCached;
+}
+
+function buildDeps(o: Partial<Long2ShortDeps> = {}): Long2ShortDeps {
+	return {
+		loadConfig: o.loadConfig ?? loadConfig,
+		probe: o.probe ?? probeGeometry,
+		extract: o.extract ?? extractAudio,
+		compress: o.compress ?? compress720p,
+		uploadSubtitle: o.uploadSubtitle ?? uploadCached,
+	};
+}
+
+/** 超限报错的尾句：分段之后该干什么（长剪短侧 = 各段 clip 汇总成一张选题清单）。 */
+const DURATION_LIMIT_HINT = {
+	command: "long2short",
+	afterward: "各段产出的 clip 可事后汇总成一张选题清单（分段是常态动作，不是降级方案）。",
+} as const;
 
 /**
  * 拼云端 payload（导出供离线测试）：几何三件套 + source_path 恒回传；选段/分屏参数缺省省略；
@@ -194,9 +231,14 @@ export function registerLong2Short(program: Command): void {
 		});
 }
 
-async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void> {
+export async function runLong2Short(
+	input: string,
+	opts: Long2ShortOpts,
+	overrides: Partial<Long2ShortDeps> = {},
+): Promise<void> {
 	if (opts.json) routeLogsToStderr();
-	const cfg = loadConfig();
+	const deps = buildDeps(overrides);
+	const cfg = deps.loadConfig();
 	const inputAbs = resolve(input);
 	if (!existsSync(inputAbs)) throw new Error(`毛片不存在：${inputAbs}`);
 
@@ -221,33 +263,47 @@ async function runLong2Short(input: string, opts: Long2ShortOpts): Promise<void>
 		`▶ 长剪短：${basename(inputAbs)}（${opts.splitScreen ? "720p 代理 · 智能分屏" : "纯选段 · 音频上传"}，格式 ${formats.join("/")}）`,
 	);
 
-	// ① 本地预处理：探原片几何 + 抽音频(缺省) / 压 720p 代理(--split-screen)。毛片永不上传。
+	// ① 本地预处理：探原片几何 → 零成本前置校验区 → 抽音频(缺省) / 压 720p 代理(--split-screen)。
+	//    毛片永不上传。
 	log.step("① 本地预处理（探几何 + 抽音频/720p 代理）…");
-	const geo = probeGeometry(inputAbs, opts.ffmpegPath);
+	const geo = deps.probe(inputAbs, opts.ffmpegPath);
 	log.info(`原片几何 ${geo.width}x${geo.height} @ ${geo.fps.toFixed(2)}fps · ${(geo.duration / 60).toFixed(1)}min`);
-	const artifact = opts.splitScreen
-		? await compress720p(inputAbs, opts.ffmpegPath)
-		: await extractAudio(inputAbs, opts.ffmpegPath);
-	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
-	log.info(opts.splitScreen ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`);
 
-	// ②a 可选：现成字幕作转写来源（先于主上传独立上传；扩展名先在本地拦，省一次白上传）
-	let subtitleFileId: string | undefined;
-	if (opts.subtitleFile) {
-		const subAbs = resolve(opts.subtitleFile);
+	// ①a 零成本前置校验区（add-pre-upload-duration-gate）——本区 MUST 排在**任何抽取与上传之前**：
+	//   区内三项都只花本地几毫秒，而它们要拦的失败在服务端一律是「建单期硬拒」，
+	//   排在抽取之后就等于先花几分钟转码、再传几百 MB，然后才知道不行（2026-08-26 真机实证）。
+	//   ⚠️ 原实现把必填干跑排在抽取**与字幕上传之后**（`--subtitle-file` 那一跳真会白传一次），
+	//      与本命令 spec「缺失在上传前报错、零上传零提交」不符——本次一并归位，别再挪回去。
+	//   ① 时长硬闸：服务端全局 2h 上限的本地镜像（判据严格大于，同构服务端）
+	assertWithinMediaDurationLimit(geo.duration, DURATION_LIMIT_HINT);
+	//   ② 字幕入参的存在性与扩展名（内容合法性归服务端）
+	const subAbs = opts.subtitleFile ? resolve(opts.subtitleFile) : undefined;
+	if (subAbs) {
 		if (!existsSync(subAbs)) throw new Error(`字幕文件不存在：${subAbs}`);
 		const subExt = extname(subAbs).toLowerCase();
 		if (subExt !== ".srt" && subExt !== ".ass") {
 			throw new Error(`--subtitle-file 只接受单语 .srt/.ass，拿到「${subExt || "无扩展名"}」`);
 		}
-		const up = await uploadCached(cfg, subAbs, { force: opts.reupload });
+	}
+	//   ③ 必填/数值干跑（--language 必填、--max-clip-sec 有限数值）：拿假 file_id 拼一遍触发校验。
+	//      subtitle_file_id 此刻尚未上传得到，传 undefined 不影响这两项校验。
+	void buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget, undefined);
+
+	const artifact = opts.splitScreen
+		? await deps.compress(inputAbs, opts.ffmpegPath)
+		: await deps.extract(inputAbs, opts.ffmpegPath);
+	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
+	log.info(opts.splitScreen ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`);
+
+	// ②a 可选：现成字幕作转写来源（先于主上传独立上传；存在性/扩展名已在 ①a 拦过，此处只上传）
+	let subtitleFileId: string | undefined;
+	if (subAbs) {
+		const up = await deps.uploadSubtitle(cfg, subAbs, { force: opts.reupload });
 		subtitleFileId = up.fileId;
 		log.info(`${up.cached ? "命中上传缓存，复用" : "已上传"}字幕文件（转写来源，跳过云端 ASR）：${basename(subAbs)}`);
 	}
 
-	// ② 上传抽出物 → 提交（--language 必填在拼 payload 时前置校验，缺失零上传零提交）
-	const payloadProbe = buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget, subtitleFileId);
-	void payloadProbe; // 干跑一遍触发必填/数值校验；真实 payload 由下方闭包按 file_id 重拼
+	// ② 上传抽出物 → 提交（必填/数值校验已在 ①a 前置完成，缺失零抽取零上传零提交）
 	log.step("② 上传抽出物到云端…");
 	const submitted = await uploadAndSubmitTask(
 		cfg,
