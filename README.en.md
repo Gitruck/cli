@@ -33,7 +33,7 @@
 | ⚙️ | `gtrk init` | Guided one-time setup (API key + Jianying draft folder), then forget about it |
 | 🩺 | `gtrk doctor` | Health check: config / cloud connectivity / Jianying folder / runtime in one shot |
 | 📦 | `gtrk deps` | Runtime assets: `status` shows where ffmpeg/fonts come from and under which licence, `install` fetches them from the Gitruck Cloud mirror (**must be triggered explicitly — never a silent auto-download**) |
-| 🤖 | `gtrk skills install` | Installs the 12 bundled CLI skills into the agents detected on this machine, via the generic `skills` adapter plus a gtrk supplement layer; `--all` covers every registered host |
+| 🤖 | `gtrk skills install` | Installs the 13 bundled CLI skills into the agents detected on this machine, via the generic `skills` adapter plus a gtrk supplement layer; `--all` covers every registered host |
 | ⬆️ | `gtrk upgrade` | Upgrade the CLI to the latest version + refresh skills (config preserved); `--check` only reports |
 | 🎞️ | `gtrk render` | Render a gtrk project (EDL) locally → finished mp4 (requires ffmpeg); output frames are allocated against the **cumulative** timeline (per-clip rounding never accumulates, so the picture cannot drift away from the voiceover); runs a QC pass afterwards and writes `.qc.json` (`--no-qc` skips it) |
 | 🔬 | `gtrk qc <cut>` | Final-cut QC: one decoding pass over the whole file for flash frames, black/frozen frames, clipping, silence and audio/video drift, each with a timecode; `--gtrk <project>` enables project-aware detection of **intra-clip cuts**, `--fail-on error\|warn\|never` gates pipelines via the exit code |
@@ -219,7 +219,7 @@ Once installed, a single sentence in any agent invokes a gtrk skill:
 | ![Calling gtrk from an agent, example 1](assets/agent-example-1.png) | ![Calling gtrk from an agent, example 2](assets/agent-example-2.png) |
 | ![Calling gtrk from an agent, example 3](assets/agent-example-3.png) | ![Calling gtrk from an agent, example 4](assets/agent-example-4.png) |
 
-`gtrk install` installs the 12 bundled CLI skills (`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`) into the agents detected on this machine. The mechanism matches lark-cli: gtrk hands its local skill sources to the generic `skills` CLI, which owns agent detection, directory mapping and update rules; gtrk no longer hardcodes per-vendor paths.
+`gtrk install` installs the 13 bundled CLI skills (`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`) into the agents detected on this machine. The mechanism matches lark-cli: gtrk hands its local skill sources to the generic `skills` CLI, which owns agent detection, directory mapping and update rules; gtrk no longer hardcodes per-vendor paths.
 
 By default `~/.agents/skills` is the single source of truth, linked into each agent's compatible directory (junctions on Windows); where linking is unavailable the adapter falls back to copying. That way updates touch one canonical copy instead of letting duplicates drift apart. Common commands:
 

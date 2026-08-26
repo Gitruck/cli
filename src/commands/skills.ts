@@ -29,6 +29,8 @@ export const SKILL_NAMES = [
 	"gtrk-cover",
 	// 第一张 structure 级组合图纸（add-travel-recap-skill）
 	"gtrk-travel-recap",
+	// 第三张 structure 级组合图纸（add-live-slicing-skill）：直播回放 → 一批粗剪工程
+	"gtrk-live-slicing",
 ] as const;
 
 export interface InstallSkillOptions {
