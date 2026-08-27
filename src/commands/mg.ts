@@ -4,10 +4,12 @@
  * 脑手分工：real-roam-viz skill=脑（产 GSAP 颗粒 HTML），本命令=手（lint / 铺轨 / 看板）。
  * **不云渲、不下载 webm**——渲染是客户端出片期的事（客户端有内容 key 缓存）。
  *
- * 三模式（沿 matrix/split 的「顶层命令 + 可选 positional」范式）：
+ * 四模式（沿 matrix/split 的「顶层命令 + 可选 positional」范式）：
  *   gtrk mg --project <dir>        消费 dispatch.mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track
  *   gtrk mg lint <particle.html>   单文件纯本地静态 lint（六铁律静态子集）
  *   gtrk mg status --project <dir> 编排看板（几 beat / 几已产 / 几已铺）
+ *   gtrk mg render <particle.html> --duration <sec>   独立颗粒云渲 qtrle 透明 MOV（脱离工程，精剪补给口；
+ *                                  add-mg-standalone-render——例外于「不云渲」旧注：仅此模式云渲、计费确认前置）
  *
  * 去品牌化双名认旧：命令保留弃用别名 `gtrk rrv`；dispatch 读 `mg ?? rrv_mg`；源目录双探 `mg/ ∪ rrv/`；
  * struct_meta 读 `mg ?? rrv`。写侧一律新名（assets/mg、mg- 前缀、struct_meta.mg）。
@@ -18,6 +20,7 @@ import { existsSync } from "node:fs";
 import { readFile, mkdir, copyFile } from "node:fs/promises";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 import { lintParticle, parseCompositionId } from "../lib/mg-lint";
+import { renderParticle, CID_SHAPE } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
 import type { Dispatch, MgDispatch } from "../lib/splitdoc";
 import { reportReprojection, reprojectDispatchWindows, withTimecodeSource } from "../lib/reproject";
@@ -36,6 +39,14 @@ interface MgOpts {
 	/** 逃生门（fix-mg-lay-strip-scope ④）：显式授权「重置整轨」——清空保留集 + 绕过空 queue 守门。 */
 	replaceAll?: boolean;
 	json?: boolean;
+	/** render 模式（add-mg-standalone-render）：显式时长锚（秒，必填）。 */
+	duration?: string;
+	/** render 模式：产物格式，首发仅 qtrle（缺省即它）。 */
+	format?: string;
+	/** render 模式：落盘目录（缺省 ./mg-render/<composition_id>/）。 */
+	out?: string;
+	/** render 模式：跳过计费预估确认。 */
+	yes?: boolean;
 }
 
 export function registerMg(program: Command): void {
@@ -43,13 +54,17 @@ export function registerMg(program: Command): void {
 		.command("mg [words...]")
 		.alias("rrv") // 去品牌化弃用别名：`gtrk rrv` 旧脚本/skill 不断（打 deprecation 提示）
 		.description(
-			"MG 颗粒铺轨：无 positional=消费 dispatch.mg 铺 html-particle；`mg lint <file>`=单文件 lint；`mg status`=看板",
+			"MG 颗粒铺轨：无 positional=消费 dispatch.mg 铺 html-particle；`mg lint <file>`=单文件 lint；`mg status`=看板；`mg render <file> --duration <sec>`=独立颗粒云渲 qtrle 透明 MOV（精剪补给口）",
 		)
 		.option("--project <dir>", "oralcut 产物目录（定位 split/dispatch.json 与工程）")
 		.option("--dispatch <path>", "显式指定 dispatch.json（非标准布局兜底）")
 		.option("--only <beat>", "只跑单 beat（收 beat id 如 B12，非 composition_id）：增量重铺该 beat，轨上其余已铺颗粒原样保留")
 		.option("--lint-only", "只 lint 校验，不铺轨不写回")
 		.option("--replace-all", "显式授权重置整轨：不走增量保留、整轨剥掉重铺——会删掉轨上其余已铺颗粒（不在本次派单/--only 里的那些）")
+		.option("--duration <sec>", "render 模式必填：显式时长锚（秒）——独立模式无坑位包络，它就是 lint 包络与计费时长")
+		.option("--format <fmt>", "render 模式产物格式：首发仅 qtrle（剪映可读透明 MOV；webm 剪映不吃、明确拒绝）")
+		.option("--out <dir>", "render 模式落盘目录（缺省 ./mg-render/<composition_id>/；绝不写剪映草稿目录）")
+		.option("--yes", "render 模式：跳过计费预估确认")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MgOpts) => {
 			if (process.argv[2] === "rrv") log.warn("`gtrk rrv` 已更名为 `gtrk mg`（去品牌化），别名仍可用但建议改用 `gtrk mg`。");
@@ -63,7 +78,8 @@ export async function runMg(words: string[], opts: MgOpts): Promise<MgResult> {
 	const sub = words[0];
 	if (sub === "lint") return runLint(words.slice(1), opts);
 	if (sub === "status") return runStatus(opts);
-	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status`);
+	if (sub === "render") return runRender(words.slice(1), opts);
+	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>`);
 	return runLay(opts);
 }
 
@@ -269,7 +285,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 			reprojection: reproj.summary,
 		});
 	}
-	const { gtrk, mtimeMs } = project;
+	const { gtrk, revision } = project;
 	const gtrkDir = dirname(gtrkPath);
 
 	// ── 剥离面（fix-mg-lay-strip-scope 阶段 A · 真增量合并）───────────────────────────
@@ -337,7 +353,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 	// 让「这批已铺产物是照哪条时间线、哪种模式铺的」可被后续体检读取。本 change 只**登记**，不据此判失效。
 	// 注意它描述的是**本次铺的那些**——保留条目带的是上一轮时码（混排形态，见 spec 同名 Scenario）。
 	const written = withTimecodeSource(next, "mg", reproj);
-	writeGtrkAtomic(gtrkPath, written, mtimeMs);
+	writeGtrkAtomic(gtrkPath, written, revision);
 	// 素材落盘自检（material-integrity-check）：与 `gtrk matrix` 同一纯函数、同名同形字段。
 	// 只读、非致命——查出悬空 MUST NOT 改 ok / 退出码 / 写回结果；人读输出压在铺轨完成行之后。
 	const integrity = safeCheckMaterialIntegrity({ gtrk: written, gtrkDir, log });
@@ -382,12 +398,22 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 	});
 }
 
-/**
- * 文件名是否形如 composition_id（`<slug>-B<数字>` / `<slug>-B<数字>-aux<n>`）。
- * 裸 lint 拿 basename 当期望 id 时的门槛：`gtrk mg lint ./tmp.html` 这类临时副本必然对不上，
- * 不设门就会误判致命（fix-mg-lint-law7-estimate 开放问题·裸 lint 期望 id 来源）。
- */
-const CID_SHAPE = /-B\d+(?:-aux\d+)?$/;
+// CID_SHAPE（文件名是否形如 composition_id）已上提至 lib/mg-render.ts 导出（render/lint 两模式同规则，单一真相源）。
+
+/** render 模式（add-mg-standalone-render）：参数转译 + 统一退出码；主链在 lib/mg-render.ts。 */
+async function runRender(args: string[], opts: MgOpts): Promise<MgResult> {
+	const file = args[0];
+	if (!file) throw new Error("用法：gtrk mg render <particle.html> --duration <sec> [--format qtrle] [--out <dir>] [--yes]");
+	const duration = Number(opts.duration);
+	const result = await renderParticle({
+		file,
+		duration,
+		...(opts.format ? { format: opts.format } : {}),
+		...(opts.out ? { out: opts.out } : {}),
+		...(opts.yes ? { yes: true } : {}),
+	});
+	return done(opts, result as unknown as MgResult);
+}
 
 /** 单文件 lint 模式。 */
 async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {

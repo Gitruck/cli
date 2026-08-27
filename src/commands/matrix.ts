@@ -56,6 +56,7 @@ import { uploadCached, invalidateUpload } from "../lib/upload-cache";
 import { submitTask, getTaskResult } from "../lib/cloud";
 import type { CloudFileTaskDeps } from "../lib/tool-runner";
 import { BLACK_BED_HEX, encodeSolidPng, solidRelPath } from "../lib/solid-png";
+import { fetchMaterials, type MatrixFetchDeps } from "../lib/matrix-fetch";
 import {
 	reportMaterialIntegrity,
 	safeCheckMaterialIntegrity,
@@ -216,13 +217,15 @@ export interface MatrixRunDeps {
 	probeExempt?: () => Promise<boolean>;
 	/** --materials 视频形态的场景抽帧计划替身（缺省 = probeGeometry + detectScenes 场景中点）。 */
 	videoSceneFrames?: (path: string) => Promise<{ materialId: string; frameTsSec: number[] }>;
+	/** matrix fetch 注入面（add-matrix-raw-fetch）：resign/下载替身透传给 lib 层（缺省 = 真实云链）。 */
+	matrixFetch?: MatrixFetchDeps;
 }
 
 export function registerMatrix(program: Command): void {
 	program
 		.command("matrix [words...]")
 		.description(
-			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 剪辑向检索；`matrix material \"<query>\"`=通用三态素材检索（下载向，clip/image/audio，BGM 主场）；`matrix index --dirs <a,b>`=本地素材索引；`matrix describe`=按需理解零件（plan 注入/素材文件）；`matrix lay`=消费（agent 编辑后的）plan 文件铺轨",
+			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 剪辑向检索；`matrix material \"<query>\"`=通用三态素材检索（下载向，clip/image/audio，BGM 主场）；`matrix fetch <clip_id...>`=精剪期拉原片（对已授予素材免费重签+下载落盘）；`matrix index --dirs <a,b>`=本地素材索引；`matrix describe`=按需理解零件（plan 注入/素材文件）；`matrix lay`=消费（agent 编辑后的）plan 文件铺轨",
 		)
 		.option("--project <dir>", "oralcut 产物目录（定位 split/dispatch.json 与产物落点）")
 		.option("--dispatch <path>", "显式指定 dispatch.json（非标准布局兜底）")
@@ -293,18 +296,19 @@ export function registerMatrix(program: Command): void {
 		.option("--min-duration <sec>", "matrix material：最短时长（秒）——BGM 按成片时长挑")
 		.option("--max-duration <sec>", "matrix material：最长时长（秒）")
 		.option("--diversity", "matrix material：去同质化，避免返回雷同素材")
-		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）")
+		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）；matrix fetch：原片落盘目录（缺省 ./matrix-fetch/；绝不写剪映草稿目录）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
 			await runMatrix(parseMatrixPositional(words), opts);
 		});
 }
 
-/** positional 解析结果：plan（派单消费）/ search（剪辑向 ad-hoc）/ material（通用三态素材）/ index（本地索引）/ describe（理解零件）/ lay（消费编辑后 plan）。 */
+/** positional 解析结果：plan（派单消费）/ search（剪辑向 ad-hoc）/ material（通用三态素材）/ fetch（精剪期拉原片）/ index（本地索引）/ describe（理解零件）/ lay（消费编辑后 plan）。 */
 export type MatrixPositional =
 	| { kind: "plan" }
 	| { kind: "search"; query: string }
 	| { kind: "material"; query: string }
+	| { kind: "fetch"; clipIds: string[] }
 	| { kind: "index" }
 	| { kind: "describe" }
 	| { kind: "lay" };
@@ -316,6 +320,13 @@ export function parseMatrixPositional(words: string[] | undefined): MatrixPositi
 		const q = words.slice(1).join(" ").trim();
 		if (!q) throw new Error('检索词不能为空：gtrk matrix material "<query>"');
 		return { kind: "material", query: q };
+	}
+	if (words[0] === "fetch") {
+		const clipIds = words.slice(1);
+		if (!clipIds.length) {
+			throw new Error('用法：gtrk matrix fetch <clip_id...> [--out <dir>]——clip_id 来自 matrix search 的候选结果（两段式：先 search 挑定、再 fetch 拉原片）');
+		}
+		return { kind: "fetch", clipIds };
 	}
 	if (words[0] === "index") {
 		if (words.length > 1) throw new Error(`matrix index 不接受多余参数「${words.slice(1).join(" ")}」——用法：gtrk matrix index --dirs <a,b,...>`);
@@ -335,7 +346,7 @@ export function parseMatrixPositional(words: string[] | undefined): MatrixPositi
 	}
 	if (words[0] !== "search") {
 		throw new Error(
-			`未知子命令「${words[0]}」——ad-hoc 剪辑向检索：gtrk matrix search "<query>"；通用三态素材检索：gtrk matrix material "<query>"；派单消费：gtrk matrix --project <dir>；本地索引：gtrk matrix index --dirs <a,b,...>；理解零件：gtrk matrix describe；消费编辑后 plan：gtrk matrix lay`,
+			`未知子命令「${words[0]}」——ad-hoc 剪辑向检索：gtrk matrix search "<query>"；通用三态素材检索：gtrk matrix material "<query>"；精剪期拉原片：gtrk matrix fetch <clip_id...>；派单消费：gtrk matrix --project <dir>；本地索引：gtrk matrix index --dirs <a,b,...>；理解零件：gtrk matrix describe；消费编辑后 plan：gtrk matrix lay`,
 		);
 	}
 	const query = words.slice(1).join(" ").trim();
@@ -395,6 +406,15 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 			throw new Error("matrix material 不接受 --material-class：素材形态用 --scope clip|image|audio；概念/实拍分层是剪辑向语义");
 		}
 		if (opts.project || opts.dispatch) throw new Error("matrix material 不接受 --project/--dispatch：本零件是 ad-hoc 检索，不消费派单也不铺轨");
+		return;
+	}
+	if (pos.kind === "fetch") {
+		// fetch 只认 --out / --json：拉原片是 resign 消费口，不检索不铺轨不进工程（不做静默忽略）
+		if (opts.local || dirs.length) throw new Error("matrix fetch 不接受 --local/--dirs：本地素材本就绝对路径直引、无需拉取（search --local 出路径、直接拖）");
+		if (opts.plan || opts.materials) throw new Error("--plan/--materials 仅用于 matrix describe / matrix lay（不做静默忽略）");
+		if (opts.sourceWindow !== undefined) throw new Error("--source-window 仅用于 --local 检索（不做静默忽略）");
+		if (opts.column || opts.materialClass) throw new Error("matrix fetch 不接受 --column/--material-class：拉原片不是检索，无语义过滤面");
+		if (opts.project || opts.dispatch) throw new Error("matrix fetch 不接受 --project/--dispatch：产物落普通目录、不进工程（进工程的原片走铺轨「确认原片」链路）");
 		return;
 	}
 	if (pos.kind === "describe") {
@@ -539,6 +559,16 @@ export async function runMatrix(
 
 	// ── 通用三态素材检索（matrix material：2×2 路由下半行，下载向出参）──
 	if (pos.kind === "material") return withEmbedJsonGuard("material", opts, () => runMaterialMode(pos.query, cfg, opts));
+
+	// ── 精剪期拉原片（matrix fetch：resign 消费口，两段式第二段；零计费无确认闸）──
+	if (pos.kind === "fetch") {
+		return withEmbedJsonGuard("fetch", opts, async () => {
+			const result = await fetchMaterials({ clipIds: pos.clipIds, ...(opts.out ? { out: opts.out } : {}) }, deps.matrixFetch ?? { loadCfg: () => cfg });
+			if (!result.ok) process.exitCode = 1;
+			if (opts.json) console.log(JSON.stringify(result));
+			return result as unknown as MatrixResult;
+		});
+	}
 
 	// ── 本地检索模式（--local）：跳过身份探针，不触任何云端检索端点 ──
 	if (opts.local) {
@@ -1695,7 +1725,7 @@ async function extractLocalCovers(plan: BrollPlan, gtrkDir: string): Promise<Map
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
  * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
  * → layBrollTracks → 原子写回 → 素材落盘自检（只读）。
- * 任何整体性失败（工程缺失/非 v1/mtime 冲突）都不影响已产出的 plan。
+ * 任何整体性失败（工程缺失/非 v1/revision 冲突）都不影响已产出的 plan。
  */
 async function layIntoProject(
 	baseDir: string,
@@ -1729,7 +1759,7 @@ async function layIntoProject(
 		log.warn(`未找到工程文件（${join(baseDir, "gtrk", "project.gtrk")}），跳过铺轨——plan 已产出，可后续在有工程的目录重跑`);
 		return undefined;
 	}
-	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
+	const { gtrk, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 
 	// ── 句界吸附供数（adjust-shot-cut-sentence-align）：句起点 = 重投影 utteranceIndex 的句级
@@ -2005,7 +2035,7 @@ async function layIntoProject(
 
 	// 时码来源登记（add-consume-side-reprojection 7.2，纯追加可选字段）：本 change 只**登记**，不据此判失效
 	const written = withTimecodeSource(next, "broll", reproj);
-	writeGtrkAtomic(gtrkPath, written, mtimeMs);
+	writeGtrkAtomic(gtrkPath, written, revision);
 	// 素材落盘自检（material-integrity-check）：对象取**写回后**的那份（报的必须是「用户现在打开工程会遇到什么」）；
 	// 只读、非致命——查出悬空 MUST NOT 改 ok / 退出码 / 写回结果。人读输出压在铺轨完成行之后（见下）。
 	const integrity = safeCheckMaterialIntegrity({ gtrk: written, gtrkDir, log });

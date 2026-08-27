@@ -333,7 +333,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | **`matrix lay` 报「plan 校验未通过」** | 你把不可编辑面改坏了（报错逐条指名字段）：按 §plan 编辑口径改回来重跑；`local_path 路径无效` 多半是可移动盘没挂载或真把路径改了 |
 | 报「本地索引不存在」 | 先 `gtrk matrix index --dirs <...>`；已建过则查 `--dirs` 与建索引目录是否一致、可移动盘是否挂载 |
 | 换电脑用不了索引 | 索引跨机不可移植（本机缓存），新机重跑 `matrix index` 即可 |
-| 预览看不了 / 想「重签」 | 别为此重跑铺轨：`preview_url`/`cover_url` 不带签名不过期；带签名 24h 过期的是原片 `url`，由客户端「确认原片」重签 |
+| 预览看不了 / 想「重签」 | 别为此重跑铺轨：`preview_url`/`cover_url` 不带签名不过期；带签名 24h 过期的是原片 `url`——工程内走客户端「确认原片」重签；**脱离工程要原片落本地走 `gtrk matrix fetch <clip_id...>`（免费重签+下载，见「精剪补素材」节）** |
 | raw 原片回落 / 体积大 | 提示用户；服务端 backfill 后重跑可换回轻量代理 |
 | `reprojection.degraded:true` | 不是故障：命令算不出当刻窗口退回快照。`transcript_missing` → 补回 transcript.json 或新版 oralcut 重出；`no_project`/`gtrk_unreadable` → 工程放回位或 `--project` 指对 |
 | 期望 concept 却报 external 限制 | 如实说明当前身份只出 real_shot 有版权素材，concept 需矩阵成员口 |
@@ -352,6 +352,26 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - 用户表示暂时只要 B-roll → 停在这，尊重他的节奏。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill，用户只对话**——别让用户自己去终端敲下一条 gtrk 命令；但关键检查点务必停下等用户确认再进下一步——本车道涉及**两处**：① B-roll 铺完让用户挑选/调整；② ④ 全局抽帧检查后让用户确认构图。
+
+---
+
+## 精剪补素材：`gtrk matrix fetch`，两段式拉原片（脱离工程）
+
+**场景**：粗剪已完成、工程已导剪映，用户在剪映精剪时说「这里想补一段 B-roll」——不回客户端、不重跑铺轨，把原片拉到本地直接拖进剪映。这是既有管线的**旁路补给口**（add-matrix-raw-fetch），与铺轨链路的「确认原片」（客户端挑选 UI）互不相扰。
+
+动线恒为**两段式**（先看后拉，钱和磁盘都不失控）：
+
+1. **search 挑定**：`gtrk matrix search "<词>"` 出候选（preview 可看）→ 用户/agent 挑定要的 `clip_id`。计费检索的每次成功返回都会**灌授予账本**——付费即持久授予。
+2. **fetch 拉取**：`gtrk matrix fetch <clip_id...> [--out <dir>]` → 免费重签新鲜签名 → 原片按 `<clip_id>.<ext>` 落盘（缺省 `./matrix-fetch/`）→ 「拖进剪映即用」。
+
+授权边界话术（MUST 如实、给出路）：
+
+- **fetch 零计费**：重签是行使既有授予，免费无限次；**24h 过期签名不构成障碍**——三天前 search 出的 clip 照样 fetch（授予持久、签名现签）。
+- **未购项逐条报因不连坐**：报「未购授予」的条目，出路 = 对该素材的关键词跑一次计费检索即获授予；其余命中项照常落盘，别把部分 missing 说成整批失败。
+- **首发只覆盖视频 clip 原片**：图片/音频素材虽也落授予账本，但重签面未开——这类 id 会进 missing（透传报因并附提示），属「暂不支持」不是故障。
+- **本地素材不走 fetch**：`--local` 域素材本就绝对路径直引——`matrix search --local --dirs` 出的就是本地路径，用户直接拖，**没有「拉取」这一步**。
+
+工程分叉明示（与 `gtrk mg render` 同款话术）：用户在剪映里补的这段料**不会回流 `.gtrk`**（导出本就单向），回头从工程重导剪映不会带上它；要长期用提醒自存产物文件。原片体积可观（单条常见几十 MB 级），批量拉取前把量说清。
 
 ---
 
