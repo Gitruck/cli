@@ -1741,6 +1741,21 @@ export function lintParticle(
 
 	// 铁律1：<template> 包裹 + 根 data-* 三件
 	if (!/<template[\s>]/i.test(html)) push("1-template", true, "缺 <template> 包裹根元素（裸 div 整片渲染失败）");
+	// 铁律1b：script MUST 全部在 <template> 内（fix-mg-lint-script-scope，2026-08-27 真机实锤）：
+	// 客户端 player-runtime 只挂载 template 内容并重建其中的 script；template 外的 script 恒不执行
+	// ⇒ __timelines 不注册 ⇒ 颗粒预览/渲染空白。此前 lint 只查「文件里有注册」，位置盲区放行了空白颗粒。
+	{
+		const tplClose = html.search(/<\/template>/i);
+		if (tplClose >= 0) {
+			const lastScript = html.lastIndexOf("<script");
+			if (lastScript > tplClose)
+				push(
+					"1b-script-outside-template",
+					true,
+					"存在 </template> 之后的 <script>——客户端只挂载并执行 template 内的脚本，外部脚本恒不执行（__timelines 不注册 → 颗粒空白）。把全部 <script> 移入根元素内部末尾",
+				);
+		}
+	}
 	const root = rootTag(html);
 	const cid = root ? attr(root, "data-composition-id") : undefined;
 	if (!root || !cid) push("1-composition-id", true, "根元素缺 data-composition-id");

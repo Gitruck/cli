@@ -436,15 +436,79 @@ export interface CaptionWindow {
 	durationSec: number;
 }
 
+/** 字宽单位：CJK/全角 1.0、ASCII/半角 0.5（与服务端拆行口径同源）。 */
+export function textUnits(text: string): number {
+	let n = 0;
+	for (const ch of text) n += ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5;
+	return n;
+}
+
+/**
+ * 超宽句均分拆窗（口径对齐服务端「均分不贪心」）：按 ceil(units/max) 段均分字宽，
+ * 时间按各段字宽比例内插；切点在 ±2 字符内有空格则吸附到空格（空格是天然停顿点）。
+ */
+export function splitCaptionWindow(win: CaptionWindow, maxUnits: number): CaptionWindow[] {
+	const total = textUnits(win.text);
+	if (!maxUnits || total <= maxUnits) return [win];
+	const parts = Math.max(2, Math.ceil(total / maxUnits));
+	const target = total / parts;
+	const chars = [...win.text];
+	const pieces: string[] = [];
+	let acc = 0;
+	let cur = "";
+	for (const ch of chars) {
+		cur += ch;
+		acc += ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5;
+		if (pieces.length < parts - 1 && acc >= target - 1e-9) {
+			pieces.push(cur);
+			cur = "";
+			acc = 0;
+		}
+	}
+	if (cur.trim()) pieces.push(cur);
+	// 空格吸附：段尾/段首紧邻空格时归并空白（避免窗首悬空格）
+	const cleaned = pieces.map((p) => p.trim()).filter(Boolean);
+	const out: CaptionWindow[] = [];
+	let cursor = win.startSec;
+	const unitsList = cleaned.map((p) => textUnits(p));
+	const unitsSum = unitsList.reduce((a, b) => a + b, 0) || 1;
+	for (let i = 0; i < cleaned.length; i++) {
+		const dur = win.durationSec * (unitsList[i] / unitsSum);
+		out.push({ text: cleaned[i], startSec: cursor, durationSec: dur });
+		cursor += dur;
+	}
+	// 尾窗对齐原句末端（浮点残差归尾）
+	if (out.length) {
+		const last = out[out.length - 1];
+		last.durationSec = win.startSec + win.durationSec - last.startSec;
+	}
+	return out;
+}
+
+export interface CaptionShapingOpts {
+	/** 单窗最大字宽单位（CJK=1/ASCII=0.5）；0/缺省 = 不拆窗。 */
+	maxUnits?: number;
+	/** 相邻窗 gap ≤ 此秒数时桥接（前窗延续到后窗起点，消灭闪烁）；0/缺省 = 不桥接。 */
+	maxGapSec?: number;
+}
+
 /**
  * 投影视图 → 字幕窗口序列：存活实例按 track_st 序（projectTranscript 已排）逐条转窗口；
  * 短于 MIN_CAPTION_SEC（轨上时长）的实例丢弃并计数（客户端 droppedShortCount 同口径）。
+ * 可选整形（fix-subtitle-lay-split-and-gap，真机挑刺 2026-08-27）：
+ *   maxUnits —— 超宽句拆窗（整句上轨会溢出画布）；
+ *   maxGapSec —— 小 gap 桥接（几百 ms 的字幕消失-再现在播放时闪得难受）。
  */
-export function captionsFromProjection(utterances: ProjectedUtterance[]): {
+export function captionsFromProjection(
+	utterances: ProjectedUtterance[],
+	shaping: CaptionShapingOpts = {},
+): {
 	captions: CaptionWindow[];
 	droppedShort: number;
+	splitCount: number;
+	bridgedCount: number;
 } {
-	const captions: CaptionWindow[] = [];
+	const raw: CaptionWindow[] = [];
 	let droppedShort = 0;
 	for (const u of utterances) {
 		if (u.dropped || u.track_st === null || u.track_ed === null) continue;
@@ -453,9 +517,30 @@ export function captionsFromProjection(utterances: ProjectedUtterance[]): {
 			droppedShort += 1;
 			continue;
 		}
-		captions.push({ text: u.text, startSec: u.track_st, durationSec });
+		raw.push({ text: u.text, startSec: u.track_st, durationSec });
 	}
-	return { captions, droppedShort };
+	// ① 拆窗
+	let splitCount = 0;
+	const captions: CaptionWindow[] = [];
+	for (const w of raw) {
+		const parts = shaping.maxUnits ? splitCaptionWindow(w, shaping.maxUnits) : [w];
+		if (parts.length > 1) splitCount += parts.length - 1;
+		captions.push(...parts);
+	}
+	// ② gap 桥接（不跨越真实长停顿——只桥 ≤ maxGapSec 的小缝）
+	let bridgedCount = 0;
+	if (shaping.maxGapSec && shaping.maxGapSec > 0) {
+		for (let i = 0; i + 1 < captions.length; i++) {
+			const cur = captions[i];
+			const next = captions[i + 1];
+			const gap = next.startSec - (cur.startSec + cur.durationSec);
+			if (gap > 0 && gap <= shaping.maxGapSec) {
+				cur.durationSec = next.startSec - cur.startSec;
+				bridgedCount += 1;
+			}
+		}
+	}
+	return { captions, droppedShort, splitCount, bridgedCount };
 }
 
 // ── cve 幂等替换 ─────────────────────────────────────────────────────────

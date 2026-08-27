@@ -8,7 +8,7 @@
  * content 缺省做逗号句号清洗（★ 2026-08-21 真机走查拍板，见 lib/subtitle-lay.ts
  * stripSubtitlePunctuation）；`--keep-punctuation` 保留原始标点。
  *
- *   - 纯本地零云端零计费；写回复用原子写回口径（writeGtrkAtomic：临时文件+rename，mtime 冲突拒写）；
+ *   - 纯本地零云端零计费；写回复用原子写回口径（writeGtrkAtomic：临时文件+rename，内容 revision 冲突拒写 + rename 前重检）；
  *     除 `struct_meta.client_visual_elements` 外 MUST NOT 改 `.gtrk` 任何其他键。
  *   - 幂等：重跑替换既有字幕 lane（判据 = text lane 全员 `params.subtitleCue === true`，
  *     与客户端字幕身份判据同源）；用户手加的 text 元素所在 lane 恒不动。
@@ -60,6 +60,10 @@ export interface SubtitleLayOpts {
 	/** 保留原始标点（逃生口）；缺省对 content 清洗逗号句号（★ 2026-08-21 拍板）。 */
 	keepPunctuation?: boolean;
 	json?: boolean;
+	/** 单窗最大字宽单位（CJK=1/ASCII=0.5）；缺省按画布档（横 20/竖 13）；0=不拆窗。 */
+	maxUnits?: string;
+	/** 相邻窗 gap ≤ 此秒数时桥接前窗（缺省 0.5；0=不桥接）。 */
+	maxGap?: string;
 }
 
 export interface SubtitleLayResult {
@@ -157,7 +161,7 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 	const colorId = parseColorId(opts.color);
 	const { gtrkPath, transcriptPath } = resolvePaths(opts);
 
-	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
+	const { gtrk, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 	const canvas = canvasOf(gtrk);
 	const transcript = loadTranscript(transcriptPath);
@@ -173,10 +177,21 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 			`投影零命中：transcript 的口播素材（material_id=${transcript.material_id}）在当刻时间线上没有任何存活句。\n${report.text}\n${report.hint}`,
 		);
 	}
-	const { captions, droppedShort } = captionsFromProjection(view.utterances);
+	// 整形口径（fix-subtitle-lay-split-and-gap）：拆窗按画布档位（横屏 20 / 竖屏 13，全线同口径）；
+	// gap 桥接缺省 0.5s（真机挑刺：几百 ms 的字幕消失-再现闪得难受）。--max-units/--max-gap 可覆盖，0=关。
+	const orientation = orientationOf(canvas);
+	const defaultUnits = orientation === "portrait" ? 13 : 20;
+	const maxUnits = opts.maxUnits != null ? Math.max(0, Number(opts.maxUnits) || 0) : defaultUnits;
+	const maxGapSec = opts.maxGap != null ? Math.max(0, Number(opts.maxGap) || 0) : 0.5;
+	const { captions, droppedShort, splitCount, bridgedCount } = captionsFromProjection(view.utterances, {
+		maxUnits,
+		maxGapSec,
+	});
 	if (droppedShort > 0) {
 		log.warn(`丢弃 ${droppedShort} 条短于最小可读时长（${MIN_CAPTION_SEC}s）的投影实例`);
 	}
+	if (splitCount > 0) log.info(`超宽句拆窗：+${splitCount} 窗（上限 ${maxUnits} 字宽单位/${orientation === "portrait" ? "竖" : "横"}屏档）`);
+	if (bridgedCount > 0) log.info(`小 gap 桥接：${bridgedCount} 处（阈值 ${maxGapSec}s，消灭字幕闪烁）`);
 	if (captions.length === 0) {
 		throw new Error(`存活投影实例全部短于最小可读时长（${MIN_CAPTION_SEC}s），无字幕可上——请检查剪辑是否把整句都切碎了`);
 	}
@@ -206,9 +221,8 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 		...gtrk,
 		struct_meta: { ...structMeta, client_visual_elements: mirror },
 	};
-	writeGtrkAtomic(gtrkPath, next, mtimeMs);
+	writeGtrkAtomic(gtrkPath, next, revision);
 
-	const orientation = orientationOf(canvas);
 	log.ok(
 		`字幕已写入：${elements.length} 条 · ${orientation === "landscape" ? "横屏" : "竖屏"}档（${canvas.width}x${canvas.height}）· ${presetId}/${colorId}` +
 			(replacedLanes ? `（替换旧字幕 lane ${replacedLanes} 条）` : ""),
@@ -245,6 +259,8 @@ export function registerSubtitle(program: Command): void {
 		.option("--style <id>", "字幕样式（default/outline/cinema_yellow/immersive_box/wide_spacing/deep_shadow/boxed，默认 default）")
 		.option("--color <id>", "字幕颜色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金，默认 雅黑）")
 		.option("--keep-punctuation", "保留原始标点（默认清洗：中英逗号句号替换为空格，小数/千分位/缩写不误伤）")
+		.option("--max-units <n>", "单窗最大字宽（CJK=1/ASCII=0.5；缺省按画布档：横屏 20/竖屏 13；0=不拆窗）")
+		.option("--max-gap <s>", "相邻字幕 gap ≤ 此秒数时桥接前一条（缺省 0.5，消灭闪烁；0=不桥接）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action((words: string[] | undefined, opts: SubtitleLayOpts) => {
 			parseSubtitlePositional(words);

@@ -122,6 +122,8 @@ export interface AudioLayOpts {
 	volume?: string;
 	offset?: string;
 	beatAlign?: boolean;
+	/** 关闭 loop 铺满（缺省 BGM 循环叠满至工程末尾、尾段裁齐）。 */
+	noLoop?: boolean;
 	json?: boolean;
 }
 
@@ -144,6 +146,8 @@ export interface AudioLayResult {
 	volume: number;
 	offsetMs: number;
 	clip: { clip_st: number; clip_ed: number; track_st: number; track_ed: number; duration: number };
+	/** loop 铺满时的总段数（单次=1）。 */
+	loopCount: number;
 	/** 仅 --beat-align 时出现：对齐成败与降级原因（降级不失败整命令）。 */
 	beatAlign?: { aligned: boolean; grid: "downbeats" | "beats" | null; degradedReason?: string };
 }
@@ -242,11 +246,15 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 		}
 	}
 
-	// ── clip 窗口：BGM 从头播（clip_st=0），工程末尾裁剪（工程长度未知则整条上）──
+	// ── clip 窗口：BGM 从头播（clip_st=0），工程末尾裁剪（工程长度未知则整条上）。
+	// loop 铺满（adjust-audio-lay-loop-fill，真机挑刺 2026-08-27）：BGM 短于剩余时间线时
+	// 缺省循环叠满至工程末尾（多 clip 首尾相接、尾段裁齐）——BGM 铺一半就静音是明显缺陷；
+	// --no-loop 保留单次行为。工程长度未知（projEnd undefined）时无「满」可言，恒单次。
 	const maxLen = projEnd !== undefined ? Math.max(0, projEnd - trackSt) : audioDur;
+	const loop = opts.noLoop !== true && projEnd !== undefined;
 	const len = r3(Math.min(audioDur, maxLen));
 	if (len < MIN_LAY_SEC) throw new Error(`起点 ${trackSt}s 之后已放不下音频（工程末尾 ${projEnd?.toFixed(2)}s）`);
-	if (len < audioDur - 1e-6) log.info(`音频长于剩余时间线，已在工程末尾裁剪（上轨 ${len}s / 全长 ${r3(audioDur)}s）`);
+	if (!loop && len < audioDur - 1e-6) log.info(`音频长于剩余时间线，已在工程末尾裁剪（上轨 ${len}s / 全长 ${r3(audioDur)}s）`);
 
 	// ── 同源幂等替换：同绝对路径素材所在的既有音轨全部剥除（含旧素材，零引用保护后）──
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
@@ -282,17 +290,38 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	// ── 新轨落位：track_index 取现有（保留轨）最大 +1；MUST NOT 写 hidden ──
 	const trackIndex =
 		keptTracks.reduce((mx, t) => Math.max(mx, typeof t.track_index === "number" ? t.track_index : -1), -1) + 1;
-	const clip = {
-		clip_id: `${materialId}-0`,
-		material: materialId,
-		clip_st: 0,
-		clip_ed: len,
-		track_st: trackSt,
-		track_ed: r3(trackSt + len),
-		duration: len,
-		volume,
-	};
-	const newTrack: LooseTrack = { track_index: trackIndex, muted: false, track_timeline: [clip] };
+	const clips: Array<Record<string, number | string>> = [];
+	{
+		let cursor = trackSt;
+		let i = 0;
+		const end = projEnd !== undefined ? projEnd : trackSt + len;
+		do {
+			const remain = r3(end - cursor);
+			const pieceLen = r3(Math.min(audioDur, remain));
+			if (pieceLen < MIN_LAY_SEC) break;
+			clips.push({
+				clip_id: `${materialId}-${i}`,
+				material: materialId,
+				clip_st: 0,
+				clip_ed: pieceLen,
+				track_st: r3(cursor),
+				track_ed: r3(cursor + pieceLen),
+				duration: pieceLen,
+				volume,
+			});
+			cursor = r3(cursor + pieceLen);
+			i += 1;
+		} while (loop && cursor < end - MIN_LAY_SEC);
+	}
+	if (clips.length === 0) throw new Error(`起点 ${trackSt}s 之后已放不下音频（工程末尾 ${projEnd?.toFixed(2)}s）`);
+	if (clips.length > 1) {
+		const lastClip = clips[clips.length - 1];
+		log.info(
+			`BGM 循环铺满：${clips.length} 段（全长 ${r3(audioDur)}s × ${clips.length - 1} + 尾段 ${lastClip.duration}s，对齐工程末尾）`,
+		);
+	}
+	const clip = clips[0] as { clip_st: number; clip_ed: number; track_st: number; track_ed: number; duration: number };
+	const newTrack: LooseTrack = { track_index: trackIndex, muted: false, track_timeline: clips };
 	// audio_channel：客户端 materialMediaKind 的音频判据是「无 video_size ∧ 有 audio_channel」的合取，
 	// 漏写会让音频素材在素材库里显示成视频（2026-08-22 真机实锤 BGM mp3 显示「视频 4:59」）。
 	// 与后端 video_project_struct 写出的音频 material 形态对齐；探不到就不写键（不塞假值）。
@@ -330,6 +359,7 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 		offsetMs,
 		clip: { clip_st: clip.clip_st, clip_ed: clip.clip_ed, track_st: clip.track_st, track_ed: clip.track_ed, duration: clip.duration },
 		...(beatAlign ? { beatAlign } : {}),
+		loopCount: clips.length,
 	};
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
@@ -483,6 +513,7 @@ export function registerAudio(program: Command): void {
 			"--beat-align",
 			"[lay] 云端节拍分析（audio_music_analyze，计费一次）并把起点吸附最近 downbeat；无 Key/失败自动降级为不对齐，不失败整命令",
 		)
+		.option("--no-loop", "[lay] 关闭循环铺满（缺省 BGM 短于工程时循环叠满至末尾、尾段裁齐）")
 		.option("--resume <gtrk>", "[align] 客户端拖齐保存后的对齐工程，读回偏移完成换轨")
 		.option("--threshold <r>", "[align] 置信度阈值（主峰/次峰显著性比；缺省真机标定值）")
 		.option("-o, --out <path>", "[align] 产物路径（缺省 <视频名>_extaudio.<ext>；低置信时为对齐工程路径）")
