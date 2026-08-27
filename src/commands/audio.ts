@@ -5,7 +5,7 @@
  * 往 `.gtrk` 追加一条 audio_track（BGM 上轨，纯本地）。
  *   - track_index 取现有音轨最大 +1；契约冗余时码齐全（clip_st/clip_ed/track_st/track_ed/duration）；
  *     MUST NOT 写 hidden（gtrk v1 契约：audio_track 结构上不可隐藏，该键对音轨恒无效且误导读方）。
- *   - 写回复用既有原子写回口径（writeGtrkAtomic：临时文件+rename，mtime 冲突拒写）。
+ *   - 写回复用既有原子写回口径（writeGtrkAtomic：临时文件+rename，内容 revision 冲突拒写 + rename 前重检）。
  *   - 同源幂等：同一音频文件（同绝对路径）对同一工程重复 lay = 替换既有同源轨，不叠加第二条。
  *   - `--beat-align` 复用 mad 的 cloud-beat 基建（audio_music_analyze，按官网价格表计费、如实提示）：
  *     取 downbeat 网格并把音频起点吸附至工程时间轴最近 downbeat（网格 = BGM 自时间轴 0 起播时的
@@ -19,7 +19,19 @@ import { basename, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic } from "../lib/gtrk-writeback";
-import { probeDuration, probeAudioChannel } from "../lib/media";
+import { probeDuration, probeAudioChannel, probeGeometry } from "../lib/media";
+import {
+	DEFAULT_ALIGN_THRESHOLD,
+	alignOutputPath,
+	alignProjectPath,
+	buildAlignProject,
+	detectOffset,
+	muxExternalAudio,
+	readAlignOffset,
+	writeAlignProject,
+} from "../lib/audio-align";
+import { mkdir } from "node:fs/promises";
+import { audioCacheDir } from "../lib/paths";
 import { defaultExtsFor } from "../lib/tool-descriptors";
 import { analyzeBgm } from "../lib/mad/cloud-beat";
 import type { BeatAnalysis } from "../lib/mad/beat";
@@ -38,15 +50,24 @@ const MIN_LAY_SEC = 0.05;
 
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
-/** positional 解析：仅支持 `lay`。 */
-export function parseAudioPositional(words: string[] | undefined): "lay" {
+/** positional 解析：`lay` 或 `align [<视频> <外录>]`。 */
+export function parseAudioPositional(
+	words: string[] | undefined,
+): { sub: "lay" } | { sub: "align"; video?: string; extAudio?: string } {
 	if (!words || words.length === 0) {
-		throw new Error("缺少子命令——用法：gtrk audio lay --project <目录> --file <音频>");
+		throw new Error(
+			"缺少子命令——用法：gtrk audio lay --project <目录> --file <音频>；或 gtrk audio align <视频> <外录音频>",
+		);
 	}
-	if (words[0] !== "lay" || words.length > 1) {
-		throw new Error(`未知子命令「${words.join(" ")}」——当前仅支持：gtrk audio lay`);
+	if (words[0] === "lay") {
+		if (words.length > 1) throw new Error(`未知参数「${words.slice(1).join(" ")}」——lay 不收 positional`);
+		return { sub: "lay" };
 	}
-	return "lay";
+	if (words[0] === "align") {
+		if (words.length > 3) throw new Error("align 最多收两个 positional：<视频毛片> <外录音频>");
+		return { sub: "align", video: words[1], extAudio: words[2] };
+	}
+	throw new Error(`未知子命令「${words.join(" ")}」——支持：gtrk audio lay / gtrk audio align`);
 }
 
 /** 素材 id：audio-lay-<sha256(音频绝对路径) 前 16 hex>——同源（同路径）恒同 id，幂等替换天然对齐。 */
@@ -169,7 +190,7 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	const offsetMs = parseOffsetMs(opts.offset);
 
 	const gtrkPath = locateGtrk(resolve(opts.project));
-	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
+	const { gtrk, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 
 	const probeDur = deps.probeDur ?? ((p: string) => probeDuration(p));
@@ -290,7 +311,7 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 			(a, b) => ((a.track_index as number) ?? 0) - ((b.track_index as number) ?? 0),
 		),
 	};
-	writeGtrkAtomic(gtrkPath, next, mtimeMs);
+	writeGtrkAtomic(gtrkPath, next, revision);
 
 	log.ok(
 		`音轨已写入：track_index ${trackIndex} · ${trackSt}s → ${r3(trackSt + len)}s · 音量 ${volume}` +
@@ -314,21 +335,166 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	return result;
 }
 
+// ---------------------------------------------------------------------------
+// audio align（add-audio-align-command）：外录对轨 → 换轨（纯本地零计费）
+// ---------------------------------------------------------------------------
+
+export interface AudioAlignOpts {
+	out?: string;
+	offset?: string;
+	threshold?: string;
+	resume?: string;
+	force?: boolean;
+	ffmpegPath?: string;
+	json?: boolean;
+	/** 测试注入。 */
+	_detect?: typeof detectOffset;
+	_mux?: typeof muxExternalAudio;
+}
+
+export interface AudioAlignResult {
+	ok: boolean;
+	mode: "auto" | "manual-offset" | "align-project" | "resume";
+	offsetSec?: number;
+	confidence?: number;
+	threshold?: number;
+	output?: string;
+	alignProject?: string;
+}
+
+/** align 主流程：三分支（显式 offset / resume / 自动置信度分流）。 */
+export async function runAudioAlign(
+	video: string | undefined,
+	extAudio: string | undefined,
+	opts: AudioAlignOpts,
+): Promise<AudioAlignResult> {
+	if (opts.json) routeLogsToStderr();
+	const detect = opts._detect ?? detectOffset;
+	const mux = opts._mux ?? muxExternalAudio;
+	const threshold = opts.threshold != null ? Number(opts.threshold) : DEFAULT_ALIGN_THRESHOLD;
+	if (!Number.isFinite(threshold) || threshold <= 0) throw new Error(`--threshold 需要正数，拿到「${opts.threshold}」`);
+
+	// ---- 分支：resume（客户端拖齐后读回）
+	if (opts.resume) {
+		const gtrkPath = resolve(opts.resume);
+		if (!existsSync(gtrkPath)) throw new Error(`对齐工程不存在：${gtrkPath}`);
+		const info = readAlignOffset(gtrkPath);
+		log.info(`对齐工程读回：offset = ${info.offsetSec.toFixed(3)}s（音轨 track_st − 视频轨 track_st）`);
+		const out = opts.out ? resolve(opts.out) : alignOutputPath(info.videoAbs);
+		assertOutWritable(out, opts.force);
+		await mux(info.videoAbs, info.extAudioAbs, info.offsetSec, out, opts.ffmpegPath);
+		logAlignDone(out);
+		const result: AudioAlignResult = { ok: true, mode: "resume", offsetSec: info.offsetSec, output: out };
+		if (opts.json) console.log(JSON.stringify(result));
+		return result;
+	}
+
+	// ---- 输入校验（两个 positional）
+	if (!video || !extAudio) throw new Error("用法：gtrk audio align <视频毛片> <外录音频>（或 --resume <对齐工程>）");
+	const videoAbs = resolve(video);
+	const extAbs = resolve(extAudio);
+	if (!existsSync(videoAbs)) throw new Error(`视频不存在：${videoAbs}`);
+	if (!existsSync(extAbs)) throw new Error(`外录音频不存在：${extAbs}`);
+	const videoExts = new Set(defaultExtsFor("video"));
+	const audioExts = new Set(defaultExtsFor("audio"));
+	const vExt = extname(videoAbs).toLowerCase();
+	const aExt = extname(extAbs).toLowerCase();
+	if (audioExts.has(vExt) && !videoExts.has(vExt)) {
+		throw new Error(`第一个参数要视频毛片，拿到音频「${basename(videoAbs)}」——参数顺序是 <视频> <外录音频>`);
+	}
+	if (videoExts.has(aExt) && !audioExts.has(aExt)) {
+		throw new Error(`第二个参数要外录音频，拿到视频「${basename(extAbs)}」——参数顺序是 <视频> <外录音频>`);
+	}
+	const out = opts.out ? resolve(opts.out) : alignOutputPath(videoAbs);
+
+	// ---- 分支：显式偏移
+	if (opts.offset != null) {
+		const off = Number(opts.offset);
+		if (!Number.isFinite(off)) throw new Error(`--offset 需要秒数，拿到「${opts.offset}」`);
+		assertOutWritable(out, opts.force);
+		await mux(videoAbs, extAbs, off, out, opts.ffmpegPath);
+		logAlignDone(out);
+		const result: AudioAlignResult = { ok: true, mode: "manual-offset", offsetSec: off, output: out };
+		if (opts.json) console.log(JSON.stringify(result));
+		return result;
+	}
+
+	// ---- 分支：自动（置信度分流）
+	const vDur = probeDuration(videoAbs, opts.ffmpegPath);
+	const eDur = probeDuration(extAbs, opts.ffmpegPath);
+	if (eDur < vDur - 1) {
+		log.warn(`外录（${eDur.toFixed(1)}s）比视频（${vDur.toFixed(1)}s）短——成片尾部将无外录声，请确认给对了文件`);
+	}
+	log.step("对轨检测（互相关测偏移 + 置信度）…");
+	await mkdir(audioCacheDir(), { recursive: true });
+	const det = await detect(videoAbs, extAbs, audioCacheDir(), opts.ffmpegPath);
+	log.info(`偏移 = ${det.offsetSec.toFixed(3)}s（正=外录晚开录）  置信度 = ${det.confidence}（阈值 ${threshold}）`);
+
+	if (det.confidence >= threshold) {
+		assertOutWritable(out, opts.force);
+		await mux(videoAbs, extAbs, det.offsetSec, out, opts.ffmpegPath);
+		logAlignDone(out);
+		const result: AudioAlignResult = {
+			ok: true, mode: "auto", offsetSec: det.offsetSec, confidence: det.confidence, threshold, output: out,
+		};
+		if (opts.json) console.log(JSON.stringify(result));
+		return result;
+	}
+
+	// 低置信兜底：产对齐工程交客户端
+	// -o 只在其扩展名是 .gtrk 时才用作工程路径——换轨产物路径（.mp4/.mov）不能拿来装 JSON，会误导客户端
+	const geo = probeGeometry(videoAbs, opts.ffmpegPath);
+	const projPath = opts.out && opts.out.toLowerCase().endsWith(".gtrk") ? resolve(opts.out) : alignProjectPath(videoAbs);
+	const proj = buildAlignProject(videoAbs, extAbs, det.offsetSec, geo, eDur);
+	writeAlignProject(projPath, proj);
+	log.warn(`置信度 ${det.confidence} < 阈值 ${threshold}，不自动换轨。`);
+	log.info(`已产对齐工程：${projPath}`);
+	log.info("请在客户端打开该工程，把音轨拖到与画面对齐后保存，然后跑：");
+	log.info(`  gtrk audio align --resume "${projPath}"`);
+	const result: AudioAlignResult = {
+		ok: true, mode: "align-project", offsetSec: det.offsetSec, confidence: det.confidence, threshold, alignProject: projPath,
+	};
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
+}
+
+function assertOutWritable(out: string, force?: boolean): void {
+	if (existsSync(out) && !force) {
+		throw new Error(`产物已存在：${out}（加 --force 覆盖）`);
+	}
+}
+
+function logAlignDone(out: string): void {
+	log.ok(`换轨完成（视频流零像素改动）：${out}`);
+	log.info("⚠️ 该文件是后续工程的素材，请留存——删了工程会素材脱机。原毛片未动（内录保底轨）。");
+}
+
 export function registerAudio(program: Command): void {
 	program
 		.command("audio [words...]")
-		.description("音频轨零件：gtrk audio lay 往 .gtrk 追加一条 audio_track（BGM 上轨；同源幂等替换；可选 beat 对齐）")
-		.option("--project <dir>", "工程产物目录（定位 gtrk/project.gtrk）")
-		.option("--file <audio>", "要上轨的音频文件（BGM/配乐等）")
-		.option("--volume <v>", `音量 0..1（默认 ${AUDIO_LAY_VOLUME_DEFAULT}，BGM 垫底音量）`)
-		.option("--offset <ms>", "音频入点在工程时间轴上的偏移（毫秒，默认 0）")
+		.description(
+			"音频零件族：gtrk audio lay 往 .gtrk 追加 audio_track（BGM 上轨）；gtrk audio align 外录音轨对轨换声（互相关测偏移+置信度分流，纯本地零计费）",
+		)
+		.option("--project <dir>", "[lay] 工程产物目录（定位 gtrk/project.gtrk）")
+		.option("--file <audio>", "[lay] 要上轨的音频文件（BGM/配乐等）")
+		.option("--volume <v>", `[lay] 音量 0..1（默认 ${AUDIO_LAY_VOLUME_DEFAULT}，BGM 垫底音量）`)
+		.option("--offset <v>", "[lay] 入点偏移毫秒；[align] 显式偏移秒（跳过检测直接换轨，正=外录晚开录）")
 		.option(
 			"--beat-align",
-			"云端节拍分析（audio_music_analyze，计费一次）并把起点吸附最近 downbeat；无 Key/失败自动降级为不对齐，不失败整命令",
+			"[lay] 云端节拍分析（audio_music_analyze，计费一次）并把起点吸附最近 downbeat；无 Key/失败自动降级为不对齐，不失败整命令",
 		)
+		.option("--resume <gtrk>", "[align] 客户端拖齐保存后的对齐工程，读回偏移完成换轨")
+		.option("--threshold <r>", "[align] 置信度阈值（主峰/次峰显著性比；缺省真机标定值）")
+		.option("-o, --out <path>", "[align] 产物路径（缺省 <视频名>_extaudio.<ext>；低置信时为对齐工程路径）")
+		.option("--force", "[align] 产物已存在时覆盖")
+		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统 PATH）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
-		.action(async (words: string[] | undefined, opts: AudioLayOpts) => {
-			parseAudioPositional(words);
-			await runAudioLay(opts);
+		.action(async (words: string[] | undefined, opts: AudioLayOpts & AudioAlignOpts) => {
+			const parsed = parseAudioPositional(words);
+			if (parsed.sub === "lay") {
+				await runAudioLay(opts as AudioLayOpts);
+				return;
+			}
+			await runAudioAlign(parsed.video, parsed.extAudio, opts as AudioAlignOpts);
 		});
 }
