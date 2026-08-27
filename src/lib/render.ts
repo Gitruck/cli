@@ -12,7 +12,7 @@
 import { writeFile, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
 
 const AUDIO_SAMPLE_RATE = 48000;
@@ -306,7 +306,10 @@ export function buildFilterGraph(
  * 校验范围收窄为**被渲染实际消费的素材**（主视频轨 + 全部音频轨引用；add-matrix-lay-tracks）：
  * 本地渲染不合成 overlay，未被消费的素材（如 B-roll 候选代理）缺失不应阻断与它无关的渲染。
  * 被消费素材缺 path/文件缺失仍硬拒（行为不变）。导出供单测。 */
-export function materialPathsFromGtrk(gtrk: GtrkV1): Record<string, string> {
+export function materialPathsFromGtrk(
+	gtrk: GtrkV1,
+	opts: { gtrkDir?: string } = {},
+): Record<string, string> {
 	const used = new Set<string>();
 	const sortedV = sortedTracks(gtrk.video_track || []);
 	// 与快照渲染同一主轨口径（跳过黑底垫轨——fix-broll-zorder-contract-drift 连锁）
@@ -322,8 +325,11 @@ export function materialPathsFromGtrk(gtrk: GtrkV1): Record<string, string> {
 	for (const m of gtrk.materials || []) {
 		if (!used.has(String(m.id))) continue; // 未被主轨/音轨消费：不校验不入表
 		if (!m.path) throw new Error(`gtrk 素材 ${m.id} 缺 path（source_path），无法本地渲染`);
-		if (!existsSync(m.path)) throw new Error(`gtrk 素材文件不存在：${m.path}`);
-		map[String(m.id)] = m.path;
+		// 相对路径恒以 .gtrk 所在目录为基准（与 material-integrity 同一口径；按 CWD 裸测是历史坑，
+		// 黑片 assets/builtin/ 等相对素材在任意 CWD 下渲染都会被误判缺失）
+		const abs = !isAbsolute(m.path) && opts.gtrkDir ? resolve(opts.gtrkDir, m.path) : m.path;
+		if (!existsSync(abs)) throw new Error(`gtrk 素材文件不存在：${m.path}`);
+		map[String(m.id)] = abs;
 	}
 	return map;
 }
@@ -332,14 +338,20 @@ export function materialPathsFromGtrk(gtrk: GtrkV1): Record<string, string> {
 export async function renderGtrk(
 	gtrk: GtrkV1,
 	outputPath: string,
-	opts: { crf?: number; codec?: string; ffmpegPath?: string; onLine?: (l: string) => void } = {},
+	opts: {
+		crf?: number;
+		codec?: string;
+		ffmpegPath?: string;
+		gtrkDir?: string;
+		onLine?: (l: string) => void;
+	} = {},
 ): Promise<{ outputPath: string; duration: number }> {
 	const codec = opts.codec ?? "h264";
 	if (codec !== "h264") throw new Error(`v1 仅支持 h264，实际 ${codec}`);
 	const crf = opts.crf ?? DEFAULT_CRF;
 
 	const { ffmpeg } = requireFfmpeg(opts.ffmpegPath);
-	const materialPaths = materialPathsFromGtrk(gtrk);
+	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });
 	const { inputs, graph, total } = buildFilterGraph(gtrk, materialPaths, { crf });
 
 	const filterFile = join(tmpdir(), `gtrk-filter-${process.pid}-${inputs.length}.txt`);

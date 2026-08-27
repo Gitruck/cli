@@ -6,7 +6,7 @@
  * 使报告能扛住其后的下载/渲染失败；下载渲染完成后再补写解析出的本地路径。
  * 下载遇 404（产物过期被 GC）不整体中止：记入 errors、仍完成报告落盘与输出。
  */
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
 import { download as realDownload, type OralCutOutput } from "./cloud";
 import { copyJianyingDraft } from "./jianying";
@@ -162,6 +162,7 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 				crf: opts.crf != null ? Number(opts.crf) : undefined,
 				codec: opts.codec,
 				ffmpegPath: opts.ffmpegPath,
+				gtrkDir: dirname(gtrkPath),
 				onLine: (l) => {
 					const m = l.match(/time=(\S+)/);
 					if (m) log.tick(`渲染中 ${m[1]}`);

@@ -43,6 +43,7 @@ export function registerRender(program: Command): void {
 				crf: opts.crf != null ? Number(opts.crf) : undefined,
 				codec: opts.codec,
 				ffmpegPath: opts.ffmpegPath,
+				gtrkDir: dirname(gtrkAbs),
 				onLine: (l) => {
 					const m = l.match(/time=(\S+)/);
 					if (m) log.tick(`渲染中 ${m[1]}`);
