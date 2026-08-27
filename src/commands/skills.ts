@@ -37,6 +37,8 @@ export const SKILL_NAMES = [
 	"gtrk-narration",
 	// 配音链快速成片预设（add-voiceover-skill）：稿 → 配音 → 配画面成片
 	"gtrk-voiceover",
+	// 解说链垂类示例（add-food-recap-skill）：探店/密着/做饭流程 → 美食解说成片
+	"gtrk-food-recap",
 ] as const;
 
 export interface InstallSkillOptions {
