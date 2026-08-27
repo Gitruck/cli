@@ -33,6 +33,10 @@ export const SKILL_NAMES = [
 	"gtrk-live-slicing",
 	// 第四张 structure 级组合图纸（add-talking-head-skill）：口播毛片 → 完整包装成片工程
 	"gtrk-talking-head",
+	// 解说链正本图纸（add-narration-skill）：素材自带时序 → 提炼看点重述成片
+	"gtrk-narration",
+	// 配音链快速成片预设（add-voiceover-skill）：稿 → 配音 → 配画面成片
+	"gtrk-voiceover",
 ] as const;
 
 export interface InstallSkillOptions {
