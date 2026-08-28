@@ -48,6 +48,12 @@ export const MIN_SCENE_SEC = 0.5;
 export const FRAME_LONG_INTERVAL_SEC = 2.0;
 /** 抽帧最长边（px）。 */
 export const FRAME_MAX_EDGE = 512;
+/** 场景检测「产出够不够」的下限比例（实得帧数 / 时长×帧率）。
+ * 低于此值判本趟无效——不是为了严谨好看：解码中途夭折时 ffmpeg 可能已退 0 且吐了一部分帧，
+ * 而**部分帧序列在下游与「这片真没什么切点」不可区分**，会被当成权威结论落库。
+ * 取 0.5 而非 0.95：VFR 素材、容器帧率不准、丢帧容器都会让实得数合法地低于名义值，
+ * 宁可放过一半的病例，也不能把正常素材误杀。 */
+export const SCENE_FRAME_COUNT_MIN_RATIO = 0.5;
 
 /** 索引可收录的视频扩展名。 */
 const VIDEO_EXT = /\.(mp4|mov|m4v|mkv|webm|avi|wmv|mpg|mpeg|ts|mts|m2ts|flv)$/i;
@@ -409,10 +415,15 @@ export function buildScenes(cuts: number[], durationSec: number, minSceneSec: nu
 	return scenes;
 }
 
-/** 跑 ffmpeg 抓全量 stderr（runFfmpeg 只留尾 4000 字会截断，故独立实现）。
+/** 跑 ffmpeg 抓全量 stderr **并回退出码**（runFfmpeg 只留尾 4000 字会截断，故独立实现）。
  * metadata=print 逐帧两行 ⇒ stderr 体量 O(帧数)（~170B/帧，1h@30fps ≈ 18MB 字符串）——CLI 单素材
- * 串行处理下可接受；若未来撑不住再换流式逐行消费。 */
-function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<string> {
+ * 串行处理下可接受；若未来撑不住再换流式逐行消费。
+ *
+ * ⚠️ 退出码 MUST 上抛给调用方判定。本函数曾经吞掉退出码（注释写「调用方解析不出切点自然为空」），
+ * 那条推理是错的：空切点在下游**与「这片真没有切点」完全同形**——buildScenes([]) 得单场景 →
+ * 稳定性注记拿不到帧判 stable → planFrames 收敛成 1 帧 → 整片被当作有效结论落库并打成功进度行，
+ * 而 size:mtime 指纹会把这条坏行**粘住**，重跑直接 skip、永不自愈。 */
+function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<{ exitCode: number | null; stderr: string }> {
 	return new Promise((resolvePromise, reject) => {
 		const p = spawn(bin, args, { env: process.env });
 		let err = "";
@@ -420,8 +431,7 @@ function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<string> {
 			err += b.toString("utf8");
 		});
 		p.on("error", (e) => reject(e));
-		// select+showinfo 到 -f null 正常退 0；异常码也先回 stderr（调用方解析不出切点自然为空）
-		p.on("close", () => resolvePromise(err));
+		p.on("close", (code) => resolvePromise({ exitCode: code, stderr: err }));
 	});
 }
 
@@ -543,6 +553,39 @@ export interface SceneDetection {
 	cuts: number[];
 }
 
+/** 场景检测这一趟到底有没有产出——不合格就抛，MUST NOT 让空/残缺的 score 序列流进下游。
+ * 判据取三条的并集（任一不过即失败）：
+ *   ① 进程非零退出；② 零帧；③ 实得帧数 < 时长×帧率×{@link SCENE_FRAME_COUNT_MIN_RATIO}。
+ * 只看 ① 不够——硬解滤镜链断裂等情形实测会出现「退 0 但零帧」；只看 ①② 也不够——
+ * 解码中途夭折会留下一段合法但残缺的序列。 */
+export function assertScenePassProductive(x: {
+	exitCode: number | null;
+	stderr: string;
+	frameCount: number;
+	durationSec: number;
+	fps?: number;
+}): void {
+	// stderr 尾部才是根因所在（前面全是逐帧 metadata 刷屏），且要给可读长度不给天书全文
+	const tail = x.stderr.split(/\r?\n/).filter((l) => l.trim() && !l.includes("lavfi.scene_score") && !l.includes("pts_time:"))
+		.slice(-3).join(" | ").slice(0, 400);
+	if (x.exitCode !== 0) {
+		throw new Error(`场景检测 ffmpeg 退出码 ${x.exitCode}${tail ? `：${tail}` : ""}`);
+	}
+	if (x.frameCount === 0) {
+		throw new Error(`场景检测零帧产出（退出码 0 但一帧 scene score 都没解析到）${tail ? `：${tail}` : ""}`);
+	}
+	if (x.fps && x.fps > 0 && x.durationSec > 0) {
+		const expected = x.durationSec * x.fps;
+		const floor = expected * SCENE_FRAME_COUNT_MIN_RATIO;
+		if (x.frameCount < floor) {
+			throw new Error(
+				`场景检测产出残缺：实得 ${x.frameCount} 帧，按 ${x.durationSec.toFixed(1)}s × ${x.fps}fps 应约 ` +
+				`${Math.round(expected)} 帧（下限 ${Math.round(floor)}）${tail ? `：${tail}` : ""}`,
+			);
+		}
+	}
+}
+
 /** 场景边界检测：返回场景区间（秒）+ 稳定性注记 + 切点全集。源文件与其所在目录不产生任何新媒体文件。
  * 单趟解码双产物（spec MUST NOT 为判定新增解码 pass）：select 表达式放到 gte(scene,0)（全帧通过，
  * scene score 本就逐帧计算，解码量不变），metadata=print 打出每帧 score——切点由客户端按
@@ -555,12 +598,13 @@ export async function detectScenesAndCuts(
 	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
 	containerFps?: number,
 ): Promise<SceneDetection> {
-	const stderr = await runFfmpegCaptureStderr(ffmpeg, [
+	const { exitCode, stderr } = await runFfmpegCaptureStderr(ffmpeg, [
 		"-i", path,
 		"-vf", "select='gte(scene,0)',metadata=print",
 		"-f", "null", "-",
 	]);
 	const frames = parseSceneScores(stderr);
+	assertScenePassProductive({ exitCode, stderr, frameCount: frames.length, durationSec, fps: containerFps });
 	const cuts = detectCutsFromScores(frames, threshold);
 	return {
 		scenes: annotateSceneStability(buildScenes(cuts, durationSec), frames, stabilityThreshold, containerFps),
