@@ -241,6 +241,18 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		// cuts.origin 幂等迁移：旧行 NULL 与 'detected' 同义（检测所得）
 		const cutCols = db.all<{ name: string }>("PRAGMA table_info(cuts)").map((c) => c.name);
 		if (!cutCols.includes("origin")) db.exec("ALTER TABLE cuts ADD COLUMN origin TEXT");
+		// 镜头卡片列幂等迁移（add-shot-cards-and-alignment-qc 1.1）：subject/action/shot_size 客观层
+		// 永续；highlight 与 rubric_hash 成对（换 rubric 只失效 highlight，不清客观层）。
+		const descCols = db.all<{ name: string }>("PRAGMA table_info(describes)").map((c) => c.name);
+		for (const [col, type] of [
+			["subject", "TEXT"],
+			["action", "TEXT"],
+			["shot_size", "TEXT"],
+			["highlight", "REAL"],
+			["rubric_hash", "TEXT"],
+		] as const) {
+			if (!descCols.includes(col)) db.exec(`ALTER TABLE describes ADD COLUMN ${col} ${type}`);
+		}
 		// materials.cuts_indexed 幂等迁移（fix-broll-flash-frames D4）：NULL=旧行无切点全集数据
 		// （检索侧不透出 cuts、消费方按无已知切点兜底）；1=本素材已落切点全集（空集=真无切点）。
 		if (!cols.some((c) => c.name === "cuts_indexed")) {

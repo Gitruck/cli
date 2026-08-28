@@ -7,9 +7,14 @@ import { Command } from "commander";
 import { resolve, dirname, join, basename, extname } from "node:path";
 import { existsSync } from "node:fs";
 import { writeFile, readFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { fmtTime, scanFinalCut, shouldFail, type QcItem, type QcReport, type QcSeverity } from "../lib/qc";
 import { openLocalIndexDb, recordConfirmedCuts } from "../lib/local-index";
 import { log, routeLogsToStderr } from "../lib/log";
+import { runAlignmentQc, tryOpenIndexDb } from "../lib/alignment-qc";
+import { resolveDescribeUrl } from "../lib/describe";
+import { loadConfig } from "../lib/config";
+import { requireFfmpeg } from "../lib/ffmpeg";
 
 interface QcOpts {
 	gtrk?: string;
@@ -17,6 +22,9 @@ interface QcOpts {
 	failOn?: string;
 	ffmpegPath?: string;
 	feedbackCuts?: boolean;
+	alignment?: boolean;
+	project?: string;
+	yes?: boolean;
 }
 
 const SEVERITY_LABEL: Record<QcSeverity, string> = { error: "严重", warn: "提示", info: "备注" };
@@ -62,7 +70,7 @@ function formatItem(it: QcItem): string {
 
 export function registerQc(program: Command): void {
 	program
-		.command("qc <成片>")
+		.command("qc [成片]")
 		.description("成片质量扫描：闪帧/段内跳切/黑帧/冻结/爆音/静音/音画规整，产报告与时码定位")
 		.option("--gtrk <path>", "工程感知模式：对表 clip 拼接边界，识别段内跳切、已知黑底空洞降级")
 		.option("--json <path>", "机读报告落点（缺省 = <成片同目录>/<成片名>.qc.json）")
@@ -72,7 +80,15 @@ export function registerQc(program: Command): void {
 			"把段内跳切映射回源时码并补录进本地索引（标 qc_confirmed，治检测阈值漏网）——须配 --gtrk；不带本开关时常规扫描零写库",
 		)
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统）")
-		.action(async (input: string, opts: QcOpts) => {
+		.option("--alignment", "对齐质检：逐叙述句判定已铺画面是否给到稿句所说（须配 --project；引用段按结构校验跳过；计费=1 积分/句帧）")
+		.option("--project <dir>", "[alignment] 工程产物目录（定位 gtrk/transcript/split 三件）")
+		.option("--yes", "[alignment] 跳过计费确认")
+		.action(async (input: string | undefined, opts: QcOpts) => {
+			if (opts.alignment) {
+				await runAlignmentMode(input, opts);
+				return;
+			}
+			if (!input) throw new Error("缺少成片路径（常规质检模式必填；对齐质检走 --alignment --project）");
 			const failOn = opts.failOn === "warn" || opts.failOn === "never" ? opts.failOn : "error";
 			const inputAbs = resolve(input);
 			if (!existsSync(inputAbs)) throw new Error(`成片不存在：${inputAbs}`);
@@ -130,6 +146,53 @@ export function registerQc(program: Command): void {
 
 			if (shouldFail(report, failOn)) process.exitCode = 1;
 		});
+}
+
+/** [add-shot-cards-and-alignment-qc 1.4] 对齐质检模式（CLI 专属，勿入对外文档）。
+ * positional 在本模式下兼作工程目录兜底（`gtrk qc --alignment <工程>` 与 `--project` 等价）。 */
+async function runAlignmentMode(input: string | undefined, opts: QcOpts): Promise<void> {
+	const target = opts.project ?? input;
+	if (!target) throw new Error("对齐质检缺工程目录：--project <dir>（或 positional 兜底）");
+	const projectDir = resolve(target);
+	if (!existsSync(projectDir)) throw new Error(`工程目录不存在：${projectDir}`);
+	const cfg = loadConfig();
+	const endpoint = { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey };
+	const ffmpeg = requireFfmpeg(opts.ffmpegPath).ffmpeg;
+	log.step(`▶ 对齐质检：${projectDir}`);
+	const db = await tryOpenIndexDb();
+	try {
+		const report = await runAlignmentQc(projectDir, {
+			endpoint,
+			ffmpeg,
+			yes: opts.yes === true,
+			confirm: async (q) => {
+				const rl = createInterface({ input: process.stdin, output: process.stderr });
+				try {
+					const a = (await rl.question(`${q} [y/N] `)).trim().toLowerCase();
+					return a === "y" || a === "yes";
+				} finally {
+					rl.close();
+				}
+			},
+			onLog: (m) => log.info(m),
+			db,
+		});
+		const s = report.summary;
+		if (report.degraded) {
+			log.warn(
+				`对齐质检（降级形态）：${s.audited} 句已产帧描述，逐句裁定交 agent 文本判读 → qc/alignment-audit.{json,md}`,
+			);
+		} else {
+			log.ok(
+				`对齐率 ${s.rate}%：match ${s.match} · partial ${s.partial} · mismatch ${s.mismatch}（n=${s.audited}，引用段等跳过 ${s.skipped}）→ qc/alignment-audit.{json,md}`,
+			);
+			for (const it of report.items) {
+				if (it.verdict === "mismatch") log.warn(`  mismatch ${it.id} @${fmtTime(it.track_mid)}：${it.sentence.slice(0, 24)}… — ${it.reason ?? ""}`);
+			}
+		}
+	} finally {
+		db?.close();
+	}
 }
 
 /** 渲染尾随质检（add-qc-scan · local-ffmpeg-render delta）：同进程复用，异常降级不阻断出片。 */

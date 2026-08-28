@@ -57,6 +57,24 @@ export interface MaterialDescribe {
 	tags: string[];
 	mark: number;
 	usable_flags: Record<string, boolean>;
+	// [add-shot-cards-and-alignment-qc] 镜头卡片维度（服务端 upgrade-material-describe-shot-cards
+	// 宽松超集；旧服务端缺失时按 ""/null 兜底，消费侧中性处理）。
+	subject: string;
+	action: string;
+	shot_size: string | null;
+	highlight: number | null;
+	// claims 对齐判定三字段：仅带 claim 提交的图才有（CLI 条专属，勿在任何对外文档提及）。
+	claim_aligned?: number;
+	claim_verdict?: "match" | "partial" | "mismatch";
+	claim_reason?: string;
+}
+
+/** [add-shot-cards-and-alignment-qc] describe 请求扩参（仅 CLI 条服务端解析；见 infra 联动件）。 */
+export interface DescribeShotCardOpts {
+	/** highlight 评分准则文本（≤2000 字；缺省=服务端 L0 领域无关准则）。 */
+	highlightRubric?: string;
+	/** 与 images 等长的逐图稿句（null=该图不做对齐判定）。 */
+	claims?: (string | null)[];
 }
 
 /** describe 端点硬失败（机读 code 固定 `describe_endpoint_unreachable`）。 */
@@ -122,7 +140,7 @@ function parseBusinessRejection(status: number, text: string): DescribeRejectedE
 	return null;
 }
 
-/** 单行产物宽松解析：desc/tags/mark/usable_flags 逐键容错（flags 值全部钳成布尔）。 */
+/** 单行产物宽松解析：desc/tags/mark/usable_flags + 镜头卡片/claims 逐键容错（缺失兜底不炸）。 */
 function parseDescribeRow(raw: unknown): MaterialDescribe {
 	const r = (raw ?? {}) as Record<string, unknown>;
 	const tags = Array.isArray(r.tags) ? r.tags.filter((t): t is string => typeof t === "string") : [];
@@ -130,12 +148,26 @@ function parseDescribeRow(raw: unknown): MaterialDescribe {
 	if (r.usable_flags && typeof r.usable_flags === "object" && !Array.isArray(r.usable_flags)) {
 		for (const [k, v] of Object.entries(r.usable_flags as Record<string, unknown>)) flags[k] = v === true;
 	}
-	return {
+	const num = (v: unknown): number | null =>
+		typeof v === "number" && Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : null;
+	const row: MaterialDescribe = {
 		desc: typeof r.desc === "string" ? r.desc : "",
 		tags,
 		mark: typeof r.mark === "number" && Number.isFinite(r.mark) ? r.mark : 0,
 		usable_flags: flags, // 缺失键=false 语义（infra D1「宁放行勿误杀」，agent 可复核）
+		subject: typeof r.subject === "string" ? r.subject : "",
+		action: typeof r.action === "string" ? r.action : "",
+		shot_size: typeof r.shot_size === "string" && r.shot_size ? r.shot_size : null,
+		highlight: num(r.highlight),
 	};
+	const aligned = num(r.claim_aligned);
+	if (aligned !== null) {
+		row.claim_aligned = aligned;
+		row.claim_verdict =
+			r.claim_verdict === "match" || r.claim_verdict === "mismatch" ? r.claim_verdict : "partial";
+		row.claim_reason = typeof r.claim_reason === "string" ? r.claim_reason : "";
+	}
+	return row;
 }
 
 /** 公共请求头（提交与轮询同口径）：裸 apikey，非 Bearer（cloud-link 口径）。 */
@@ -169,11 +201,19 @@ async function submitDescribeTask(
 	endpoint: DescribeEndpoint,
 	imagesBase64: string[],
 	deps: Required<Pick<DescribeDeps, "fetchFn" | "timeoutMs">>,
+	shotCard?: DescribeShotCardOpts,
 ): Promise<string> {
+	const reqBody: Record<string, unknown> = { input: imagesBase64.map((image) => ({ image })) };
+	// [add-shot-cards-and-alignment-qc] 扩参仅 CLI 条服务端解析；旧服务端未升级时会整段忽略
+	// （宽松超集），claims 判定字段缺席由调用方降级路兜底。
+	if (shotCard?.highlightRubric?.trim()) reqBody.highlight_rubric = shotCard.highlightRubric.trim();
+	if (shotCard?.claims?.some((c) => c !== null && c !== undefined && c.trim() !== "")) {
+		reqBody.claims = shotCard.claims.map((c) => (c && c.trim() ? c.trim() : null));
+	}
 	const res = await deps.fetchFn(endpoint.url, {
 		method: "POST",
 		headers: { ...authHeaders(endpoint), "Content-Type": "application/json" },
-		body: JSON.stringify({ input: imagesBase64.map((image) => ({ image })) }),
+		body: JSON.stringify(reqBody),
 		signal: AbortSignal.timeout(deps.timeoutMs),
 	});
 	if (!res.ok) {
@@ -271,6 +311,7 @@ export async function describeImages(
 	endpoint: DescribeEndpoint,
 	imagesBase64: string[],
 	deps: DescribeDeps = {},
+	shotCard?: DescribeShotCardOpts,
 ): Promise<MaterialDescribe[]> {
 	if (imagesBase64.length === 0) return [];
 	// 合规告知（add-compliance-notice 2.2）：素材理解的抽帧由此离机（matrix describe），
@@ -292,13 +333,17 @@ export async function describeImages(
 	const out: MaterialDescribe[] = [];
 	for (let off = 0; off < imagesBase64.length; off += DESCRIBE_BATCH_MAX) {
 		const batch = imagesBase64.slice(off, off + DESCRIBE_BATCH_MAX);
+		// claims 与 images 逐图对位 → 随批切片（rubric 全批同一份）
+		const batchShotCard: DescribeShotCardOpts | undefined = shotCard
+			? { ...shotCard, claims: shotCard.claims?.slice(off, off + DESCRIBE_BATCH_MAX) }
+			: undefined;
 		// ── 提交阶段：指数退避重试（1s → 2s → 4s；仅传输面，业务拒绝短路）──
 		let taskId: string | undefined;
 		let lastErr = "";
 		for (let attempt = 0; attempt <= DESCRIBE_RETRIES; attempt++) {
 			if (attempt > 0) await sleep(backoffBase * 2 ** (attempt - 1)); // 1s → 2s → 4s
 			try {
-				taskId = await submitDescribeTask(endpoint, batch, { fetchFn, timeoutMs });
+				taskId = await submitDescribeTask(endpoint, batch, { fetchFn, timeoutMs }, batchShotCard);
 				break;
 			} catch (e) {
 				if ((e as { rejected?: unknown } | null)?.rejected === true) throw e; // 业务拒绝：重试无意义
@@ -324,11 +369,15 @@ interface DescribeRow {
 	tags_json: string;
 	mark: number | null;
 	flags_json: string;
+	subject: string | null;
+	action: string | null;
+	shot_size: string | null;
+	highlight: number | null;
 }
 
 export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): MaterialDescribe | undefined {
 	const row = db.get<DescribeRow>(
-		"SELECT desc_text, tags_json, mark, flags_json FROM describes WHERE material_id = ? AND ts_ms = ?",
+		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size, highlight FROM describes WHERE material_id = ? AND ts_ms = ?",
 		[materialId, tsMs],
 	);
 	if (!row) return undefined;
@@ -338,6 +387,10 @@ export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): 
 			tags: JSON.parse(row.tags_json) as string[],
 			mark: row.mark ?? 0,
 			usable_flags: JSON.parse(row.flags_json) as Record<string, boolean>,
+			subject: row.subject ?? "",
+			action: row.action ?? "",
+			shot_size: row.shot_size ?? null,
+			highlight: row.highlight ?? null,
 		};
 	} catch {
 		return undefined; // 缓存行损坏当未命中（重新理解即自愈覆盖）
@@ -357,16 +410,44 @@ export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number
 	return row.mark ?? 0;
 }
 
-export function putCachedDescribe(db: SqlDb, materialId: string, tsMs: number, d: MaterialDescribe): void {
+export function putCachedDescribe(
+	db: SqlDb,
+	materialId: string,
+	tsMs: number,
+	d: MaterialDescribe,
+	rubricHash?: string,
+): void {
 	db.run(
-		"INSERT OR REPLACE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, created_at) VALUES (?,?,?,?,?,?,?)",
-		[materialId, tsMs, d.desc, JSON.stringify(d.tags), d.mark, JSON.stringify(d.usable_flags), new Date().toISOString()],
+		"INSERT OR REPLACE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, highlight, rubric_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+		[
+			materialId,
+			tsMs,
+			d.desc,
+			JSON.stringify(d.tags),
+			d.mark,
+			JSON.stringify(d.usable_flags),
+			d.subject || null,
+			d.action || null,
+			d.shot_size,
+			d.highlight,
+			rubricHash ?? null,
+			new Date().toISOString(),
+		],
 	);
 }
 
 /** 注入 plan result 的裁剪形态（describe 字段随 plan 流转，broll-plan-contract delta）。 */
 export function toDescribeMeta(d: MaterialDescribe): MaterialDescribeMeta {
-	return { desc: d.desc, tags: d.tags, mark: d.mark, usable_flags: d.usable_flags };
+	return {
+		desc: d.desc,
+		tags: d.tags,
+		mark: d.mark,
+		usable_flags: d.usable_flags,
+		...(d.subject ? { subject: d.subject } : {}),
+		...(d.action ? { action: d.action } : {}),
+		...(d.shot_size ? { shot_size: d.shot_size } : {}),
+		...(d.highlight !== null && d.highlight !== undefined ? { highlight: d.highlight } : {}),
+	};
 }
 
 // ── 理解编排（三输入形态共用：缓存短路 → 确认护栏 → 抽帧/直读 → 批调用 → 写缓存）──
