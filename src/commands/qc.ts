@@ -183,11 +183,17 @@ async function runAlignmentMode(input: string | undefined, opts: QcOpts): Promis
 				`对齐质检（降级形态）：${s.audited} 句已产帧描述，逐句裁定交 agent 文本判读 → qc/alignment-audit.{json,md}`,
 			);
 		} else {
+			// 验收判据=卡点句零 mismatch（七三开：跟随句蹭领衔镜头，其错配属设计非缺陷；
+			// 全句 rate 冲 100 反而意味着 100% 逐句硬切、节奏碎成 PPT）
 			log.ok(
-				`对齐率 ${s.rate}%：match ${s.match} · partial ${s.partial} · mismatch ${s.mismatch}（n=${s.audited}，引用段等跳过 ${s.skipped}）→ qc/alignment-audit.{json,md}`,
+				`卡点句对齐 ${s.lead_rate}%（mismatch ${s.lead_mismatch}/${s.lead_total}）← 验收判据 | 全句 ${s.rate}%：match ${s.match} · partial ${s.partial} · mismatch ${s.mismatch}（n=${s.audited}，引用段等跳过 ${s.skipped}）→ qc/alignment-audit.{json,md}`,
 			);
 			for (const it of report.items) {
-				if (it.verdict === "mismatch") log.warn(`  mismatch ${it.id} @${fmtTime(it.track_mid)}：${it.sentence.slice(0, 24)}… — ${it.reason ?? ""}`);
+				if (it.verdict !== "mismatch") continue;
+				const tag = it.role === "follow" ? "跟随句（七三开设计内）" : "★卡点句";
+				const line = `  ${tag} ${it.id} @${fmtTime(it.track_mid)}：${it.sentence.slice(0, 22)}… — ${it.reason ?? ""}`;
+				if (it.role === "follow") log.info(line);
+				else log.warn(line);
 			}
 		}
 	} finally {

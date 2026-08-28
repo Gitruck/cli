@@ -48,6 +48,9 @@ export interface AlignmentItem {
 	thumb?: string;
 	/** 跳过原因（引用段/无覆盖 clip/抽帧失败）。 */
 	skipped?: string;
+	/** [七三开] 句角色：lead=卡点句（beat 领衔句，画面为它而挑，MUST 零 mismatch）；
+	 * follow=跟随句（抽象/数字/修辞，蹭领衔镜头，partial/mismatch 属设计不计惩罚）。 */
+	role?: "lead" | "follow";
 }
 
 export interface AlignmentReport {
@@ -61,8 +64,13 @@ export interface AlignmentReport {
 		match: number;
 		partial: number;
 		mismatch: number;
-		/** match=1 / partial=0.5 / mismatch=0 计分；降级时 null。 */
+		/** match=1 / partial=0.5 / mismatch=0 计分；降级时 null。全句口径（含跟随句）。 */
 		rate: number | null;
+		/** [七三开] 卡点句口径——**真正的验收判据**：lead_mismatch MUST=0；
+		 * 全句 rate 冲 100 反而意味着 100% 逐句硬切（节奏碎成 PPT，260828 实证闪帧 3→17）。 */
+		lead_total: number;
+		lead_mismatch: number;
+		lead_rate: number | null;
 	};
 	items: AlignmentItem[];
 }
@@ -103,6 +111,8 @@ export function pairSentencesWithClips(args: {
 	clips: GtrkClip[];
 	materials: Record<string, string>;
 	quoteSpans: Array<[number, number]>;
+	/** [七三开] 卡点句 id 集（= 各 beat 的 span.from）；缺省=全部按 lead（旧工程兜底）。 */
+	leadIds?: Set<string>;
 }): AlignmentItem[] {
 	const sorted = [...args.clips].sort((a, b) => num(a.track_st) - num(b.track_st));
 	return args.utterances.map((u) => {
@@ -121,13 +131,15 @@ export function pairSentencesWithClips(args: {
 		if (isQuoteText || args.quoteSpans.some(([a, b]) => u.st >= a - 0.05 && u.ed <= b + 0.05)) {
 			return { ...base, skipped: "quote" }; // 引用段：结构校验已覆盖，不烧判定
 		}
+		const role: "lead" | "follow" = args.leadIds?.has(u.id) === false ? "follow" : "lead";
 		const clip = sorted.find((c) => num(c.track_st) <= mid && mid < num(c.track_ed));
-		if (!clip) return { ...base, skipped: "no_clip" };
+		if (!clip) return { ...base, role, skipped: "no_clip" };
 		const srcSec = num(clip.clip_st) + (mid - num(clip.track_st));
 		const path = clip.material ? (args.materials[clip.material] ?? null) : null;
-		if (!path) return { ...base, clip_id: clip.clip_id ?? null, skipped: "no_material_path" };
+		if (!path) return { ...base, role, clip_id: clip.clip_id ?? null, skipped: "no_material_path" };
 		return {
 			...base,
+			role,
 			clip_id: clip.clip_id ?? null,
 			source_path: path,
 			source_sec: Math.round(srcSec * 1000) / 1000,
@@ -178,6 +190,14 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 	};
 	const planPath = join(projectDir, "split", "broll-plan.json");
 	const quoteSpans = existsSync(planPath) ? quoteSpansFromPlan(readJson(planPath)) : [];
+	// [七三开] 卡点句 = 各 beat 的 span.from（dispatch 派单里的领衔句）；无 dispatch 时全按 lead 兜底。
+	const dispatchPath = join(projectDir, "split", "dispatch.json");
+	let leadIds: Set<string> | undefined;
+	if (existsSync(dispatchPath)) {
+		const dsp = readJson(dispatchPath) as { film_broll?: Array<{ span?: { from?: string } }> };
+		const ids = (dsp.film_broll ?? []).map((f) => f.span?.from).filter((x): x is string => !!x);
+		if (ids.length > 0) leadIds = new Set(ids);
+	}
 
 	const clips = gtrk.video_track?.[0]?.track_timeline ?? [];
 	const materials: Record<string, string> = {};
@@ -188,6 +208,7 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 		clips,
 		materials,
 		quoteSpans,
+		leadIds,
 	});
 
 	// ── 抽帧（句中点对应的**已铺**画面帧；temp 目录即用即弃，缩略图落工程 qc/ 供对照表嵌图）──
@@ -283,6 +304,9 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 			partial: judged.filter((i) => i.verdict === "partial").length,
 			mismatch: judged.filter((i) => i.verdict === "mismatch").length,
 			rate: alignmentRate(items),
+			lead_total: judged.filter((i) => i.role !== "follow").length,
+			lead_mismatch: judged.filter((i) => i.role !== "follow" && i.verdict === "mismatch").length,
+			lead_rate: alignmentRate(judged.filter((i) => i.role !== "follow")),
 		},
 		items,
 	};
@@ -293,16 +317,17 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 		`# 稿句 ↔ 画面对齐审计（${report.generated_at}）`,
 		"",
 		report.summary.rate !== null
-			? `**对齐率 ${report.summary.rate}%**（match ${report.summary.match} / partial ${report.summary.partial} / mismatch ${report.summary.mismatch}，n=${report.summary.audited}；match=1、partial=0.5 计分）`
+			? `**卡点句对齐率 ${report.summary.lead_rate}%（mismatch ${report.summary.lead_mismatch}/${report.summary.lead_total}）← 验收判据**；全句口径 ${report.summary.rate}%（match ${report.summary.match} / partial ${report.summary.partial} / mismatch ${report.summary.mismatch}，n=${report.summary.audited}）。七三开：跟随句为抽象/数字/修辞句，蹭领衔镜头保节奏自然，其 partial/mismatch 属设计非缺陷`
 			: `**降级形态**（服务端未升级）：帧描述已产出，逐句裁定交 agent 文本判读`,
 		"",
-		"| 句 | 稿句 | 画面 | 判定 | 说明 |",
-		"|---|---|---|---|---|",
+		"| 句 | 角色 | 稿句 | 画面 | 判定 | 说明 |",
+		"|---|---|---|---|---|---|",
 	];
 	for (const it of items) {
 		const img = it.thumb ? `![${it.id}](${it.thumb})` : it.skipped === "quote" ? "（引用段·结构校验）" : `（跳过：${it.skipped ?? "?"}）`;
 		const verdict = it.verdict ? `${it.verdict}（${it.aligned}）` : it.skipped ? "—" : "待裁定";
-		md.push(`| ${it.id} | ${it.sentence.replace(/\|/g, "\\|")} | ${img} | ${verdict} | ${(it.reason ?? it.frame_desc ?? "").replace(/\|/g, "\\|")} |`);
+		const role = it.role === "follow" ? "跟随" : it.skipped === "quote" ? "引用" : "**卡点**";
+		md.push(`| ${it.id} | ${role} | ${it.sentence.replace(/\|/g, "\\|")} | ${img} | ${verdict} | ${(it.reason ?? it.frame_desc ?? "").replace(/\|/g, "\\|")} |`);
 	}
 	writeFileSync(join(qcDir, "alignment-audit.md"), md.join("\n"), "utf-8");
 	return report;
