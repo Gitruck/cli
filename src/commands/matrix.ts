@@ -1895,6 +1895,20 @@ async function layIntoProject(
 	if (markOn) {
 		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 候选 · 中性 ${markStats.neutral} 候选（w=${layOpts.markWeight}）`);
 	}
+	// 零覆盖明示（fix-describe-cache-locality）：库存在但**本片**一条缓存都没命中这一档此前静默通过
+	// ——用户以为加权在跑，实际全部中性、权重原样回吐给 sim（260828 三条美食片 describes=0 实锤）。
+	// 与「索引库不存在」告警分案：那档是没库，这档是有库没本片。
+	const hlOn = typeof layOpts.highlightWeight === "number" && layOpts.highlightWeight > 0;
+	const zeroCov: string[] = [];
+	if (markOn && markStats.hit === 0 && markStats.neutral > 0) zeroCov.push(`美观度（--mark-weight ${layOpts.markWeight}）`);
+	if (hlOn && markStats.hlHit === 0 && markStats.hlNeutral > 0) zeroCov.push(`看点（--highlight-weight ${layOpts.highlightWeight}）`);
+	if (zeroCov.length) {
+		log.warn(
+			`${zeroCov.join(" 与 ")}权重开了但**本片零缓存覆盖**：全部候选按中性处理，排序与不开权重完全一致（权重已回吐给语义分）。` +
+				`根因通常是本 plan 未经理解——先跑 gtrk matrix describe --plan <plan 路径> 再重跑 lay 才有效；` +
+				`手写 plan（免索引直排）也走这条路，此时美观度/看点/模糊降权三条信号一并不生效`,
+		);
+	}
 	// pinned 让位必须明示（matrix-command spec：冲突后到让位并 summary 明示，MUST NOT 静默）
 	if (pinnedOutcome.yielded.length) {
 		log.warn(
@@ -2161,10 +2175,16 @@ async function layIntoProject(
 				emptySlotsByRefine: fillStats.emptySlotsByRefine,
 				// 取用了高运动段的槽位数（降权不排除，候选稀疏时仍会取——让「为什么这颗抖」可追溯）
 				hotSlotsPlaced: fillStats.hotSlotsPlaced,
+				// 同款：取用了 describe 判模糊候选的槽位数（fix-describe-cache-locality）
+				blurrySlotsPlaced: fillStats.blurrySlotsPlaced,
 				adjacentWaived: fillStats.adjacentWaived,
 			},
 			// mark 融合账面（add-audio-project-atoms）：仅开启时出现（默认 0 时 lay JSON 逐字节不变）
 			...(markOn ? { mark_weight: layOpts.markWeight, mark_hit: markStats.hit, mark_neutral: markStats.neutral } : {}),
+			// 看点维度同款账面（fix-describe-cache-locality）：仅开启时出现（关闭时 lay JSON 逐字节不变）
+			...(hlOn
+				? { highlight_weight: layOpts.highlightWeight, highlight_hit: markStats.hlHit, highlight_neutral: markStats.hlNeutral }
+				: {}),
 			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）
 			...(pinnedOutcome.requested.length
 				? {

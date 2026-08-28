@@ -398,15 +398,31 @@ export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): 
 }
 
 /**
+ * [fix-describe-cache-locality] 就近命中的时间距离上限（毫秒）。
+ *
+ * 判据不是「多远算远」而是「**多远还算同一个镜头**」——理解抽帧密度是「每 (beat, query, result)
+ * 一帧」（只取 `segments[0]` 的 best），同一 result 的次级段与跨 beat 复用都会去够别的镜头的分。
+ * 260828 走查实测：同素材相邻描述帧间隔中位 2–6s、**最大 191s**，无上限时分打给错镜头不是理论风险。
+ *
+ * 取 15s = 典型场景长度（密着长片实测 3–6s、段宽下限 1.5s、槽长区间 [1.5,8]s）的 2–5 倍：
+ * 同镜头/同机位连拍的邻帧照常命中不误杀，跨场景串味被切断。**MUST NOT 取更严**（如 3s）——
+ * describe 密度本就稀疏，过严会让绝大多数候选变中性，等于把权重关掉；本常量的目的是
+ * **让权重打准，不是把它关掉**。超限恒走「中性」而非「零分」（不惩罚不加分）。
+ */
+export const DESCRIBE_NEAREST_MAX_GAP_MS = 15_000;
+
+/**
  * mark 就近命中（add-audio-project-atoms mark-weight）：同素材内 |ts_ms 差| 最小的缓存条目的 mark。
  * 无任何缓存条目返回 undefined（消费方按中性处理，MUST NOT 变成变相剔除）；mark 列 NULL 按 0。
+ * [fix-describe-cache-locality] 距离超 `DESCRIBE_NEAREST_MAX_GAP_MS` 一并按未命中处置。
  */
 export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number): number | undefined {
-	const row = db.get<{ mark: number | null }>(
-		"SELECT mark FROM describes WHERE material_id = ? ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
+	const row = db.get<{ mark: number | null; ts_ms: number }>(
+		"SELECT mark, ts_ms FROM describes WHERE material_id = ? ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
 		[materialId, tsMs],
 	);
 	if (!row) return undefined;
+	if (Math.abs(row.ts_ms - tsMs) > DESCRIBE_NEAREST_MAX_GAP_MS) return undefined; // 太远 = 别的镜头
 	return row.mark ?? 0;
 }
 
@@ -414,13 +430,16 @@ export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number
  * [add-shot-cards-and-alignment-qc] highlight 就近命中（同 mark 家族）。
  * **与 mark 的关键差别**：mark 列 NULL 按 0 消费（旧行为），highlight 列 NULL 返回 undefined
  * ——旧缓存行没有这一维，当 0 会把老素材全部打成「零看点」静默沉底。
+ * [fix-describe-cache-locality] 距离上限与 mark 同口径。
  */
 export function getNearestCachedHighlight(db: SqlDb, materialId: string, tsMs: number): number | undefined {
-	const row = db.get<{ highlight: number | null }>(
-		"SELECT highlight FROM describes WHERE material_id = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
+	const row = db.get<{ highlight: number | null; ts_ms: number }>(
+		"SELECT highlight, ts_ms FROM describes WHERE material_id = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
 		[materialId, tsMs],
 	);
-	return row?.highlight ?? undefined;
+	if (!row) return undefined;
+	if (Math.abs(row.ts_ms - tsMs) > DESCRIBE_NEAREST_MAX_GAP_MS) return undefined;
+	return row.highlight ?? undefined;
 }
 
 export function putCachedDescribe(

@@ -194,6 +194,13 @@ export const JUMP_CUT_GAP_SEC = 2;
  * 0.05 = 打样标定：问题窗口 0.1058 / 倍帧快摇 0.2747 在线上，干净窗 0.0247 / 真快剪段 0.0165 /
  * 静止 0.0178 在线下。**首批工程复核后再固化**，spec 只要求「可排序、可降权、不硬排除」。 */
 export const MOTION_HOT_P50 = 0.05;
+/** 模糊降权（分，fix-describe-cache-locality）：`describe.usable_flags.blurry` 命中的候选排序减分。
+ * 与 `MOTION_HOT_PENALTY` 同族但**更确定**——运动量是间接代理（抖/摇未必糊），blurry 是 VLM 直判，
+ * 故取略重的 0.03，仍在「同分优先」量级而非「一票否决」量级。
+ * 两个降权**可叠加**（又糊又抖 = −0.05）：独立观测，叠加是如实反映不是重复惩罚。
+ * MUST NOT 排除、MUST NOT 参与 score 地板（候选稀疏时照用——留空的观感代价更大）；
+ * plan 未注入 describe 时恒 0 ⇒ 排序逐字节零回归。剔除权仍归用户（CLI 只降权不替你剔）。 */
+export const BLURRY_PENALTY = 0.03;
 /** 高运动降权（分，add-material-motion-signal D1）：排序时高运动段的等效分减去此值——
  * 即「高运动段要比平稳段多 0.02 分才压得过它」，实现 spec 的「同等 score 下优先平稳」。
  * 取降权而非按分档排序：分档会在档位边界上武断（0.339 与 0.341 落不同档）。
@@ -248,6 +255,9 @@ export interface FillStats {
 	/** 落成槽位中取用了**高运动段**的数量（add-material-motion-signal）：降权只改排序不作排除，
 	 * 候选稀疏时仍会取高运动段——如实记录，让「为什么这颗抖」可追溯。 */
 	hotSlotsPlaced: number;
+	/** 落成槽位中取用了**模糊候选**的数量（fix-describe-cache-locality）：与 hotSlotsPlaced 同款——
+	 * 降权只改排序不作排除，候选稀疏时仍会取糊帧，如实记录让「为什么这颗糊」可追溯。 */
+	blurrySlotsPlaced: number;
 	/** pinned 候选未能入选数（冲突后到让位/候选枯竭/被排除——按候选 clip 计，summary 明示）。 */
 	pinnedYielded: number;
 }
@@ -458,19 +468,26 @@ interface Pair {
 	 * w>0 且 mark 缓存命中时 = sim×(1-w)+(mark/100)×w，无缓存中性（=sim）。只参与排序，
 	 * MUST NOT 参与 score 地板判定（mark 缺失/低 mark 不得变成变相剔除）。 */
 	fused: number;
-	/** 排序用等效分（add-material-motion-signal）：`fused − 高运动降权`。无运动信号时恒 === fused
-	 * （零回归）。只参与**排序**，MUST NOT 参与 score 地板判定或作为排除条件。 */
+	/** 排序用等效分（add-material-motion-signal + fix-describe-cache-locality）：
+	 * `fused − 高运动降权 − 模糊降权`。两信号都缺席时恒 === fused（零回归）。
+	 * 只参与**排序**，MUST NOT 参与 score 地板判定或作为排除条件。 */
 	rank: number;
 	/** 该段是否判为高运动（p50 > MOTION_HOT_P50）——summary 计数与诊断用。 */
 	hot: boolean;
+	/** [fix-describe-cache-locality] 该候选是否被 describe 判为模糊（usable_flags.blurry）。 */
+	blurry: boolean;
 }
 
-/** mark 融合统计收集器（按候选 clip 去重；planBeatFills 聚合进 summary）。 */
+/** mark/highlight 融合统计收集器（按候选 clip 去重；planBeatFills 聚合进 summary）。 */
 export interface MarkStatsSets {
 	/** describe 缓存命中的候选 clip_id 集。 */
 	hit: Set<string>;
 	/** 无缓存按中性处理的候选 clip_id 集。 */
 	neutral: Set<string>;
+	/** [fix-describe-cache-locality] 看点维度同款分账——两维缓存覆盖率可以不同
+	 * （旧缓存行有 mark 无 highlight），合账会让「本片零覆盖」告警在其中一维上误判。 */
+	hlHit: Set<string>;
+	hlNeutral: Set<string>;
 }
 
 /** mark 查询闭包（命令层供给：material_id+ts_ms 就近命中 describes 缓存；纯函数层零 IO）。 */
@@ -539,10 +556,17 @@ function buildQueryPools(
 						if (markOk) opts.markStats?.hit.add(cand.clip_id);
 						else opts.markStats?.neutral.add(cand.clip_id);
 					}
+					if (wh > 0) {
+						if (hlOk) opts.markStats?.hlHit.add(cand.clip_id);
+						else opts.markStats?.hlNeutral.add(cand.clip_id);
+					}
 				}
 				// 高运动降权（add-material-motion-signal）：只影响排序，不改地板、不作排除
 				const p50 = (seg as { motion?: { p50?: number } }).motion?.p50;
 				const hot = typeof p50 === "number" && Number.isFinite(p50) && p50 > MOTION_HOT_P50;
+				// 模糊降权（fix-describe-cache-locality）：同款处置——降权不排除、不碰地板；
+				// 信号来自 describe 注入（未跑 matrix describe --plan 时恒 false ⇒ 排序零回归）
+				const blurry = (cand as { describe?: { usable_flags?: Record<string, unknown> } }).describe?.usable_flags?.blurry === true;
 				pool.push({
 					cand,
 					seg,
@@ -551,7 +575,9 @@ function buildQueryPools(
 					pinned,
 					fused,
 					hot,
-					rank: hot ? fused - MOTION_HOT_PENALTY : fused,
+					blurry,
+					// 两降权可叠加（独立观测，如实反映）
+					rank: fused - (hot ? MOTION_HOT_PENALTY : 0) - (blurry ? BLURRY_PENALTY : 0),
 				});
 			}
 		}
@@ -890,6 +916,7 @@ export function fillBeatTrack(opts: {
 		});
 		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++; // pinned 落成计数（summary 明示）
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++; // 取用高运动段（降权未挡住=候选稀疏）
+		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++; // 同上：取用模糊候选如实记账
 		consumed.add(pick.key);
 		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
 		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipEd };
@@ -1080,6 +1107,7 @@ export function fillBeatTrackWithAnchors(opts: {
 		opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
 		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++;
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
+		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++;
 		cursorMin = st + d;
 		outcomes.push({
 			beat: beat.beat,
@@ -1278,8 +1306,9 @@ export function planBeatFills(
 	clipIds: Set<string>;
 	stats: FillStats;
 	pinnedOutcome: { requested: string[]; yielded: string[] };
-	/** mark 融合统计（add-audio-project-atoms）：按候选 clip 去重的缓存命中/中性计数；w=0 时恒 0/0。 */
-	markStats: { hit: number; neutral: number };
+	/** mark/highlight 融合统计（add-audio-project-atoms + fix-describe-cache-locality）：
+	 * 按候选 clip 去重的缓存命中/中性计数；对应权重为 0 时恒 0/0。 */
+	markStats: { hit: number; neutral: number; hlHit: number; hlNeutral: number };
 	/** 逐锚落位结果（add-keyword-anchored-broll）：plan 无 anchors 时恒空数组（零回归）。 */
 	anchors: AnchorOutcome[];
 	/** 对齐实测（adjust-shot-cut-sentence-align）：首轨口径；吸附未激活时 undefined（lay JSON 零新键）。 */
@@ -1292,8 +1321,8 @@ export function planBeatFills(
 	const clipIds = new Set<string>();
 	// 全局消费集（D4）：跨 beat 跨 query 跨轨共享——分配即消费、该轮不归还（剥旧重铺后新一轮独立适用）
 	const consumed = new Set<string>();
-	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
-	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set() };
+	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, blurrySlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
+	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set(), hlHit: new Set(), hlNeutral: new Set() };
 	const anchorOutcomes: AnchorOutcome[] = [];
 	// 句界吸附：每轨一份闭环控制器（跨 beat 共享——比例是全片口径，不是逐 beat 口径）。
 	// 密度自适应标定（design §2）：闭环控制的是「吸附机会的放行份额」，而实测比例的分母是**句起点**
@@ -1400,7 +1429,7 @@ export function planBeatFills(
 		clipIds,
 		stats,
 		pinnedOutcome: { requested: [...pinnedRequested], yielded },
-		markStats: { hit: markSets.hit.size, neutral: markSets.neutral.size },
+		markStats: { hit: markSets.hit.size, neutral: markSets.neutral.size, hlHit: markSets.hlHit.size, hlNeutral: markSets.hlNeutral.size },
 		anchors: anchorOutcomes,
 		...(cutAlignStats ? { cutAlign: cutAlignStats } : {}),
 		...(gapFillEntries ? { gapFills: gapFillEntries } : {}),
