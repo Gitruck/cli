@@ -1014,6 +1014,10 @@ export function fillBeatTrackWithAnchors(opts: {
 		dedupScope: opts.dedupScope,
 		markWeight: opts.markWeight,
 		markLookup: opts.markLookup,
+		// [add-shot-cards-and-alignment-qc] 锚槽池 MUST 与序贯填充同一套融合口径——漏传会让锚槽
+		// 只吃 mark 不吃 highlight，同一 beat 内两种排序标准并存（260828 走查揪出）。
+		highlightWeight: opts.highlightWeight,
+		highlightLookup: opts.highlightLookup,
 		markStats: opts.markStats,
 	});
 	const poolByQuery = new Map(pools.map((p) => [p.query, p.pool]));
