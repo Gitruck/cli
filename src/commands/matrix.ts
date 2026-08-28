@@ -107,6 +107,7 @@ import {
 import {
 	describeImages,
 	getNearestCachedMark,
+	getNearestCachedHighlight,
 	resolveDescribeUrl,
 	runDescribeItems,
 	toDescribeMeta,
@@ -187,6 +188,8 @@ interface MatrixOpts {
 	// ── 美观度权重（add-audio-project-atoms，仅 matrix lay）──
 	/** `--mark-weight <0..1>`：融合分 = sim×(1-w)+(mark/100)×w；默认 0 零回归。 */
 	markWeight?: string;
+	/** `--highlight-weight <0..1>`：看点权重（与 mark 正交）；默认 0 零回归。 */
+	highlightWeight?: string;
 	// ── 句界吸附（adjust-shot-cut-sentence-align）──
 	/** `--cut-align <ratio>`：字幕句起点吸附目标比例（默认 0.7；0=关闭回旧节奏切槽）。 */
 	cutAlign?: string;
@@ -260,6 +263,10 @@ export function registerMatrix(program: Command): void {
 		.option(
 			"--dedup-scope <scope>",
 			"铺轨去重粒度：scene=场景级（默认；同素材不同场景可分配，相邻槽位按跳剪豁免避让）| material=严格档（同一素材文件整轮只用一次）",
+		)
+		.option(
+			"--highlight-weight <w>",
+			"仅 matrix lay：看点权重 0..1（默认 0 关闭零回归）——与 --mark-weight 正交（mark=画面好不好看，highlight=有没有看点：信息量/戏剧性/情绪强度/稀缺性）；两权之和钳到 1，看点分取 describe 理解缓存，无缓存候选中性（权重回吐给 sim）",
 		)
 		.option(
 			"--mark-weight <w>",
@@ -398,6 +405,9 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 		}
 	}
 	// --mark-weight 仅 lay 模式（spec 只对 matrix lay 立法；不做静默忽略）
+	if (opts.highlightWeight !== undefined && pos.kind !== "lay") {
+		throw new Error("--highlight-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
+	}
 	if (opts.markWeight !== undefined && pos.kind !== "lay") {
 		throw new Error("--mark-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
 	}
@@ -1143,6 +1153,48 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 		}
 	}
 
+	// ── 看点权重（add-shot-cards-and-alignment-qc）：与 mark 同一缓存库、正交维度 ──
+	// mark=画面好不好看（美学），highlight=有没有看点（信息量/戏剧性/情绪/稀缺）。
+	// 两权之和 >1 时由 lay 层钳制（sim 权重不为负）；无缓存候选中性，权重回吐给 sim。
+	const highlightWeight = parseMarkWeight(opts.highlightWeight);
+	let highlightLookup: MarkLookup | undefined;
+	if (highlightWeight > 0) {
+		if (markDb) {
+			const db = markDb;
+			const cache = new Map<string, number | undefined>();
+			highlightLookup = (clipId, tsMs) => {
+				const key = `${clipId}@${tsMs}`;
+				if (cache.has(key)) return cache.get(key);
+				const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs);
+				cache.set(key, v);
+				return v;
+			};
+		} else {
+			const dbPath2 = localIndexDbPath();
+			if (existsSync(dbPath2)) {
+				markDb = await openLocalIndexDb(dbPath2);
+				const db = markDb;
+				const cache = new Map<string, number | undefined>();
+				highlightLookup = (clipId, tsMs) => {
+					const key = `${clipId}@${tsMs}`;
+					if (cache.has(key)) return cache.get(key);
+					const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs);
+					cache.set(key, v);
+					return v;
+				};
+			} else {
+				log.warn(
+					`--highlight-weight ${highlightWeight}：本地索引库不存在（${dbPath2}），无任何理解缓存——全部候选按中性处理。先跑 gtrk matrix describe 产看点分再开权重才有效`,
+				);
+			}
+		}
+		if (highlightLookup) {
+			log.info(
+				`看点权重开启（wh=${highlightWeight}）：融合分 = sim×${Math.max(0, 1 - markWeight - highlightWeight)}+(mark/100)×${markWeight}+(highlight/100)×${highlightWeight}；看点分取 describe 理解缓存（素材内就近帧），无缓存候选按中性处理（权重回吐给 sim）`,
+			);
+		}
+	}
+
 	let laid: Awaited<ReturnType<typeof layIntoProject>>;
 	try {
 		laid = await layIntoProject(baseDir, effPlan, layN, parseScoreFloor(opts.scoreFloor), opts.blackBed ?? true, opts.forceRelay === true, reproj, {
@@ -1153,6 +1205,8 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 			dedupScope: parseDedupScope(opts.dedupScope),
 			markWeight,
 			markLookup,
+			highlightWeight,
+			highlightLookup,
 			cutAlign: parseCutAlign(opts.cutAlign),
 			gapFill: parseGapFill(opts.gapFill),
 			gapFillExplicit: opts.gapFill !== undefined,
@@ -1753,6 +1807,10 @@ async function layIntoProject(
 		markWeight?: number;
 		/** mark 查询闭包（runLayMode 供给；缺省=全部中性）。 */
 		markLookup?: MarkLookup;
+		/** [add-shot-cards-and-alignment-qc] 看点权重（与 mark 正交）：0..1，缺省 0 零回归。 */
+		highlightWeight?: number;
+		/** highlight 查询闭包（runLayMode 供给；缺省=全部中性）。 */
+		highlightLookup?: MarkLookup;
 		/** 句界吸附目标比例（adjust-shot-cut-sentence-align）：缺省 CUT_ALIGN_DEFAULT；0=关闭。 */
 		cutAlign?: number;
 		/** 主轨 gap 填充模式（adjust-main-track-gap-fill）：缺省 solid；仅音频驱动工程主轨生效。 */
@@ -1807,6 +1865,8 @@ async function layIntoProject(
 		dedupScope: layOpts.dedupScope,
 		markWeight: layOpts.markWeight,
 		markLookup: layOpts.markLookup,
+		highlightWeight: layOpts.highlightWeight,
+		highlightLookup: layOpts.highlightLookup,
 		...(cutStarts ? { cutAlign: { ratio: cutRatio, starts: cutStarts } } : {}),
 		...(gapModeEff !== "none" ? { gapFill: gapModeEff } : {}),
 	});

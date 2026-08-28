@@ -496,10 +496,18 @@ function buildQueryPools(
 		markWeight?: number;
 		markLookup?: MarkLookup;
 		markStats?: MarkStatsSets;
+		/** [add-shot-cards-and-alignment-qc] 看点权重（0..1，默认 0 零回归）。 */
+		highlightWeight?: number;
+		/** highlight 查询闭包（describes 缓存就近命中；缺省=全部中性）。 */
+		highlightLookup?: MarkLookup;
 	} = {},
 ): { query: string; pool: Pair[] }[] {
 	const scope = opts.dedupScope ?? "scene";
 	const w = typeof opts.markWeight === "number" && opts.markWeight > 0 ? Math.min(1, opts.markWeight) : 0;
+	// [add-shot-cards-and-alignment-qc] 看点权重：与 mark 同族但正交（mark=好不好看，highlight=有没有看点）。
+	// 两权之和钳到 1（sim 至少留 0 权重不为负）；缺席维度的权重**回吐给 sim**，不静默惩罚。
+	const wh0 = typeof opts.highlightWeight === "number" && opts.highlightWeight > 0 ? Math.min(1, opts.highlightWeight) : 0;
+	const wh = Math.max(0, Math.min(wh0, 1 - w));
 	const out: { query: string; pool: Pair[] }[] = [];
 	for (const q of beat.queries) {
 		const pool: Pair[] = [];
@@ -514,13 +522,22 @@ function buildQueryPools(
 			for (const seg of segs) {
 				if (!pinned && seg.score < scoreFloor) continue; // 低于阈值不采纳（pinned=强制入选，免地板；地板恒看原始 sim）
 				let fused = seg.score;
-				if (w > 0) {
-					const mark = opts.markLookup?.(cand.clip_id, Math.round(seg.best * 1000));
-					if (typeof mark === "number" && Number.isFinite(mark)) {
-						fused = seg.score * (1 - w) + (Math.min(100, Math.max(0, mark)) / 100) * w;
-						opts.markStats?.hit.add(cand.clip_id);
-					} else {
-						opts.markStats?.neutral.add(cand.clip_id); // 无缓存中性：融合分=sim
+				if (w > 0 || wh > 0) {
+					const tsMs = Math.round(seg.best * 1000);
+					const mark = w > 0 ? opts.markLookup?.(cand.clip_id, tsMs) : undefined;
+					const hl = wh > 0 ? opts.highlightLookup?.(cand.clip_id, tsMs) : undefined;
+					const markOk = typeof mark === "number" && Number.isFinite(mark);
+					const hlOk = typeof hl === "number" && Number.isFinite(hl);
+					// 缺席维度的权重回吐给 sim（无缓存中性：不惩罚不加分，w/wh 全缺时 fused === sim）
+					const wmEff = markOk ? w : 0;
+					const whEff = hlOk ? wh : 0;
+					fused =
+						seg.score * (1 - wmEff - whEff) +
+						(markOk ? (Math.min(100, Math.max(0, mark as number)) / 100) * wmEff : 0) +
+						(hlOk ? (Math.min(100, Math.max(0, hl as number)) / 100) * whEff : 0);
+					if (w > 0) {
+						if (markOk) opts.markStats?.hit.add(cand.clip_id);
+						else opts.markStats?.neutral.add(cand.clip_id);
 					}
 				}
 				// 高运动降权（add-material-motion-signal）：只影响排序，不改地板、不作排除
@@ -691,6 +708,9 @@ export function fillBeatTrack(opts: {
 	markWeight?: number;
 	/** mark 查询闭包（命令层供给 describes 缓存就近命中；缺省=全部中性）。 */
 	markLookup?: MarkLookup;
+	/** [add-shot-cards-and-alignment-qc] 看点权重与查询闭包（同 mark 一族，正交维度）。 */
+	highlightWeight?: number;
+	highlightLookup?: MarkLookup;
 	/** mark 融合统计收集器（planBeatFills 聚合）。 */
 	markStats?: MarkStatsSets;
 	/** 句界吸附（adjust-shot-cut-sentence-align）：缺席/ratio≤0 = 不激活（旧行为逐字节零回归）。 */
@@ -715,6 +735,8 @@ export function fillBeatTrack(opts: {
 		dedupScope: opts.dedupScope,
 		markWeight: opts.markWeight,
 		markLookup: opts.markLookup,
+		highlightWeight: opts.highlightWeight,
+		highlightLookup: opts.highlightLookup,
 		markStats: opts.markStats,
 	});
 	if (!pools.length) return [];
@@ -965,6 +987,9 @@ export function fillBeatTrackWithAnchors(opts: {
 	markWeight?: number;
 	markLookup?: MarkLookup;
 	markStats?: MarkStatsSets;
+	/** [add-shot-cards-and-alignment-qc] 看点权重与查询闭包（与 mark 正交，同缓存库）。 */
+	highlightWeight?: number;
+	highlightLookup?: MarkLookup;
 	/** 句界吸附（adjust-shot-cut-sentence-align）：锚槽窗口零改动（锚 > 句吸附），锚点分割区间内透传照常吸附。 */
 	cutAlign?: CutAlignOpts;
 }): { slots: FillSlot[]; anchors: AnchorOutcome[] } {
@@ -1234,6 +1259,9 @@ export function planBeatFills(
 		dedupScope?: DedupScope;
 		markWeight?: number;
 		markLookup?: MarkLookup;
+		/** [add-shot-cards-and-alignment-qc] 看点权重与查询闭包（与 mark 正交，同缓存库）。 */
+		highlightWeight?: number;
+		highlightLookup?: MarkLookup;
 		/** 句界吸附（adjust-shot-cut-sentence-align）：缺席/ratio≤0/starts 空 = 不激活（旧行为逐字节）。
 		 * `calibrated` 为内部标定标记（密度自适应两遍法的第二遍/标定遍自带，调用方 MUST NOT 传）。 */
 		cutAlign?: { ratio: number; starts: number[]; calibrated?: boolean };
@@ -1303,6 +1331,8 @@ export function planBeatFills(
 				dedupScope: opts.dedupScope,
 				markWeight: opts.markWeight,
 				markLookup: opts.markLookup,
+				highlightWeight: opts.highlightWeight,
+				highlightLookup: opts.highlightLookup,
 				markStats: markSets,
 				beatOwners,
 				stats,

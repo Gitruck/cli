@@ -410,6 +410,19 @@ export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number
 	return row.mark ?? 0;
 }
 
+/**
+ * [add-shot-cards-and-alignment-qc] highlight 就近命中（同 mark 家族）。
+ * **与 mark 的关键差别**：mark 列 NULL 按 0 消费（旧行为），highlight 列 NULL 返回 undefined
+ * ——旧缓存行没有这一维，当 0 会把老素材全部打成「零看点」静默沉底。
+ */
+export function getNearestCachedHighlight(db: SqlDb, materialId: string, tsMs: number): number | undefined {
+	const row = db.get<{ highlight: number | null }>(
+		"SELECT highlight FROM describes WHERE material_id = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
+		[materialId, tsMs],
+	);
+	return row?.highlight ?? undefined;
+}
+
 export function putCachedDescribe(
 	db: SqlDb,
 	materialId: string,
