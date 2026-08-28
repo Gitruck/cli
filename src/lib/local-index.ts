@@ -270,6 +270,11 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		if (!cols.some((c) => c.name === "cuts_indexed")) {
 			db.exec("ALTER TABLE materials ADD COLUMN cuts_indexed INTEGER");
 		}
+		// materials.decode_lane 幂等迁移（speedup-matrix-index-proxy-decode）：NULL=旧行（当时只有全清一条路）。
+		// 溯源用，检索侧不读——增量索引下同库素材可能走了不同车道，其 motion 分位彼此不完全可比；
+		// 这一列只保证该差异**可见**，MUST NOT 因换车道强制全库重建（那等于「换机器 = 全库重扫」）。
+		const cols2 = db.all<{ name: string }>("PRAGMA table_info(materials)").map((c) => c.name);
+		if (!cols2.includes("decode_lane")) db.exec("ALTER TABLE materials ADD COLUMN decode_lane TEXT");
 	} catch (e) {
 		db.close();
 		throw new Error(
@@ -294,6 +299,8 @@ export interface MaterialRow {
 	height: number | null;
 	fps: number | null;
 	indexed_at: string;
+	/** 建此行时实际跑成的解码车道；NULL=旧行（当时只有全清一条路）。溯源用，检索侧不读。 */
+	decode_lane?: string | null;
 }
 
 /** 级联删一个素材的全部行（frames → scenes → cuts → materials；显式删，不依赖外键 pragma）。 */
@@ -1188,7 +1195,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 					}
 				}
 				db.run(
-					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at, cuts_indexed) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at, cuts_indexed, decode_lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
 					[
 						p.planned.materialId,
 						p.path,
@@ -1203,6 +1210,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 						// cuts_indexed（fix-broll-flash-frames D4）：有切点全集数据=1（空集=真无切点）；
 						// 旧注入面/图片缺省 undefined → NULL（检索侧不透出 cuts）
 						p.planned.cutsMs !== undefined ? 1 : null,
+						p.planned.decodeLane ?? null,
 					],
 				);
 				const matRowId = Number(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id);
