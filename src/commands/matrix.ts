@@ -141,6 +141,7 @@ import {
 } from "../lib/local-index";
 import { loadLocalIndex, searchLoadedIndex, type LoadedIndex } from "../lib/local-search";
 import { requireFfmpeg, resolveFfmpeg } from "../lib/ffmpeg";
+import { EXCLUDE_RECENT_DEFAULT, filterRecentlyUsed, recentBgmKeys } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
 
 interface MatrixOpts {
@@ -202,6 +203,8 @@ interface MatrixOpts {
 	maxDuration?: string;
 	/** `--diversity`：去同质化（避免返回雷同素材）。 */
 	diversity?: boolean;
+	/** `--exclude-recent <n>` / `--no-exclude-recent`：BGM 选曲避让窗口（scope=audio）。 */
+	excludeRecent?: string | false;
 }
 
 /** 测试注入面（MUST NOT 真调云端）：图片运镜生成与计费确认；缺省 = 真实云链 / stdin 确认。
@@ -296,6 +299,11 @@ export function registerMatrix(program: Command): void {
 		.option("--min-duration <sec>", "matrix material：最短时长（秒）——BGM 按成片时长挑")
 		.option("--max-duration <sec>", "matrix material：最长时长（秒）")
 		.option("--diversity", "matrix material：去同质化，避免返回雷同素材")
+		.option(
+			"--exclude-recent <n>",
+			`matrix material --scope audio：避让最近 n 首用过的 BGM（缺省 ${EXCLUDE_RECENT_DEFAULT}；历史由 audio lay 落轨自动记账）`,
+		)
+		.option("--no-exclude-recent", "matrix material --scope audio：关闭选曲避让（允许复用近期曲目）")
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）；matrix fetch：原片落盘目录（缺省 ./matrix-fetch/；绝不写剪映草稿目录）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
@@ -2304,7 +2312,21 @@ async function runMaterialMode(query: string, cfg: ReturnType<typeof loadConfig>
 
 	const data = await searchMaterialOnce(cfg, tier, body);
 	// 公开口没有 filters 入参 → 本地按 duration 兜底过滤（已在上面显式提示，不静默）
-	const results = tier === "external" ? filterMaterialsByDuration(data.results, bounds) : data.results;
+	const durationFiltered = tier === "external" ? filterMaterialsByDuration(data.results, bounds) : data.results;
+	// [adjust-bgm-selection-freshness] BGM 选曲新鲜度：scope=audio 时默认避让近期用过的曲子
+	// （历史由 audio lay 落轨自动记账）。--no-exclude-recent 关闭；--exclude-recent <n> 调窗口。
+	// 宁可少滤不可滤空：过滤后一条不剩则回退原结果并明示（曲库小/窗口过大时不让用户空手）。
+	let results = durationFiltered;
+	if (scope === "audio" && opts.excludeRecent !== false) {
+		const n = typeof opts.excludeRecent === "string" ? Number(opts.excludeRecent) : EXCLUDE_RECENT_DEFAULT;
+		const window = Number.isFinite(n) && n >= 0 ? n : EXCLUDE_RECENT_DEFAULT;
+		const avoided = filterRecentlyUsed(durationFiltered, recentBgmKeys(window));
+		results = avoided.kept;
+		if (avoided.skipped > 0)
+			log.info(`选曲新鲜度：已避让近期用过的 ${avoided.skipped} 首（窗口 ${window} 条；--no-exclude-recent 可关）`);
+		if (avoided.exhausted)
+			log.warn(`选曲新鲜度：本次候选全部是近期用过的曲子——已按原结果返回（避免空手）。建议换检索词或缩小窗口（--exclude-recent <n>）`);
+	}
 	log.ok(`${results.length} 条候选${typeof data.total === "number" && data.total !== results.length ? `（服务端返回 ${data.total}）` : ""}`);
 
 	// ④ upsell（仅 external 档 且 结果不足；独立字段不进 results）

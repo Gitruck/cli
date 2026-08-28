@@ -38,6 +38,7 @@ import type { BeatAnalysis } from "../lib/mad/beat";
 import { uploadCached, invalidateUpload } from "../lib/upload-cache";
 import { submitTask } from "../lib/cloud";
 import { pollToolTask } from "../lib/tool-runner";
+import { recordBgmUseFromFile } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
 
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
@@ -347,6 +348,11 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 			(replacedTracks ? `（替换旧同源轨 ${replacedTracks} 条）` : ""),
 	);
 	log.info("客户端打开工程即见音轨；本地渲染（gtrk render）混音可闻。");
+	// [adjust-bgm-selection-freshness] 落轨即记账（机制而非纪律）：下次 matrix material
+	// --scope audio 自动避让近期用过的曲子，治「无论什么题材都来回那几首」。
+	// 记账失败静默降级（bgm-history 内部吞异常），绝不影响铺轨本身。
+	recordBgmUseFromFile(audioAbs, opts.project);
+
 
 	const result: AudioLayResult = {
 		ok: true,

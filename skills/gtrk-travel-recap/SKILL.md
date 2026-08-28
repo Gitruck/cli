@@ -112,7 +112,9 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 3. **TTS 音色**：拉 catalog（`GET {apiBase}/task/tts/voices`，免鉴权）按内容调性挑 2-4 个候选，**每个附试听链接**（catalog 的 audition_url 字段，api.ai-mcn.tv:9000 静态直链）——用户在对话框里直接点开听。internal 标注的音色注明「仅内部成员」。也可按用户描述语义挑（「要个温柔女声」）；
 4. **BGM 处置（双来源）**：
    - 用户有本地音乐 → 询问是否 `gtrk tool audio_separation` 伴奏分离后取伴奏（缺省建议分离——TTS 配音不与歌曲人声打架）；
-   - 用户未提供 → **搜同和素材矩阵**：`gtrk matrix material "<按稿件情绪+地理文化写的检索词>" --scope audio --top-k 5 --diversity --json`（按成片时长挑可加 `--min-duration <秒>`）。身份路由（矩阵成员搜全库 / 非成员搜公开库）、版权范围、计费口径全由零件持有，你只管写好检索词并从结果里挑；出参 `results[]` 直接用，`upsell` 是独立顶层字段（非成员且没搜够时才有，原样转述给用户即可，**不要**把它当候选）。
+   - 用户未提供 → **搜同和素材矩阵**：`gtrk matrix material "<按稿件情绪+地理文化写的检索词>" --scope audio --top-k 5 --diversity --json`
+     （检索词口径见公约 §三′：**内容驱动、禁通用词、至少含一个只有这一片才成立的词**；候选
+     MUST 给用户挑不许默认 top1；跨片避让由 `audio lay` 记账 + 检索缺省 `--exclude-recent` 自动完成）（按成片时长挑可加 `--min-duration <秒>`）。身份路由（矩阵成员搜全库 / 非成员搜公开库）、版权范围、计费口径全由零件持有，你只管写好检索词并从结果里挑；出参 `results[]` 直接用，`upsell` 是独立顶层字段（非成员且没搜够时才有，原样转述给用户即可，**不要**把它当候选）。
      推荐 3-5 首、**每首附试听链接**（结果的 `download_url`）；`audio_type:"pure"` 纯音乐直接用，`"song"` 直接取 `accompaniment_url` 现成伴奏（零处理成本，两档都有）；注意曲长 vs 成片时长（`duration` 字段，audio lay 不循环，短曲只垫前段）；
    - **试听链接义务（MUST）**：音色与 BGM 的推荐没有试听链接=未完成推荐。
 5. **字幕样式**：7 种样式（default/outline/cinema_yellow/immersive_box/wide_spacing/deep_shadow/boxed）× 11 色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金）挑选；**用户没选就用 default+雅黑**（不追问不阻塞）。拍板值在 ⑪ `gtrk subtitle lay` 落地，客户端里仍可整轨换样式（悔棋通道）。
