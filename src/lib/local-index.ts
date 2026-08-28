@@ -35,6 +35,12 @@ import { requireFfmpeg, runFfmpeg, type FfmpegResolution } from "./ffmpeg";
 import { probeGeometry } from "./media";
 import { BROLL_LOCAL_MATERIAL_PREFIX } from "./matrix-lay";
 import { EMBED_BATCH_MAX, EMBED_UNREACHABLE_CODE, type EmbedInput } from "./embed-client";
+import { cpus } from "node:os";
+import {
+	buildScenePassArgs, buildGpuProbeArgs, gpuLaneEligible, nextLane, explainIneligible,
+	GPU_FAIL_STREAK_LIMIT, PROXY_WIDTH_DEFAULT, PROXY_SCALER_DEFAULT, summarizeDowngrades,
+	type DecodeLane,
+} from "./index-decode";
 
 // ── 参数基线（POC 标定值，design D4；θ 经 --scene-threshold 暴露）──────────
 export const SCENE_THRESHOLD_DEFAULT = 0.3;
@@ -435,6 +441,27 @@ function runFfmpegCaptureStderr(bin: string, args: string[]): Promise<{ exitCode
 	});
 }
 
+/**
+ * CUDA 运行时探针：跑完整条 hwupload→scale_cuda→hwdownload 链形，成功才认为本机可硬解。
+ *
+ * 为什么不只查 `-hwaccels` 里有没有 cuda：构建里编了 ≠ 这台机器此刻能用。
+ * 无卡、驱动过旧、设备号错、显存被占满——全都只在真跑时暴露，而 `-hwaccels` 一律说「有」。
+ * 实测成功 ~314ms、失败 ~177ms，一轮只跑一次，成本可忽略。
+ *
+ * 结果**只在进程内缓存、绝不落盘**：用户可能中途插拔外接卡或换驱动，落盘缓存会把
+ * 一次偶然的失败钉死成永久结论。
+ */
+export async function probeCudaRuntime(ffmpeg: string, timeoutMs = 8000): Promise<boolean> {
+	try {
+		const p = runFfmpegCaptureStderr(ffmpeg, buildGpuProbeArgs());
+		const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeoutMs));
+		const res = await Promise.race([p, timeout]);
+		return res !== null && res.exitCode === 0;
+	} catch {
+		return false;
+	}
+}
+
 /** 场景区间 + 稳定性注记（add-index-stability-sampling）。 */
 export interface SceneSpan {
 	st: number;
@@ -551,6 +578,9 @@ export function computeSceneMotion(scores: number[], containerFps?: number): Sce
 export interface SceneDetection {
 	scenes: SceneSpan[];
 	cuts: number[];
+	/** 实际跑成的车道（降级后是降到的那一档）。落库供溯源：
+	 * 不同车道的 motion 分位彼此不完全可比，出问题时要能查出这条素材当时走的哪条路。 */
+	lane?: DecodeLane;
 }
 
 /** 场景检测这一趟到底有没有产出——不合格就抛，MUST NOT 让空/残缺的 score 序列流进下游。
@@ -569,7 +599,9 @@ export function assertScenePassProductive(x: {
 	const tail = x.stderr.split(/\r?\n/).filter((l) => l.trim() && !l.includes("lavfi.scene_score") && !l.includes("pts_time:"))
 		.slice(-3).join(" | ").slice(0, 400);
 	if (x.exitCode !== 0) {
-		throw new Error(`场景检测 ffmpeg 退出码 ${x.exitCode}${tail ? `：${tail}` : ""}`);
+		// Windows 上退出码回来是无符号 32 位（-40 会显示成 4294967256），归一成有符号才有可读性
+		const code = x.exitCode === null ? "null" : String(x.exitCode > 0x7fffffff ? x.exitCode - 0x100000000 : x.exitCode);
+		throw new Error(`场景检测 ffmpeg 退出码 ${code}${tail ? `：${tail}` : ""}`);
 	}
 	if (x.frameCount === 0) {
 		throw new Error(`场景检测零帧产出（退出码 0 但一帧 scene score 都没解析到）${tail ? `：${tail}` : ""}`);
@@ -597,19 +629,65 @@ export async function detectScenesAndCuts(
 	threshold: number = SCENE_THRESHOLD_DEFAULT,
 	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
 	containerFps?: number,
+	laneOpts?: ScenePassLaneOpts,
 ): Promise<SceneDetection> {
-	const { exitCode, stderr } = await runFfmpegCaptureStderr(ffmpeg, [
-		"-i", path,
-		"-vf", "select='gte(scene,0)',metadata=print",
-		"-f", "null", "-",
-	]);
-	const frames = parseSceneScores(stderr);
-	assertScenePassProductive({ exitCode, stderr, frameCount: frames.length, durationSec, fps: containerFps });
+	const { frames, lane } = await runScenePassWithFallback(ffmpeg, path, durationSec, containerFps, laneOpts);
 	const cuts = detectCutsFromScores(frames, threshold);
 	return {
 		scenes: annotateSceneStability(buildScenes(cuts, durationSec), frames, stabilityThreshold, containerFps),
 		cuts,
+		lane,
 	};
+}
+
+/** 单素材场景检测的车道选项。缺省（全不传）= `cpu_full`，与本 change 之前逐字节同行为。 */
+export interface ScenePassLaneOpts {
+	/** 起始车道。缺省 `cpu_full`（零回归）。 */
+	lane?: DecodeLane;
+	/** 车道失败时是否自动降级。用户**显式**指定车道时应传 false——
+	 * 显式指定的意图就是验证这条路，静默换成别的路等于没验。 */
+	fallback?: boolean;
+	proxyWidth?: number;
+	proxyScaler?: string;
+	/** 降级发生时的回调（编排层据此聚合成一条轮末 INFO，而非逐素材刷屏）。 */
+	onDowngrade?: (from: DecodeLane, to: DecodeLane, reason: string) => void;
+}
+
+/**
+ * 按车道跑场景检测，失败自动降级到下一档。
+ *
+ * 为什么降级必须由我们自己做：实测 `-hwaccel cuda -hwaccel_output_format cuda` **不会自愈**——
+ * 硬解不可用时 ffmpeg 确实把解码回落到软解，但滤镜链仍在索要 CUDA 帧，于是整条命令
+ * 报 `Impossible to convert between the formats…` 死掉、零帧产出。指望 ffmpeg 内部兜底
+ * 只会得到一个静默的空索引（正是 assertScenePassProductive 拦的那个形态）。
+ */
+export async function runScenePassWithFallback(
+	ffmpeg: string,
+	path: string,
+	durationSec: number,
+	containerFps?: number,
+	opts?: ScenePassLaneOpts,
+): Promise<{ frames: { ts: number; score: number }[]; lane: DecodeLane }> {
+	const fallback = opts?.fallback !== false;
+	let lane: DecodeLane = opts?.lane ?? "cpu_full";
+	for (;;) {
+		const { exitCode, stderr } = await runFfmpegCaptureStderr(
+			ffmpeg,
+			buildScenePassArgs({ src: path, lane, proxyWidth: opts?.proxyWidth, proxyScaler: opts?.proxyScaler }),
+		);
+		const frames = parseSceneScores(stderr);
+		try {
+			assertScenePassProductive({ exitCode, stderr, frameCount: frames.length, durationSec, fps: containerFps });
+			return { frames, lane };
+		} catch (e) {
+			const to = fallback ? nextLane(lane) : null;
+			// 无下一档（或用户钉死了车道）⇒ 原样上抛，让编排层记 failed。
+			// MUST NOT 在这里把失败咽掉返回空 frames——那正是本 change 修掉的那个 bug 的形状。
+			if (!to) throw e;
+			opts?.onDowngrade?.(lane, to, e instanceof Error ? e.message : String(e));
+			lane = to;
+		}
+	}
 }
 
 /** 兼容包装（旧签名，只要场景区间）：既有调用/对拍测试零改动。 */
@@ -662,6 +740,19 @@ export async function extractFrameJpg(ffmpeg: string, path: string, tsSec: numbe
 
 // ── 素材处理与索引编排（2.3/2.4/2.5 + 计量会话联动）────────────────────────
 
+/** 阶段一入参上下文。lane 相关字段缺省时行为与本 change 之前逐字节一致。 */
+export interface PlanMaterialCtx {
+	sceneThreshold: number;
+	stabilityThreshold: number;
+	/** 本素材应起跑的车道（编排层按静态门 + 探针结果给定）。缺省 cpu_full。 */
+	lane?: DecodeLane;
+	/** 失败是否自动降级。用户钉死车道时为 false。 */
+	fallback?: boolean;
+	proxyWidth?: number;
+	proxyScaler?: string;
+	onDowngrade?: (from: DecodeLane, to: DecodeLane, reason: string) => void;
+}
+
 /** 阶段一产物：单素材抽帧**计划**（零 embed 请求；注入面 planMaterial 可整体替换，免 ffmpeg 依赖）。 */
 export interface PlannedMaterial {
 	materialId: string;
@@ -681,6 +772,8 @@ export interface PlannedMaterial {
 	 * 缺省 undefined = 无数据（旧注入面零改动）→ 落库 cuts_indexed=NULL、检索不透出 cuts；
 	 * `[]` = 真无切点（cuts_indexed=1）。图片素材恒缺省（无时间轴）。 */
 	cutsMs?: number[];
+	/** 实际跑成的解码车道（溯源用；注入面缺省 undefined）。 */
+	decodeLane?: DecodeLane;
 }
 
 /** 阶段二产物：帧向量（sceneIdx 指向 PlannedMaterial.scenes 下标）。 */
@@ -723,11 +816,19 @@ export interface IndexRunOptions {
 	/** 逐素材进度行（人读，命令层接 log.info）。 */
 	onProgress?: (line: string) => void;
 	/** 测试注入：整体替换阶段一（探测/场景检测/抽帧计划）。 */
-	planMaterial?: (path: string, ctx: { sceneThreshold: number; stabilityThreshold: number }) => Promise<PlannedMaterial>;
+	planMaterial?: (path: string, ctx: PlanMaterialCtx) => Promise<PlannedMaterial>;
 	/** 测试注入：整体替换阶段二（抽帧/embed；sessionToken 透传）。 */
 	embedFrames?: (path: string, planned: PlannedMaterial, sessionToken?: string) => Promise<FrameVec[]>;
 	/** 测试注入：文件枚举。 */
 	listFiles?: (dirs: string[]) => string[];
+	/** 解码路径（speedup-matrix-index-proxy-decode）：
+	 * `auto` = 三层探测 + 自动降级；`gpu`/`cpu`/`full` = 用户钉死某档且**失败不降级**。
+	 * 缺省 undefined = `full`（本 change 之前的逐字节同行为）。 */
+	decodePath?: "auto" | "gpu" | "cpu" | "full";
+	proxyWidth?: number;
+	proxyScaler?: string;
+	/** 测试注入：替换 CUDA 运行时探针（返回 true=本机可用）。无卡 CI 靠它跑通全部车道状态机。 */
+	probeGpuLane?: () => Promise<boolean>;
 }
 
 export interface IndexRunResult {
@@ -740,6 +841,17 @@ export interface IndexRunResult {
 	frames: number;
 	/** 本轮抽帧计划总数（= 计量会话 planned_units 口径；豁免/零新帧时也如实报）。 */
 	plannedFrames: number;
+	/** 解码车道账面（--json 恒带；默认路的降级静默但**永远可查**）。 */
+	decode?: {
+		requested: "auto" | "gpu" | "cpu" | "full";
+		/** GPU 车道状态：off_flag=用户没开 / off_probe=探针未过 / on=用过 / tripped=熔断。 */
+		gpu: "off_flag" | "off_probe" | "on" | "tripped";
+		/** 各车道实际跑成的素材数。 */
+		lanes: Record<string, number>;
+		/** 降级次数（含静态门拦下的与执行期失败的）。 */
+		degraded: number;
+		probeMs?: number;
+	};
 	/** 稳定性收敛账面（add-index-stability-sampling；只计本轮实际入库的视频素材，图片不参与）：
 	 * framesSaved = 同场景集不带 stable 标记的旧策略计划帧数 − 带标记的实际计划帧数（降本透明）。 */
 	stability: { stableScenes: number; unstableScenes: number; framesSaved: number };
@@ -784,7 +896,7 @@ export function listMaterialFiles(dirs: string[]): string[] {
  * 图片素材（add-matrix-local-image-broll D1）：单帧向量 ts=0 + 统一形态 scenes 一行 0..0，无场景轴。 */
 async function planMaterialDefault(
 	path: string,
-	ctx: { sceneThreshold: number; stabilityThreshold: number },
+	ctx: PlanMaterialCtx,
 	ff: FfmpegResolution,
 	ffmpegPathOpt: string | undefined,
 ): Promise<PlannedMaterial> {
@@ -813,8 +925,24 @@ async function planMaterialDefault(
 	}
 	const geo = probeGeometry(path, ffmpegPathOpt);
 	if (!(geo.duration > 0)) throw new Error("探测不到有效时长（疑似损坏/非视频文件）");
+	// 素材静态门：编排层只负责判「整机能不能硬解」，「这条素材能不能」在这里判——
+	// 复用上面这次 ffprobe 的 codec/pix_fmt ⇒ 零额外进程。
+	let lane = ctx.lane ?? "cpu_full";
+	if (lane === "gpu") {
+		const gate = gpuLaneEligible({ codecName: geo.codecName, pixFmt: geo.pixFmt }, { cores: cpus().length });
+		if (!gate.ok) {
+			lane = "cpu_proxy";
+			ctx.onDowngrade?.("gpu", "cpu_proxy", gate.reason);
+		}
+	}
 	// 容器帧率透传给运动量注记（倍帧判定后据此推有效帧率）
-	const det = await detectScenesAndCuts(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold, ctx.stabilityThreshold, geo.fps);
+	const det = await detectScenesAndCuts(ff.ffmpeg, path, geo.duration, ctx.sceneThreshold, ctx.stabilityThreshold, geo.fps, {
+		lane,
+		fallback: ctx.fallback,
+		proxyWidth: ctx.proxyWidth,
+		proxyScaler: ctx.proxyScaler,
+		onDowngrade: ctx.onDowngrade,
+	});
 	const scenes = det.scenes;
 	const plan = planFrames(scenes); // stable 场景在此收敛为中点 1 帧
 	return {
@@ -832,6 +960,7 @@ async function planMaterialDefault(
 		})),
 		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: Math.round(p.ts * 1000) })),
 		cutsMs: det.cuts.map((t) => Math.round(t * 1000)),
+		decodeLane: det.lane,
 	};
 }
 
@@ -918,9 +1047,26 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	let frameCount = 0;
 	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）
 	const ff = opts.planMaterial && opts.embedFrames ? null : requireFfmpeg(opts.ffmpegPath);
+	// ── 解码车道状态（speedup-matrix-index-proxy-decode）────────────────────────
+	// requested=auto 时才允许自动降级；用户钉死车道时失败必须响亮——显式指定的意图就是验证这条路，
+	// 静默换成别的路等于没验。
+	const requested = opts.decodePath ?? "full";
+	const laneState = {
+		baseLane: (requested === "gpu" ? "gpu" : requested === "cpu" ? "cpu_proxy" : requested === "auto" ? "gpu" : "cpu_full") as DecodeLane,
+		fallback: requested === "auto",
+		probed: null as boolean | null,
+		probeMs: undefined as number | undefined,
+		tripped: false,
+		gpuFailStreak: 0,
+		gpuStatus: (requested === "gpu" || requested === "auto" ? "off_probe" : "off_flag") as "off_flag" | "off_probe" | "on" | "tripped",
+		lanes: {} as Record<string, number>,
+		degradeLog: [] as { name: string; reason: string }[],
+	};
+	const probeGpu = opts.probeGpuLane ? () => opts.probeGpuLane!() : (bin: string) => probeCudaRuntime(bin);
+
 	const planOne =
 		opts.planMaterial ??
-		((p: string, ctx: { sceneThreshold: number; stabilityThreshold: number }) => planMaterialDefault(p, ctx, ff!, opts.ffmpegPath));
+		((p: string, ctx: PlanMaterialCtx) => planMaterialDefault(p, ctx, ff!, opts.ffmpegPath));
 	const embedOne =
 		opts.embedFrames ??
 		((p: string, planned: PlannedMaterial, token?: string) => embedFramesDefault(p, planned, ff!, opts.embed, token));
@@ -959,7 +1105,50 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				continue;
 			}
 			try {
-				pending.push({ path, name, size, mtimeMs, prev, planned: await planOne(path, { sceneThreshold, stabilityThreshold }) });
+				// 车道决策：整机门（探针，一轮一次惰性触发）→ 素材静态门（在 planMaterialDefault 内，
+				// 复用它那次 ffprobe）→ 执行期降级。三层层层收窄，每层的成本都比下一层低。
+				let lane: DecodeLane = laneState.baseLane;
+				if (lane === "gpu") {
+					if (laneState.tripped) lane = "cpu_proxy";
+					else {
+						if (laneState.probed === null) {
+							const t0 = Date.now();
+							laneState.probed = await probeGpu(ff!.ffmpeg);
+							laneState.probeMs = Date.now() - t0;
+							if (!laneState.probed) {
+								laneState.gpuStatus = "off_probe";
+								if (!laneState.fallback) {
+									throw new Error("--decode-path gpu：本机未探到可用的 CUDA 解码设备（显式指定车道时不降级）");
+								}
+								opts.onProgress?.("GPU 硬解不可用（本机未探到可用 CUDA 解码设备），本轮走 CPU 解码——索引结果不受影响");
+							}
+						}
+						if (!laneState.probed) lane = "cpu_proxy";
+					}
+				}
+				const before = laneState.degradeLog.length;
+				const planned = await planOne(path, {
+					sceneThreshold, stabilityThreshold,
+					lane, fallback: laneState.fallback,
+					proxyWidth: opts.proxyWidth, proxyScaler: opts.proxyScaler,
+					onDowngrade: (from, _to, reason) => {
+						if (from === "gpu") laneState.gpuFailStreak++;
+						laneState.degradeLog.push({ name, reason });
+					},
+				});
+				// 熔断：静态门只看编码格式，拦不住「驱动挂了/卡被占满」这类整机态问题——
+				// 那种情况下每个素材都要白试 ~3s，连挂两次就不再试。
+				if (before === laneState.degradeLog.length) laneState.gpuFailStreak = 0;
+				if (laneState.gpuFailStreak >= GPU_FAIL_STREAK_LIMIT && !laneState.tripped) {
+					laneState.tripped = true;
+					laneState.gpuStatus = "tripped";
+					opts.onProgress?.(`GPU 硬解连续 ${GPU_FAIL_STREAK_LIMIT} 次失败，本轮余下素材直接走 CPU 解码`);
+				}
+				if (planned.decodeLane) {
+					laneState.lanes[planned.decodeLane] = (laneState.lanes[planned.decodeLane] ?? 0) + 1;
+					if (planned.decodeLane === "gpu") laneState.gpuStatus = laneState.tripped ? "tripped" : "on";
+				}
+				pending.push({ path, name, size, mtimeMs, prev, planned });
 			} catch (e) {
 				stats.failed++;
 				opts.onProgress?.(`[${name}] 探测/场景检测失败：${e instanceof Error ? e.message : String(e)}（跳过）`);
@@ -1069,6 +1258,10 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 					: `[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${stableNote}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
 			);
 		}
+		// 降级轮末聚合成一条：逐素材打会把真正的问题淹在良性噪声里（良性降级打可读 INFO）。
+		// ffmpeg 原始 stderr 不上抛——那是天书；根因已经翻成人话装进这一行。
+		const summary = summarizeDowngrades(laneState.degradeLog);
+		if (summary) opts.onProgress?.(summary);
 	} finally {
 		db.close();
 		// 完成/失败均 close：失败也要结算已用量（infra 计费细案第 6 条）
@@ -1099,6 +1292,13 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 		scenes: sceneCount,
 		frames: frameCount,
 		plannedFrames,
+		decode: {
+			requested,
+			gpu: laneState.gpuStatus,
+			lanes: laneState.lanes,
+			degraded: laneState.degradeLog.length,
+			probeMs: laneState.probeMs,
+		},
 		stability,
 		...(billing ? { billing } : {}),
 		elapsedMs: Date.now() - t0,

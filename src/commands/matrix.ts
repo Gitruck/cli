@@ -146,6 +146,10 @@ import { EXCLUDE_RECENT_DEFAULT, filterRecentlyUsed, recentBgmKeys } from "../li
 import { log, routeLogsToStderr } from "../lib/log";
 
 interface MatrixOpts {
+	/** matrix index：解码路径（speedup-matrix-index-proxy-decode）。 */
+	decodePath?: string;
+	proxyWidth?: string;
+	proxyScaler?: string;
 	project?: string;
 	dispatch?: string;
 	column?: string;
@@ -246,6 +250,15 @@ export function registerMatrix(program: Command): void {
 			"matrix index：场景稳定性判定阈值——场景内最大帧间 scene score 低于此值判 stable（固定机位），抽帧收敛为中点 1 帧（默认 0.05，保守值待标定；误判 stable 丢检索粒度、误判 unstable 只是不省钱，宁严勿松）",
 		)
 		.option("--rebuild", "matrix index：忽略 size:mtime 指纹，强制全量重建索引")
+		.option(
+			"--decode-path <mode>",
+			"matrix index：场景检测的解码路径 auto|gpu|cpu|full——auto 自动探测硬解并逐素材降级（推荐），gpu/cpu/full 钉死某档且失败不降级（对照与排障用；默认 full = 旧行为）",
+		)
+		.option("--proxy-width <n>", "matrix index：代理解码宽度（默认 384；再往下保真度明显劣化，勿随手调小）")
+		.option(
+			"--proxy-scaler <name>",
+			"matrix index：代理缩放算法（默认 neighbor——点采样不滤波，实测比默认 bicubic 又快又准；改这个基本只有做对照实验才需要）",
+		)
 		.option(
 			"--plan <path>",
 			"matrix describe：理解该 plan 的 top 候选并把产物写回 result.describe；matrix lay：显式指定要消费的 plan 文件（缺省 <project>/split/broll-plan.json）",
@@ -698,6 +711,15 @@ export function buildIndexSessionHooks(endpoint: EmbedEndpoint): IndexSessionHoo
 }
 
 /** 编排账面 → --json billing 字段（snake_case 机读口径）。 */
+/** `--decode-path` 取值校验。不认的值必须报错——静默当成缺省会让「我明明指定了 gpu」
+ * 变成一次无声的空跑，用户拿不到任何反馈就以为硬解开了。 */
+export function parseDecodePath(v: unknown): "auto" | "gpu" | "cpu" | "full" | undefined {
+	if (v === undefined || v === null || v === "") return undefined;
+	const s = String(v).toLowerCase();
+	if (s === "auto" || s === "gpu" || s === "cpu" || s === "full") return s;
+	throw new Error(`--decode-path 只认 auto|gpu|cpu|full，收到「${String(v)}」`);
+}
+
 export function composeIndexBilling(exempt: boolean, run: Pick<IndexRunResult, "plannedFrames" | "billing">): MatrixIndexBilling {
 	if (exempt) return { exempt: true, planned_units: run.plannedFrames };
 	const b = run.billing;
@@ -726,11 +748,19 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	// 同合云内部成员（gc_member_type=internal）豁免：无 token 也放行图像且零计费 → 直接不开会话
 	const exempt = await probeIndexBillingExempt(cfg);
 	if (exempt) log.info("同合云内部成员（gc_member_type=internal）：图像 embed 计费豁免（免会话零积分；文本 embed 本就免费）。");
+	const decodePath = parseDecodePath(opts.decodePath);
+	const proxyWidth = opts.proxyWidth === undefined ? undefined : Number(opts.proxyWidth);
+	if (proxyWidth !== undefined && (!Number.isFinite(proxyWidth) || proxyWidth < 64)) {
+		throw new Error("--proxy-width 需为 ≥64 的数字");
+	}
 	const run = await indexLocalMaterials({
 		dirs,
 		sceneThreshold: threshold,
 		stabilityThreshold,
 		rebuild: opts.rebuild === true,
+		decodePath,
+		proxyWidth,
+		proxyScaler: opts.proxyScaler,
 		embed: (inputs, sessionToken) => embedInputs(endpoint, inputs, { sessionToken }),
 		session: exempt ? undefined : buildIndexSessionHooks(endpoint),
 		onProgress: (line) => log.info(line),

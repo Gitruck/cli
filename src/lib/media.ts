@@ -18,6 +18,10 @@ export interface Geometry {
 	fps: number;
 	/** 时长（秒）。 */
 	duration: number;
+	/** 视频编码名（`h264`/`hevc`/`av1`…）。硬解静态门入参，探不到为 undefined。 */
+	codecName?: string;
+	/** 像素格式（`yuv420p`/`yuv422p10le`…）。硬解静态门入参——4:2:2/4:4:4 消费级卡无硬解。 */
+	pixFmt?: string;
 }
 
 function parseFps(rate: unknown): number {
@@ -33,7 +37,9 @@ export function probeGeometry(inputAbs: string, ffmpegPath?: string): Geometry {
 	const info = ffprobeJson(ffprobe, [
 		"-v", "error",
 		"-select_streams", "v:0",
-		"-show_entries", "stream=width,height,r_frame_rate",
+		// codec_name/pix_fmt 是 speedup-matrix-index-proxy-decode 的硬解静态门入参：
+		// 挂在这次 ffprobe 上 ⇒ 零额外进程（另起一次 ffprobe 在 NAS 素材上要几百毫秒）
+		"-show_entries", "stream=width,height,r_frame_rate,codec_name,pix_fmt",
 		"-show_entries", "format=duration",
 		"-of", "json",
 		inputAbs,
@@ -45,6 +51,8 @@ export function probeGeometry(inputAbs: string, ffmpegPath?: string): Geometry {
 		height: Number(s.height) || 0,
 		fps: parseFps(s.r_frame_rate),
 		duration,
+		codecName: typeof s.codec_name === "string" ? s.codec_name : undefined,
+		pixFmt: typeof s.pix_fmt === "string" ? s.pix_fmt : undefined,
 	};
 }
 
