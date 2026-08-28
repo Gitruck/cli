@@ -104,6 +104,8 @@ gtrk matrix --project "<工程>" --local --dirs "<素材语料>" --lay 0 --json
 gtrk matrix lay --project "<工程>" --mark-weight 0.3 --gap-fill fast --json
 
 # ⑧⑨⑩ 字卡（MG 临场泛化，公约 §三）→ BGM（0.10 垫底、短了自动循环铺满）→ 字幕直出
+# BGM 是带人声歌曲（audio_type:"song"）→ MUST 下载 accompaniment_url 伴奏版上轨，
+# 不得用 download_url 原曲（人声与配音打架，260827 美食批踩坑）
 gtrk mg --project "<工程>" --json
 gtrk audio lay --project "<工程>" --file "<bgm>" --volume 0.1 --beat-align --json
 gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
