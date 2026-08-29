@@ -462,7 +462,10 @@ export function previewDims(width?: number, height?: number): [number, number] |
 	return [640, h];
 }
 
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+/** 三位小数舍入。⚠️ `Math.round` 是**半上入**（含 `Math.round(-0.5) === -0`），
+ * 与 Python `round()` 的半偶入**不同**——移植 MUST 用 `math.floor(x*1000+0.5)/1000`。
+ * 导出供 golden fixture 生成器直取真身。 */
+export const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 // ── 平铺填充 ──────────────────────────────────────────────────────────────
 
@@ -679,8 +682,14 @@ function pairAvail(p: Pair): number {
 	return Math.max(0, p.seg.end - p.seg.start);
 }
 
-/** 字符串哈希（FNV-1a）→ 种子。 */
-function hashStr(s: string): number {
+/**
+ * 字符串哈希（FNV-1a）→ 种子。
+ *
+ * ⚠️ **吃的是 UTF-16 码元**（`charCodeAt`），不是码点——星平面字符（代理对）按两个码元参与。
+ * 跨语言移植时这是头号坑：Python 若按 `ord()` 逐码点吃，同一 beat 名会算出不同种子，
+ * 全片槽长静默重排（不崩不报错）。导出供 golden fixture 生成器直取真身，避免复制一份产生漂移。
+ */
+export function hashStr(s: string): number {
 	let h = 2166136261;
 	for (let i = 0; i < s.length; i++) {
 		h ^= s.charCodeAt(i);
@@ -689,8 +698,10 @@ function hashStr(s: string): number {
 	return h >>> 0;
 }
 
-/** mulberry32 种子化伪随机：观感随机、同 plan 重跑逐字节同结果（幂等/可测铁律）。 */
-function mulberry32(seed: number): () => number {
+/** mulberry32 种子化伪随机：观感随机、同 plan 重跑逐字节同结果（幂等/可测铁律）。
+ * 全程 uint32（每步 `>>> 0` / `Math.imul` 截断）——移植时每步都要显式掩码。
+ * 导出供 golden fixture 生成器直取真身。 */
+export function mulberry32(seed: number): () => number {
 	let a = seed >>> 0;
 	return () => {
 		a = (a + 0x6d2b79f5) >>> 0;
