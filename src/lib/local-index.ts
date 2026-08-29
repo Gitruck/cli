@@ -209,6 +209,23 @@ CREATE TABLE IF NOT EXISTS cuts (
   origin TEXT,
   PRIMARY KEY (material_id, t_ms)
 );
+-- 编排期 QC 判定缓存（add-broll-arrange-atom P3.2）。
+--
+-- ★ 与 describes 分表，不是懒：describes 缓存的是**这一帧长什么样**（客观、与稿句无关），
+-- 而这里缓存的是**这一帧配这句稿对不对得上**（主观、随稿句变）。同一帧配不同稿句判定不同，
+-- 塞进同一张表就得让键带 claim，那会把「客观描述」的复用面白白切碎。
+--
+-- 缓存键第三维是 claim 哈希 ⇒ 改稿即失效、重跑幂等（同一份稿重跑一次判定都不烧）。
+CREATE TABLE IF NOT EXISTS qc_verdicts (
+  material_id TEXT NOT NULL,            -- broll- 家族材料 id
+  ts_ms INTEGER NOT NULL,               -- 帧时刻
+  claim_hash TEXT NOT NULL,             -- 稿句哈希（改稿即失效）
+  verdict TEXT NOT NULL,                -- match | partial | mismatch
+  reason TEXT,                          -- 判定理由（人读；mismatch 时指名差在哪）
+  frame_desc TEXT,                      -- 该帧客观描述（降级态与对照表共用）
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (material_id, ts_ms, claim_hash)
+);
 CREATE TABLE IF NOT EXISTS describes (
   material_id TEXT NOT NULL,            -- broll- 家族材料 id（字符串，随内容不随行号——生命周期独立于三表）
   ts_ms INTEGER NOT NULL,               -- 帧时刻（缓存键第二维）
