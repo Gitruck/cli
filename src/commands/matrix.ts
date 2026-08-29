@@ -41,7 +41,7 @@ import {
 } from "../lib/matrix-lay";
 import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
 import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
-import { MAX_QC_ROUNDS, runArrangeQc } from "../lib/arrange-qc";
+import { type CutsProbeSlot, MAX_QC_ROUNDS, flashRiskNotice, flashRiskOf, runArrangeQc } from "../lib/arrange-qc";
 import { leadSentencesFrom, makeJudge, sqliteQcCache } from "../lib/arrange-qc-bind";
 import { arrangeUnits, scaleOfRequest } from "../lib/arrange-metering";
 import {
@@ -2178,6 +2178,29 @@ async function layIntoProject(
 		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
 	}
 	void qcResidual;
+
+	// ── L1 结构自检（P3.3）：闪帧风险前置声明。**零成本恒开**——只看已有数据，不抽帧不调模型。
+	//    风险要在落轨前说出来，不等渲完了才发现。⚠️ `cuts` 缺省（没扫过，不可判）与 `cuts: []`
+	//    （扫过且无切点，可判且无风险）是两件事，混为一谈会让「不可判」被静默说成「安全」。
+	{
+		const segCutsOf = (clipId: string, clipSt: number): number[] | undefined => {
+			for (const b of plan.beats) {
+				for (const q of b.queries) {
+					for (const r of q.results ?? []) {
+						if (r.clip_id !== clipId) continue;
+						for (const sg of r.segments ?? []) if (sg.start <= clipSt && clipSt <= sg.end) return sg.cuts;
+					}
+				}
+			}
+			return undefined;
+		};
+		const probes: CutsProbeSlot[] = [];
+		for (const [beat, tracks] of fills) {
+			for (const slot of tracks[0] ?? []) probes.push({ beat, clipId: slot.clip_id, cuts: segCutsOf(slot.clip_id, slot.clip_st) });
+		}
+		const notice = flashRiskNotice(flashRiskOf(probes));
+		if (notice) log.warn(notice);
+	}
 	// 对齐实测明示（人读；机读走 lay JSON 的 cut_align 条件键）
 	if (cutAlignStats) {
 		log.info(

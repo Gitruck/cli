@@ -281,3 +281,58 @@ export async function runArrangeQc<O>(
 
 	return { outcome, plan: curPlan, rounds: roundRecords.length, roundRecords, residual, hitRoundCap };
 }
+
+// ── L1 结构自检：闪帧风险前置声明（P3.3）────────────────────────────────────
+
+/**
+ * ★ **`cuts` 缺省与 `cuts: []` 是两件完全不同的事**（`local-index.ts:796` 的既有口径）：
+ *
+ * - `cuts` **整键缺省** = 这条素材**没被扫过切点**（旧库 / 未 `--rebuild`）⇒ 段内有没有隐藏
+ *   场景切点**不可判**。窗口精修的端点残片收缩这一步在它身上等于没开——铺出来可能带一段
+ *   异景残片，也就是俗称的闪帧。
+ * - `cuts: []` = 扫过了，**确认无切点** ⇒ 可判，且判定结果是「没有闪帧风险」。
+ *
+ * 把两者混为一谈（比如都当成「没有切点」）会让「不可判」被静默说成「安全」——
+ * 这正是本条自检要拦的事：**风险要在落轨前说出来，不等渲完了才发现**。
+ */
+export interface FlashRiskReport {
+	/** 落位槽位取用的段里，`cuts` 整键缺省的（不可判）。 */
+	unknown: Array<{ beat: string; clipId: string }>;
+	/** 扫过且确认无切点的（可判，无风险）。 */
+	clean: number;
+	/** 扫过且有切点的（可判，精修已据此收缩过端点）。 */
+	withCuts: number;
+}
+
+/** 段级 cuts 形态（`undefined` = 没扫过；`[]` = 扫过且无切点）。 */
+export interface CutsProbeSlot {
+	beat: string;
+	clipId: string;
+	/** 该槽位取用的那一段的 cuts —— 注意区分 `undefined` 与 `[]`。 */
+	cuts: number[] | undefined;
+}
+
+/** L1：统计落位槽位里「闪帧风险不可判」的比例。**零成本**（只看已有数据，不抽帧不调模型）。 */
+export function flashRiskOf(slots: CutsProbeSlot[]): FlashRiskReport {
+	const report: FlashRiskReport = { unknown: [], clean: 0, withCuts: 0 };
+	for (const s of slots) {
+		if (s.cuts === undefined) report.unknown.push({ beat: s.beat, clipId: s.clipId });
+		else if (s.cuts.length === 0) report.clean++;
+		else report.withCuts++;
+	}
+	return report;
+}
+
+/** L1 的人读结论。无风险时回 `null`（没事就别制造噪音）。 */
+export function flashRiskNotice(r: FlashRiskReport): string | null {
+	if (r.unknown.length === 0) return null;
+	const total = r.unknown.length + r.clean + r.withCuts;
+	const beats = [...new Set(r.unknown.map((u) => u.beat))];
+	return (
+		`闪帧风险**不可判**：${total} 颗落位镜头里有 ${r.unknown.length} 颗取自**没扫过切点**的素材` +
+		`（${beats.slice(0, 5).join("、")}${beats.length > 5 ? ` 等 ${beats.length} 个段` : ""}）。\n` +
+		"这不是「有闪帧」，是「不知道有没有」——那些段里若藏着场景切点，铺轨的端点残片收缩这一步\n" +
+		"在它们身上等于没开，成片可能出现一闪而过的异景。跑 `gtrk matrix index --dirs <素材夹> --rebuild`\n" +
+		"补上切点数据后重铺即可判定；不补也能交片，只是这条风险留在暗处。"
+	);
+}
