@@ -39,6 +39,9 @@ import {
 	type MarkLookup,
 	type SourceLayer,
 } from "../lib/matrix-lay";
+import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
+import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
+import { arrangeUnits, scaleOfRequest } from "../lib/arrange-metering";
 import {
 	BROLL_MOVE_DIR,
 	IMAGE_MOVE_CONCURRENCY,
@@ -201,6 +204,11 @@ interface MatrixOpts {
 	// ── 主轨 gap 填充（adjust-main-track-gap-fill）──
 	/** `--gap-fill <fast|solid|none>`：音频驱动工程主轨空洞填充（缺省 solid）。 */
 	gapFill?: string;
+	// ── 云端编排（add-broll-arrange-atom P3.1）──
+	/** `--arrange <local|shadow|cloud>`：编排取数路（缺省 local = 行为不变）。 */
+	arrange?: string;
+	/** `--arrange-cost-cap <n>`：云端编排本次编排量硬上限。 */
+	arrangeCostCap?: string;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -296,6 +304,18 @@ export function registerMatrix(program: Command): void {
 			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、再不够垫黑片；" +
 				"solid=黑片垫齐（精修时一眼看出「这里没匹配到」）；none=留 gap（客户端主轨磁吸开启时 gap 会被吸除、后续画面整体前移与配音错位，慎用）。" +
 				"口播工程主轨为 A-roll，本参数不适用（照旧留空语义）",
+		)
+		.option(
+			"--arrange <mode>",
+			"B-roll 编排取数路 local|shadow|cloud（缺省 local=全部在本机决策，与以往逐字节一致）：" +
+				"shadow=本机照跑照铺轨，同时把编排交给云端跑一遍**只对拍不采纳**；cloud=采纳云端编排产物，" +
+				"本机复算自校验不一致时自动回落本机。**只作用于本地素材上轨铺排**——素材库/普通素材/概念素材的" +
+				"匹配与铺排一律不受影响，原来什么样以后还什么样。云端档按「编排量」计费，跑前会报预估并征求确认" +
+				"（--yes 跳过）。环境变量 GITRUCK_ARRANGE=off 是总闸，可随时把云端压回本机",
+		)
+		.option(
+			"--arrange-cost-cap <n>",
+			"云端编排单次编排量上限：超限服务端**前置拒绝**、零执行零计费（不是跑到一半掐断）。只在 --arrange shadow|cloud 时有意义",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -563,6 +583,8 @@ export interface MatrixIndexResult {
 
 /** 检索上下文：plan/adhoc 两模式共用的「一 query 一答」抽象（云端=双口 HTTP；本地=索引点积）。 */
 interface SearchCtx {
+	/** 云端凭据（云端编排端点由 base 推导；`--arrange local` 时不读它）。 */
+	cfg: { base: string; apiKey: string };
 	memberType: Tier | "local";
 	columnId?: string;
 	/** 本轮铺轨来源层（add-broll-dedup-and-layering D2）：--local → local；
@@ -642,6 +664,7 @@ export async function runMatrix(
 	// 来源层判定（add-broll-dedup-and-layering D2）：custom 口 + concept → concept 层；其余云端 → common 层
 	const effectiveMc = tier === "internal" ? (opts.materialClass ?? broll?.material_class_policy) : undefined;
 	const ctx: SearchCtx = {
+		cfg,
 		memberType: tier,
 		columnId: effectiveColumnId,
 		sourceLayer: tier === "internal" && effectiveMc === "concept" ? "concept" : "common",
@@ -1087,6 +1110,8 @@ async function runDescribeMode(
 /** matrix lay：读（编辑后的）plan 文件 → 白名单校验（坏 plan 明示拒绝）→ 现场重投影 → 铺轨。
  * MUST NOT 因「与原始检索结果不一致」拒绝——lay 按 plan 现值执行（去重消费/层带/幂等照常）。 */
 async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<MatrixResult> {
+	// 云端编排端点凭据（`--arrange local` 时 arrangeWiring 不会去用它——那一档一个网络字节都不动）
+	const cfg = loadConfig();
 	// 定位 plan 与工程目录（--plan 显式 > <project>/split/broll-plan.json）
 	let planPath: string;
 	let baseDir: string;
@@ -1241,6 +1266,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 			cutAlign: parseCutAlign(opts.cutAlign),
 			gapFill: parseGapFill(opts.gapFill),
 			gapFillExplicit: opts.gapFill !== undefined,
+			...arrangeWiring(opts, cfg),
 		});
 	} finally {
 		markDb?.close();
@@ -1310,6 +1336,7 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	}
 	const qvecCache = new Map<string, Float32Array>();
 	return {
+		cfg,
 		memberType: "local",
 		sourceLayer: "local",
 		search: async (query) => {
@@ -1481,6 +1508,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 				cutAlign: parseCutAlign(opts.cutAlign),
 				gapFill: parseGapFill(opts.gapFill),
 				gapFillExplicit: opts.gapFill !== undefined,
+				...arrangeWiring(opts, ctx.cfg),
 			},
 		);
 	}
@@ -1554,6 +1582,38 @@ export function parseCutAlign(raw: string | undefined): number {
 	if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
 	log.warn(`--cut-align 取值非法（${raw}），按默认 ${CUT_ALIGN_DEFAULT} 处理`);
 	return CUT_ALIGN_DEFAULT;
+}
+
+/** 云端编排接线（两处 caller 共用一份，避免两边漂移）。
+ *
+ * 端点在 `local` 档**不解析**：那一档一个网络字节都不该动，连凭据都不必读。 */
+function arrangeWiring(
+	opts: MatrixOpts,
+	cfg: { base: string; apiKey: string } | undefined,
+): { arrangeMode: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
+	const arrangeMode = parseArrangeMode(opts.arrange);
+	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
+	return {
+		arrangeMode,
+		...(costCap !== undefined ? { arrangeCostCap: costCap } : {}),
+		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
+	};
+}
+
+/** --arrange 解析：local|shadow|cloud，缺省 local（**零回归**）；越界即参数错误。
+ * MUST NOT 静默忽略——把 `--arrange cloub` 的笔误当成 local 跑掉，用户会以为云端跑了。 */
+function parseArrangeMode(raw: string | undefined): ArrangeMode {
+	if (raw === undefined) return "local";
+	if (raw === "local" || raw === "shadow" || raw === "cloud") return raw;
+	throw new Error(`--arrange 只支持 local、shadow 或 cloud（得到「${raw}」）`);
+}
+
+/** --arrange-cost-cap 解析：正整数；越界即参数错误。 */
+function parseArrangeCostCap(raw: string | undefined): number | undefined {
+	if (raw === undefined) return undefined;
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n <= 0) throw new Error(`--arrange-cost-cap 须为正整数（得到「${raw}」）`);
+	return n;
 }
 
 /** --gap-fill 解析：fast|solid|none，缺省 solid（保守：黑片垫齐）；越界即参数错误（不做静默忽略）。 */
@@ -1867,6 +1927,14 @@ async function layIntoProject(
 		gapFill?: GapFillMode;
 		/** 用户是否显式传了 --gap-fill（口播工程「不适用」提示只对显式传参出，缺省态不制造噪音）。 */
 		gapFillExplicit?: boolean;
+		/** 编排取数路（add-broll-arrange-atom P3.1）：缺省 `local` = **行为逐字节与本 change 之前一致**。
+		 * `shadow` 本地照跑 + 云端只对拍不采纳；`cloud` 采纳云端产物（自校验不过即回落本地）。
+		 * 总闸 `GITRUCK_ARRANGE=off` 可单向压回 local。 */
+		arrangeMode?: ArrangeMode;
+		/** 云端编排的本次编排量硬上限（超限服务端前置拒绝、零执行零计费）。 */
+		arrangeCostCap?: number;
+		/** 云端编排端点（缺省由 apiBase 推导；缺凭据 ⇒ 回落本地）。 */
+		arrangeEndpoint?: ArrangeEndpoint;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -1940,7 +2008,7 @@ async function layIntoProject(
 
 	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重；--no-image-broll 时图片不进池；
 	// 全局不二用消费集与跳剪豁免避让在此生效（add-broll-dedup-and-layering D1/D4）
-	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = planBeatFills(plan, layN, scoreFloor, {
+	const decisionOpts = {
 		noImage: !layOpts.imageBroll,
 		dedupScope: layOpts.dedupScope,
 		markWeight: layOpts.markWeight,
@@ -1949,7 +2017,35 @@ async function layIntoProject(
 		highlightLookup: layOpts.highlightLookup,
 		...(cutStarts ? { cutAlign: { ratio: cutRatio, starts: cutStarts } } : {}),
 		...(gapModeEff !== "none" ? { gapFill: gapModeEff } : {}),
+	};
+	// 编排取数路（add-broll-arrange-atom P3.1）：缺省 local ⇒ 与本 change 之前**逐字节一致**
+	// （`runArrangeWithFallback` 的 local 分支就是直接调 runLocal，零额外动作）。
+	// 云端档只承担**本地素材上轨铺排**——云端素材路由 isLocalArrangeScope 挡在门外，
+	// 那不是回滚，是终裁「按业务线切，不按算法切」的执行面。
+	let arrangeMode = resolveArrangeMode(layOpts.arrangeMode ?? "local");
+	// 预估确认门（P2.2b）：云端档跑前报编排量并征求确认。**只在真会发请求时问**——
+	// 云端素材路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
+	if (arrangeMode !== "local" && isLocalArrangeScope(plan)) {
+		const gate = await estimateGate(arrangeUnits(scaleOfRequest(plan, layN, decisionOpts)), {
+			assumeYes: layOpts.yes,
+			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+			confirm: layOpts.deps.confirm ?? confirmViaStdin,
+			log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
+		});
+		// 拒绝/无从确认 ⇒ 退回本地编排，**工程照常完成**（不是中止：编排本机也做得了，
+		// 用户拒的是「上云」不是「铺轨」——把整轮掐掉等于替他做了他没做的决定）
+		if (!gate.proceed) arrangeMode = "local";
+	}
+	const arrangeRes = await runArrangeWithFallback(plan, layN, scoreFloor, decisionOpts, arrangeMode, {
+		runLocal: () => planBeatFills(plan, layN, scoreFloor, decisionOpts),
+		...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
+		...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+		log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
 	});
+	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = arrangeRes.outcome;
+	if (arrangeRes.source === "cloud") {
+		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
+	}
 	// 对齐实测明示（人读；机读走 lay JSON 的 cut_align 条件键）
 	if (cutAlignStats) {
 		log.info(
