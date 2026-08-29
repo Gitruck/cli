@@ -16,7 +16,7 @@ import { join, resolve, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { Command } from "commander";
 import { routeLogsToStderr, log } from "../lib/log";
-import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
+import { readGtrk, assertGtrkV1, writeGtrkAtomic, GtrkWritebackConflictError } from "../lib/gtrk-writeback";
 import {
 	type ActionKind,
 	type Element,
@@ -75,6 +75,11 @@ export interface PatchOpts {
 	ops?: string;
 	dryRun?: boolean;
 	json?: boolean;
+	/**
+	 * 跨命令写回断言（`gtrk-writeback-contract` R4）：上一次回执里的 `revision`。
+	 * 给定则以它作 expected 参与写回双重校验；缺省取本次读取时的 revision（≡ 仅护进程内窗口）。
+	 */
+	expectedRevision?: string;
 }
 
 /** 回执里一条 op 的结果。 */
@@ -91,10 +96,17 @@ interface OpReceipt {
 interface Receipt {
 	applied: boolean;
 	gtrk: string;
+	/**
+	 * 当前内容 revision（`gtrk-writeback-contract` R4）：写入成功=**落盘后的新值**、
+	 * 干跑/冲突=读取时的值。调用方可直接把它用作下一次的 `--expected-revision`。
+	 */
+	revision: string;
 	video_rate: number;
 	ops: OpReceipt[];
 	warnings: Array<Record<string, unknown>>;
 	preexisting: Violation[];
+	/** 仅写回冲突时出现（R3）：双 revision + 见错误文案的下一步指示。 */
+	conflict?: { expected_revision: string; actual_revision: string };
 }
 
 class PatchError extends Error {
@@ -108,6 +120,57 @@ class PatchError extends Error {
 
 function fail(code: string, message: string): never {
 	throw new PatchError(message, code);
+}
+
+/** revision 形态：64 位小写 hex（sha256）。 */
+const REVISION_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * 定写回的 expected revision（`gtrk-writeback-contract` R4）：
+ * 显式 `--expected-revision` 优先（跨命令断言），否则取本次读取值（≡ 仅护进程内读→改→写窗口）。
+ * ⚠️ 格式非法 **fail-fast**，MUST NOT 静默回落缺省——那会让调用方以为有保护、其实没有。
+ */
+function resolveExpectedRevision(opts: PatchOpts, readRevision: string): string {
+	const given = opts.expectedRevision;
+	if (given === undefined) return readRevision;
+	if (!REVISION_RE.test(given)) {
+		fail("bad_expected_revision", `--expected-revision 需 64 位小写 hex（sha256），实得：${JSON.stringify(given)}`);
+	}
+	return given;
+}
+
+/**
+ * 写回；冲突转结构化回执（`gtrk-writeback-contract` R3）。
+ * `--json` 下先把带 `conflict` 的回执吐到 stdout，再按错误路径退出（stderr 出人读文案 + exit 1）。
+ * @returns 落盘后的新 revision
+ */
+function commitWithConflictReceipt(
+	gtrkPath: string,
+	next: Record<string, unknown>,
+	expected: string,
+	receipt: Receipt,
+	opts: PatchOpts,
+): string {
+	try {
+		return writeGtrkAtomic(gtrkPath, next, expected, "patch");
+	} catch (e) {
+		if (e instanceof GtrkWritebackConflictError) {
+			if (opts.json) {
+				const r: Receipt = {
+					...receipt,
+					applied: false,
+					revision: e.expectedRevision,
+					conflict: { expected_revision: e.expectedRevision, actual_revision: e.actualRevision },
+				};
+				process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+			}
+			fail(
+				"writeback_conflict",
+				`${e.message}\n下一步：重新读取工程后重试；agent 可拿回执里的 revision 作 --expected-revision 断言（本次 expected=${e.expectedRevision.slice(0, 12)}… actual=${e.actualRevision.slice(0, 12)}…）。`,
+			);
+		}
+		throw e;
+	}
 }
 
 // ────────────────────────────── 路径定位（沿 split 的候选序） ──────────────────────────────
@@ -440,7 +503,7 @@ async function runBatch(words: string[], opts: PatchOpts): Promise<Receipt> {
 	if (specs.length === 0) fail("ops_empty", "--ops 是空数组，没有可执行的操作");
 
 	const gtrkPath = resolveGtrkPath(opts);
-	const { gtrk: before, mtimeMs } = readGtrk(gtrkPath);
+	const { gtrk: before, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(before);
 	const rate = videoRateOf(before);
 
@@ -466,12 +529,14 @@ async function runBatch(words: string[], opts: PatchOpts): Promise<Receipt> {
 	}
 
 	const warnings = topDurationWarnings(next);
-	const receipt: Receipt = { applied: false, gtrk: gtrkPath, video_rate: rate, ops: receipts, warnings, preexisting };
+	// expected 在 dryRun 分支**之前**解析：`--expected-revision` 格式非法时干跑也要 fail-fast
+	const expected = resolveExpectedRevision(opts, revision);
+	const receipt: Receipt = { applied: false, gtrk: gtrkPath, revision, video_rate: rate, ops: receipts, warnings, preexisting };
 	if (opts.dryRun) {
 		emit(receipt, opts);
 		return receipt;
 	}
-	writeGtrkAtomic(gtrkPath, next, mtimeMs, "patch");
+	receipt.revision = commitWithConflictReceipt(gtrkPath, next, expected, receipt, opts);
 	receipt.applied = true;
 	emit(receipt, opts);
 	return receipt;
@@ -496,7 +561,7 @@ export async function runPatchCommand(words: string[], opts: PatchOpts): Promise
 	if (!ACTIONS.includes(action)) fail("unknown_action", `未知动作「${action}」。合法动作：${ACTIONS.join(" / ")}`);
 
 	const gtrkPath = resolveGtrkPath(opts);
-	const { gtrk: before, mtimeMs } = readGtrk(gtrkPath);
+	const { gtrk: before, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(before);
 	const rate = videoRateOf(before);
 
@@ -578,12 +643,14 @@ export async function runPatchCommand(words: string[], opts: PatchOpts): Promise
 		}
 	}
 
-	const receipt: Receipt = { applied: false, gtrk: gtrkPath, video_rate: rate, ops, warnings, preexisting };
+	// expected 在 dryRun 分支**之前**解析：`--expected-revision` 格式非法时干跑也要 fail-fast
+	const expected = resolveExpectedRevision(opts, revision);
+	const receipt: Receipt = { applied: false, gtrk: gtrkPath, revision, video_rate: rate, ops, warnings, preexisting };
 	if (opts.dryRun) {
 		emit(receipt, opts);
 		return receipt;
 	}
-	writeGtrkAtomic(gtrkPath, next, mtimeMs, "patch");
+	receipt.revision = commitWithConflictReceipt(gtrkPath, next, expected, receipt, opts);
 	receipt.applied = true;
 	emit(receipt, opts);
 	return receipt;
@@ -638,6 +705,7 @@ export function registerPatch(program: Command): void {
 		.option("--opaque", "set：不透明")
 		.option("--total <sec|Nf|max>", "set：改顶层 duration（工程级 op，与元素寻址互斥）")
 		.option("--dry-run", "只算与校验、不写文件")
+		.option("--expected-revision <sha256>", "跨命令写回断言：上次回执里的 revision，与盘上内容不符即拒写（agent 用；缺省只护本次读→改→写窗口）")
 		.option("--json", "机器可读回执到 stdout（日志转 stderr）")
 		.action(async (words: string[], opts: PatchOpts) => {
 			await runPatchCommand(words ?? [], opts);

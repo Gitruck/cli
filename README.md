@@ -58,7 +58,7 @@ CLI 要调用同合云云端能力，需先拿一个 API Key（形如 `gc_xxxxxx
 
 > 条款正本：[《"OpenCut Gitruck Edition 客户端"与"gtrk CLI"用户协议》](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [隐私政策](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf) —— 官网**登录或完成注册即代表你已同意**；用 CLI 调用云端能力时，你是所处理内容合法性的第一责任人。
 >
-> 快速开始文档：[cloud.ai-mcn.tv/zh-CN/docs/quick-start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · 对接咨询：business@migotimes.com
+> 快速开始文档：[cloud.ai-mcn.tv/zh-CN/docs/quick-start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · 对接咨询：business@gitruck.com
 
 ## 安装 & 快速上手
 

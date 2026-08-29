@@ -58,7 +58,7 @@ The CLI calls Gitruck Cloud capabilities, so you need an API key first (it looks
 
 > Terms of record: [User agreement for the "OpenCut Gitruck Edition" client and the "gtrk CLI"](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [Privacy policy](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf) — **signing in or completing registration on the website constitutes your acceptance**; when you call cloud capabilities from the CLI, you are the party primarily responsible for the legality of the content you process.
 >
-> Quick-start docs: [cloud.ai-mcn.tv/zh-CN/docs/quick-start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · Business enquiries: business@migotimes.com
+> Quick-start docs: [cloud.ai-mcn.tv/zh-CN/docs/quick-start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · Business enquiries: business@gitruck.com
 
 ## Install & first run
 

@@ -4,7 +4,7 @@
  * 双模式（沿 oralcut-result D2 教训：顶层命令 + 可选 positional，避免父子命令吞选项）：
  *   - `gtrk split --project <dir>`            投影视图导出：transcript × 当刻 .gtrk → split/view.json（skill 的创作输入）
  *   - `gtrk split <拆分稿.json> --project <dir>` 校验落地：v1 门 → 校验链 → 现场投影 → 三件产物
- *       ① .gtrk 的 struct_meta.split 原子写回（只改该键、mtime 冲突拒写）
+ *       ① .gtrk 的 struct_meta.split 原子写回（只改该键、内容 revision 冲突拒写 + rename 前重检）
  *       ② split/dispatch.json 派单清单（composition_id = <工程slug>-<beatId>）
  *       ③ --md 时的 split/visual-split.md 人读稿（单向渲染）
  *
@@ -217,8 +217,8 @@ async function runLand(
 	const doc = JSON.parse(await readFile(splitdocPath, "utf8")) as SplitDoc;
 	const transcript = await loadTranscript(transcriptPath);
 
-	// ① v1 门（读 .gtrk 并记录 mtime，供写回前冲突检测）
-	const { gtrk, mtimeMs } = readGtrk(gtrkPath);
+	// ① v1 门（读 .gtrk 并记录内容 revision，供写回前双重校验）
+	const { gtrk, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 
 	// ② 校验链（结构/枚举 → id 合法 → hash 硬拒），失败零副作用
@@ -270,8 +270,8 @@ async function runLand(
 		},
 	});
 
-	// ④ 三件产物：struct_meta.split 原子写回（mtime 冲突拒写）→ dispatch.json → --md
-	writeStructMetaSplit(gtrkPath, gtrk, landing.split, mtimeMs);
+	// ④ 三件产物：struct_meta.split 原子写回（内容 revision 冲突拒写 + rename 前重检）→ dispatch.json → --md
+	writeStructMetaSplit(gtrkPath, gtrk, landing.split, revision);
 	const splitDir = join(baseDir, "split");
 	await mkdir(splitDir, { recursive: true });
 	const dispatchPath = join(splitDir, "dispatch.json");
