@@ -1,0 +1,8 @@
+# broll_arrange golden fixtures 是**跨仓 oracle**（gitruck-infra 的 Python 移植读同一批文件做
+# 逐字节对拍）。换行符随平台漂移会给下游制造无谓的困惑——例如有人对夹具文件求 sha256 来判
+# 「金样有没有被动过」，Windows 检出的 CRLF 与 Linux 的 LF 会算出两个值。
+# 这里钉死 LF：夹具的字节形态与平台无关。
+#
+# 注：对拍本身比的是**反序列化后的结构**（见 fixtures/broll-arrange/README.md），
+# 不依赖换行符；本条是为了让「文件字节」这个更朴素的判据也能用。
+test/fixtures/broll-arrange/** text eol=lf
