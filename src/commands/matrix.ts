@@ -12,7 +12,7 @@
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
@@ -41,6 +41,8 @@ import {
 } from "../lib/matrix-lay";
 import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
 import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
+import { MAX_QC_ROUNDS, runArrangeQc } from "../lib/arrange-qc";
+import { leadSentencesFrom, makeJudge, sqliteQcCache } from "../lib/arrange-qc-bind";
 import { arrangeUnits, scaleOfRequest } from "../lib/arrange-metering";
 import {
 	BROLL_MOVE_DIR,
@@ -114,6 +116,7 @@ import {
 	getNearestCachedHighlight,
 	resolveDescribeUrl,
 	runDescribeItems,
+	type DescribeEndpoint,
 	toDescribeMeta,
 	type DescribeWorkItem,
 	type MaterialDescribe,
@@ -209,6 +212,8 @@ interface MatrixOpts {
 	arrange?: string;
 	/** `--arrange-cost-cap <n>`：云端编排本次编排量硬上限。 */
 	arrangeCostCap?: string;
+	/** `--arrange-qc`：编排期 QC（L2 卡点句画音对齐闭环，落轨前收敛，零渲染）。缺省关。 */
+	arrangeQc?: boolean;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -316,6 +321,13 @@ export function registerMatrix(program: Command): void {
 		.option(
 			"--arrange-cost-cap <n>",
 			"云端编排单次编排量上限：超限服务端**前置拒绝**、零执行零计费（不是跑到一半掐断）。只在 --arrange shadow|cloud 时有意义",
+		)
+		.option(
+			"--arrange-qc",
+			"编排期质检（缺省关）：**落轨之前**就查每个 beat 的卡点句「画面有没有给到稿子说的东西」，" +
+				`没给到就换候选重排，最多 ${MAX_QC_ROUNDS} 轮，到限即交付并如实登记还差哪几句。全程零渲染——` +
+				"替代「铺完→渲→看→重铺→再渲」那两轮。⚠️ 判定走素材理解口，**按帧计费**（每个卡点句 1 帧/轮），" +
+				"跑前会报预估并征求确认（--yes 跳过）",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -1584,6 +1596,102 @@ export function parseCutAlign(raw: string | undefined): number {
 	return CUT_ALIGN_DEFAULT;
 }
 
+/**
+ * 编排期 QC 执行体（P3.2）：预估 → 确认 → 跑闭环。
+ *
+ * 抽出来是因为 `layIntoProject` 已经很长，而这段有完整的「先问再花钱」动线。
+ * 拿不到 lead 句（无 dispatch / 重投影降级）时**如实说明并跳过**——
+ * MUST NOT 当成「查过了都没问题」，那是把没做的事说成做过了。
+ */
+async function runArrangeQcHere(
+	plan: BrollPlan,
+	baseDir: string,
+	reproj: ReprojectResult,
+	arrangeOnce: (p: BrollPlan) => Promise<Awaited<ReturnType<typeof runArrangeWithFallback>>>,
+	/** 首轮编排产物：QC 被跳过 / 被取消时原样交回（那些路径不该重跑一次编排）。 */
+	first: Awaited<ReturnType<typeof runArrangeWithFallback>>,
+	layOpts: { yes: boolean; deps: MatrixRunDeps; describeEndpoint?: DescribeEndpoint },
+	log: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{
+	res: Awaited<ReturnType<typeof runArrangeWithFallback>>;
+	plan: BrollPlan;
+	residual: Array<{ beat: string; sentence: string }>;
+}> {
+	const dispatchPath = join(baseDir, "split", "dispatch.json");
+	const dispatch = existsSync(dispatchPath)
+		? (JSON.parse(readFileSync(dispatchPath, "utf8")) as { film_broll?: Array<{ beat?: string; span?: { from?: string } }> })
+		: undefined;
+	const leads = leadSentencesFrom(dispatch, reproj.utteranceIndex);
+	if (leads.length === 0) {
+		log.warn(
+			"编排期质检跳过：拿不到卡点句（没有 dispatch，或口播轨重投影降级）——" +
+				"**这不等于查过了没问题**，本轮的画音对齐没有被检查。",
+		);
+		return { res: first, plan, residual: [] };
+	}
+	if (!layOpts.describeEndpoint) {
+		log.warn("编排期质检跳过：未配置素材理解端点。");
+		return { res: first, plan, residual: [] };
+	}
+
+	// 预估 + 确认：判定按帧计费（每个卡点句 1 帧/轮，上限 MAX_QC_ROUNDS 轮）
+    const maxFrames = leads.length * MAX_QC_ROUNDS;
+	log.info(
+		`编排期质检：${leads.length} 个卡点句，最多判 ${maxFrames} 帧` +
+			`（每句 1 帧 × 最多 ${MAX_QC_ROUNDS} 轮；命中判定缓存的不重复计费）。`,
+	);
+	if (!layOpts.yes) {
+		const go = await (layOpts.deps.confirm ?? confirmViaStdin)(`确认发起编排期质检（最多 ${maxFrames} 帧判定）？`);
+		if (!go) {
+			log.info("已取消编排期质检——零判定零计费，本轮按未质检的编排产物落轨。");
+			return { res: first, plan, residual: [] };
+		}
+	}
+
+	const sources = new Map<string, string>();
+	for (const b of plan.beats) {
+		for (const q of b.queries) {
+			for (const r of q.results ?? []) if (typeof r.local_path === "string") sources.set(r.clip_id, r.local_path);
+		}
+	}
+	// ffmpeg 缺失不炸整命令：抽不到帧的探针一律回 partial（判不了 ≠ 判不对，见 arrange-qc-bind）
+	const ffmpeg = resolveFfmpeg();
+	if (!ffmpeg) log.warn("未找到 ffmpeg，编排期质检抽不到帧——本轮各句按「跳过判定」处理，不当作画面不对。");
+	const judge = makeJudge({
+		endpoint: layOpts.describeEndpoint,
+		ffmpeg: ffmpeg?.ffmpeg ?? "ffmpeg",
+		sourcePathFor: (id) => sources.get(id),
+		log,
+	});
+
+	let db: Awaited<ReturnType<typeof openLocalIndexDb>> | undefined;
+	try {
+		try {
+			if (existsSync(localIndexDbPath())) db = await openLocalIndexDb(localIndexDbPath());
+		} catch (e) {
+			// 判定缓存打不开只是「这轮多花点钱」，不该让质检整个做不成
+			log.warn(`判定缓存不可用（${(e as Error).message}）——本轮照跑，只是重跑时不能复用判定。`);
+		}
+		const out = await runArrangeQc(plan, leads, {
+			arrange: (p) => arrangeOnce(p as BrollPlan),
+			// ★ 取**全部 beat 的首轨**槽位：lead 句跨多个 beat，只取第一个 beat 会让后面的句
+			//   全部落进「没铺到东西」而被静默跳过——看起来通过了，其实一句都没查。
+			//   首轨（trackOrder 0）是默认可见的主候选轨，用户看到的就是它。
+			slotsOf: (o) => [...o.outcome.fills.values()].flatMap((tracks) => tracks[0] ?? []),
+			judge,
+			...(db ? { cache: sqliteQcCache(db, brollMaterialIdFor) } : {}),
+			log,
+		});
+		return {
+			res: out.outcome,
+			plan: out.plan as BrollPlan,
+			residual: out.residual.map((p) => ({ beat: p.beat, sentence: p.sentence })),
+		};
+	} finally {
+		db?.close();
+	}
+}
+
 /** 云端编排接线（两处 caller 共用一份，避免两边漂移）。
  *
  * 端点在 `local` 档**不解析**：那一档一个网络字节都不该动，连凭据都不必读。 */
@@ -1593,10 +1701,14 @@ function arrangeWiring(
 ): { arrangeMode: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
 	const arrangeMode = parseArrangeMode(opts.arrange);
 	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
+	const qc = opts.arrangeQc === true;
 	return {
 		arrangeMode,
 		...(costCap !== undefined ? { arrangeCostCap: costCap } : {}),
 		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
+		...(qc ? { arrangeQc: true } : {}),
+		// 判定端点只在真要判时解析（不开 QC 的那条路一个网络字节都不该动）
+		...(qc && cfg ? { describeEndpoint: { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
 	};
 }
 
@@ -1901,6 +2013,7 @@ function reportLayRefusal(keptEditedTracks: number[], warnings: string[]): void 
  */
 async function layIntoProject(
 	baseDir: string,
+	/** ⚠️ 可重赋值：编排期 QC 换候选时会把它换成「删过段的 plan」。 */
 	plan: BrollPlan,
 	layN: number,
 	scoreFloor: number,
@@ -1935,6 +2048,10 @@ async function layIntoProject(
 		arrangeCostCap?: number;
 		/** 云端编排端点（缺省由 apiBase 推导；缺凭据 ⇒ 回落本地）。 */
 		arrangeEndpoint?: ArrangeEndpoint;
+		/** 编排期 QC（P3.2）：缺省关 = 行为逐字节与开工前一致。 */
+		arrangeQc?: boolean;
+		/** 素材理解端点（QC 判定用；缺省由 apiBase 推导）。 */
+		describeEndpoint?: DescribeEndpoint;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -2036,16 +2153,31 @@ async function layIntoProject(
 		// 用户拒的是「上云」不是「铺轨」——把整轮掐掉等于替他做了他没做的决定）
 		if (!gate.proceed) arrangeMode = "local";
 	}
-	const arrangeRes = await runArrangeWithFallback(plan, layN, scoreFloor, decisionOpts, arrangeMode, {
-		runLocal: () => planBeatFills(plan, layN, scoreFloor, decisionOpts),
-		...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
-		...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
-		log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
-	});
+	const gateLog = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };
+	const arrangeOnce = (p: BrollPlan) =>
+		runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, arrangeMode, {
+			runLocal: () => planBeatFills(p, layN, scoreFloor, decisionOpts),
+			...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
+			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+			log: gateLog,
+		});
+
+	// 编排期 QC（P3.2）：缺省关 ⇒ 与开工前逐字节一致。开启时把「铺完→渲→看→重铺→再渲」
+	// 那两轮收成落轨前的一个闭环，全程零渲染。它对本地档与云端档**一样成立**——
+	// 闭环只调 arrangeOnce，不关心产物来自哪一侧。
+	let arrangeRes = await arrangeOnce(plan);
+	let qcResidual: Array<{ beat: string; sentence: string }> = [];
+	if (layOpts.arrangeQc) {
+		const qcOut = await runArrangeQcHere(plan, baseDir, reproj, arrangeOnce, arrangeRes, layOpts, gateLog);
+		arrangeRes = qcOut.res;
+		plan = qcOut.plan;
+		qcResidual = qcOut.residual;
+	}
 	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = arrangeRes.outcome;
 	if (arrangeRes.source === "cloud") {
 		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
 	}
+	void qcResidual;
 	// 对齐实测明示（人读；机读走 lay JSON 的 cut_align 条件键）
 	if (cutAlignStats) {
 		log.info(
