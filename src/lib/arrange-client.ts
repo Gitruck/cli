@@ -51,6 +51,9 @@ const BACKOFF_BASE_MS = 1000;
 
 export class ArrangeError extends Error {
 	readonly code = ARRANGE_UNREACHABLE_CODE;
+	/** 跨 bundle 判别标记（`instanceof` 在多 bundle 下类身份不唯一——同 `EmbedRejectedError` 先例）。
+	 * 回滚层靠它认「端点不可达」，认错就会把可回落的故障当成真 bug 抛给用户。 */
+	readonly unreachable = true;
 	constructor(msg: string) {
 		super(msg);
 		this.name = "ArrangeError";
