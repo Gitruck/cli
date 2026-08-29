@@ -31,6 +31,7 @@ import {
 	planBeatFills,
 	previewUrlFor,
 	projectHasShieldTrack,
+	wouldRefuseLay,
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
@@ -1814,6 +1815,25 @@ async function extractLocalCovers(plan: BrollPlan, gtrkDir: string): Promise<Map
 }
 
 /**
+ * 拒铺报因三件套（缺一不可）：① 是哪条轨 ② 判定证据 ③ 下一步与逃生门用法。
+ * **计费前预判**与**落轨定案**两处共用本函数（文案 MUST NOT 各写一份——分家后两条路会报出不同的话，
+ * 而用户根本分不清自己撞的是哪一条）。
+ */
+function reportLayRefusal(keptEditedTracks: number[], warnings: string[]): void {
+	log.err(
+		`拒绝铺轨：${keptEditedTracks.length} 条候选轨已被你在客户端编辑过（track_index ${keptEditedTracks.join("/") || "-"}）——` +
+			"本次不剥它们、也不铺新轨，工程文件零改动。",
+	);
+	for (const w of warnings) log.warn(w); // 逐轨证据：clip 数 vs 登记条数 / material 是否已变 broll-raw-*
+	log.warn(
+		"下一步二选一：① 在客户端处置那条轨（删掉 / 移走 / 改用别的轨）后重跑本命令；" +
+			"② 确知要丢弃那条轨上的编辑 → 加 --force-relay 强制剥离重铺" +
+			"（会删掉已确认原片的 broll-raw-* 素材登记，盘上原片文件成孤儿，不可恢复）。",
+	);
+	log.warn("已产出的 broll-plan.json 与已落盘的 preview 代理照常可用——拒的只是「改工程」这一步。");
+}
+
+/**
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
  * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
  * → layBrollTracks → 原子写回 → 素材落盘自检（只读）。
@@ -1855,8 +1875,38 @@ async function layIntoProject(
 		log.warn(`未找到工程文件（${join(baseDir, "gtrk", "project.gtrk")}），跳过铺轨——plan 已产出，可后续在有工程的目录重跑`);
 		return undefined;
 	}
-	const { gtrk, revision } = readGtrk(gtrkPath);
+	// ── 工程读取①（规划用）：此处**不持有 revision** ──
+	// revision 改在全部耗时动作完成之后取（见下方「写回前重读」）：把冲突窗口从「跨越整个下载期」
+	// 的秒~分钟级收回毫秒级（fix-lay-refuse-order-and-qc-holes 1.2；也是 broll_arrange 网络往返的地基）。
+	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
+
+	// ── ②-B 拒铺**前置**（fix-lay-refuse-order-and-qc-holes 1.1）─────────────────────────
+	// 公约「计费动作恒在停点之后」：能不能铺是本命令的停点，而运镜生成是真计费动作
+	// （image_move 2 积分/张）。此前裁定只在 layBrollTracks 内部跑、位置在运镜计费**之后**
+	// ⇒ 判拒铺时积分已扣、工程零改动、运镜产物成孤儿（用户为一次没发生的铺轨付了钱）。
+	// 现把同一份裁定（wouldRefuseLay，与落轨定案同源）提到一切计费/下载/落盘动作之前，
+	// 拒铺即短路：零云端调用、零下载、零改动。
+	// 定案权威仍在 layBrollTracks（以写回前重读的当刻工程再判一次）——预判只负责挡住
+	// 「开跑前就已被编辑」这个常见情形，MUST NOT 取代定案。
+	const pre = wouldRefuseLay(gtrk, forceRelay);
+	if (pre.refused) {
+		reportLayRefusal(pre.keptEditedTracks, pre.warnings);
+		return {
+			lay: {
+				refused: true,
+				keptEditedTracks: pre.keptEditedTracks,
+				laidTracks: [],
+				laidClips: 0,
+				removedTracks: [],
+				blackTrack: null,
+				blackBedHoleSec: 0,
+				blackBedHoles: [],
+				// 预判发生在下载之前：本轮一个字节都没下（`imageBilling` 一并缺席 = 本轮零计费）
+				downloads: { preview: 0, raw: 0, reused: 0, failed: 0, local: 0 },
+			},
+		};
+	}
 
 	// ── 句界吸附供数（adjust-shot-cut-sentence-align）：句起点 = 重投影 utteranceIndex 的句级
 	// track 时码（与锚 at_sec 内插同一份投影产物）。降级链无中间档：拿不到就整体回旧行为并告警，
@@ -2053,8 +2103,26 @@ async function layIntoProject(
 		}
 	}
 
+	// ── 工程读取②（写回用）：耗时动作全部完成后才取 revision ─────────────────────────────
+	// 运镜生成 / 封面抽帧 / 代理下载是秒~分钟级动作；持有跨越它们的 revision，用户在此期间
+	// 在客户端存一次工程，本轮就整体白跑（写回冲突、下载与运镜全部作废）。此刻重读后冲突窗口
+	// = 重读到 rename 的毫秒级，且 writeGtrkAtomic 的 rename 前重检照旧兜底（那条 MUST NOT 删）。
+	// 落轨据此对**当刻**工程判定与写回：剥旧裁定在此再跑一次（权威定案），预判只是它的前哨。
+	const { gtrk: freshGtrk, revision } = readGtrk(gtrkPath);
+	assertGtrkV1(freshGtrk);
+	// 基底漂移 MUST NOT 静默：窗口内工程真被改过时，本轮 fills（切槽/句界吸附/gap 规划）算的是
+	// 读①那份工程，却要铺到读②这份上。收紧前这种情形直接报写回冲突（整轮作废）；现在能铺完，
+	// 但用户有权知道自己那次保存与本轮铺轨发生了交叠——差异大到影响观感时重跑一次即可。
+	if (revision !== planningRevision) {
+		log.warn(
+			"工程在本轮铺轨期间被改动过（下载/运镜进行中你在客户端存了一次）：已按**改后**的工程落轨写回，" +
+				"你那次保存不会被覆盖；但本轮槽位是按改动前的时间线切的，若改的是口播时间线，B-roll 位置可能与新时间线对不齐——" +
+				"觉得不对就直接重跑一次本命令（plan 与已落盘代理都可复用，重跑很快）。",
+		);
+	}
+
 	let { next, summary, warnings } = layBrollTracks({
-		gtrk,
+		gtrk: freshGtrk,
 		plan,
 		lay: layN,
 		fills,
@@ -2069,21 +2137,12 @@ async function layIntoProject(
 		...(gapModeEff !== "none" ? { gapFill: { mode: gapModeEff, planned: gapFills ?? [] } } : {}),
 	});
 
-	// ── ②-B 拒铺：存在「自产内容但已被你编辑」的轨且未开逃生门 → 一个字节都不动工程 ──
-	// 报因三件套（缺一不可）：① 是哪条轨 ② 判定证据 ③ 下一步与逃生门用法。
+	// ── ②-B 拒铺定案：存在「自产内容但已被你编辑」的轨且未开逃生门 → 一个字节都不动工程 ──
+	// 常见情形已被计费前预判挡在花钱之前；能走到这里的只剩一种：**耗时动作期间**工程被改成了
+	// 已编辑态（预判那刻还没有）。此时运镜可能已生成，账面如实报（下方 imageBilling）。
 	if (summary.refused) {
 		const list = summary.keptEditedTracks;
-		log.err(
-			`拒绝铺轨：${list.length} 条候选轨已被你在客户端编辑过（track_index ${list.join("/") || "-"}）——` +
-				"本次不剥它们、也不铺新轨，工程文件零改动。",
-		);
-		for (const w of warnings) log.warn(w); // 逐轨证据：clip 数 vs 登记条数 / material 是否已变 broll-raw-*
-		log.warn(
-			"下一步二选一：① 在客户端处置那条轨（删掉 / 移走 / 改用别的轨）后重跑本命令；" +
-				"② 确知要丢弃那条轨上的编辑 → 加 --force-relay 强制剥离重铺" +
-				"（会删掉已确认原片的 broll-raw-* 素材登记，盘上原片文件成孤儿，不可恢复）。",
-		);
-		log.warn("已产出的 broll-plan.json 与已落盘的 preview 代理照常可用——拒的只是「改工程」这一步。");
+		reportLayRefusal(list, warnings);
 		// 拒铺 = 工程零改动 = 本次没写回 → 不做素材自检（`integrity` 字段缺席即「本次没查」）
 		return {
 			lay: {
@@ -2107,7 +2166,7 @@ async function layIntoProject(
 	// gap 填充的 solid 兜底与黑底垫轨共用同一确定性 ex-solid 素材（adjust-main-track-gap-fill）。
 	const gapSolidUsed = (summary.gapFill?.fills ?? []).some((f) => f.kind === "solid");
 	if (summary.blackTrack !== null || gapSolidUsed) {
-		const canvas = gtrk.video_size as number[];
+		const canvas = freshGtrk.video_size as number[];
 		const spec = { hex: BLACK_BED_HEX, width: canvas[0]!, height: canvas[1]! };
 		const rel = solidRelPath(spec);
 		const abs = join(gtrkDir, ...rel.split("/"));
@@ -2126,7 +2185,7 @@ async function layIntoProject(
 				}，候选轨照常。`,
 			);
 			({ next, summary, warnings } = layBrollTracks({
-				gtrk,
+				gtrk: freshGtrk,
 				plan,
 				lay: layN,
 				fills,

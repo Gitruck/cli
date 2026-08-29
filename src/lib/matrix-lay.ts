@@ -330,6 +330,16 @@ export interface StructMetaBroll {
 	track_layers?: Record<string, SourceLayer>;
 	/** 黑底垫轨 track_index；未铺时 null。供消费方从 lay_tracks 中区分出黑底轨。 */
 	black_track: number | null;
+	/**
+	 * 黑底空洞登记（fix-lay-refuse-order-and-qc-holes）：本轮铺出的纯黑时段，供 QC 把「预期内的
+	 * 粗剪期纯黑」与「真缺陷黑屏」分开（`qc.ts` 的 `isKnownBlackHole` 读方早已在位，此前全仓无写方
+	 * ⇒ 降级分支永不通电，正常产物一路被报成缺陷）。
+	 *
+	 * 形态取 `{track_st, track_ed}` 二元（读方只用这两维；`beat`/`sec` 不重复登记——beat 账本已在
+	 * `beats[]` 里，秒数可算）。未铺黑底时为**空数组**：照 `black_track` 既定口径显式写值，
+	 * 写方 MUST NOT 发明缺键写法。可选只为**读入侧**的老档兼容（本键之前的登记没有它）。
+	 */
+	holes?: { track_st: number; track_ed: number }[];
 	confirmed: false;
 	beats: BrollMetaBeat[];
 }
@@ -1731,6 +1741,70 @@ export function resolveTrackLayer(track: LooseTrack, registered?: SourceLayer): 
 }
 
 /**
+ * 剥旧裁定的一次求值（纯函数，只吃工程对象）：盘上登记复算期望指纹 → 逐轨三态 → 已编辑轨集合。
+ *
+ * **单一取值点**：`layBrollTracks`（落轨定案）与命令层（计费前预判）共用本函数，MUST NOT 各写一份。
+ * 两处判据一旦漂移，预判放行而定案拒铺 ⇒ 计费照扣、工程零改动，恰是本函数要根治的那个缺陷。
+ */
+export function evaluateStripVerdicts(gtrk: Record<string, unknown>): {
+	videoTracks: LooseTrack[];
+	verdicts: TrackVerdict[];
+	prevBroll: StructMetaBroll | undefined;
+	prevIndices: Set<number>;
+	editedTracks: LooseTrack[];
+	keptEditedTracks: number[];
+} {
+	const videoTracks = [...((gtrk.video_track as LooseTrack[] | undefined) ?? [])];
+	const prevBroll = ((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}).broll as StructMetaBroll | undefined;
+	const prevIndices = new Set<number>(
+		Array.isArray(prevBroll?.lay_tracks)
+			? (prevBroll!.lay_tracks as unknown[]).filter((x): x is number => typeof x === "number")
+			: [],
+	);
+	const verdicts = classifyVideoTracks(videoTracks, expectedSelfProducedTracks(prevBroll), prevIndices);
+	const editedTracks = videoTracks.filter((_, i) => verdicts[i]!.cls === "self-produced-edited");
+	const keptEditedTracks = editedTracks
+		.map((t) => (typeof t.track_index === "number" ? t.track_index : -1))
+		.filter((n) => n >= 0);
+	return { videoTracks, verdicts, prevBroll, prevIndices, editedTracks, keptEditedTracks };
+}
+
+/** 逐轨「已被你编辑」证据文案（MUST NOT 静默）：文案随逃生门分叉，两处调用逐字一致。 */
+export function editedTrackWarnings(verdicts: TrackVerdict[], forceRelay: boolean): string[] {
+	const out: string[] = [];
+	for (const v of verdicts) {
+		if (v.cls !== "self-produced-edited") continue;
+		const samples = v.samples.length ? `，material 样例 ${v.samples.join(" / ")}` : "";
+		out.push(
+			`候选轨 track_index=${v.trackIndex} 判定为「已被你编辑」：${v.reason}（该轨 ${v.clipCount} clip${samples}）。` +
+				(forceRelay
+					? "已按 --force-relay 强制剥离重铺。"
+					: "本次不剥它、也不铺新轨——在客户端处置该轨后重跑，或加 --force-relay 强剥重铺。"),
+		);
+	}
+	return out;
+}
+
+/**
+ * 拒铺预判（纯函数，零 IO 零计费）：供命令层在**一切计费/下载动作之前**短路。
+ *
+ * 拒铺是「能不能铺」的停点，按公约（skill-charter「计费动作恒在停点之后」）计费必须在它之后发生。
+ * 判据与 `layBrollTracks` 内的定案同源（见 `evaluateStripVerdicts`）；落轨时仍会以**当刻**工程
+ * 再判一次——预判只负责把常见情形（开跑前就已被编辑）挡在花钱之前，MUST NOT 取代定案。
+ */
+export function wouldRefuseLay(
+	gtrk: Record<string, unknown>,
+	forceRelay = false,
+): { refused: boolean; keptEditedTracks: number[]; warnings: string[] } {
+	const { verdicts, editedTracks, keptEditedTracks } = evaluateStripVerdicts(gtrk);
+	return {
+		refused: editedTracks.length > 0 && !forceRelay,
+		keptEditedTracks,
+		warnings: editedTrackWarnings(verdicts, forceRelay),
+	};
+}
+
+/**
  * 铺轨主函数（纯函数，不做 IO）：按层剥离上次自产物 → 按 fills 平铺 append 素材与 overlay 轨 →
  * 层带 track_index 分配（local>concept>common 自上而下写死，黑底恒在全部带区之下）→
  * 写 struct_meta.broll（本层登记替换 + 他层登记保留平移）。下载失败的槽位被丢弃（留空，调用方已告警）
@@ -1766,23 +1840,12 @@ export function layBrollTracks(opts: {
 	const forceRelay = opts.forceRelay === true;
 	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : "common");
 	const warnings: string[] = [];
-	const videoTracks = [...((gtrk.video_track as LooseTrack[] | undefined) ?? [])];
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}) };
 
 	// ── 按层剥离自产物（幂等重铺；判据 = 自产指纹 + 层归属，登记缺失宁留勿删）──
-	const prevBroll = structMeta.broll as StructMetaBroll | undefined;
-	const prevIndices = new Set<number>(
-		Array.isArray(prevBroll?.lay_tracks)
-			? (prevBroll!.lay_tracks as unknown[]).filter((x): x is number => typeof x === "number")
-			: [],
-	);
-	const expected = expectedSelfProducedTracks(prevBroll);
-	const verdicts = classifyVideoTracks(videoTracks, expected, prevIndices);
-	const editedTracks = videoTracks.filter((_, i) => verdicts[i]!.cls === "self-produced-edited");
-	const keptEditedTracks = editedTracks
-		.map((t) => (typeof t.track_index === "number" ? t.track_index : -1))
-		.filter((n) => n >= 0);
+	// 裁定与命令层的计费前预判共用 evaluateStripVerdicts（单一取值点，两处 MUST NOT 各写一份）
+	const { videoTracks, verdicts, prevBroll, prevIndices, editedTracks, keptEditedTracks } = evaluateStripVerdicts(gtrk);
 	// 三分（D3 按层剥旧）：removed=目标层自产轨 ∪ 黑底轨 ∪（forceRelay 下的已编辑轨）；
 	// keptBand=他层自产轨（保留但随带区平移——L2 不比对 track_index，平移安全）；
 	// keptOther=用户轨 ∪ 层归属未知的存量自产轨（过渡口径：保守不剥 + 告警，位置不动）。
@@ -1823,17 +1886,7 @@ export function layBrollTracks(opts: {
 	const keptTracks = [...keptOtherTracks, ...keptBandTracks.map((b) => b.track)];
 
 	// 逐轨告警：被判「自产内容但已被编辑」的轨必须带证据出场，MUST NOT 静默
-	for (let i = 0; i < videoTracks.length; i++) {
-		const v = verdicts[i]!;
-		if (v.cls !== "self-produced-edited") continue;
-		const samples = v.samples.length ? `，material 样例 ${v.samples.join(" / ")}` : "";
-		warnings.push(
-			`候选轨 track_index=${v.trackIndex} 判定为「已被你编辑」：${v.reason}（该轨 ${v.clipCount} clip${samples}）。` +
-				(forceRelay
-					? "已按 --force-relay 强制剥离重铺。"
-					: "本次不剥它、也不铺新轨——在客户端处置该轨后重跑，或加 --force-relay 强剥重铺。"),
-		);
-	}
+	warnings.push(...editedTrackWarnings(verdicts, forceRelay));
 
 	// ②-B 拒铺：存在已编辑自产轨且未开逃生门 → 工程零改动（不剥、不追加、不写 struct_meta.broll）
 	if (editedTracks.length > 0 && !forceRelay) {
@@ -1867,6 +1920,7 @@ export function layBrollTracks(opts: {
 				plan_path: opts.planPath,
 				lay_tracks: [],
 				black_track: null,
+				holes: [],
 				confirmed: false,
 				beats: [],
 			}) as StructMetaBroll,
@@ -2358,6 +2412,10 @@ export function layBrollTracks(opts: {
 			.sort((a, b) => a - b),
 		track_layers: trackLayers,
 		black_track: blackTrack,
+		// 空洞登记（fix-lay-refuse-order-and-qc-holes ②）：QC 据此把粗剪期预期内的纯黑降级为 info。
+		// 只投影读方用得到的两维；这是本检测对产物的**唯一**影响面（「只读铁律」的定向豁免——
+		// materials / video_track / broll 其余字段照旧逐字节不变，金样对拍剥掉本键后仍恒等）。
+		holes: blackBedHoles.map((h) => ({ track_st: h.track_st, track_ed: h.track_ed })),
 		confirmed: false,
 		beats: metaBeats,
 	};
