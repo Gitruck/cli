@@ -1,6 +1,6 @@
 ---
 name: gtrk-matrix
-description: B-roll 检索铺轨编排手册——成片管线里第一个铺的车道（SOP ③ B-roll 底轨阶段的影视/本地素材腿），也是素材智能铺轨「乐高架构」的裁定层指引。消费拆分派单的 FILM_BROLL 队列（`dispatch.film_broll`），双口向量检索 + 下载 preview 代理，在工程里平铺 N 条候选 B-roll 轨，供用户在 opencut 里用轨道小眼睛切换对比、挑选/调整；确认后交棒同阶段的 AI 情景片段腿（`/gtrk-ai-drama`，车道非空时），三源落齐再进 ④ 全局抽帧检查构图、⑤ 才铺 MG。另支持**本地素材模式**（`matrix index` 建免切片索引、`--local` 本地检索铺轨，素材本体不上云）、**按需理解零件**（`matrix describe`：VLM 描述/标签/质量分/可用性信号，plan 注入或素材直理解）、**源时间窗检索**（`--source-window`，电影解说式逐段推进）、**通用三态素材检索**（`matrix material`：clip/image/audio 下载向整条素材，BGM/配图主场，2×2 身份路由下半行）与 **plan 可编辑通路**（agent 改 plan 后 `matrix lay` 消费）。当用户想「铺 B-roll / 检索素材 / 找空镜 / 给空镜配画面 / 填 B-roll 候选 / 单独搜个词补个空槽 / 找 BGM / 搜配乐 / 搜张配图 / 用我自己的素材铺 B-roll / 给素材文件夹建索引 / 理解一下这些素材能不能用 / 把这堆素材剪成片 / 影视解说配画面」时使用本 skill。凡涉及把素材检索并铺进工程，优先用本 skill 驱动 gtrk CLI 的 `matrix` 命令族，别让用户自己去终端敲、也别手搓检索。
+description: B-roll 检索铺轨编排手册——成片管线里第一个铺的车道（SOP ③ B-roll 底轨阶段）。消费拆分派单的 FILM_BROLL 队列（`dispatch.film_broll`），检索素材并在工程里平铺 N 条候选 B-roll 轨，供用户在 opencut 里用轨道小眼睛切换对比、挑选/调整；确认后交棒同阶段的 AI 情景片段腿（`/gtrk-ai-drama`，车道非空时）。命令族还含：**本地素材模式**（`matrix index` 建索引、`--local` 用自己的素材铺轨，**素材本体不上云**）、**按需理解**（`matrix describe`，为排序提供画质与看点信号）、**源时间窗检索**（`--source-window`，电影解说式逐段推进）、**通用三态素材检索**（`matrix material`：clip/image/audio 整条素材下载向，BGM/配图主场）、**plan 可编辑通路**（agent 改 plan 后 `matrix lay` 消费）。当用户想「铺 B-roll / 检索素材 / 找空镜 / 给空镜配画面 / 填 B-roll 候选 / 单独搜个词补个空槽 / 找 BGM / 搜配乐 / 搜张配图 / 用我自己的素材铺 B-roll / 给素材文件夹建索引 / 理解一下这些素材能不能用 / 把这堆素材剪成片 / 影视解说配画面」时使用本 skill。凡涉及把素材检索并铺进工程，优先用本 skill 驱动 gtrk CLI 的 `matrix` 命令族，别让用户自己去终端敲、也别手搓检索。
 ---
 
 # B-roll 检索铺轨编排手册（gtrk-matrix）
