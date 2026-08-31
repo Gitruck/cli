@@ -2252,7 +2252,7 @@ async function layIntoProject(
 		plan = qcOut.plan;
 		qcResidual = qcOut.residual;
 	}
-	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = arrangeRes.outcome;
+	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills, direct: directOutcomes } = arrangeRes.outcome;
 	if (arrangeRes.source === "cloud") {
 		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
 	}
@@ -2300,6 +2300,37 @@ async function layIntoProject(
 			}
 		}
 		log.info(`关键词锚：钉位 ${cnt.planned} · 用户钉选 ${cnt.pinned} · 降级 ${cnt.degraded}（共 ${anchorOutcomes.length} 锚）`);
+	}
+	// 高档直排落位回报（add-arrange-direct-tier）：spec 要求「诚实边界 SHALL 可被用户知晓」，
+	// 而回执产出来没人消费就等于没有。三类必须出声，其余逐槽 info。
+	if (directOutcomes?.length) {
+		const cnt = { planned: 0, sliver: 0, rejected: 0 };
+		for (const d of directOutcomes) {
+			cnt[d.status]++;
+			if (d.status === "rejected") {
+				log.warn(`${d.beat} 直排槽 clip ${d.clip_id} 未落位：${d.reason ?? "未知原因"}——该段没有画面，MUST NOT 当成已铺`);
+				continue;
+			}
+			if (d.status === "sliver") log.warn(`${d.beat} 直排槽 clip ${d.clip_id}：${d.reason ?? "短于最小可用镜头长"}`);
+			// ★ 诚实边界一：查不到帧率 ⇒ 帧网格吸附整步没生效。MUST NOT 让用户以为「直排就不闪帧」。
+			if (d.fps === null) {
+				log.warn(
+					`${d.beat} 直排槽 clip ${d.clip_id}：全 plan 都查不到这条素材的帧率，**帧网格吸附未生效**——` +
+						`端点可能落在非整帧上，不同播放器/渲染器会各自取整。把这条素材过一遍索引即可消除。`,
+				);
+			}
+			// ★ 诚实边界二：源窗供不满承诺轨长 ⇒ 末帧会驻留（超过一帧才报，亚帧渲染侧不可见）
+			if (typeof d.starved_sec === "number") {
+				log.warn(
+					`${d.beat} 直排槽 clip ${d.clip_id}：源窗比你给的时间线窗短 ${d.starved_sec}s，` +
+						`成片上这一段的最后一帧会静止这么久。要么把源窗给长一点，要么把时间线窗收短。`,
+				);
+			}
+			if (d.status === "planned" && d.fps !== null) {
+				log.info(`${d.beat} 直排槽 clip ${d.clip_id} 钉 ${d.track_st}s（精修${d.refined ? "已生效" : "未改动端点"}${d.has_cuts ? "" : " · 无切点数据，仅帧网格吸附"}）`);
+			}
+		}
+		log.info(`高档直排：落位 ${cnt.planned} · 过短照落 ${cnt.sliver} · 未落位 ${cnt.rejected}（共 ${directOutcomes.length} 槽）`);
 	}
 	const markOn = typeof layOpts.markWeight === "number" && layOpts.markWeight > 0;
 	if (markOn) {
@@ -2641,6 +2672,31 @@ async function layIntoProject(
 							clip_id: d.clip_id,
 							status: d.status,
 							...(d.reason ? { reason: d.reason } : {}),
+						})),
+					}
+				: {}),
+			// 高档直排账面（add-arrange-direct-tier）：plan 里有直排槽才出现（无则 lay JSON 逐字节不变）。
+			// `fps: null` 与 `starved_sec` 是两条诚实边界，机读侧也要拿得到，MUST NOT 只打日志。
+			...(directOutcomes?.length
+				? {
+						direct: {
+							planned: directOutcomes.filter((d) => d.status === "planned").length,
+							sliver: directOutcomes.filter((d) => d.status === "sliver").length,
+							rejected: directOutcomes.filter((d) => d.status === "rejected").length,
+							no_fps: directOutcomes.filter((d) => d.fps === null).length,
+							starved: directOutcomes.filter((d) => typeof d.starved_sec === "number").length,
+						},
+						direct_details: directOutcomes.map((d) => ({
+							beat: d.beat,
+							clip_id: d.clip_id,
+							track_st: d.track_st,
+							status: d.status,
+							refined: d.refined,
+							has_cuts: d.has_cuts,
+							fps: d.fps,
+							...(d.code ? { code: d.code } : {}),
+							...(d.reason ? { reason: d.reason } : {}),
+							...(typeof d.starved_sec === "number" ? { starved_sec: d.starved_sec } : {}),
 						})),
 					}
 				: {}),

@@ -29,7 +29,7 @@
  * 拒绝面只有**结构性违约**：形态不对、必填缺失、越界、出现了不该出现的键。
  */
 
-import type { AnchorOutcome, FillSlot, FillStats, GapFillEntry } from "./matrix-lay";
+import type { AnchorOutcome, DirectOutcome, FillSlot, FillStats, GapFillEntry } from "./matrix-lay";
 
 /** 服务端响应的 data 段（形态与 golden fixture 的 `expected` 逐字段同构）。 */
 export interface ArrangeResponse {
@@ -42,6 +42,9 @@ export interface ArrangeResponse {
 	/** 条件键：吸附未激活时**整键缺席**（MUST NOT 补 null）。 */
 	cut_align?: { target: number; starts_total: number; aligned: number; ratio: number };
 	gap_fills?: GapFillEntry[];
+	/** 高档直排回执。条件键：服务端未实现 direct 档时**整键缺席**（MUST NOT 补空数组
+	 * ——「没有直排槽」与「服务端不认这个档」是两件事）。 */
+	direct?: DirectOutcome[];
 	/** 计费回显（服务端复算值）。 */
 	units?: number;
 	task_id?: string;
@@ -60,6 +63,7 @@ export interface ArrangeOutcome {
 	anchors: AnchorOutcome[];
 	cutAlign?: { target: number; starts_total: number; aligned: number; ratio: number };
 	gapFills?: GapFillEntry[];
+	direct?: DirectOutcome[];
 }
 
 /** 槽位字段的规范顺序（与本地 `planBeatFills` 的产出顺序逐字一致）。 */
@@ -236,6 +240,21 @@ export function applyArrangeResponse(resp: ArrangeResponse, expectedLay: number)
 			problems.push(`锚「${a.keyword}」降级但没给 reason —— 降级 MUST NOT 静默`);
 		}
 	}
+	// 高档直排回执（add-arrange-direct-tier）：条件键——服务端未实现 direct 档时整键缺席。
+	// 在册就要形态完整，且**照锚点降级同一条纪律**：非 planned 必须带 reason 与机读 code，
+	// 否则「这一槽被拒了 / 变短了」就成了静默事件，而静默正是本档要消灭的东西。
+	if (resp.direct !== undefined) {
+		if (!Array.isArray(resp.direct)) problems.push("direct 在册但不是数组");
+		else {
+			for (const d of resp.direct as Partial<DirectOutcome>[]) {
+				const who = d?.clip_id ?? "?";
+				if (d?.status !== "planned" && !d?.reason) problems.push(`直排槽「${who}」非 planned 但没给 reason —— MUST NOT 静默`);
+				if (d?.status !== "planned" && !d?.code) problems.push(`直排槽「${who}」非 planned 但没给机读 code`);
+				// fps 未知须显式 null：整键缺席会让「查不到帧率」和「服务端老版本不报」混成一谈
+				if (!(d && "fps" in d)) problems.push(`直排槽「${who}」缺 fps 键（未知须显式 null）`);
+			}
+		}
+	}
 	// 条件键：在册就必须形态完整（缺席是合法的，半截不是）
 	if (resp.cut_align !== undefined) {
 		for (const k of ["target", "starts_total", "aligned", "ratio"] as const) {
@@ -254,6 +273,7 @@ export function applyArrangeResponse(resp: ArrangeResponse, expectedLay: number)
 		anchors: resp.anchors.map((a) => ({ ...a })),
 		...(resp.cut_align ? { cutAlign: { ...resp.cut_align } } : {}),
 		...(resp.gap_fills ? { gapFills: resp.gap_fills.map((g) => ({ ...g })) } : {}),
+		...(resp.direct ? { direct: resp.direct.map((d) => ({ ...d })) } : {}),
 	};
 }
 
