@@ -2353,15 +2353,35 @@ async function layIntoProject(
 	}
 	// 高档直排落位回报（add-arrange-direct-tier）：spec 要求「诚实边界 SHALL 可被用户知晓」，
 	// 而回执产出来没人消费就等于没有。三类必须出声，其余逐槽 info。
+	//
+	// ★ 文案**按机读 `code` 现渲染**，MUST NOT 直接印服务端送来的 `reason`：
+	// 那个字段内嵌数值，刻意不在跨语言契约面上（JS 出 "1"、Python 出 "1.0"），
+	// 服务端本就不送。现渲染让本地路与云端路说同一句话，也断掉文案漂移。
+	const directWhy = (d: { code?: string; reason?: string; starved_sec?: number }): string => {
+		switch (d.code) {
+			case "sliver":
+				return `精修后短于最小可用镜头长——已按指令照落，成片上会是一个很短的镜头`;
+			case "overlap":
+				return "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）";
+			case "out_of_beat":
+				return "指定的时间线位置越出 beat 窗口";
+			case "no_room":
+				return "beat 内已无足够空隙容纳该直排槽";
+			case "beat_no_span":
+				return "beat 窗口无长度";
+			default:
+				return d.reason ?? "未知原因";
+		}
+	};
 	if (directOutcomes?.length) {
 		const cnt = { planned: 0, sliver: 0, rejected: 0 };
 		for (const d of directOutcomes) {
 			cnt[d.status]++;
 			if (d.status === "rejected") {
-				log.warn(`${d.beat} 直排槽 clip ${d.clip_id} 未落位：${d.reason ?? "未知原因"}——该段没有画面，MUST NOT 当成已铺`);
+				log.warn(`${d.beat} 直排槽 clip ${d.clip_id} 未落位：${directWhy(d)}——该段没有画面，MUST NOT 当成已铺`);
 				continue;
 			}
-			if (d.status === "sliver") log.warn(`${d.beat} 直排槽 clip ${d.clip_id}：${d.reason ?? "短于最小可用镜头长"}`);
+			if (d.status === "sliver") log.warn(`${d.beat} 直排槽 clip ${d.clip_id}：${directWhy(d)}`);
 			// ★ 诚实边界一：查不到帧率 ⇒ 帧网格吸附整步没生效。MUST NOT 让用户以为「直排就不闪帧」。
 			if (d.fps === null) {
 				log.warn(

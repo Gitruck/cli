@@ -264,8 +264,11 @@ export function applyArrangeResponse(resp: ArrangeResponse, expectedLay: number)
 		else {
 			for (const d of resp.direct as Partial<DirectOutcome>[]) {
 				const who = d?.clip_id ?? "?";
-				if (d?.status !== "planned" && !d?.reason) problems.push(`直排槽「${who}」非 planned 但没给 reason —— MUST NOT 静默`);
-				if (d?.status !== "planned" && !d?.code) problems.push(`直排槽「${who}」非 planned 但没给机读 code`);
+				// 只要机读 `code`。`reason` 是**人读文案**，内嵌数值 ⇒ 刻意不在跨语言契约面上
+				// （JS 出 "1"、Python 出 "1.0"），所以服务端本就不会送它——在这里要求它
+				// 等于要求一个契约上不存在的字段。人读文案由消费侧按 code 现渲染，
+				// 于是本地路与云端路**说同一句话**，也不存在跨语言文案漂移。
+				if (d?.status !== "planned" && !d?.code) problems.push(`直排槽「${who}」非 planned 但没给机读 code —— 非 planned MUST NOT 静默`);
 				// fps 未知须显式 null：整键缺席会让「查不到帧率」和「服务端老版本不报」混成一谈
 				if (!(d && "fps" in d)) problems.push(`直排槽「${who}」缺 fps 键（未知须显式 null）`);
 			}
