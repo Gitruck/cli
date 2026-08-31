@@ -51,7 +51,7 @@
  *    丢一条，轮转序整体错位一格，而落轨字节照样合法、永不被发现。
  */
 
-import type { BrollPlan, PlanAnchor, PlanBeat, PlanQuery, PlanResult } from "./matrix";
+import type { ArrangeTier, BrollPlan, DirectSlot, PlanAnchor, PlanBeat, PlanQuery, PlanResult } from "./matrix";
 import type { DedupScope, GapFillMode, MarkLookup } from "./matrix-lay";
 import { METERING_ALGO_PIN, arrangeUnits, scaleOfRequest } from "./arrange-metering";
 
@@ -109,7 +109,21 @@ export interface WireBeat {
 	anchors?: WireAnchor[];
 	/** 红线 3：顺序即叙事轮转序，一条都不许丢。 */
 	queries: WireQuery[];
-	arrange_mode?: string;
+	/** 编排档位，**逐 beat**（design §3 同片可混档）。缺席 = 未标注，服务端按低档处置。
+	 * ⚠️ 这个 `mode` 是**编排策略**，与取数路 `ArrangeMode`（local|shadow|cloud）无关，见 matrix.ts 的 ArrangeTier。 */
+	arrange_mode?: ArrangeTier;
+	/** 直排槽（高档入参）。缺席 = 本 beat 无出处直给。 */
+	direct_slots?: WireDirectSlot[];
+}
+
+/** 上行的直排槽。与本地 `DirectSlot` 同构——本层只做投影不做变形。 */
+export interface WireDirectSlot {
+	clip_id: string;
+	clip_st: number;
+	clip_ed: number;
+	track_st?: number;
+	track_ed?: number;
+	query?: string;
 }
 
 export interface WirePlan {
@@ -209,7 +223,22 @@ function projectAnchor(a: PlanAnchor): WireAnchor {
 	return { keyword: a.keyword, at_sec: num(a.at_sec) ?? null, query: a.query };
 }
 
-function projectBeat(b: PlanBeat, arrangeMode?: string): WireBeat {
+/** 直排槽投影（add-arrange-direct-tier）：源窗必传，时间线位置成对传或都不传。
+ * `query` 传**原文**——红线 1：q_idx 会因空池折叠而错位。 */
+function projectDirectSlot(d: DirectSlot): WireDirectSlot {
+	const out: WireDirectSlot = { clip_id: d.clip_id, clip_st: d.clip_st, clip_ed: d.clip_ed };
+	const ts = num(d.track_st);
+	const te = num(d.track_ed);
+	// 成对才传：只给一半是无意义的半个约束，投影层不替它猜另一半
+	if (ts !== undefined && te !== undefined) {
+		out.track_st = ts;
+		out.track_ed = te;
+	}
+	if (d.query) out.query = d.query;
+	return out;
+}
+
+function projectBeat(b: PlanBeat): WireBeat {
 	// `exclude[]`（派单负词）决策层零读——本地已折算进候选的 excluded_hint，不上行
 	const out: WireBeat = {
 		beat: b.beat,
@@ -223,7 +252,12 @@ function projectBeat(b: PlanBeat, arrangeMode?: string): WireBeat {
 	const req = num(b.requested_shots);
 	if (req !== undefined) out.requested_shots = req;
 	if (Array.isArray(b.anchors) && b.anchors.length) out.anchors = b.anchors.map(projectAnchor);
-	if (arrangeMode) out.arrange_mode = arrangeMode;
+	// ★ 档位**逐 beat 取自 beat 自己**（design §3「档位逐 beat 标注，同一片内可混档」）。
+	//   此前是整份 plan 一个值铺给所有 beat，那样混档在结构上就不可能。
+	//   ⚠️ 缺席即整键不上行，**MUST NOT 补成 "semantic"**——同 motion/fps 的既有纪律：
+	//   缺席是「没标注」，补默认值会让服务端分不清「用户选了低档」与「用户没选」。
+	if (b.arrange_mode) out.arrange_mode = b.arrange_mode;
+	if (Array.isArray(b.direct_slots) && b.direct_slots.length) out.direct_slots = b.direct_slots.map(projectDirectSlot);
 	return out;
 }
 
@@ -288,12 +322,12 @@ export function projectArrangeRequest(
 	lay: number,
 	scoreFloor: number,
 	opts: LocalArrangeOpts = {},
-	extra: { costCap?: number; arrangeMode?: string } = {},
+	extra: { costCap?: number } = {},
 ): ArrangeRequest {
 	const wirePlan: WirePlan = {
 		plan_version: plan.plan_version,
 		member_type: plan.member_type,
-		beats: plan.beats.map((b) => projectBeat(b, extra.arrangeMode)),
+		beats: plan.beats.map(projectBeat),
 	};
 	const wireOpts = projectOpts(plan, opts);
 	const req: ArrangeRequest = {

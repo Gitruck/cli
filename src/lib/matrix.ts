@@ -338,6 +338,46 @@ export function anchorAtSec(utteranceText: string, keyword: string, trackSt: num
 	return Math.round((trackSt + (idx / utteranceText.length) * span) * 1000) / 1000;
 }
 
+/**
+ * 编排档位（add-arrange-direct-tier，design §3「不是二选一，给档位」）。
+ *
+ * ⚠️ **不要和 `ArrangeMode` 搞混**——那是 `arrange-gate.ts` 的**取数路**
+ * （`local|shadow|cloud`，管「在哪算」）；本类型是**编排策略**（管「怎么排」）。
+ * 两者正交：本地素材路走云端算（取数路 cloud），而那一份 plan 里每个 beat
+ * 各自标什么档位（本类型）与之无关。
+ * 命名刻意用 `Tier` 而非 `Mode` 就是为了不再撞车——本仓 2026-08-31 刚因为
+ * 「本地/云端」被两根正交轴共用吃过一次亏。
+ *
+ * - `direct`   高档 · 锚定直排：出处窗直给，不检索不排序，但**过同一套 refineWindow**
+ * - `temporal` 中档 · 语义×时序先验：**尚未实现**（衰减函数形态待打样，服务端报 6214）
+ * - `semantic` 低档 · 纯语义：现状，缺省
+ */
+export type ArrangeTier = "direct" | "temporal" | "semantic";
+
+/**
+ * 直排槽（高档入参）：「这一段就用这条素材的这一段，别检索」。
+ *
+ * 射程是 narration 图纸 §119 点名的两类——**引用段**（画音必须逐秒对齐，检索无从保证）
+ * 与**硬出处段**（稿里显式写「【素材：片段03 2:10-2:40】」，那是指令不是线索）。
+ *
+ * ★ 直排槽**照样过 refineWindow**（切点吸附 + 帧网格吸附）——这是本档的核心价值：
+ * 手写窗必然可能跨源镜头切点，那正是免索引直排闪帧的机制性根因。
+ * ⚠️ 但残片收缩依赖 `segments[].cuts`：**素材未索引则无 cuts**，那时只有帧吸附生效，
+ * 是**部分收益**。MUST NOT 对用户表述成「直排就一定不闪帧」。
+ */
+export interface DirectSlot {
+	clip_id: string;
+	/** 源窗（素材内秒）——「出处」的本体，必给。 */
+	clip_st: number;
+	clip_ed: number;
+	/** 时间线位置。引用段**必给**（画音要逐秒对齐）；硬出处段可缺，缺则在 beat 内顺排。
+	 * 要么都给要么都不给。 */
+	track_st?: number;
+	track_ed?: number;
+	/** 溯源用的检索词**原文**。MUST NOT 用 q_idx——下标会因空池折叠而错位（红线 1）。 */
+	query?: string;
+}
+
 export interface PlanBeat {
 	beat: string;
 	track_st: number;
@@ -348,6 +388,13 @@ export interface PlanBeat {
 	/** 关键词锚（add-keyword-anchored-broll，可选）：lay 锚点优先布局的输入；无该键 = 行为与
 	 * 本 change 之前逐字节一致。 */
 	anchors?: PlanAnchor[];
+	/** 编排档位（add-arrange-direct-tier，可选）。**缺席 = `semantic` = 逐字节零回归**；
+	 * 逐 beat 标注 ⇒ 同一片内可混档（design §3 举例：引用段直排 + 叙述段中档）。
+	 * 越界值 MUST NOT 静默降级到低档——与服务端 6214 同一条纪律。 */
+	arrange_mode?: ArrangeTier;
+	/** 直排槽（`arrange_mode === "direct"` 时消费）。同 beat 内与 `queries` 可并存：
+	 * 直排槽先钉死，**剩余区间才走检索**（design「检索只兜出处缺失段」）。 */
+	direct_slots?: DirectSlot[];
 	queries: PlanQuery[];
 }
 
