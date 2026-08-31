@@ -81,6 +81,21 @@ interface CountablePlan {
  * 这条口径是刻意的：过滤发生在决策内部，若计量跟着过滤走，同一份请求在不同 score_floor
  * 下就会算出不同的价，而 score_floor 是用户随手调的旋钮——那会变成「调参要钱」。
  */
+/**
+ * ▶️ **直排槽不计入编排量**（主理人 2026-08-31 裁定取甲，add-arrange-direct-tier §4.1）。
+ *
+ * 本函数只数 `beats` / `queries[].results[].segments` / `lay` / 标定遍数，**不读
+ * `direct_slots`**——所以取甲是**构造性成立**的，没有分支、没有新常量、
+ * `algo_pin` 零风险（低档 plan 无 `direct_slots`，新旧两端算出的价完全相同）。
+ *
+ * 立论：直排的边际成本确实低——不建池、不排序、不去重，每槽只多几次 `refineWindow`，
+ * 相比低档的 O(候选数·log) 排序小一个量级。「按工作量计价」在这里是过度精算，
+ * 而 bump pin 会让所有旧客户端被 6212 拒绝。
+ * 代价是「20 个直排槽与 1 个同价」——已知且接受。
+ *
+ * ⚠️ 纯直排 beat（无 queries）⇒ `segments = 0` ⇒ `U = ⌈8×beat数 × 轨数 × 标定遍数 / 32⌉`。
+ * 金样 `29-direct-no-fps-honest` 钉的就是这一格。
+ */
 export function scaleOfRequest(
 	plan: CountablePlan,
 	lay: number,

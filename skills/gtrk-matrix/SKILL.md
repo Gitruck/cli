@@ -140,6 +140,17 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
 | 机读（你必带） | `--json` | 开关 · 关 | 人读日志转 stderr，stdout 只出结果 JSON |
 
+> ⚠️ **编排档位不是 flag。** `--arrange` 管的是**取数路**（在哪算：本机还是云端），
+> 与「怎么排」无关。编排档位（`direct` 高档锚定直排 / `temporal` 中档 / `semantic` 低档）
+> 是 **plan 层字段** `beat.arrange_mode`，**由 agent 在图纸层逐 beat 标注**，
+> 同一片内可混档。没有 `--arrange-tier` 这种参数，CLI 不猜档位。
+>
+> 高档还要在同一个 beat 上给 `direct_slots[]`：
+> `{ clip_id, clip_st, clip_ed, track_st?, track_ed?, query?, slot_role? }`。
+> `slot_role` 二选一——`quote` 引用段（画音逐秒对齐，端点是硬约束，**必须给
+> `track_st/track_ed`**）、`provenance` 硬出处段（位置可协商，要精修消端点残片）；
+> **缺席 = 按硬出处处置**。越界取值一律拒绝，MUST NOT 静默降级。
+
 **通用三态素材检索零件**（`gtrk matrix material`，云端素材库、**下载向**出参）：
 
 与上面那张表的剪辑向检索是**并列的第二条线**，出参契约独立（下载向直链 vs 剪辑向 segments），别混用：要 B-roll 段落走 `matrix search`/派单主路，要整条素材（BGM、配图、整条原片）走本零件。

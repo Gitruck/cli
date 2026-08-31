@@ -1343,11 +1343,13 @@ export interface DirectOutcome {
 	/** 实际落位的时间线起点；被拒时 null。 */
 	track_st: number | null;
 	status: "planned" | "sliver" | "rejected";
-	/** 人读文案（**只给人看**）。内嵌数值 ⇒ MUST NOT 进跨语言逐字节对拍面：
-	 * JS 把 `1` 输出成 `"1"`、Python f-string 输出 `"1.0"`，那是语言差异不是行为差异。
-	 * 机读判据一律看 `code`。 */
-	reason?: string;
-	/** 机读归因（`planned` 时整键缺席）。跨语言契约面上的就是这一项。 */
+	/** 机读归因（`planned` 时整键缺席）。**这是唯一的归因字段**。
+	 *
+	 * ★ 刻意**没有** `reason`：人读文案内嵌数值（「精修后 1.0s」），JS 输出 `"1"`、
+	 * Python f-string 输出 `"1.0"`——那是语言差异不是行为差异，进逐字节对拍面就是噪声。
+	 * 而「一侧产、一侧在边界剔掉」是更坏的形态：契约上不存在的字段，移植者会照着补，
+	 * 补完 parity 就红，红了又看不出为什么。文案由**消费侧按 code 现渲染**，
+	 * 于是本地路与云端路说同一句话，也不存在跨语言文案漂移。 */
 	code?: "sliver" | "overlap" | "out_of_beat" | "no_room" | "beat_no_span";
 	/** 精修是否真的动了窗口端点——用来如实回答「这一槽的闪帧风险处理了没有」。 */
 	refined: boolean;
@@ -1477,7 +1479,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	const span = beat.track_ed - beat.track_st;
 	if (!(span > 0)) {
 		for (const d of dsIn) {
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 窗口无长度", code: "beat_no_span", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", code: "beat_no_span", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 		}
 		return { slots: [], direct: outcomes };
 	}
@@ -1550,12 +1552,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 			track_st: r3(st),
 			// 精修后短于最小槽长 ⇒ 照落但标出来（直排是指令，MUST NOT 因为短就丢）
 			status: isSliver ? "sliver" : "planned",
-			...(isSliver
-				? {
-						reason: `直排槽精修后 ${r3(useDur)}s，短于最小可用镜头长 ${MIN_SHOT_SEC}s——已按指令照落，成片上会是一个很短的镜头`,
-						code: "sliver" as const,
-					}
-				: {}),
+			...(isSliver ? { code: "sliver" as const } : {}),
 			refined,
 			has_cuts: hasCuts,
 			cut_snap: cutSnap,
@@ -1568,12 +1565,12 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		const st = d.track_st as number;
 		const ed = d.track_ed as number;
 		if (!(ed > st) || st < beat.track_st - 1e-6 || ed > beat.track_ed + 1e-6) {
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置越出 beat 窗口", code: "out_of_beat", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", code: "out_of_beat", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 			continue;
 		}
 		if (overlaps(st, ed)) {
 			// MUST NOT 静默让位——引用段的位置是硬约束，移一下就是画音错开
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）", code: "overlap", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", code: "overlap", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 			continue;
 		}
 		place(d, st, ed, true); // 钉位槽：轨窗是用户给的承诺，轨长不跟着源窗缩
@@ -1594,7 +1591,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		}
 		if (!done) {
 			if (beat.track_ed - cursor >= Math.min(want, MIN_SHOT_SEC)) place(d, cursor, Math.min(cursor + want, beat.track_ed), false);
-			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 内已无足够空隙容纳该直排槽", code: "no_room", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
+			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", code: "no_room", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 		}
 	}
 
