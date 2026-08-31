@@ -284,6 +284,54 @@ export function validatePlanForLay(planRaw: unknown): string[] {
 				}
 			}
 		}
+		// ── 编排档位与直排槽（add-arrange-direct-tier）─────────────────────────
+		// ⚠️ 本块 MUST 留在下面 `queries` 那条 `continue` **之前**：那条 continue 会跳过
+		// 本 beat 剩余全部校验，插在其后会让「queries 形态也坏了」的 beat 整块漏检。
+		// 档位：缺席 = 低档 = 逐字节零回归，故必须先判 `!== undefined` 再判越界；
+		// 越界即拒，MUST NOT 静默降级到低档——与服务端 6214 同一条纪律。
+		const tier = beat.arrange_mode as unknown;
+		if (tier !== undefined && !(typeof tier === "string" && (ARRANGE_TIERS as readonly string[]).includes(tier))) {
+			errs.push(
+				`beat ${beat.beat}：arrange_mode 非法（三选一：${ARRANGE_TIERS.join(" | ")}；得到 ${JSON.stringify(tier)}）——越界档位 MUST NOT 静默降级到低档`,
+			);
+		}
+		const ds = beat.direct_slots as unknown;
+		if (ds !== undefined) {
+			if (!Array.isArray(ds)) {
+				errs.push(`beat ${beat.beat}：direct_slots 须为数组（可删槽，不可改坏形态）`);
+			} else {
+				const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+				for (const d of ds as Record<string, unknown>[]) {
+					if (!d || typeof d !== "object" || Array.isArray(d)) {
+						errs.push(`beat ${beat.beat}：存在非对象 direct_slot 条目`);
+						break;
+					}
+					const { clip_id, clip_st, clip_ed, track_st, track_ed } = d;
+					if (!(typeof clip_id === "string" && clip_id) || !num(clip_st) || !num(clip_ed)) {
+						errs.push(`beat ${beat.beat}：direct_slot 须为 {clip_id 非空字符串, clip_st/clip_ed 有限数字}（得到 ${JSON.stringify(d)}）`);
+						break;
+					}
+					if (!(clip_st < clip_ed)) {
+						errs.push(
+							`beat ${beat.beat}：direct_slot 源窗须 clip_st < clip_ed（得到 ${JSON.stringify(clip_st)}–${JSON.stringify(clip_ed)}）——源窗是「出处」的本体`,
+						);
+						break;
+					}
+					// 半给的位置在下游是**静默**处置的（投影层丢掉位置、铺轨层降级成顺排），
+					// 静默移位正是引用段要防的东西，故在此拒掉而不是让它悄悄改语义。
+					if ((track_st === undefined) !== (track_ed === undefined)) {
+						errs.push(`beat ${beat.beat}：direct_slot 的 track_st/track_ed 要么都给要么都不给（只给一半是无意义的半个约束）`);
+						break;
+					}
+					if (track_st !== undefined && !(num(track_st) && num(track_ed) && track_st < track_ed)) {
+						errs.push(
+							`beat ${beat.beat}：direct_slot 的时间线位置须为有限数字且 track_st < track_ed（得到 ${JSON.stringify(track_st)}–${JSON.stringify(track_ed)}）`,
+						);
+						break;
+					}
+				}
+			}
+		}
 		if (!Array.isArray(beat.queries)) {
 			errs.push(`beat ${beat.beat}：queries 必须为数组`);
 			continue;
@@ -351,8 +399,13 @@ export function anchorAtSec(utteranceText: string, keyword: string, trackSt: num
  * - `direct`   高档 · 锚定直排：出处窗直给，不检索不排序，但**过同一套 refineWindow**
  * - `temporal` 中档 · 语义×时序先验：**尚未实现**（衰减函数形态待打样，服务端报 6214）
  * - `semantic` 低档 · 纯语义：现状，缺省
+ *
+ * 取值表用 `as const` 而非裸联合，是因为**运行期要能 includes**（`validatePlanForLay`
+ * 拒越界档位）。一处真值派生出类型，避免「类型加了新档、校验数组忘了加」这类静默漏网
+ * ——同 `MATERIAL_CLASSES` 的写法。
  */
-export type ArrangeTier = "direct" | "temporal" | "semantic";
+export const ARRANGE_TIERS = ["direct", "temporal", "semantic"] as const;
+export type ArrangeTier = (typeof ARRANGE_TIERS)[number];
 
 /**
  * 直排槽（高档入参）：「这一段就用这条素材的这一段，别检索」。
