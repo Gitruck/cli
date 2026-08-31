@@ -25,6 +25,7 @@ import {
 	BROLL_PREVIEW_DIR,
 	CUT_ALIGN_DEFAULT,
 	SCORE_FLOOR_DEFAULT,
+	SIGNAL_COVERAGE_LOW,
 	brollMaterialIdFor,
 	layBrollTracks,
 	mergedCandidates,
@@ -2302,21 +2303,50 @@ async function layIntoProject(
 		log.info(`关键词锚：钉位 ${cnt.planned} · 用户钉选 ${cnt.pinned} · 降级 ${cnt.degraded}（共 ${anchorOutcomes.length} 锚）`);
 	}
 	const markOn = typeof layOpts.markWeight === "number" && layOpts.markWeight > 0;
-	if (markOn) {
-		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 段 · 中性 ${markStats.neutral} 段（w=${layOpts.markWeight}）`);
-	}
-	// 零覆盖明示（fix-describe-cache-locality）：库存在但**本片**一条缓存都没命中这一档此前静默通过
-	// ——用户以为加权在跑，实际全部中性、权重原样回吐给 sim（260828 三条美食片 describes=0 实锤）。
-	// 与「索引库不存在」告警分案：那档是没库，这档是有库没本片。
 	const hlOn = typeof layOpts.highlightWeight === "number" && layOpts.highlightWeight > 0;
-	const zeroCov: string[] = [];
-	if (markOn && markStats.hit === 0 && markStats.neutral > 0) zeroCov.push(`美观度（--mark-weight ${layOpts.markWeight}）`);
-	if (hlOn && markStats.hlHit === 0 && markStats.hlNeutral > 0) zeroCov.push(`看点（--highlight-weight ${layOpts.highlightWeight}）`);
+	// 信号覆盖率（add-signal-coverage-reporting）：分母是**参与融合的候选段总数**——
+	// 靠 fix-arrange-diagnostics-granularity 把 markStats 换成段粒度之后这个数才算得准
+	// （此前是 Set<clip_id>，二创单素材场景下恒 1/1）。
+	const covOf = (hit: number, neutral: number): number | undefined => (hit + neutral > 0 ? r3num(hit / (hit + neutral)) : undefined);
+	const markCov = markOn ? covOf(markStats.hit, markStats.neutral) : undefined;
+	const hlCov = hlOn ? covOf(markStats.hlHit, markStats.hlNeutral) : undefined;
+	const pct = (v: number): string => `${Math.round(v * 1000) / 10}%`;
+	if (markOn) {
+		log.info(
+			`美观度权重（w=${layOpts.markWeight}）：mark 缓存命中 ${markStats.hit} 段 / 共 ${markStats.hit + markStats.neutral} 段` +
+				`${markCov === undefined ? "" : `（覆盖率 ${pct(markCov)}）`}`,
+		);
+	}
+	if (hlOn) {
+		log.info(
+			`看点权重（w=${layOpts.highlightWeight}）：highlight 缓存命中 ${markStats.hlHit} 段 / 共 ${markStats.hlHit + markStats.hlNeutral} 段` +
+				`${hlCov === undefined ? "" : `（覆盖率 ${pct(hlCov)}）`}`,
+		);
+	}
+	// 覆盖率告警分两档（add-signal-coverage-reporting）。合并成一句是错的：
+	// **零覆盖**是「权重完全没起作用」，根因通常是本片没 describe 过；
+	// **低覆盖**是「只对少数段起作用」，那时往往**已经 describe 过了**，真因是素材长而描述帧稀疏
+	// （超出就近命中上限的段拿不到信号）——对这一档说「先跑 describe」是条错建议。
+	// 旧判据只认 hit===0，走查实测 6.3% 覆盖率完全不触发，用户以为加权在跑。
+	const dims: { name: string; flag: string; cov: number | undefined }[] = [
+		...(markOn ? [{ name: "美观度", flag: `--mark-weight ${layOpts.markWeight}`, cov: markCov }] : []),
+		...(hlOn ? [{ name: "看点", flag: `--highlight-weight ${layOpts.highlightWeight}`, cov: hlCov }] : []),
+	];
+	const zeroCov = dims.filter((d) => d.cov === 0).map((d) => `${d.name}（${d.flag}）`);
+	const lowCov = dims.filter((d) => d.cov !== undefined && d.cov > 0 && d.cov < SIGNAL_COVERAGE_LOW);
 	if (zeroCov.length) {
 		log.warn(
 			`${zeroCov.join(" 与 ")}权重开了但**本片零缓存覆盖**：全部候选按中性处理，排序与不开权重完全一致（权重已回吐给语义分）。` +
 				`根因通常是本 plan 未经理解——先跑 gtrk matrix describe --plan <plan 路径> 再重跑 lay 才有效；` +
 				`手写 plan（免索引直排）也走这条路，此时美观度/看点/模糊降权三条信号一并不生效`,
+		);
+	}
+	if (lowCov.length) {
+		log.warn(
+			`${lowCov.map((d) => `${d.name}（${d.flag}）覆盖率仅 ${pct(d.cov as number)}`).join("；")}` +
+				`——只有这些候选段拿到了信号分，其余按中性处理，排序主要仍由语义分决定。` +
+				`这一档通常**不是没 describe 过**，而是素材长、描述帧稀疏：一个素材往往只有一个时间点有描述行，` +
+				`离它太远的段就近命中不上。要提高覆盖率得让描述帧更密，重跑一次 describe 不会改善`,
 		);
 	}
 	// pinned 让位必须明示（matrix-command spec：冲突后到让位并 summary 明示，MUST NOT 静默）
@@ -2607,6 +2637,18 @@ async function layIntoProject(
 			// 看点维度同款账面（fix-describe-cache-locality）：仅开启时出现（关闭时 lay JSON 逐字节不变）
 			...(hlOn
 				? { highlight_weight: layOpts.highlightWeight, highlight_hit: markStats.hlHit, highlight_neutral: markStats.hlNeutral }
+				: {}),
+			// 信号覆盖率（add-signal-coverage-reporting）：逐维度给出比例，省得消费方自己除。
+			// ⚠️ **权重为 0 的维度整键缺席，MUST NOT 补 0**——「没开这一维」与「开了但零覆盖」
+			// 是两件事，补 0 会把它们抹平成同一个数，而那两件事的处置完全不同。
+			// `coverage: null` 是第三档：开了、但一个候选段都没有（分母为 0，不可判）——同样 MUST NOT 写 0。
+			...(markOn || hlOn
+				? {
+						signal_coverage: {
+							...(markOn ? { mark: { hit: markStats.hit, neutral: markStats.neutral, coverage: markCov ?? null } } : {}),
+							...(hlOn ? { highlight: { hit: markStats.hlHit, neutral: markStats.hlNeutral, coverage: hlCov ?? null } } : {}),
+						},
+					}
 				: {}),
 			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）。
 			// 三个数**同分母、按段计**（fix-arrange-diagnostics-granularity）：requested = placed + yielded 恒成立。

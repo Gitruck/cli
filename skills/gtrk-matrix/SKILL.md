@@ -290,7 +290,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 ```
 
 - `--json`：人读日志走 stderr，成功时 stdout 只有一行结果 JSON：
-  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
+  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
   （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/items? }`）
 - **拒铺结局**（候选轨已被用户编辑）：stdout 出 `{ ok:false, refused:[…], reason:"tracks_edited", planReusable:true, … }` 且非 0 退出——不是命令失败，plan 已产出，处置见下表。
 - **命令失败**（缺派单、鉴权失败、全部 query 失败、参数越界、坏 plan 被 lay 拒）→ 非 0 退出、报错在 stderr、stdout 无 JSON。先看退出码，把 stderr 报错如实回给用户。
@@ -308,6 +308,8 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - `lay.removedTracks` / `lay.keptEditedTracks`：剥了哪些旧自产轨 / 因「你编辑过」保留未剥的轨。删了什么必须跟用户说。
 - `lay.dedup`：`emptySlots`（宁空不重复的空槽数——多了是该补料或走动线②的信号）、`adjacentWaived`。
 - `lay.pinned`（有钉选才出现）：`requested/placed/yielded`——三个数**按段计**（键 `<clip_id>@<段内锚点毫秒>`）且同分母，`placed + yielded === requested` 恒成立。整片单素材的工程（二创：一条长视频钉多处引用）全靠这个粒度才看得出「钉了 5 段只落了 1 段」。`yielded` 非空要**逐段指名**哪些没落上（stderr 也有告警）。
+- `lay.signal_coverage`（开了 `--mark-weight` / `--highlight-weight` 才出现，**只出开了的那一维**）：`coverage = hit/(hit+neutral)`，分母是参与融合的候选**段**数。
+  覆盖率低不等于「没 describe」——一个素材通常只有一个时间点有描述行，离它太远（>15s）的段就近命中不上，**素材越长覆盖率越低**。所以：`coverage` 为 0 ⇒ 本片确实没理解过，去跑 `matrix describe --plan`；`coverage` 偏低但非 0 ⇒ **重跑 describe 不会改善**，如实告诉用户「信号只对这 N% 的候选段起了作用，其余按中性、排序主要还是语义分」，别让他以为加权在全面生效。
 - `lay.anchors` / `lay.anchor_details`（拆分稿圈了关键词锚才出现）：`planned` 钉位数 / `pinned` 用户钉选占锚槽数 / `degraded` 降级数——`degraded` 非零要按 `anchor_details` 指名哪个关键词没锚上及原因（无合格命中/文本漂移/窗口不足），提示用户该处「听到关键词看到画面」的卡点没兑现、可换 query 或补素材后重跑。
 - `lay.downloads`：`raw` 原片回落 / `failed` 掉槽位非零时提一句。
 - `integrity`（素材落盘自检，只在真写回过时出现）：`dangling` 悬空引用全量清单；`danglingReferenced`（时间线上没素材可放）与 `danglingOrphan`（只挂在 materials 里）严重度差一个量级，**分开说**；`external` 绝对路径找不到文件另一档。告知不拦阻，别自己删素材。

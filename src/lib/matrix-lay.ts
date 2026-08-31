@@ -207,6 +207,22 @@ export const BLURRY_PENALTY = 0.03;
  * 无运动信号（旧库/云端候选）时降权恒 0 ⇒ 排序逐字节零回归。 */
 export const MOTION_HOT_PENALTY = 0.02;
 
+/**
+ * 质量信号**低覆盖告警**阈值（add-signal-coverage-reporting）：
+ * 开了 `--mark-weight` / `--highlight-weight` 而拿到缓存分值的候选段占比低于此值时打 WARN。
+ *
+ * ★ **这是告警阈值，不是行为阈值。** 它 MUST NOT 参与排序、score 地板或任何取舍判定
+ * ——取错了的代价上限是「多一条或少一条告警」，不会改变一帧产物。
+ * 请与 `DESCRIBE_NEAREST_MAX_GAP_MS` 那类**行为常量**分清楚：那条动一下会改排序，
+ * 所以它的头注写着「MUST NOT 拍脑袋」；那条纪律**不适用于本常量**，
+ * 别顺手套过来当成不敢调它的理由。
+ *
+ * 取 0.5 的理由：过半候选段拿不到信号时，排序**主要**由未加权的语义分决定，
+ * 而用户以为自己在用信号选片——这正是需要开口说话的那条线。
+ * （走查实测的 6.3% 覆盖率此前完全不触发告警：旧判据只认「命中数为 0」。）
+ */
+export const SIGNAL_COVERAGE_LOW = 0.5;
+
 /** 去重粒度（D1）：scene=场景级（默认）；material=严格档（同一素材文件整轮只消费一次）。 */
 export type DedupScope = "scene" | "material";
 
