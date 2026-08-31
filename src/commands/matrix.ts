@@ -312,14 +312,13 @@ export function registerMatrix(program: Command): void {
 		)
 		.option(
 			"--arrange <mode>",
-			"B-roll 编排取数路 local|shadow|cloud。**不传时按素材来源自动定档**：铺你自己电脑里的素材=cloud" +
-				"（编排在云端做，算法只在服务端迭代）；铺素材库/普通/概念素材=local（原来什么样以后还什么样，逐字不动）。" +
-				"shadow=本机照跑照铺轨，同时把编排交给云端跑一遍**只对拍不采纳**；cloud=采纳云端编排产物，" +
-				"本机复算自校验不一致时回落本机并大声告知。" +
-				"⚠️ 本地素材走 cloud 时**没网就直接报错**，不会悄悄改用本机编排——那会给你另一套算法的结果而你不知情；" +
-				"确实要离线出片就显式加 --arrange local（那份本地编排仍随包，但不再随服务端更新）。" +
-				"云端档按「编排量」计费，跑前会报预估并征求确认（--yes 跳过）。" +
-				"环境变量 GITRUCK_ARRANGE=off 是总闸，可随时把云端压回本机",
+			"B-roll 编排取数路 local|shadow|cloud，**按素材来源自动定档，一般不用传**：" +
+				"铺你自己电脑里的素材=cloud（编排在云端做，算法只在服务端迭代，按「编排量」计费，" +
+				"跑前报预估并征求确认、--yes 跳过）；铺素材矩阵的素材=local（编排仍在本机、不计费，逐字不动）。" +
+				"shadow=本机照跑照铺轨、云端只对拍不采纳；cloud=采纳云端产物，自校验不一致时回落本机并大声告知。" +
+				"⚠️ 本地素材路上 --arrange local **已不受理**（编排只在服务端迭代，留旧路等于让你在不知情时拿到另一套算法的结果），" +
+				"且云端拿不到产物时**直接报错**、不会悄悄换算法把活干完。" +
+				"它也不是省钱开关——用素材矩阵的素材同样要付检索费，两条路都要花钱、只是花在不同环节",
 		)
 		.option(
 			"--arrange-cost-cap <n>",
@@ -463,7 +462,7 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	if (pos.kind === "material") {
 		if (opts.local || dirs.length) {
 			throw new Error(
-				"matrix material 不接受 --local/--dirs：本零件是云端素材库检索（本地索引无音频语义面）；本地素材检索走 gtrk matrix --local --dirs",
+				"matrix material 不接受 --local/--dirs：本零件是素材矩阵检索（本地索引无音频语义面）；本地素材检索走 gtrk matrix --local --dirs",
 			);
 		}
 		if (opts.plan || opts.materials) throw new Error("--plan/--materials 仅用于 matrix describe / matrix lay（不做静默忽略）");
@@ -509,7 +508,7 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	if (opts.local) {
 		if (!dirs.length) throw new Error("--local 需要 --dirs <a,b,...> 圈定检索域（检索域永远用户可见，不静默复用）");
 		if (opts.column) throw new Error("--local 与 --column 互斥：栏目检索偏好（column_tag_ids/facets）是云端语义，本地索引不适用");
-		if (opts.materialClass) throw new Error("--local 与 --material-class 互斥：素材类型过滤是云端素材库语义，本地索引不适用");
+		if (opts.materialClass) throw new Error("--local 与 --material-class 互斥：素材类型过滤是素材矩阵语义，本地索引不适用");
 		return;
 	}
 	if (dirs.length) throw new Error("--dirs 仅用于 --local 检索或 matrix index（云端检索不接受该参数，不做静默忽略）");
@@ -1731,18 +1730,33 @@ function parseArrangeMode(raw: string | undefined): ArrangeMode | undefined {
 	throw new Error(`--arrange 只支持 local、shadow 或 cloud（得到「${raw}」）`);
 }
 
-/** 缺省定档（P4.1 抽芯）：**本地素材路走云端，云端素材路逐字不动**。
+/** 档位定案（P4.1 抽芯）：**本地素材路只能走云端**，素材矩阵路逐字不动。
  *
- * 这是「按业务线切，不按算法切」落到缺省值上的执行面（design §8′ 终裁 + 主理人
- * 2026-08-31「以后涉及本地素材的，就全部走云端了，不需要维护两套」）。
- * 显式传的档位恒优先 —— auto 只在没传时说话。
+ * 「按业务线切，不按算法切」落到档位上的执行面（design §8′ 终裁 + 主理人 2026-08-31
+ * 两次拍板：「以后涉及本地素材的，就全部走云端了，不需要维护两套」→
+ * 「我想要把本地编排完全丢掉，只能走我们云端编排」）。
  *
- * ⚠️ 这里**没有**「把本地决策代码抽出分发物」这一步，那是做不到的：云端素材路仍要在本地
- * 跑同一份 `planBeatFills`（§8′ 明载「两条路共用的算法仍将随包公开——云端路需要它」）。
- * 抽芯抽掉的是**本地素材路对本地决策的依赖**，不是那段代码本身。 */
+ * 于是本地素材路上：不传 = `cloud`；**显式传 `local` 直接报参数错**。
+ * 留一个「用旧引擎」的口子等于两套引擎都得维护，而用户还会在不知情时拿到冻结那套的产物
+ * ——那正是这次要消灭的东西。
+ *
+ * ⚠️ 「完全丢掉」是**用户面**的，不是代码面：`planBeatFills` **删不掉**，
+ * 素材矩阵路仍要在本地跑同一份（§8′ 明载「两条路共用的算法仍将随包公开——矩阵路需要它」）。
+ * 本函数关的是本地素材路通往它的那扇门。
+ *
+ * ★ 唯一的例外是 `GITRUCK_ARRANGE` 总闸，它在本函数**之后**生效（见 `resolveArrangeMode`）：
+ * 那是**我们**的止血阀不是用户的逃生舱——云端编排真出故障时，没有它就只能眼看所有人停工。 */
 function resolveAutoArrangeMode(explicit: ArrangeMode | undefined, plan: BrollPlan): ArrangeMode {
-	if (explicit !== undefined) return explicit;
-	return isLocalArrangeScope(plan) ? "cloud" : "local";
+	if (!isLocalArrangeScope(plan)) return explicit ?? "local";
+	if (explicit === "local") {
+		throw new Error(
+			"本地素材的 B-roll 编排只能走云端，`--arrange local` 已不再受理。\n" +
+				"编排算法自 2026-08-31 起只在服务端迭代；再留一条本机旧路，等于让你在不知情时拿到另一套算法的结果。\n" +
+				"⚠️ 它**不是**一个「省钱」开关——用素材矩阵的素材同样要付检索费。两条路都要花钱，只是花在不同环节。\n" +
+				"（素材矩阵那条路的**编排**不受影响、仍在本机跑且不计费；它的**检索**照旧按次计费。）",
+		);
+	}
+	return explicit ?? "cloud";
 }
 
 /** --arrange-cost-cap 解析：正整数；越界即参数错误。 */
@@ -2161,8 +2175,8 @@ async function layIntoProject(
 		...(gapModeEff !== "none" ? { gapFill: gapModeEff } : {}),
 	};
 	// 编排取数路（P3.1 → P4.1 抽芯）：**不传 `--arrange` 时按业务线定档**——
-	// 本地素材路走 cloud，云端素材路走 local（逐字不动）。显式档位恒优先。
-	// 云端档只承担本地素材上轨铺排；云端素材路由 isLocalArrangeScope 挡在门外，
+	// 本地素材路走 cloud，素材矩阵路走 local（逐字不动）。显式档位恒优先。
+	// 云端档只承担本地素材上轨铺排；素材矩阵路由 isLocalArrangeScope 挡在门外，
 	// 那不是回滚，是终裁「按业务线切，不按算法切」的执行面。
 	let arrangeMode = resolveArrangeMode(resolveAutoArrangeMode(layOpts.arrangeMode, plan));
 	// ★ 抽芯的实质：本地素材路**不再自动回落本地**。
@@ -2170,16 +2184,12 @@ async function layIntoProject(
 	//   理由是诚实性：回落产出的是**另一套算法**的结果，用户以为自己拿到的是云端那套。
 	//   保留两个例外，见 arrange-gate 的 `strictCloud` 注释（总闸 / 自校验）。
 	//
-	// ★★ 分界线是**「谁做的决定」**，不是「有没有出错」：
-	//   系统故障（连不上 / 被拒 / 产物违约）⇒ 报错，因为那是我们没兑现承诺；
-	//   用户选择（拒绝预估确认）⇒ 回落 + 大声说明，因为不花钱是他自己选的。
-	//
 	// 曾想再补一条「没配凭据 ⇒ 回落而非报错」，实测后**撤掉了**：`runLayMode` 开头就
 	// 无条件 `loadConfig()`，缺 Key 在这之前几百行就已经明确报错了 —— 那个分支不可达。
 	// 不可达的兜底 + 跑不起来的测试，比没有更糟（它会让人以为这条路被守住了）。
 	const strictCloud = isLocalArrangeScope(plan);
 	// 预估确认门（P2.2b）：云端档跑前报编排量并征求确认。**只在真会发请求时问**——
-	// 云端素材路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
+	// 素材矩阵路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
 	if (arrangeMode !== "local" && isLocalArrangeScope(plan)) {
 		const confirmFn = layOpts.deps.confirm ?? (process.stdin.isTTY ? confirmViaStdin : undefined);
 		const gate = await estimateGate(arrangeUnits(scaleOfRequest(plan, layN, decisionOpts)), {
@@ -2192,19 +2202,33 @@ async function layIntoProject(
 			...(confirmFn ? { confirm: confirmFn } : {}),
 			log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
 		});
-		// 拒绝/无从确认 ⇒ 退回本地编排，**工程照常完成**（不是中止：编排本机也做得了，
-		// 用户拒的是「上云」不是「铺轨」——把整轮掐掉等于替他做了他没做的决定）。
+		// 拒绝/无从确认 ⇒ **整轮铺轨中止**，工程零改动、零云端调用。
 		//
-		// ★ 抽芯后这条**仍然回落**，与「不再自动回落」不矛盾：那条针对的是**系统故障**
-		//   （连不上 / 被拒 / 产物违约），这里是**用户的选择**。分界线是「谁做的决定」——
-		//   故障时静默换算法是我们瞒着他，他主动不花钱时换算法是他自己选的。
-		//   但**必须说清楚换了引擎**，否则「不静默」就成了空话。
+		// ⟲ 2026-08-31 二次拍板前，这里是「回落本地编排、工程照常完成」。那条依赖
+		//   「本地还有第二个引擎可退」这个前提；主理人裁定「把本地编排完全丢掉」后前提没了，
+		//   再回落就是拿素材矩阵路那份**不再更新**的算法冒充云端产物交给他。
+		//   ⇒ 改成中止，姿势对齐同命令里既有的 `image_move_billing_declined`：
+		//   不花钱就不给货，但**plan 照常可用**、工程一个字节没动，他随时可以改主意重跑。
 		if (!gate.proceed) {
-			arrangeMode = "local";
-			log.warn(
-				"本轮改用**随包的本地编排**出片（它仍在分发物里、云端素材路也用它，但不再随服务端更新）——" +
-					"与云端那套算法的结果可能不同。要用云端编排：交互环境下确认，或在脚本里显式加 --yes。",
+			log.err(
+				"已取消：本地素材的 B-roll 编排计费确认被拒绝——本轮铺轨中止，工程文件零改动、零云端调用" +
+					"（broll-plan.json 照常可用，随时可重跑）。\n" +
+					"这一步只在云端跑，没有本机备用算法可退——不确认就没有编排结果。\n" +
+					"可用 --yes 跳过确认，或 --arrange-cost-cap 先设个上限再跑。",
 			);
+			return {
+				declined: true,
+				lay: {
+					declined: true,
+					laidTracks: [],
+					laidClips: 0,
+					removedTracks: [],
+					keptEditedTracks: [],
+					blackTrack: null,
+					blackBedHoleSec: 0,
+					blackBedHoles: [],
+				},
+			};
 		}
 	}
 	const gateLog = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };

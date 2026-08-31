@@ -5,7 +5,7 @@
  *
  * ## 适用面（主理人 2026-08-29 终裁）
  *
- * **只作用于本地素材上轨铺排。** 云端素材路（素材库检索 → 客户端挑选 → 确认 /
+ * **只作用于本地素材上轨铺排。** 素材矩阵路（素材库检索 → 客户端挑选 → 确认 /
  * 快速模式铺到位）的编排决策继续在本地跑、逐字不动——按业务线切，不按算法切。
  * 判据在 `plan.member_type === "local"`，见 `isLocalArrangeScope`。
  *
@@ -18,8 +18,19 @@
  * | ③ algo_pin | 口径版本不认识（6212）/ 双端复算不一致（6210） | 服务端拒绝 → 本文件接住回落 |
  * | ④ 版本回退 | npm 版本回滚 | 代码外 |
  *
- * **四层的共同语义是「回落本地，工程照做完」，不是「报错中断」。** 用户在跑的是自己的
- * 片子，我们的迁移节奏不该成为他交不了片的理由。
+ * ⟲ **2026-08-31 抽芯后，四层语义按「谁做的决定」一分为二**（主理人两次拍板：
+ * 「本地素材全部走云端、不维护两套」→「把本地编排完全丢掉，只能走我们云端编排」）：
+ *
+ * - **系统故障**（②③ 与产物违约）在本地素材路上 **报错中断**，不再回落。
+ *   回落产出的是另一套算法的结果，而用户以为拿到的是云端那套——静默换引擎比报错更坏。
+ * - **总闸（①）** 仍回落：它是**我们**的止血阀，不是用户的逃生舱。云端编排真出故障时，
+ *   没有它就只能眼看所有人停工。它是 env 开关、不进用户文档，触发时大声说明换了引擎。
+ * - **版本回退（④）** 在代码外。
+ *
+ * 原文存档：「四层的共同语义是『回落本地，工程照做完』，不是『报错中断』——
+ * 用户在跑的是自己的片子，我们的迁移节奏不该成为他交不了片的理由。」
+ * 那句话在**双引擎并存期**成立；抽芯后本地素材路已无第二个引擎可退，它就不再是保护、
+ * 而是「悄悄给你一份不一样的东西」。
  *
  * ## ★ 一处诚实性要求
  *
@@ -58,7 +69,7 @@ export function resolveArrangeMode(requested: ArrangeMode, env: NodeJS.ProcessEn
 /**
  * 适用面判据：**只有本地素材路**走云端编排。
  *
- * 云端素材路的 plan `member_type` 是 `internal`/`external`，一律留在本地跑——
+ * 素材矩阵路的 plan `member_type` 是 `internal`/`external`，一律留在本地跑——
  * 这不是性能取舍，是主理人 260829 的终裁：按业务线切，不按算法切。
  */
 export function isLocalArrangeScope(plan: Pick<BrollPlan, "member_type">): boolean {
@@ -68,7 +79,7 @@ export function isLocalArrangeScope(plan: Pick<BrollPlan, "member_type">): boole
 /** 回落归因（人读告警 + 机读诊断共用；MUST NOT 静默）。 */
 export type FallbackReason =
 	| "kill_switch" // ① 总闸
-	| "out_of_scope" // 云端素材路——不是回滚，是本来就不该走云端
+	| "out_of_scope" // 素材矩阵路——不是回滚，是本来就不该走云端
 	| "unreachable" // ② 服务端熔断
 	| "rejected" // ③ 服务端业务拒绝（含 algo_pin 与双端复算不一致）
 	| "malformed" // 产物结构违约
@@ -101,7 +112,7 @@ export interface ArrangeGateDeps {
 	 *
 	 * ★ 订正一处早先的预判：本字段原注释写「P4 抽芯后本地无从复算，届时关闭」。
 	 * 那句话预设了抽芯会把 `planBeatFills` 抽出分发物，而 design §8′ 终裁后它抽不掉
-	 * ——云端素材路仍要在本地跑同一份决策。既然它还在，复算就做得到，
+	 * ——素材矩阵路仍要在本地跑同一份决策。既然它还在，复算就做得到，
 	 * 这层白送的安全网没有理由关。
 	 */
 	selfCheck?: boolean;
@@ -122,7 +133,11 @@ export interface ArrangeGateDeps {
 	strictCloud?: boolean;
 }
 
-/** 抽芯档下不再回落的那三种情形共用的错误。**带逃生舱**——报错必须给出路。 */
+/** 抽芯档下不再回落的那三种情形共用的错误。
+ *
+ * ★ 2026-08-31 主理人二次拍板「把本地编排完全丢掉，只能走我们云端编排」后，
+ * 本错误**不再给 `--arrange local` 逃生舱**——那条路已被 `resolveAutoArrangeMode` 关死，
+ * 指过去只会让用户再撞一次参数错误。**报错仍必须给出路**，只是出路变成「重试 / 反馈」。 */
 export class ArrangeUnavailableError extends Error {
 	/** 鸭子标记：同 `ArrangeError`，多 bundle 下 instanceof 不可靠。 */
 	readonly arrangeUnavailable = true;
@@ -132,10 +147,11 @@ export class ArrangeUnavailableError extends Error {
 	) {
 		super(
 			`本地素材的 B-roll 编排在云端完成，本轮没能拿到云端产物：${detail}\n` +
-				"本地素材路自 2026-08-31 起全部走云端（算法只在服务端迭代），故这里**不再**悄悄改用本地编排" +
-				"——那会给你另一套算法的结果而你并不知情。\n" +
-				"出路：① 排查网络/凭据后重试；② 确实要离线出片就显式加 `--arrange local`，" +
-				"用随包的那份本地编排（它仍在分发物里、云端素材路也用它，但**不再随服务端更新**）。",
+				"本地素材的编排只在服务端跑（算法只在那里迭代），所以这里**不会**改用别的算法把活干完" +
+				"——那会给你一份和云端不同的结果而你并不知情。\n" +
+				"出路：先排查网络与凭据后重试；若持续失败请把这条报错发给我们——" +
+				"这说明是我们这边的问题，不该由你来绕过。\n" +
+				"（素材矩阵那条路的**编排**不受影响，本来就在你机器上跑、也不计费；它的检索照旧按次计费。）",
 		);
 		this.name = "ArrangeUnavailableError";
 	}
@@ -164,8 +180,8 @@ export async function runArrangeWithFallback(
 		return { outcome: deps.runLocal(), source: "local", mode, ...(requestedMode !== "local" ? { fallback: "kill_switch" as const } : {}) };
 	}
 	if (!isLocalArrangeScope(plan)) {
-		// 不是回滚——云端素材路本来就不该走云端编排（终裁：按业务线切）
-		log.info("本轮是云端素材路（member_type 非 local），编排继续在本地跑——云端编排只承担本地素材上轨铺排。");
+		// 不是回滚——素材矩阵路本来就不该走云端编排（终裁：按业务线切）
+		log.info("本轮是素材矩阵路（member_type 非 local），编排继续在本地跑——云端编排只承担本地素材上轨铺排。");
 		return { outcome: deps.runLocal(), source: "local", mode, fallback: "out_of_scope" };
 	}
 
