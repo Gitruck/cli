@@ -8,7 +8,7 @@
 >
 > 一条命令，把口播毛片变成可二次精修的剪辑工程。云端做重活，本地只装配，源视频不出本地。
 
-**🔗 [官网](https://cloud.ai-mcn.tv/zh-CN/cli) · [使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [快速开始](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [客户端下载](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli) · [用户协议](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [隐私政策](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf)**
+**🔗 [官网](https://cloud.ai-mcn.tv/zh-CN/cli) · [使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [计费说明](https://hocassian.feishu.cn/docx/DtendXStMogAbJxAOEmcCyC7n3e) · [快速开始](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [客户端下载](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli) · [用户协议](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [隐私政策](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf)**
 
 ![把智能创作 AI 能力，装进你的本地 Agent](assets/gtrk-agent-intro.png)
 
@@ -461,8 +461,9 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 > 端点不可达自动回落、服务端拒绝自动回落、卸回旧版本。**任何一道触发，工程都照常完成**——
 > 迁移节奏不该成为你交不了片的理由。
 >
-> 云端两档按新计量维度**编排量**计费（规模越大越贵：段落数 × 候选数 × 轨数）。跑前会报预估并征求确认，
-> `--yes` 跳过、`--arrange-cost-cap` 设本次上限（超限**前置拒绝**，零执行零计费）。
+> 云端两档按新计量维度**编排量**计费——要配画面的段落越多、每段候选素材越多、铺的候选轨越多就越贵。
+> 跑前会报预估并征求确认，`--yes` 跳过、`--arrange-cost-cap` 设本次上限（超限**前置拒绝**，零执行零计费）。
+> 完整计费口径（含既有的额度包 / 余额、阶梯价与免费档）见 **[计费说明](https://hocassian.feishu.cn/docx/DtendXStMogAbJxAOEmcCyC7n3e)**。
 > ⚠️ 预估值只供双端一致性校验，**实际计费恒以服务端复算值为准**；两值不一致时服务端会拒绝执行且不计费。
 > 上行的只有决策要读的字段——素材绝对路径、签名 URL、画面描述文本、派单负词、口播原文整句一律**不出你的机器**。
 >

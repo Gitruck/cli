@@ -8,7 +8,7 @@
 >
 > One command turns a raw talking-head recording into an editable, re-cuttable project. The cloud does the heavy lifting, your machine only assembles, and the source video never leaves it.
 
-**🔗 [Website](https://cloud.ai-mcn.tv/zh-CN/cli) · [Tutorial](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [Quick start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [Desktop client](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli) · [User agreement](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [Privacy policy](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf)**
+**🔗 [Website](https://cloud.ai-mcn.tv/zh-CN/cli) · [Tutorial](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk) · [Pricing](https://hocassian.feishu.cn/docx/DtendXStMogAbJxAOEmcCyC7n3e) · [Quick start](https://cloud.ai-mcn.tv/zh-CN/docs/quick-start) · [Desktop client](https://cloud.ai-mcn.tv/zh-CN/download) · [npm](https://www.npmjs.com/package/@gitruck/cli) · [User agreement](https://hocassian.feishu.cn/wiki/T6UywR8b3ik4Mgk7tP9c1b7Kn0b) · [Privacy policy](https://hocassian.feishu.cn/wiki/ZLRNwlEhfishYtkosUhcofMYnPf)**
 
 ![Put AI creation capabilities into your local agent](assets/gtrk-agent-intro.png)
 
