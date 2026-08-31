@@ -207,6 +207,22 @@ export const BLURRY_PENALTY = 0.03;
  * 无运动信号（旧库/云端候选）时降权恒 0 ⇒ 排序逐字节零回归。 */
 export const MOTION_HOT_PENALTY = 0.02;
 
+/**
+ * 质量信号**低覆盖告警**阈值（add-signal-coverage-reporting）：
+ * 开了 `--mark-weight` / `--highlight-weight` 而拿到缓存分值的候选段占比低于此值时打 WARN。
+ *
+ * ★ **这是告警阈值，不是行为阈值。** 它 MUST NOT 参与排序、score 地板或任何取舍判定
+ * ——取错了的代价上限是「多一条或少一条告警」，不会改变一帧产物。
+ * 请与 `DESCRIBE_NEAREST_MAX_GAP_MS` 那类**行为常量**分清楚：那条动一下会改排序，
+ * 所以它的头注写着「MUST NOT 拍脑袋」；那条纪律**不适用于本常量**，
+ * 别顺手套过来当成不敢调它的理由。
+ *
+ * 取 0.5 的理由：过半候选段拿不到信号时，排序**主要**由未加权的语义分决定，
+ * 而用户以为自己在用信号选片——这正是需要开口说话的那条线。
+ * （走查实测的 6.3% 覆盖率此前完全不触发告警：旧判据只认「命中数为 0」。）
+ */
+export const SIGNAL_COVERAGE_LOW = 0.5;
+
 /** 去重粒度（D1）：scene=场景级（默认）；material=严格档（同一素材文件整轮只消费一次）。 */
 export type DedupScope = "scene" | "material";
 
@@ -246,7 +262,11 @@ export interface FillStats {
 	emptySlots: number;
 	/** 跳剪避让「枯竭放行」次数（无次优候选时放行同素材近邻颗粒）。 */
 	adjacentWaived: number;
-	/** pinned 槽位落成数（plan 可编辑契约：agent 钉选被分配器满足的槽位事件数）。 */
+	/** pinned 落成数——**落位段键去重后的集合大小**（`segDiagKey`），不是槽位事件数。
+	 * ⚠️ 曾是事件自增，而 `pinnedYielded/requested` 是 clip 粒度 ⇒ 同一份 summary 里两个字段
+	 * **分母不同**，二创场景会输出 `placed=1/requested=1/yielded=0` 这种读起来自洽的错数
+	 * （fix-arrange-diagnostics-granularity）。现在三个数同分母，自洽律：
+	 * `pinnedPlaced + pinnedYielded === pinned.requested.length`。 */
 	pinnedPlaced: number;
 	/** 其中**因窗口精修（残片收缩）后不足 MIN_SHOT_SEC 而无候选可用**导致的留空数
 	 * （tune-shot-rhythm-thresholds 的代价观察项：SLIVER_MIN_SEC 上调的真实代价只可能在此显形。
@@ -258,7 +278,8 @@ export interface FillStats {
 	/** 落成槽位中取用了**模糊候选**的数量（fix-describe-cache-locality）：与 hotSlotsPlaced 同款——
 	 * 降权只改排序不作排除，候选稀疏时仍会取糊帧，如实记录让「为什么这颗糊」可追溯。 */
 	blurrySlotsPlaced: number;
-	/** pinned 候选未能入选数（冲突后到让位/候选枯竭/被排除——按候选 clip 计，summary 明示）。 */
+	/** pinned 未能入选数（冲突后到让位/候选枯竭/被排除）——**按段计**（`segDiagKey`），
+	 * 与 `pinnedPlaced` 同分母。 */
 	pinnedYielded: number;
 }
 
@@ -491,11 +512,30 @@ interface Pair {
 	blurry: boolean;
 }
 
-/** mark/highlight 融合统计收集器（按候选 clip 去重；planBeatFills 聚合进 summary）。 */
+/**
+ * 诊断口径的**段身份键**（fix-arrange-diagnostics-granularity）。
+ *
+ * 形态 `<clip_id>@<round(best×1000)>`——**与 mark / highlight 值表键逐字同形**
+ * （golden fixture README §入参形态第 1 条已把 `tsMs = round(seg.best*1000)` 定死，
+ * 服务端 `pools.py` 的 `int(js_round(...))` 是同一口径）。
+ *
+ * ★ 复用同一把键是刻意的，不是省事：信号覆盖率的分母正是**信号查表位点**的集合，
+ * 而查表位点就是 `(clip_id, tsMs)`。诊断键与查表键分家，覆盖率立刻不可解释。
+ *
+ * ⚠️ **已知折叠**：同一 clip 下 `best` 毫秒相同的两个段并成一个键。它们查的是同一帧，
+ * 在诊断口径上本就该并；MUST NOT 为消除折叠改用区间键（`start-end`）——那正是上面那条分家。
+ */
+export function segDiagKey(clipId: string, seg: { best: number }): string {
+	return `${clipId}@${Math.round(seg.best * 1000)}`;
+}
+
+/** mark/highlight 融合统计收集器（按**段**去重，键 = `segDiagKey`；planBeatFills 聚合进 summary）。
+ * ⚠️ 曾按 `clip_id` 去重——那让整片单素材的工程（二创解说）上这两个数恒为 1/1，
+ * 而信号命中本就是逐 segment 生效的（fix-arrange-diagnostics-granularity）。 */
 export interface MarkStatsSets {
-	/** describe 缓存命中的候选 clip_id 集。 */
+	/** describe 缓存命中的**段键**集。 */
 	hit: Set<string>;
-	/** 无缓存按中性处理的候选 clip_id 集。 */
+	/** 无缓存按中性处理的**段键**集。 */
 	neutral: Set<string>;
 	/** [fix-describe-cache-locality] 看点维度同款分账——两维缓存覆盖率可以不同
 	 * （旧缓存行有 mark 无 highlight），合账会让「本片零覆盖」告警在其中一维上误判。 */
@@ -510,16 +550,21 @@ export type MarkLookup = (clipId: string, tsMs: number) => number | undefined;
 const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
 
 /**
- * 候选的命中段序列 —— **候选池与上行值表物化共用的唯一枚举口径**。
+ * 候选的命中段序列 —— **候选池 / 上行值表物化 / pinned 结算三处共用的唯一枚举口径**。
  *
- * 提出来不是为了短：`arrange-wire.ts` 的 `materializeSignalTable` 要探的键正是
- * 「决策层会查的每一个 `(clip_id, tsMs)`」，而 `tsMs` 来自这里每一段的 `best`。
- * 两处各写一遍就是漂移源——**无命中段的整片伪段那一档尤其容易被漏掉**
- * （漏了它，无段候选的信号值在云端恒缺席，两端融合分不同 ⇒ 落位不同 ⇒
- * cloud 档自校验判不一致 ⇒ 已计费的产物被丢弃）。
+ * 提出来不是为了短，是因为有三个消费方必须逐段对齐，少一个就是一处静默漂移：
  *
- * ⚠️ MUST NOT 退回内联枚举、也 MUST NOT 靠注释声明「与某行逐字一致」：
- * 行号会漂、两边会各自演化，而没有任何测试会因此变红。
+ * 1. **候选池**（本文件 `buildPools`）——决策层真正会看的那些段；
+ * 2. **上行值表物化**（`arrange-wire.ts` 的 `materializeSignalTable`）——要探的键正是
+ *    「决策层会查的每一个 `(clip_id, tsMs)`」，而 `tsMs` 来自这里每一段的 `best`。
+ *    漏了段，无段候选的信号值在云端恒缺席 ⇒ 两端融合分不同 ⇒ 落位不同 ⇒
+ *    cloud 档自校验判不一致 ⇒ **已计费的产物被丢弃**；
+ * 3. **pinned 结算**——`pinnedRequested` 必须与候选池逐段对齐，否则「钉了几个」与
+ *    「落了几个」的分母对不上，自洽律会假性失败。
+ *
+ * ⚠️ **无命中段的整片伪段那一档尤其容易被漏掉**——三个消费方各写一遍时，漏的恒是它。
+ * MUST NOT 退回内联枚举、也 MUST NOT 靠注释声明「与某行逐字一致」：行号会漂、
+ * 两边会各自演化，而没有任何测试会因此变红。
  */
 export function segmentsOf(cand: PlanResult): NonNullable<PlanResult["segments"]> {
 	if (cand.segments?.length) return cand.segments;
@@ -528,11 +573,42 @@ export function segmentsOf(cand: PlanResult): NonNullable<PlanResult["segments"]
 	return [{ start: 0, end: d, best: d / 2, score: cand.score }];
 }
 
+/**
+ * 「这一对已经被占掉了吗」——序贯填充与锚点布局**共用的唯一判据**
+ * （fix-pinned-placement-guarantee）。
+ *
+ * 非钉选对：看全局消费集（分配即消费、该轮不归还，「宁空不重复」铁律原样）。
+ *
+ * 钉选对：**只看自己落成过没有**。用户显式钉的段 MUST NOT 因为**别的候选**占了同一把
+ * 消费键而饿死——那正是「pinned 是排序特权、不是落位保证」的病灶（真机走查里被钉的两段
+ * 整段未落、时间线露黑底）。但「不二用」对钉选对**自身照旧成立**：同一个 (clip, segment)
+ * 对跨 beat 跨轨仍至多落一次，靠的就是这本 `pinnedPlaced` 段键账。
+ *
+ * ⚠️ **没有那本账就不豁免**（回退到看 `consumed`）。豁免的正确性完全依赖它——
+ * 没账则同一对会被反复选中、把整个 beat 铺成同一段。宁可少一次豁免，不可无界重复。
+ *
+ * 📌 生效面（验收别对着错的场景）：消费键是 **clip 级**时才可观测
+ * ——云端候选 / 图片候选 / `--dedup-scope material`；本地视频默认场景级去重下
+ * 键本就逐段不同，此豁免无差别。
+ */
+function takenBy(consumed: Set<string>, pinnedPlaced?: Set<string>): (p: Pair) => boolean {
+	return (p) =>
+		p.pinned && pinnedPlaced ? pinnedPlaced.has(segDiagKey(p.cand.clip_id, p.seg)) : consumed.has(p.key);
+}
+
 /** 每 query 的取材池：results 展开全部 segments，融合分降序（严格同分视频优先 tie-break，
  * ★ 主理人 2026-08-12 拍板）；excluded_hint 与低于地板的对不进池；noImage（--no-image-broll）
  * 时图片候选完全不进池（不上云）。
- * pinned（plan 可编辑契约）：钉选候选**置顶**（覆盖 score 排序）且免 excluded_hint / score 地板
- * （agent 显式裁定 > 自动护栏）；noImage 例外——「零图片上云」是用户级硬承诺，pinned 不豁免。
+ * pinned（plan 可编辑契约）：钉选候选**置顶**（覆盖 score 排序）。
+ * 立场是「**agent 显式裁定 > 自动护栏**」，据此的豁免清单**共四条**（前两条在本函数内，
+ * 后两条在 fillBeatTrack，fix-pinned-placement-guarantee 补齐）：
+ *   ① `excluded_hint`（派单负词）  ② `scoreFloor`（分数地板）
+ *   ③ `consumed` 抢占——钉选对只看**自己**落过没有，不看别的候选占没占同一把键（见 takenBy）
+ *   ④ jump-cut 紧邻避让——钉选相邻照落，且不计入 `stats.adjacentWaived`
+ * **不豁免的三条**（各有各的理由，MUST NOT 顺手一起放开）：
+ *   · `noImage`——「零图片上云」是用户级硬承诺；
+ *   · `beatOwners` 同 beat 跨轨归属互斥——那条给的是**备选面**，钉选占满每条轨就没有备选了；
+ *   · 主轨 gap 快速填充档的全局不二用——钉选在常规填充里已优先落位，轮不到兜底档。
  * mark-weight（add-audio-project-atoms）：markWeight>0 时融合分 = sim×(1-w)+(mark/100)×w，
  * mark 经 markLookup 取 describes 缓存（就近命中）；无缓存候选中性（融合分=sim，不惩罚不加分）；
  * score 地板仍只看原始 sim（mark 缺失 MUST NOT 变成变相剔除）；默认 w=0 排序逐字节零回归。 */
@@ -580,13 +656,16 @@ function buildQueryPools(
 						seg.score * (1 - wmEff - whEff) +
 						(markOk ? (Math.min(100, Math.max(0, mark as number)) / 100) * wmEff : 0) +
 						(hlOk ? (Math.min(100, Math.max(0, hl as number)) / 100) * whEff : 0);
+					// 记账按**段**去重（fix-arrange-diagnostics-granularity）：命中是逐段发生的，
+					// 按 clip 去重会让整片单素材的工程上这两个数恒为 1/1
+					const dk = segDiagKey(cand.clip_id, seg);
 					if (w > 0) {
-						if (markOk) opts.markStats?.hit.add(cand.clip_id);
-						else opts.markStats?.neutral.add(cand.clip_id);
+						if (markOk) opts.markStats?.hit.add(dk);
+						else opts.markStats?.neutral.add(dk);
 					}
 					if (wh > 0) {
-						if (hlOk) opts.markStats?.hlHit.add(cand.clip_id);
-						else opts.markStats?.hlNeutral.add(cand.clip_id);
+						if (hlOk) opts.markStats?.hlHit.add(dk);
+						else opts.markStats?.hlNeutral.add(dk);
 					}
 				}
 				// 高运动降权（add-material-motion-signal）：只影响排序，不改地板、不作排除
@@ -780,6 +859,9 @@ export function fillBeatTrack(opts: {
 	beatOwners?: Map<string, number>;
 	/** 填充统计收集器（planBeatFills 聚合进 summary）。 */
 	stats?: FillStats;
+	/** 钉选**落位段键**收集器（fix-arrange-diagnostics-granularity）：planBeatFills 建一份共享，
+	 * `stats.pinnedPlaced` 由它的 size 收口 ⇒ 与 `pinned.requested/yielded` 天然同分母。 */
+	pinnedPlaced?: Set<string>;
 	/** 美观度权重（add-audio-project-atoms）：0..1，默认 0 零回归；配 markLookup 用。 */
 	markWeight?: number;
 	/** mark 查询闭包（命令层供给 describes 缓存就近命中；缺省=全部中性）。 */
@@ -817,6 +899,7 @@ export function fillBeatTrack(opts: {
 	});
 	if (!pools.length) return [];
 
+	const taken = takenBy(consumed, opts.pinnedPlaced);
 	const slots: FillSlot[] = [];
 	let cursor = beat.track_st;
 	let lastPlaced: { slotIdx: number; clipId: string; clipEd: number } | null = null;
@@ -869,7 +952,8 @@ export function fillBeatTrack(opts: {
 		const dFor = (p: Pair): number => Math.min(dTarget, pairAvail(p), remaining);
 		// 基础合格：未被全局消费 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
 		const eligible = (p: Pair): boolean => {
-			if (consumed.has(p.key) || pairAvail(p) < minLen) return false;
+			if (pairAvail(p) < minLen) return false;
+			if (taken(p)) return false;
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			return owner === undefined || owner === trackOrder;
 		};
@@ -879,6 +963,10 @@ export function fillBeatTrack(opts: {
 			refineWindow(p, sourceWindowFor(p, dFor(p)), remaining);
 		// 跳剪豁免版相邻避让（D1）：相邻槽位（间隔 <2 槽）∧ 同素材 ∧ |后颗粒 clip_st − 前颗粒 clip_ed| < 2s
 		const jumpCutBlocked = (p: Pair, win: { clipSt: number }): boolean => {
+			// 钉选是指令，紧邻避让是自动护栏（fix-pinned-placement-guarantee）：
+			// 用户点名要这两段，同素材连着出两颗是他要的画面，MUST NOT 替他换次优。
+			// ⇒ 钉选相邻也**不计入** stats.adjacentWaived——那本账记的是自动避让的枯竭放行。
+			if (p.pinned) return false;
 			if (!lastPlaced || slotIdx - lastPlaced.slotIdx >= 2) return false;
 			if (p.cand.clip_id !== lastPlaced.clipId) return false;
 			return Math.abs(win.clipSt - lastPlaced.clipEd) < JUMP_CUT_GAP_SEC;
@@ -964,7 +1052,8 @@ export function fillBeatTrack(opts: {
 			track_st: r3(cursor),
 			track_ed: r3(cursor + d),
 		});
-		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++; // pinned 落成计数（summary 明示）
+		// pinned 落成记账：记**段键**不自增（summary 三数同分母，见 FillStats.pinnedPlaced 头注）
+		if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++; // 取用高运动段（降权未挡住=候选稀疏）
 		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++; // 同上：取用模糊候选如实记账
 		consumed.add(pick.key);
@@ -1061,6 +1150,8 @@ export function fillBeatTrackWithAnchors(opts: {
 	dedupScope?: DedupScope;
 	beatOwners?: Map<string, number>;
 	stats?: FillStats;
+	/** 钉选落位段键收集器（见 fillBeatTrack 同名字段）。 */
+	pinnedPlaced?: Set<string>;
 	markWeight?: number;
 	markLookup?: MarkLookup;
 	markStats?: MarkStatsSets;
@@ -1098,6 +1189,7 @@ export function fillBeatTrackWithAnchors(opts: {
 		markStats: opts.markStats,
 	});
 	const poolByQuery = new Map(pools.map((p) => [p.query, p.pool]));
+	const taken = takenBy(opts.consumed, opts.pinnedPlaced);
 	const perShot = typeof beat.per_shot_sec === "number" && beat.per_shot_sec > 0 ? beat.per_shot_sec : SHOT_TARGET_DEFAULT;
 	const maxAnchorLen = perShot * 2; // 锚片段时长上限 = per_shot_sec × 2（拍板口径）
 	// 按 at_sec 升序钉位（at_sec 缺失者排尾直接 degraded，不占位）；同刻按原序
@@ -1129,7 +1221,8 @@ export function fillBeatTrackWithAnchors(opts: {
 		let pick: Pair | null = null;
 		let pickWin: { clipSt: number; clipEd: number } | null = null;
 		for (const p of pool) {
-			if (opts.consumed.has(p.key)) continue;
+			// 与序贯填充同一判据（钉选只看自己落过没有，见 takenBy 头注）
+			if (taken(p)) continue;
 			if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			if (owner !== undefined && owner !== opts.trackOrder) continue;
@@ -1155,7 +1248,7 @@ export function fillBeatTrackWithAnchors(opts: {
 		});
 		opts.consumed.add(pick.key);
 		opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
-		if (pick.pinned && opts.stats) opts.stats.pinnedPlaced++;
+		if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
 		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++;
 		cursorMin = st + d;
@@ -1308,6 +1401,10 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	dedupScope?: DedupScope;
 	beatOwners?: Map<string, number>;
 	stats?: FillStats;
+	/** 钉选落位段键收集器（见 fillBeatTrack 同名字段）。直排槽本身**不进这本账**——
+	 * 直排是指令不是钉选（`directPair` 恒 `pinned:false`），两本账 MUST NOT 混；
+	 * 但直排槽分割出的区间丢回 `fillBeatTrack` 后照常记。 */
+	pinnedPlaced?: Set<string>;
 	markWeight?: number;
 	markLookup?: MarkLookup;
 	markStats?: MarkStatsSets;
@@ -1490,6 +1587,12 @@ function fastFillBeatGaps(o: {
 	noImage?: boolean;
 	dedupScope?: DedupScope;
 	entries: GapFillEntry[];
+	/** 钉选落位段键收集器（fix-arrange-diagnostics-granularity）。
+	 * ⚠️ **诚实注记**：这条路今天打不出钉选段——钉选免地板且在池里恒排第一，凡 gap 够得着的位置，
+	 * 常规填充在更宽的口径下（`room ≤ remaining`、枯竭放行无邻接约束）早就够得着了。
+	 * 收它仍是硬要求：自洽律 MUST **结构上**成立，MUST NOT 依赖上面这段没写进 spec 的可达性论证
+	 * ——改一次节奏常量它就可能悄悄失效，而失效的症状正是「读起来自洽的错数」。 */
+	pinnedPlaced?: Set<string>;
 }): void {
 	const { beat, slots } = o;
 	const EPS = BLACK_BED_MERGE_EPS;
@@ -1545,6 +1648,7 @@ function fastFillBeatGaps(o: {
 					gap_fill: true,
 				};
 				slots.push(slot);
+				if (p.pinned) o.pinnedPlaced?.add(segDiagKey(p.cand.clip_id, p.seg));
 				o.consumed.add(p.key);
 				o.beatOwners.set(p.cand.clip_id, 0);
 				o.entries.push({ beat: beat.beat, kind: "candidate", clip_id: p.cand.clip_id, track_st: slot.track_st, track_ed: slot.track_ed, sec: r3(d) });
@@ -1598,8 +1702,10 @@ function fastFillBeatGaps(o: {
 }
 
 /** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。
- * pinned 结算（plan 可编辑契约）：铺完统计 plan 内钉选候选的入选/让位（冲突后到让位不报错，
- * summary 明示——stats.pinnedYielded；yielded 名单由 pinnedOutcome 给出供告警指名）。 */
+ * pinned 结算（plan 可编辑契约）：铺完统计 plan 内钉选**段**的入选/让位（冲突后到让位不报错，
+ * summary 明示——stats.pinnedYielded；yielded 名单由 pinnedOutcome 给出供告警指名）。
+ * ★ 计数单元是**段键**（`segDiagKey`）不是 clip_id：钉选逐段生效，按 clip 去重会让整片单素材的
+ * 工程（二创解说）上这些字段坍缩成常量（fix-arrange-diagnostics-granularity）。 */
 export function planBeatFills(
 	plan: BrollPlan,
 	lay: number,
@@ -1623,9 +1729,10 @@ export function planBeatFills(
 	fills: Map<string, FillSlot[][]>;
 	clipIds: Set<string>;
 	stats: FillStats;
+	/** 钉选结算，元素是**段键**（`segDiagKey`）不是 clip_id。 */
 	pinnedOutcome: { requested: string[]; yielded: string[] };
 	/** mark/highlight 融合统计（add-audio-project-atoms + fix-describe-cache-locality）：
-	 * 按候选 clip 去重的缓存命中/中性计数；对应权重为 0 时恒 0/0。 */
+	 * 按**段**去重的缓存命中/中性计数；对应权重为 0 时恒 0/0。 */
 	markStats: { hit: number; neutral: number; hlHit: number; hlNeutral: number };
 	/** 逐锚落位结果（add-keyword-anchored-broll）：plan 无 anchors 时恒空数组（零回归）。 */
 	anchors: AnchorOutcome[];
@@ -1641,6 +1748,9 @@ export function planBeatFills(
 	const consumed = new Set<string>();
 	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, blurrySlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set(), hlHit: new Set(), hlNeutral: new Set() };
+	// 钉选落位段键（fix-arrange-diagnostics-granularity）：三条落位路 + gap 填充共用一本账，
+	// 末尾 `stats.pinnedPlaced = size` / `yielded = requested \ 本集合` 一起收口 ⇒ 天然同分母
+	const pinnedPlacedKeys = new Set<string>();
 	const anchorOutcomes: AnchorOutcome[] = [];
 	//: 高档直排的落位结果（add-arrange-direct-tier）；无直排槽的 plan 恒为空数组 ⇒ 出参整键缺席。
 	const directOutcomes: DirectOutcome[] = [];
@@ -1703,6 +1813,7 @@ export function planBeatFills(
 				markStats: markSets,
 				beatOwners,
 				stats,
+				pinnedPlaced: pinnedPlacedKeys,
 				cutAlign: cutAlignFor(k),
 				fpsOf,
 			};
@@ -1728,10 +1839,18 @@ export function planBeatFills(
 		}
 		fills.set(beat.beat, perTrack);
 	}
-	// pinned 结算：requested = plan 内全部钉选候选（去重）；yielded = 未落任何槽位者（后到让位/枯竭/被排除）
+	// pinned 结算（fix-arrange-diagnostics-granularity）：requested = plan 内全部钉选候选的
+	// **全部段**（段键去重）；yielded = 未落成任何槽位的段。
+	// ★ 枚举 MUST 走 `segmentsOf`——与候选池同一口径（含无命中段时的整片伪段）。
+	//   两处各写一遍就会漂移，而漂移的症状是自洽律假性失败，比原 bug 更难查。
 	const pinnedRequested = new Set<string>();
 	for (const beat of plan.beats) {
-		for (const q of beat.queries) for (const r of q.results ?? []) if (r.pinned === true) pinnedRequested.add(r.clip_id);
+		for (const q of beat.queries) {
+			for (const r of q.results ?? []) {
+				if (r.pinned !== true) continue;
+				for (const seg of segmentsOf(r)) pinnedRequested.add(segDiagKey(r.clip_id, seg));
+			}
+		}
 	}
 	// ── 主轨 gap 填充 · fast 规划段（adjust-main-track-gap-fill）──
 	// 两阶段：全部 beat 常规填充完成后再补 gap——gap 填充 MUST NOT 抢先消费掉后续 beat
@@ -1751,11 +1870,15 @@ export function planBeatFills(
 				noImage: opts.noImage,
 				dedupScope: opts.dedupScope,
 				entries: gapFillEntries,
+				pinnedPlaced: pinnedPlacedKeys,
 			});
 			for (const s of slots) clipIds.add(s.clip_id); // 新填候选进下载集
 		}
 	}
-	const yielded = [...pinnedRequested].filter((id) => !clipIds.has(id));
+	// 三数同分母收口：placed = 落位段键集合大小；yielded = requested \ placed
+	// ⇒ `pinnedPlaced + pinnedYielded === requested.length` 恒成立（契约层据此拦服务端漏改）
+	stats.pinnedPlaced = pinnedPlacedKeys.size;
+	const yielded = [...pinnedRequested].filter((k) => !pinnedPlacedKeys.has(k));
 	stats.pinnedYielded = yielded.length;
 	// 对齐实测（adjust-shot-cut-sentence-align）：首轨最终槽位口径——主轨 gap 填充
 	// （adjust-main-track-gap-fill）已在上方完成，计量恒按最终产物如实执行

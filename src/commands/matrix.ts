@@ -25,6 +25,7 @@ import {
 	BROLL_PREVIEW_DIR,
 	CUT_ALIGN_DEFAULT,
 	SCORE_FLOOR_DEFAULT,
+	SIGNAL_COVERAGE_LOW,
 	brollMaterialIdFor,
 	layBrollTracks,
 	mergedCandidates,
@@ -214,6 +215,8 @@ interface MatrixOpts {
 	arrangeCostCap?: string;
 	/** `--arrange-qc`：编排期 QC（L2 卡点句画音对齐闭环，落轨前收敛，零渲染）。缺省关。 */
 	arrangeQc?: boolean;
+	/** `--arrange-estimate-only`：只报编排量，走到计价确认那一步就停（零云端调用、工程零改动）。 */
+	arrangeEstimateOnly?: boolean;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -330,6 +333,13 @@ export function registerMatrix(program: Command): void {
 				`没给到就换候选重排，最多 ${MAX_QC_ROUNDS} 轮，到限即交付并如实登记还差哪几句。全程零渲染——` +
 				"替代「铺完→渲→看→重铺→再渲」那两轮。⚠️ 判定走素材理解口，**按帧计费**（每个卡点句 1 帧/轮），" +
 				"跑前会报预估并征求确认（--yes 跳过）",
+		)
+		.option(
+			"--arrange-estimate-only",
+			"只要预估不要执行：走到云端编排的计价确认那一步就停，报出编排量后成功返回——**零云端调用、工程文件零改动**。" +
+				"⚠️ 它省的是**云端那一次调用与其计费**（以及其后的候选下载与落轨），不是整条链：" +
+				"编排量的分母（beat 数/候选段数/轨数/标定遍数）本来就要读工程、读 plan、做重投影才算得出，该走的还得走。" +
+				"与 --yes 同时给时以本开关为准（--yes 的意思是「别问我」，不是「无论如何都跑」）",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -1305,6 +1315,8 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 		planPath,
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(declined ? { reason: "image_move_billing_declined", planReusable: true } : {}),
+		// 只预估不执行（add-arrange-estimate-only）：**成功**结局，与 declined 互斥且形态不同
+		...(laid?.estimateOnly ? { estimateOnly: true, planReusable: true } : {}),
 		...(laid?.imageBilling ? { image_move_billing: laid.imageBilling } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
 		...(laid?.integrity ? { integrity: laid.integrity } : {}),
@@ -1548,6 +1560,8 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 		planPath,
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(declined ? { reason: "image_move_billing_declined", planReusable: true } : {}),
+		// 只预估不执行（add-arrange-estimate-only）：**成功**结局，与 declined 互斥且形态不同
+		...(laid?.estimateOnly ? { estimateOnly: true, planReusable: true } : {}),
 		// 图片运镜计费账面（仅本轮真有图片候选参与时出现；纯视频候选行为与图片能力引入前一致）
 		...(laid?.imageBilling ? { image_move_billing: laid.imageBilling } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
@@ -1700,7 +1714,7 @@ async function runArrangeQcHere(
 function arrangeWiring(
 	opts: MatrixOpts,
 	cfg: { base: string; apiKey: string } | undefined,
-): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
+): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint; arrangeEstimateOnly?: boolean } {
 	const arrangeMode = parseArrangeMode(opts.arrange);
 	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
 	const qc = opts.arrangeQc === true;
@@ -1711,6 +1725,7 @@ function arrangeWiring(
 		//   本地素材路会定档 cloud —— 那时端点必须已经在手，否则 auto 永远走不到云端。
 		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
 		...(qc ? { arrangeQc: true } : {}),
+		...(opts.arrangeEstimateOnly === true ? { arrangeEstimateOnly: true } : {}),
 		// 判定端点只在真要判时解析（不开 QC 的那条路一个网络字节都不该动）
 		...(qc && cfg ? { describeEndpoint: { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
 	};
@@ -1795,6 +1810,8 @@ interface LayOutcome {
 	lay: Record<string, unknown>;
 	integrity?: IntegrityReport;
 	declined?: boolean;
+	/** 只预估不执行（add-arrange-estimate-only）：**成功**结局，MUST NOT 与 declined 混用。 */
+	estimateOnly?: boolean;
 	imageBilling?: { generated: number; reused: number; estimated_credits: number };
 }
 
@@ -2089,6 +2106,8 @@ async function layIntoProject(
 		arrangeEndpoint?: ArrangeEndpoint;
 		/** 编排期 QC（P3.2）：缺省关 = 行为逐字节与开工前一致。 */
 		arrangeQc?: boolean;
+		/** 只预估不执行（add-arrange-estimate-only）：走到计价确认那一步即停。 */
+		arrangeEstimateOnly?: boolean;
 		/** 素材理解端点（QC 判定用；缺省由 apiBase 推导）。 */
 		describeEndpoint?: DescribeEndpoint;
 	} = { imageBroll: true, yes: false, deps: {} },
@@ -2188,6 +2207,37 @@ async function layIntoProject(
 	// 无条件 `loadConfig()`，缺 Key 在这之前几百行就已经明确报错了 —— 那个分支不可达。
 	// 不可达的兜底 + 跑不起来的测试，比没有更糟（它会让人以为这条路被守住了）。
 	const strictCloud = isLocalArrangeScope(plan);
+	// ── 只预估不执行（add-arrange-estimate-only）：停在**计价确认之前**，与确认门同一处取值 ──
+	//    MUST NOT 另算一份编排量——两处各算一遍，预估与实收迟早会漂，而漂了没人会发现。
+	//    结局是**成功**：「我在做决定」不是「我拒绝了」，压成同一个 declined 会让调用方分不清。
+	if (layOpts.arrangeEstimateOnly) {
+		const applicable = arrangeMode !== "local" && isLocalArrangeScope(plan);
+		if (!applicable) {
+			// 素材矩阵路 / 总闸压回 local：那条路的编排在本机跑、不计编排量。
+			// **MUST NOT 报 0** —— 0 会被读成「云端跑但免费」，与「根本不走云端」是两回事。
+			log.info("本轮不走云端编排（素材矩阵路或总闸已压回本机），无编排量可估——本机编排不计费。");
+			return { estimateOnly: true, lay: { estimateOnly: true, arrange: { applicable: false } } };
+		}
+		const scale = scaleOfRequest(plan, layN, decisionOpts);
+		const units = arrangeUnits(scale);
+		log.info(
+			`本次云端编排的**编排量**预估为 ${units}` +
+				`${layOpts.arrangeCostCap !== undefined ? `（本次上限 ${layOpts.arrangeCostCap}）` : ""}。` +
+				"只预估未执行：零云端调用、工程文件零改动。去掉 --arrange-estimate-only 即可真跑。",
+		);
+		return {
+			estimateOnly: true,
+			lay: {
+				estimateOnly: true,
+				arrange: {
+					applicable: true,
+					units,
+					...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+					scale,
+				},
+			},
+		};
+	}
 	// 预估确认门（P2.2b）：云端档跑前报编排量并征求确认。**只在真会发请求时问**——
 	// 素材矩阵路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
 	if (arrangeMode !== "local" && isLocalArrangeScope(plan)) {
@@ -2340,16 +2390,37 @@ async function layIntoProject(
 		log.info(`高档直排：落位 ${cnt.planned} · 过短照落 ${cnt.sliver} · 未落位 ${cnt.rejected}（共 ${directOutcomes.length} 槽）`);
 	}
 	const markOn = typeof layOpts.markWeight === "number" && layOpts.markWeight > 0;
-	if (markOn) {
-		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 候选 · 中性 ${markStats.neutral} 候选（w=${layOpts.markWeight}）`);
-	}
-	// 零覆盖明示（fix-describe-cache-locality）：库存在但**本片**一条缓存都没命中这一档此前静默通过
-	// ——用户以为加权在跑，实际全部中性、权重原样回吐给 sim（260828 三条美食片 describes=0 实锤）。
-	// 与「索引库不存在」告警分案：那档是没库，这档是有库没本片。
 	const hlOn = typeof layOpts.highlightWeight === "number" && layOpts.highlightWeight > 0;
-	const zeroCov: string[] = [];
-	if (markOn && markStats.hit === 0 && markStats.neutral > 0) zeroCov.push(`美观度（--mark-weight ${layOpts.markWeight}）`);
-	if (hlOn && markStats.hlHit === 0 && markStats.hlNeutral > 0) zeroCov.push(`看点（--highlight-weight ${layOpts.highlightWeight}）`);
+	// 信号覆盖率（add-signal-coverage-reporting）：分母是**参与融合的候选段总数**——
+	// 靠 fix-arrange-diagnostics-granularity 把 markStats 换成段粒度之后这个数才算得准
+	// （此前是 Set<clip_id>，二创单素材场景下恒 1/1）。
+	const covOf = (hit: number, neutral: number): number | undefined => (hit + neutral > 0 ? r3num(hit / (hit + neutral)) : undefined);
+	const markCov = markOn ? covOf(markStats.hit, markStats.neutral) : undefined;
+	const hlCov = hlOn ? covOf(markStats.hlHit, markStats.hlNeutral) : undefined;
+	const pct = (v: number): string => `${Math.round(v * 1000) / 10}%`;
+	if (markOn) {
+		log.info(
+			`美观度权重（w=${layOpts.markWeight}）：mark 缓存命中 ${markStats.hit} 段 / 共 ${markStats.hit + markStats.neutral} 段` +
+				`${markCov === undefined ? "" : `（覆盖率 ${pct(markCov)}）`}`,
+		);
+	}
+	if (hlOn) {
+		log.info(
+			`看点权重（w=${layOpts.highlightWeight}）：highlight 缓存命中 ${markStats.hlHit} 段 / 共 ${markStats.hlHit + markStats.hlNeutral} 段` +
+				`${hlCov === undefined ? "" : `（覆盖率 ${pct(hlCov)}）`}`,
+		);
+	}
+	// 覆盖率告警分两档（add-signal-coverage-reporting）。合并成一句是错的：
+	// **零覆盖**是「权重完全没起作用」，根因通常是本片没 describe 过；
+	// **低覆盖**是「只对少数段起作用」，那时往往**已经 describe 过了**，真因是素材长而描述帧稀疏
+	// （超出就近命中上限的段拿不到信号）——对这一档说「先跑 describe」是条错建议。
+	// 旧判据只认 hit===0，走查实测 6.3% 覆盖率完全不触发，用户以为加权在跑。
+	const dims: { name: string; flag: string; cov: number | undefined }[] = [
+		...(markOn ? [{ name: "美观度", flag: `--mark-weight ${layOpts.markWeight}`, cov: markCov }] : []),
+		...(hlOn ? [{ name: "看点", flag: `--highlight-weight ${layOpts.highlightWeight}`, cov: hlCov }] : []),
+	];
+	const zeroCov = dims.filter((d) => d.cov === 0).map((d) => `${d.name}（${d.flag}）`);
+	const lowCov = dims.filter((d) => d.cov !== undefined && d.cov > 0 && d.cov < SIGNAL_COVERAGE_LOW);
 	if (zeroCov.length) {
 		log.warn(
 			`${zeroCov.join(" 与 ")}权重开了但**本片零缓存覆盖**：全部候选按中性处理，排序与不开权重完全一致（权重已回吐给语义分）。` +
@@ -2357,11 +2428,23 @@ async function layIntoProject(
 				`手写 plan（免索引直排）也走这条路，此时美观度/看点/模糊降权三条信号一并不生效`,
 		);
 	}
+	if (lowCov.length) {
+		log.warn(
+			`${lowCov.map((d) => `${d.name}（${d.flag}）覆盖率仅 ${pct(d.cov as number)}`).join("；")}` +
+				`——只有这些候选段拿到了信号分，其余按中性处理，排序主要仍由语义分决定。` +
+				`这一档通常**不是没 describe 过**，而是素材长、描述帧稀疏：一个素材往往只有一个时间点有描述行，` +
+				`离它太远的段就近命中不上。要提高覆盖率得让描述帧更密，重跑一次 describe 不会改善`,
+		);
+	}
 	// pinned 让位必须明示（matrix-command spec：冲突后到让位并 summary 明示，MUST NOT 静默）
 	if (pinnedOutcome.yielded.length) {
+		// 名单是**段键** `<clip_id>@<毫秒>`（fix-arrange-diagnostics-granularity）——整片单素材的工程
+		// 里「哪一段没落上」正是用户唯一需要的信息，只报 clip_id 等于什么都没说
 		log.warn(
-			`pinned 候选未能全部入选：${pinnedOutcome.yielded.join("、")} 让位（pinned 间冲突后到让位/供长不足/被排除）——` +
-				`其余 pinned 已优先满足；要强保它们可减少同 beat 的 pinned 数或放宽槽位（--lay/--top-k）后重跑`,
+			`钉选段未能全部入选（${pinnedOutcome.yielded.length}/${pinnedOutcome.requested.length} 段让位）：` +
+				`${pinnedOutcome.yielded.join("、")}（钉选间冲突后到让位/供长不足/被排除）——` +
+				`名单是「素材@段内锚点毫秒」；其余钉选段已优先满足；` +
+				`要强保它们可减少同 beat 的钉选段数或放宽槽位（--lay/--top-k）后重跑`,
 		);
 	}
 	const slotCount = [...fills.values()].flat().reduce((n, s) => n + s.length, 0);
@@ -2642,12 +2725,25 @@ async function layIntoProject(
 			...(hlOn
 				? { highlight_weight: layOpts.highlightWeight, highlight_hit: markStats.hlHit, highlight_neutral: markStats.hlNeutral }
 				: {}),
-			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）
+			// 信号覆盖率（add-signal-coverage-reporting）：逐维度给出比例，省得消费方自己除。
+			// ⚠️ **权重为 0 的维度整键缺席，MUST NOT 补 0**——「没开这一维」与「开了但零覆盖」
+			// 是两件事，补 0 会把它们抹平成同一个数，而那两件事的处置完全不同。
+			// `coverage: null` 是第三档：开了、但一个候选段都没有（分母为 0，不可判）——同样 MUST NOT 写 0。
+			...(markOn || hlOn
+				? {
+						signal_coverage: {
+							...(markOn ? { mark: { hit: markStats.hit, neutral: markStats.neutral, coverage: markCov ?? null } } : {}),
+							...(hlOn ? { highlight: { hit: markStats.hlHit, neutral: markStats.hlNeutral, coverage: hlCov ?? null } } : {}),
+						},
+					}
+				: {}),
+			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）。
+			// 三个数**同分母、按段计**（fix-arrange-diagnostics-granularity）：requested = placed + yielded 恒成立。
 			...(pinnedOutcome.requested.length
 				? {
 						pinned: {
 							requested: pinnedOutcome.requested.length,
-							placedSlots: fillStats.pinnedPlaced,
+							placed: fillStats.pinnedPlaced,
 							yielded: pinnedOutcome.yielded,
 						},
 					}
