@@ -202,7 +202,9 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 - `results` 数组：**删条**（剔除不能用的候选）、**重排**（调优先级——池内按 score 排序，重排主要配合删条用）；
 - `segments` 数组：**删段**（某命中段不想要就删）；
 - `result.describe`：增删（describe 命令注入的，你也可以手写笔记进去）；
-- `result.pinned: true`：**钉选**——分配器优先满足（覆盖 score 排序、免 score 地板强制入选）。多个 pinned 冲突（同槽/供长不足）时**后到让位**，让位名单在结果 JSON `lay.pinned.yielded` 与告警里明示。注意 `--no-image-broll` 下图片候选连 pinned 也进不来（零图片上云是硬承诺）。
+- `result.pinned: true`：**钉选**——是**落位保证**，不只是排序特权。它豁免四条自动护栏：①派单负词 `excluded_hint`、②`--score-floor` 分数地板、③不二用抢占（钉选段不会因为**别的候选**占了同一把消费键而落不上；但同一个「候选+段」对仍只落一次）、④紧邻跳剪避让（钉选相邻照落，也不计进 `dedup.adjacentWaived`）。
+  **不豁免的三条**：`--no-image-broll`（零图片上云是硬承诺，图片候选连 pinned 也进不来）、同 beat 跨轨素材归属互斥（那条给的是备选面——钉选占满每条轨，`--lay N` 就退化成 N 条一样的轨）、主轨 gap 快速填充的兜底档。
+  钉多了仍可能打架（供长不足/位置冲突），让位名单在结果 JSON `lay.pinned.yielded` 与告警里**逐段**明示。
 - beat 的 `anchors`：**关键词锚**（拆分稿圈定、plan 检索时内插 `at_sec`）——`[{keyword, utterance, at_sec, query}]`，lay 把锚 query 最高分命中钉在 `at_sec−0.5s`（时长 min(命中段, per_shot×2)），其余槽位在锚点分割的区间内序贯填充。可编辑：**挪 `at_sec`**（微调卡点时刻）、**换 `query`**（换锚画面）、**删锚**（整条删除）；`at_sec:null`=内插失败态，lay 按降级普通槽处置。锚 query 池内有 pinned 候选时**用户钉选优先占锚槽**。
 - beat 的 `per_shot_sec`/`requested_shots`（节奏锚，影响槽长档位）。
 
@@ -333,7 +335,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | 想在多个候选里挑 | `--lay N` 多铺几条候选轨。**只增加可选方案数，不扩大覆盖**——别把它当空洞的解药 |
 | 填充太差 / 命中太杂 | 先看排序前几条质量再调 `--score-floor`（调高留空处露黑底，必看空洞告警）；杂得可疑 → 走配方 B：describe top 候选，按 `usable_flags`+`desc` 剔除后 `matrix lay` |
 | 「像但不能用」（水印/字幕/黑边混进候选） | 配方 B 的标准场景：`describe --plan` → 你删掉命中的 result → `matrix lay`。**CLI 不会自动剔**（零件不裁定），删不删你判断 |
-| 某候选非用不可 / 顺序想钦定 | 编辑 plan：该 result 标 `pinned:true` → `matrix lay`。`lay.pinned.yielded` 非空说明钉多了在打架 |
+| 某候选非用不可 / 顺序想钦定 | 编辑 plan：该 result 标 `pinned:true` → `matrix lay`。钉选是落位保证（免负词/地板/不二用抢占/紧邻避让），`lay.pinned.yielded` 非空说明确实钉多了在打架，名单逐段指名 |
 | **出现黑底空洞告警** | 不是故障：照 `lay.blackBedHoles` 逐段报给用户，出路=调低 `--score-floor` / `--no-black-bed` 露主轨 / opencut 手动补片 / 动线②云端垫底 |
 | 每段候选太少不够挑 | `--top-k` 调大重跑 |
 | 某段有空槽 / 想补特定意象 | `gtrk matrix search "<英文长句场景描述>" --project <目录> --json` 单条补检；影视解说类补检记得带 `--source-window` 保时序 |

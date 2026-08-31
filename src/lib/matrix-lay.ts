@@ -547,11 +547,42 @@ function segmentsOf(cand: PlanResult): NonNullable<PlanResult["segments"]> {
 	return [{ start: 0, end: d, best: d / 2, score: cand.score }];
 }
 
+/**
+ * 「这一对已经被占掉了吗」——序贯填充与锚点布局**共用的唯一判据**
+ * （fix-pinned-placement-guarantee）。
+ *
+ * 非钉选对：看全局消费集（分配即消费、该轮不归还，「宁空不重复」铁律原样）。
+ *
+ * 钉选对：**只看自己落成过没有**。用户显式钉的段 MUST NOT 因为**别的候选**占了同一把
+ * 消费键而饿死——那正是「pinned 是排序特权、不是落位保证」的病灶（真机走查里被钉的两段
+ * 整段未落、时间线露黑底）。但「不二用」对钉选对**自身照旧成立**：同一个 (clip, segment)
+ * 对跨 beat 跨轨仍至多落一次，靠的就是这本 `pinnedPlaced` 段键账。
+ *
+ * ⚠️ **没有那本账就不豁免**（回退到看 `consumed`）。豁免的正确性完全依赖它——
+ * 没账则同一对会被反复选中、把整个 beat 铺成同一段。宁可少一次豁免，不可无界重复。
+ *
+ * 📌 生效面（验收别对着错的场景）：消费键是 **clip 级**时才可观测
+ * ——云端候选 / 图片候选 / `--dedup-scope material`；本地视频默认场景级去重下
+ * 键本就逐段不同，此豁免无差别。
+ */
+function takenBy(consumed: Set<string>, pinnedPlaced?: Set<string>): (p: Pair) => boolean {
+	return (p) =>
+		p.pinned && pinnedPlaced ? pinnedPlaced.has(segDiagKey(p.cand.clip_id, p.seg)) : consumed.has(p.key);
+}
+
 /** 每 query 的取材池：results 展开全部 segments，融合分降序（严格同分视频优先 tie-break，
  * ★ 主理人 2026-08-12 拍板）；excluded_hint 与低于地板的对不进池；noImage（--no-image-broll）
  * 时图片候选完全不进池（不上云）。
- * pinned（plan 可编辑契约）：钉选候选**置顶**（覆盖 score 排序）且免 excluded_hint / score 地板
- * （agent 显式裁定 > 自动护栏）；noImage 例外——「零图片上云」是用户级硬承诺，pinned 不豁免。
+ * pinned（plan 可编辑契约）：钉选候选**置顶**（覆盖 score 排序）。
+ * 立场是「**agent 显式裁定 > 自动护栏**」，据此的豁免清单**共四条**（前两条在本函数内，
+ * 后两条在 fillBeatTrack，fix-pinned-placement-guarantee 补齐）：
+ *   ① `excluded_hint`（派单负词）  ② `scoreFloor`（分数地板）
+ *   ③ `consumed` 抢占——钉选对只看**自己**落过没有，不看别的候选占没占同一把键（见 takenBy）
+ *   ④ jump-cut 紧邻避让——钉选相邻照落，且不计入 `stats.adjacentWaived`
+ * **不豁免的三条**（各有各的理由，MUST NOT 顺手一起放开）：
+ *   · `noImage`——「零图片上云」是用户级硬承诺；
+ *   · `beatOwners` 同 beat 跨轨归属互斥——那条给的是**备选面**，钉选占满每条轨就没有备选了；
+ *   · 主轨 gap 快速填充档的全局不二用——钉选在常规填充里已优先落位，轮不到兜底档。
  * mark-weight（add-audio-project-atoms）：markWeight>0 时融合分 = sim×(1-w)+(mark/100)×w，
  * mark 经 markLookup 取 describes 缓存（就近命中）；无缓存候选中性（融合分=sim，不惩罚不加分）；
  * score 地板仍只看原始 sim（mark 缺失 MUST NOT 变成变相剔除）；默认 w=0 排序逐字节零回归。 */
@@ -828,6 +859,7 @@ export function fillBeatTrack(opts: {
 	});
 	if (!pools.length) return [];
 
+	const taken = takenBy(consumed, opts.pinnedPlaced);
 	const slots: FillSlot[] = [];
 	let cursor = beat.track_st;
 	let lastPlaced: { slotIdx: number; clipId: string; clipEd: number } | null = null;
@@ -880,7 +912,8 @@ export function fillBeatTrack(opts: {
 		const dFor = (p: Pair): number => Math.min(dTarget, pairAvail(p), remaining);
 		// 基础合格：未被全局消费 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
 		const eligible = (p: Pair): boolean => {
-			if (consumed.has(p.key) || pairAvail(p) < minLen) return false;
+			if (pairAvail(p) < minLen) return false;
+			if (taken(p)) return false;
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			return owner === undefined || owner === trackOrder;
 		};
@@ -890,6 +923,10 @@ export function fillBeatTrack(opts: {
 			refineWindow(p, sourceWindowFor(p, dFor(p)), remaining);
 		// 跳剪豁免版相邻避让（D1）：相邻槽位（间隔 <2 槽）∧ 同素材 ∧ |后颗粒 clip_st − 前颗粒 clip_ed| < 2s
 		const jumpCutBlocked = (p: Pair, win: { clipSt: number }): boolean => {
+			// 钉选是指令，紧邻避让是自动护栏（fix-pinned-placement-guarantee）：
+			// 用户点名要这两段，同素材连着出两颗是他要的画面，MUST NOT 替他换次优。
+			// ⇒ 钉选相邻也**不计入** stats.adjacentWaived——那本账记的是自动避让的枯竭放行。
+			if (p.pinned) return false;
 			if (!lastPlaced || slotIdx - lastPlaced.slotIdx >= 2) return false;
 			if (p.cand.clip_id !== lastPlaced.clipId) return false;
 			return Math.abs(win.clipSt - lastPlaced.clipEd) < JUMP_CUT_GAP_SEC;
@@ -1112,6 +1149,7 @@ export function fillBeatTrackWithAnchors(opts: {
 		markStats: opts.markStats,
 	});
 	const poolByQuery = new Map(pools.map((p) => [p.query, p.pool]));
+	const taken = takenBy(opts.consumed, opts.pinnedPlaced);
 	const perShot = typeof beat.per_shot_sec === "number" && beat.per_shot_sec > 0 ? beat.per_shot_sec : SHOT_TARGET_DEFAULT;
 	const maxAnchorLen = perShot * 2; // 锚片段时长上限 = per_shot_sec × 2（拍板口径）
 	// 按 at_sec 升序钉位（at_sec 缺失者排尾直接 degraded，不占位）；同刻按原序
@@ -1143,7 +1181,8 @@ export function fillBeatTrackWithAnchors(opts: {
 		let pick: Pair | null = null;
 		let pickWin: { clipSt: number; clipEd: number } | null = null;
 		for (const p of pool) {
-			if (opts.consumed.has(p.key)) continue;
+			// 与序贯填充同一判据（钉选只看自己落过没有，见 takenBy 头注）
+			if (taken(p)) continue;
 			if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			if (owner !== undefined && owner !== opts.trackOrder) continue;
