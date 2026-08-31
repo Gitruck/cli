@@ -215,6 +215,8 @@ interface MatrixOpts {
 	arrangeCostCap?: string;
 	/** `--arrange-qc`：编排期 QC（L2 卡点句画音对齐闭环，落轨前收敛，零渲染）。缺省关。 */
 	arrangeQc?: boolean;
+	/** `--arrange-estimate-only`：只报编排量，走到计价确认那一步就停（零云端调用、工程零改动）。 */
+	arrangeEstimateOnly?: boolean;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -331,6 +333,13 @@ export function registerMatrix(program: Command): void {
 				`没给到就换候选重排，最多 ${MAX_QC_ROUNDS} 轮，到限即交付并如实登记还差哪几句。全程零渲染——` +
 				"替代「铺完→渲→看→重铺→再渲」那两轮。⚠️ 判定走素材理解口，**按帧计费**（每个卡点句 1 帧/轮），" +
 				"跑前会报预估并征求确认（--yes 跳过）",
+		)
+		.option(
+			"--arrange-estimate-only",
+			"只要预估不要执行：走到云端编排的计价确认那一步就停，报出编排量后成功返回——**零云端调用、工程文件零改动**。" +
+				"⚠️ 它省的是**云端那一次调用与其计费**（以及其后的候选下载与落轨），不是整条链：" +
+				"编排量的分母（beat 数/候选段数/轨数/标定遍数）本来就要读工程、读 plan、做重投影才算得出，该走的还得走。" +
+				"与 --yes 同时给时以本开关为准（--yes 的意思是「别问我」，不是「无论如何都跑」）",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -1306,6 +1315,8 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 		planPath,
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(declined ? { reason: "image_move_billing_declined", planReusable: true } : {}),
+		// 只预估不执行（add-arrange-estimate-only）：**成功**结局，与 declined 互斥且形态不同
+		...(laid?.estimateOnly ? { estimateOnly: true, planReusable: true } : {}),
 		...(laid?.imageBilling ? { image_move_billing: laid.imageBilling } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
 		...(laid?.integrity ? { integrity: laid.integrity } : {}),
@@ -1549,6 +1560,8 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 		planPath,
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(declined ? { reason: "image_move_billing_declined", planReusable: true } : {}),
+		// 只预估不执行（add-arrange-estimate-only）：**成功**结局，与 declined 互斥且形态不同
+		...(laid?.estimateOnly ? { estimateOnly: true, planReusable: true } : {}),
 		// 图片运镜计费账面（仅本轮真有图片候选参与时出现；纯视频候选行为与图片能力引入前一致）
 		...(laid?.imageBilling ? { image_move_billing: laid.imageBilling } : {}),
 		...(laySummary ? { lay: laySummary } : {}),
@@ -1701,7 +1714,7 @@ async function runArrangeQcHere(
 function arrangeWiring(
 	opts: MatrixOpts,
 	cfg: { base: string; apiKey: string } | undefined,
-): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
+): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint; arrangeEstimateOnly?: boolean } {
 	const arrangeMode = parseArrangeMode(opts.arrange);
 	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
 	const qc = opts.arrangeQc === true;
@@ -1712,6 +1725,7 @@ function arrangeWiring(
 		//   本地素材路会定档 cloud —— 那时端点必须已经在手，否则 auto 永远走不到云端。
 		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
 		...(qc ? { arrangeQc: true } : {}),
+		...(opts.arrangeEstimateOnly === true ? { arrangeEstimateOnly: true } : {}),
 		// 判定端点只在真要判时解析（不开 QC 的那条路一个网络字节都不该动）
 		...(qc && cfg ? { describeEndpoint: { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
 	};
@@ -1796,6 +1810,8 @@ interface LayOutcome {
 	lay: Record<string, unknown>;
 	integrity?: IntegrityReport;
 	declined?: boolean;
+	/** 只预估不执行（add-arrange-estimate-only）：**成功**结局，MUST NOT 与 declined 混用。 */
+	estimateOnly?: boolean;
 	imageBilling?: { generated: number; reused: number; estimated_credits: number };
 }
 
@@ -2090,6 +2106,8 @@ async function layIntoProject(
 		arrangeEndpoint?: ArrangeEndpoint;
 		/** 编排期 QC（P3.2）：缺省关 = 行为逐字节与开工前一致。 */
 		arrangeQc?: boolean;
+		/** 只预估不执行（add-arrange-estimate-only）：走到计价确认那一步即停。 */
+		arrangeEstimateOnly?: boolean;
 		/** 素材理解端点（QC 判定用；缺省由 apiBase 推导）。 */
 		describeEndpoint?: DescribeEndpoint;
 	} = { imageBroll: true, yes: false, deps: {} },
@@ -2189,6 +2207,37 @@ async function layIntoProject(
 	// 无条件 `loadConfig()`，缺 Key 在这之前几百行就已经明确报错了 —— 那个分支不可达。
 	// 不可达的兜底 + 跑不起来的测试，比没有更糟（它会让人以为这条路被守住了）。
 	const strictCloud = isLocalArrangeScope(plan);
+	// ── 只预估不执行（add-arrange-estimate-only）：停在**计价确认之前**，与确认门同一处取值 ──
+	//    MUST NOT 另算一份编排量——两处各算一遍，预估与实收迟早会漂，而漂了没人会发现。
+	//    结局是**成功**：「我在做决定」不是「我拒绝了」，压成同一个 declined 会让调用方分不清。
+	if (layOpts.arrangeEstimateOnly) {
+		const applicable = arrangeMode !== "local" && isLocalArrangeScope(plan);
+		if (!applicable) {
+			// 素材矩阵路 / 总闸压回 local：那条路的编排在本机跑、不计编排量。
+			// **MUST NOT 报 0** —— 0 会被读成「云端跑但免费」，与「根本不走云端」是两回事。
+			log.info("本轮不走云端编排（素材矩阵路或总闸已压回本机），无编排量可估——本机编排不计费。");
+			return { estimateOnly: true, lay: { estimateOnly: true, arrange: { applicable: false } } };
+		}
+		const scale = scaleOfRequest(plan, layN, decisionOpts);
+		const units = arrangeUnits(scale);
+		log.info(
+			`本次云端编排的**编排量**预估为 ${units}` +
+				`${layOpts.arrangeCostCap !== undefined ? `（本次上限 ${layOpts.arrangeCostCap}）` : ""}。` +
+				"只预估未执行：零云端调用、工程文件零改动。去掉 --arrange-estimate-only 即可真跑。",
+		);
+		return {
+			estimateOnly: true,
+			lay: {
+				estimateOnly: true,
+				arrange: {
+					applicable: true,
+					units,
+					...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+					scale,
+				},
+			},
+		};
+	}
 	// 预估确认门（P2.2b）：云端档跑前报编排量并征求确认。**只在真会发请求时问**——
 	// 素材矩阵路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
 	if (arrangeMode !== "local" && isLocalArrangeScope(plan)) {

@@ -128,6 +128,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 编排交给云端跑 | `--arrange <m>` | **按素材来源自动定档，一般不用传** | 铺**自己电脑里的素材**→`cloud`（编排在服务端，按编排量计费）；铺**素材矩阵的素材**→`local`（编排仍在本机、不计费，逐字不动）。`shadow`=本机照跑照铺轨、云端只对拍不采纳。⚠️ 本地素材路上 `--arrange local` **已不受理**（2026-08-31 拍板：编排只在服务端迭代，留旧路等于让用户在不知情时拿到另一套算法的结果）；云端拿不到产物时**直接报错**，不会换算法把活干完。⚠️ **它不是省钱开关**——矩阵素材要付检索费，两条路都花钱、只是花在不同环节，MUST NOT 对用户说「用本地就不花钱」 |
 | 落轨前先质检画音对齐 | `--arrange-qc` | 开关 · 缺省关 | 只查各 beat 的**卡点句**（span.from 领衔句）：画面没给到稿句说的东西就换候选重排，最多 2 轮，到限即交付 + 如实登记残余。零渲染。⚠️ 按帧计费（每卡点句 1 帧/轮），跑前报预估求确认。**默认关，用户没说就别带**。拿不到卡点句（无 dispatch / 重投影降级）时会明说「跳过 ≠ 查过」，别把那条日志读成通过 |
 | 云端编排本次上限 | `--arrange-cost-cap <n>` | 正整数 · 不限 | 超限服务端**前置拒绝**、零执行零计费（不是跑一半掐断）。只在 `--arrange shadow\|cloud` 时有意义 |
+| 先估价再决定跑不跑 | `--arrange-estimate-only` | 开关 · 缺省关 | 走到云端编排的计价确认那一步就停：报出编排量后**成功**返回（`ok:true` + `estimateOnly:true`，不是「被拒绝」），零云端调用、工程零改动。机读值在 `lay.arrange.units` 与 `lay.arrange.scale`。⚠️ 它省的是**云端那一次调用与其计费**（及其后的下载落轨），不是整条链——工程/plan/重投影照样要走。素材矩阵路会报 `applicable:false` 而**不是 0**。与 `--yes` 同给时以它为准 |
 | 不要黑底垫轨 | `--no-black-bed` | 开关 · 默认铺 | 黑底按 beat 包络整条铺，B-roll 期间遮口播 |
 | 已编辑轨强铺逃生门 | `--force-relay` | 开关 · 关 | 用户明确点头才带；raw 登记删除不可恢复 |
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
@@ -192,7 +193,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
 | 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 手工组的 plan 从这进 |
 | 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
-| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-qc/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
+| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
 ## plan 编辑口径（法定通道的边界）
 
@@ -262,7 +263,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
   CLI 问不到人 ⇒ **整轮铺轨中止**（工程零改动、plan 照常可用）。本地编排那条路已关死，没有备用算法可退。
   所以：跑之前先把预估编排量与花费**告诉用户、拿到他的同意**，再带 `--yes` 重跑；
   **MUST NOT 未经同意就带 `--yes`**（那是替他花钱），也 **MUST NOT 看到回落告警就当没事发生**
-  （那等于默默把他降级到冻结的本机算法）。预估值可先用 `--arrange-cost-cap` 兜个上限。
+  （那等于默默把他降级到冻结的本机算法）。想先看看要花多少，用 `--arrange-estimate-only` 单独估一次（零调用、零改动，数在 `lay.arrange.units`）；要兜上限用 `--arrange-cost-cap`。
 - **缓存零重复计费**：产物落工程 `assets/broll-move/`（材料 id=`broll-local-<图hash>-mv<参数指纹>`），同图同参恒复用；跨工程会重新生成。
 - **参数定死统一档**：duration 恒 5s（槽长 >5s 取 ceil，钳 [2,12]）、画布=工程 video_size、入轨按槽长裁剪——统一档就是为了缓存命中与重铺画面不跳。
 - **失败降级=静态图片上轨**（不换内容不留黑），明细在 `lay.image_move_failures`；重铺自动重试运镜。
