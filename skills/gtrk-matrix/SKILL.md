@@ -61,12 +61,18 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
   #   窗口中心 ≈ D × (i/n)（解说进度比），半径 r 可调（起手 ±D/n 到 ±2D/n）
   gtrk matrix search "<该段画面描述>" --local --dirs <夹> --source-window <中心-r>,<中心+r> --out seg-i.json --json
   # 空窗（results 空）→ 你裁定：扩半径重试 / 接受留空 / 放弃时序约束去全片搜
-  # 汇总各段命中，手工组一份 plan（结构照 broll-plan.json；每段一个 beat、track_st/ed=该段口播窗口）
+  # 汇总各段命中组一份 plan（结构照 broll-plan.json；每段一个 beat、track_st/ed=该段口播窗口）
+  # ★ 每个 seg-i.json 里的 results 条目**原样搬进去**，MUST NOT 自己重写 segments
   gtrk matrix lay --project <目录> --plan <你组的 plan 路径> --json
   #（可选）组 plan 前先 describe 一轮候选帮助取舍（配方 B ③ 的动作）
   ```
 - **变奏点**：窗口公式只是起手——非线性叙事（倒叙/闪回）按你对片子的理解手排窗口；`--source-window` 与 `--score-floor` AND 叠加；窗口显式传入时图片候选自动排除（无时间轴）。
 - **要点**：段边界不被窗口裁剪（有交集即完整返回），截多长归铺轨槽长逻辑；扩窗与否永远是你的裁定，CLI 绝不自动扩。
+- **★ 组 plan 时最容易丢的东西**：`cuts`（段内切点）与 `motion`（段级运动量）住在 **`segments[]` 里面**，检索结果本来就带着它们。你**原样搬** `results` 条目就都在；一旦按「我自己写个 start/end/best」的姿势重写 segments，它们一起没了，后果具体是：
+  - 丢 `cuts` ⇒ 铺轨的**端点残片收缩空转**（只剩帧网格吸附，还得候选带 `fps` 才生效）——成片上可能出现一闪而过的异景帧；
+  - 丢 `motion` ⇒ **高运动降权不生效**（缺席=不可判，不是「平稳」）；
+  - 没跑过 `describe` ⇒ 美观度 / 看点 / 模糊降权三条一并不生效（那是配方 B ② 的产物）。
+- **两种「没有 cuts」要分开处理**：① 你重写了 segments ⇒ 改姿势原样搬回来即可；② 素材压根没扫过切点 ⇒ 跑 `gtrk matrix index --dirs <夹> --rebuild` 补上。分不清就看 `matrix lay` 的输出——它会打一条「闪帧风险**不可判**：N 颗镜头取自没扫过切点的素材」，那条告警一直在跑，**读它**。
 
 ### 配方 D · 理解先行编剧（vlog 式，素材→文稿）
 
@@ -191,7 +197,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 用户想要 | CLI 怎么传 | 取值 · 默认 | 说明 |
 |---|---|---|---|
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
-| 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 手工组的 plan 从这进 |
+| 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 自己组的 plan 从这进。⚠️ 组的时候把检索返回的 `results` 条目**原样搬**——`cuts` / `motion` 住在 `segments[]` 里面，自己重写 segments 就把它们丢了（后果：端点残片收缩空转、高运动降权失效，见配方 C 要点） |
 | 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
 | 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
