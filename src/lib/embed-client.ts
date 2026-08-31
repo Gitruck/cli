@@ -7,7 +7,7 @@
  *     internal 矩阵成员豁免——见下方「计量会话」）；
  *   - 响应兼容两形态：裸 `{data:[{index, embedding}], usage}`（D2 契约/Jina 形态）与 infra
  *     包络 `{code, msg, data:{data:[…], usage}}`——jina-clip-v2 满 1024 维 normalized 向量
- *     （与云端素材矩阵同语义空间）；
+ *     （与素材矩阵同语义空间）；
  *   - 鉴权沿 cloud-link 口径：`Authorization: <apikey>`（**非 Bearer**）；
  *   - 批 ≤16/请求（图上限；文本一并压在同一上限内，服务端文本上限 64 更宽松）；
  *   - 传输失败/5xx/429 指数退避重试 3 次后**硬失败**（机读 code `embed_endpoint_unreachable`），
