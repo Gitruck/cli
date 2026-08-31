@@ -2357,7 +2357,7 @@ async function layIntoProject(
 	// ★ 文案**按机读 `code` 现渲染**，MUST NOT 直接印服务端送来的 `reason`：
 	// 那个字段内嵌数值，刻意不在跨语言契约面上（JS 出 "1"、Python 出 "1.0"），
 	// 服务端本就不送。现渲染让本地路与云端路说同一句话，也断掉文案漂移。
-	const directWhy = (d: { code?: string; reason?: string; starved_sec?: number }): string => {
+	const directWhy = (d: { code?: string; starved_sec?: number }): string => {
 		switch (d.code) {
 			case "sliver":
 				return `精修后短于最小可用镜头长——已按指令照落，成片上会是一个很短的镜头`;
@@ -2370,7 +2370,7 @@ async function layIntoProject(
 			case "beat_no_span":
 				return "beat 窗口无长度";
 			default:
-				return d.reason ?? "未知原因";
+				return "未知原因";
 		}
 	};
 	if (directOutcomes?.length) {
@@ -2821,7 +2821,7 @@ async function layIntoProject(
 							cut_snap: d.cut_snap,
 							fps: d.fps,
 							...(d.code ? { code: d.code } : {}),
-							...(d.reason ? { reason: d.reason } : {}),
+							...(d.code ? { why: directWhy(d) } : {}),
 							...(typeof d.starved_sec === "number" ? { starved_sec: d.starved_sec } : {}),
 						})),
 					}
