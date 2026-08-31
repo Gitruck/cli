@@ -312,11 +312,14 @@ export function registerMatrix(program: Command): void {
 		)
 		.option(
 			"--arrange <mode>",
-			"B-roll 编排取数路 local|shadow|cloud（缺省 local=全部在本机决策，与以往逐字节一致）：" +
+			"B-roll 编排取数路 local|shadow|cloud。**不传时按素材来源自动定档**：铺你自己电脑里的素材=cloud" +
+				"（编排在云端做，算法只在服务端迭代）；铺素材库/普通/概念素材=local（原来什么样以后还什么样，逐字不动）。" +
 				"shadow=本机照跑照铺轨，同时把编排交给云端跑一遍**只对拍不采纳**；cloud=采纳云端编排产物，" +
-				"本机复算自校验不一致时自动回落本机。**只作用于本地素材上轨铺排**——素材库/普通素材/概念素材的" +
-				"匹配与铺排一律不受影响，原来什么样以后还什么样。云端档按「编排量」计费，跑前会报预估并征求确认" +
-				"（--yes 跳过）。环境变量 GITRUCK_ARRANGE=off 是总闸，可随时把云端压回本机",
+				"本机复算自校验不一致时回落本机并大声告知。" +
+				"⚠️ 本地素材走 cloud 时**没网就直接报错**，不会悄悄改用本机编排——那会给你另一套算法的结果而你不知情；" +
+				"确实要离线出片就显式加 --arrange local（那份本地编排仍随包，但不再随服务端更新）。" +
+				"云端档按「编排量」计费，跑前会报预估并征求确认（--yes 跳过）。" +
+				"环境变量 GITRUCK_ARRANGE=off 是总闸，可随时把云端压回本机",
 		)
 		.option(
 			"--arrange-cost-cap <n>",
@@ -1698,13 +1701,15 @@ async function runArrangeQcHere(
 function arrangeWiring(
 	opts: MatrixOpts,
 	cfg: { base: string; apiKey: string } | undefined,
-): { arrangeMode: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
+): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
 	const arrangeMode = parseArrangeMode(opts.arrange);
 	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
 	const qc = opts.arrangeQc === true;
 	return {
-		arrangeMode,
+		...(arrangeMode !== undefined ? { arrangeMode } : {}),
 		...(costCap !== undefined ? { arrangeCostCap: costCap } : {}),
+		// ★ 端点只在**显式 local** 时不解析。抽芯后不传 `--arrange` 是 auto，
+		//   本地素材路会定档 cloud —— 那时端点必须已经在手，否则 auto 永远走不到云端。
 		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
 		...(qc ? { arrangeQc: true } : {}),
 		// 判定端点只在真要判时解析（不开 QC 的那条路一个网络字节都不该动）
@@ -1712,12 +1717,32 @@ function arrangeWiring(
 	};
 }
 
-/** --arrange 解析：local|shadow|cloud，缺省 local（**零回归**）；越界即参数错误。
- * MUST NOT 静默忽略——把 `--arrange cloub` 的笔误当成 local 跑掉，用户会以为云端跑了。 */
-function parseArrangeMode(raw: string | undefined): ArrangeMode {
-	if (raw === undefined) return "local";
+/** --arrange 解析：local|shadow|cloud；**不传 = auto**（返回 undefined，定档推迟到拿到 plan）。
+ *
+ * ★ 2026-08-31 抽芯（P4.1，主理人裁定「本地素材全部走云端」）：缺省从写死的 `local`
+ * 改为**按业务线分流**（见 `resolveAutoArrangeMode`）。分流依赖 `plan.member_type`，
+ * 而它要读完工程才知道 —— 所以这里只能返回「没指定」。
+ *
+ * 越界仍即参数错误，MUST NOT 静默忽略：把 `--arrange cloub` 的笔误当成缺省跑掉，
+ * 用户会以为自己指定的那一档生效了。 */
+function parseArrangeMode(raw: string | undefined): ArrangeMode | undefined {
+	if (raw === undefined) return undefined;
 	if (raw === "local" || raw === "shadow" || raw === "cloud") return raw;
 	throw new Error(`--arrange 只支持 local、shadow 或 cloud（得到「${raw}」）`);
+}
+
+/** 缺省定档（P4.1 抽芯）：**本地素材路走云端，云端素材路逐字不动**。
+ *
+ * 这是「按业务线切，不按算法切」落到缺省值上的执行面（design §8′ 终裁 + 主理人
+ * 2026-08-31「以后涉及本地素材的，就全部走云端了，不需要维护两套」）。
+ * 显式传的档位恒优先 —— auto 只在没传时说话。
+ *
+ * ⚠️ 这里**没有**「把本地决策代码抽出分发物」这一步，那是做不到的：云端素材路仍要在本地
+ * 跑同一份 `planBeatFills`（§8′ 明载「两条路共用的算法仍将随包公开——云端路需要它」）。
+ * 抽芯抽掉的是**本地素材路对本地决策的依赖**，不是那段代码本身。 */
+function resolveAutoArrangeMode(explicit: ArrangeMode | undefined, plan: BrollPlan): ArrangeMode {
+	if (explicit !== undefined) return explicit;
+	return isLocalArrangeScope(plan) ? "cloud" : "local";
 }
 
 /** --arrange-cost-cap 解析：正整数；越界即参数错误。 */
@@ -2135,23 +2160,52 @@ async function layIntoProject(
 		...(cutStarts ? { cutAlign: { ratio: cutRatio, starts: cutStarts } } : {}),
 		...(gapModeEff !== "none" ? { gapFill: gapModeEff } : {}),
 	};
-	// 编排取数路（add-broll-arrange-atom P3.1）：缺省 local ⇒ 与本 change 之前**逐字节一致**
-	// （`runArrangeWithFallback` 的 local 分支就是直接调 runLocal，零额外动作）。
-	// 云端档只承担**本地素材上轨铺排**——云端素材路由 isLocalArrangeScope 挡在门外，
+	// 编排取数路（P3.1 → P4.1 抽芯）：**不传 `--arrange` 时按业务线定档**——
+	// 本地素材路走 cloud，云端素材路走 local（逐字不动）。显式档位恒优先。
+	// 云端档只承担本地素材上轨铺排；云端素材路由 isLocalArrangeScope 挡在门外，
 	// 那不是回滚，是终裁「按业务线切，不按算法切」的执行面。
-	let arrangeMode = resolveArrangeMode(layOpts.arrangeMode ?? "local");
+	let arrangeMode = resolveArrangeMode(resolveAutoArrangeMode(layOpts.arrangeMode, plan));
+	// ★ 抽芯的实质：本地素材路**不再自动回落本地**。
+	//   端点不可达 / 服务端业务拒绝 / 产物结构违约 ⇒ 明确报错，而不是悄悄换一套算法把活干完。
+	//   理由是诚实性：回落产出的是**另一套算法**的结果，用户以为自己拿到的是云端那套。
+	//   保留两个例外，见 arrange-gate 的 `strictCloud` 注释（总闸 / 自校验）。
+	//
+	// ★★ 分界线是**「谁做的决定」**，不是「有没有出错」：
+	//   系统故障（连不上 / 被拒 / 产物违约）⇒ 报错，因为那是我们没兑现承诺；
+	//   用户选择（拒绝预估确认）⇒ 回落 + 大声说明，因为不花钱是他自己选的。
+	//
+	// 曾想再补一条「没配凭据 ⇒ 回落而非报错」，实测后**撤掉了**：`runLayMode` 开头就
+	// 无条件 `loadConfig()`，缺 Key 在这之前几百行就已经明确报错了 —— 那个分支不可达。
+	// 不可达的兜底 + 跑不起来的测试，比没有更糟（它会让人以为这条路被守住了）。
+	const strictCloud = isLocalArrangeScope(plan);
 	// 预估确认门（P2.2b）：云端档跑前报编排量并征求确认。**只在真会发请求时问**——
 	// 云端素材路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
 	if (arrangeMode !== "local" && isLocalArrangeScope(plan)) {
+		const confirmFn = layOpts.deps.confirm ?? (process.stdin.isTTY ? confirmViaStdin : undefined);
 		const gate = await estimateGate(arrangeUnits(scaleOfRequest(plan, layN, decisionOpts)), {
 			assumeYes: layOpts.yes,
 			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
-			confirm: layOpts.deps.confirm ?? confirmViaStdin,
+			// ★ 无 TTY 时**不传 confirm**，让 estimateGate 的 `no_tty` 分支真正可达。
+			//   那条分支一直存在却从来跑不到（调用方永远传了 confirm），翻面前不暴露是因为
+			//   云端档是 opt-in；缺省翻成 cloud 后它落到主路上，`confirmViaStdin` 会在
+			//   agent 驱动 / CI 这类无 stdin 的场景**永久阻塞**。这是抽芯当天实测撞到的。
+			...(confirmFn ? { confirm: confirmFn } : {}),
 			log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
 		});
 		// 拒绝/无从确认 ⇒ 退回本地编排，**工程照常完成**（不是中止：编排本机也做得了，
-		// 用户拒的是「上云」不是「铺轨」——把整轮掐掉等于替他做了他没做的决定）
-		if (!gate.proceed) arrangeMode = "local";
+		// 用户拒的是「上云」不是「铺轨」——把整轮掐掉等于替他做了他没做的决定）。
+		//
+		// ★ 抽芯后这条**仍然回落**，与「不再自动回落」不矛盾：那条针对的是**系统故障**
+		//   （连不上 / 被拒 / 产物违约），这里是**用户的选择**。分界线是「谁做的决定」——
+		//   故障时静默换算法是我们瞒着他，他主动不花钱时换算法是他自己选的。
+		//   但**必须说清楚换了引擎**，否则「不静默」就成了空话。
+		if (!gate.proceed) {
+			arrangeMode = "local";
+			log.warn(
+				"本轮改用**随包的本地编排**出片（它仍在分发物里、云端素材路也用它，但不再随服务端更新）——" +
+					"与云端那套算法的结果可能不同。要用云端编排：交互环境下确认，或在脚本里显式加 --yes。",
+			);
+		}
 	}
 	const gateLog = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };
 	const arrangeOnce = (p: BrollPlan) =>
@@ -2159,6 +2213,7 @@ async function layIntoProject(
 			runLocal: () => planBeatFills(p, layN, scoreFloor, decisionOpts),
 			...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
 			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+			...(strictCloud ? { strictCloud: true } : {}),
 			log: gateLog,
 		});
 

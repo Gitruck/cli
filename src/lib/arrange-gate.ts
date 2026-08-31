@@ -96,8 +96,49 @@ export interface ArrangeGateDeps {
 	clientDeps?: ArrangeDeps;
 	log?: { info: (m: string) => void; warn: (m: string) => void };
 	costCap?: number;
-	/** `cloud` 档是否做本地复算自校验（P3 期恒开；P4 抽芯后本地无从复算，届时关闭）。 */
+	/**
+	 * `cloud` 档是否做本地复算自校验。**恒开**——包括抽芯之后。
+	 *
+	 * ★ 订正一处早先的预判：本字段原注释写「P4 抽芯后本地无从复算，届时关闭」。
+	 * 那句话预设了抽芯会把 `planBeatFills` 抽出分发物，而 design §8′ 终裁后它抽不掉
+	 * ——云端素材路仍要在本地跑同一份决策。既然它还在，复算就做得到，
+	 * 这层白送的安全网没有理由关。
+	 */
 	selfCheck?: boolean;
+	/**
+	 * 抽芯档（P4.1，主理人 2026-08-31 裁定「本地素材全部走云端，不需要维护两套」）：
+	 * **本地素材路不再自动回落本地**。
+	 *
+	 * 开启后 `unreachable` / `rejected` / `malformed` 三种情形 SHALL **抛错**而非回落。
+	 * 理由是诚实性：回落产出的是**另一套算法**的结果，而用户以为拿到的是云端那套；
+	 * 悄悄换引擎比直接报错更坏——报错他知道该重试或换档，静默换算法他连问题存在都不知道。
+	 *
+	 * **两个例外仍回落，不受本开关影响**：
+	 * - **总闸**（`GITRUCK_ARRANGE=off`）：止血阀必须真能止血，否则它就不是阀门。
+	 *   它走 `mode === "local"` 的提前返回，根本到不了这里。
+	 * - **自校验不一致**：那一路本地产物**已经算出来了**、服务端也已计费，
+	 *   扔掉一个手上就有的可用产物对用户没有任何好处。照旧回落 + 大声告知。
+	 */
+	strictCloud?: boolean;
+}
+
+/** 抽芯档下不再回落的那三种情形共用的错误。**带逃生舱**——报错必须给出路。 */
+export class ArrangeUnavailableError extends Error {
+	/** 鸭子标记：同 `ArrangeError`，多 bundle 下 instanceof 不可靠。 */
+	readonly arrangeUnavailable = true;
+	constructor(
+		readonly reason: FallbackReason,
+		detail: string,
+	) {
+		super(
+			`本地素材的 B-roll 编排在云端完成，本轮没能拿到云端产物：${detail}\n` +
+				"本地素材路自 2026-08-31 起全部走云端（算法只在服务端迭代），故这里**不再**悄悄改用本地编排" +
+				"——那会给你另一套算法的结果而你并不知情。\n" +
+				"出路：① 排查网络/凭据后重试；② 确实要离线出片就显式加 `--arrange local`，" +
+				"用随包的那份本地编排（它仍在分发物里、云端素材路也用它，但**不再随服务端更新**）。",
+		);
+		this.name = "ArrangeUnavailableError";
+	}
 }
 
 const NOOP_LOG = { info: () => {}, warn: () => {} };
@@ -128,9 +169,14 @@ export async function runArrangeWithFallback(
 		return { outcome: deps.runLocal(), source: "local", mode, fallback: "out_of_scope" };
 	}
 
-	// 本地照跑：shadow 期它是产物，cloud 期它是自校验的对照
+	// 本地照跑：shadow 期它是产物，cloud 期它是自校验的对照。
+	// ★ 抽芯档下 shadow 仍需要它（对拍），cloud 也仍需要它（自校验）——所以这一行不能省。
 	const local = deps.runLocal();
+	//: 抽芯只作用于 **cloud 档**：shadow 的全部意义就是「本地落轨 + 云端只对拍」，
+	//: 在那一档上抛错等于把一个纯观测档变成了硬依赖。
+	const strict = deps.strictCloud === true && mode === "cloud";
 	const fallback = (reason: FallbackReason, msg: string): ArrangeGateResult => {
+		if (strict) throw new ArrangeUnavailableError(reason, msg);
 		log.warn(`${msg}——本轮回落本地编排，工程照常完成。`);
 		return { outcome: local, source: "local", mode, fallback: reason };
 	};
@@ -158,11 +204,11 @@ export async function runArrangeWithFallback(
 		remote = applyArrangeResponse(resp, lay);
 	} catch (e) {
 		// 产物结构违约：**已计费**（服务端成功返回过），如实说
-		log.warn(
-			`服务端编排产物结构违约，本轮弃用：${(e as Error).message}\n` +
-				`⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
-				"请把这条连同上面的违约明细反馈给我们。",
-		);
+		const billed =
+			`⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
+			"请把这条连同上面的违约明细反馈给我们。";
+		if (strict) throw new ArrangeUnavailableError("malformed", `服务端编排产物结构违约：${(e as Error).message}\n${billed}`);
+		log.warn(`服务端编排产物结构违约，本轮弃用：${(e as Error).message}\n${billed}`);
 		return { outcome: local, source: "local", mode, fallback: "malformed", ...(resp.units !== undefined ? { units: resp.units } : {}) };
 	}
 
