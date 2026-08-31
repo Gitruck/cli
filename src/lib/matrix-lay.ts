@@ -1134,9 +1134,11 @@ export function fillBeatTrack(opts: {
 				const refined = refineWindow(lastPick, { clipSt: last.clip_st, clipEd: last.clip_ed + ext }, maxD);
 				// 精修失败（收缩后不足下限）= 维持吸收前窗口，如实留空
 				if (refined && refined.clipEd > last.clip_ed + 1e-6) {
-					const grew = refined.clipEd - last.clip_ed;
-					last.clip_ed = r3(refined.clipEd);
-					last.track_ed = r3(last.track_ed + grew);
+					// 两端 MUST NOT 各自舍入（见 slotTimes 头注）——尾部吸收同样走唯一出口。
+					// track_ed_old + grew ≡ track_st + newDur，故两侧同时由 newDur 派生，恒等式不破。
+					const t = slotTimes(last.clip_st, last.track_st, refined.clipEd - last.clip_st);
+					last.clip_ed = t.clip_ed;
+					last.track_ed = t.track_ed;
 				}
 			}
 		}
@@ -1729,8 +1731,13 @@ function fastFillBeatGaps(o: {
 					const hi = residue <= MICRO_SLOP ? Math.min(seg.hi + residue, seg.dur ?? seg.hi + residue) : seg.hi;
 					const ext = Math.min(residue, Math.max(0, hi - prev.clip_ed));
 					if (ext > EPS) {
-						prev.clip_ed = r3(prev.clip_ed + ext);
-						prev.track_ed = r3(prev.track_ed + ext);
+						// 同一个 ext 加到两个不同基数上，浮点相位不同可能进位不同 ⇒ 恒等式破。
+						// 一律走唯一出口（见 slotTimes 头注）：起点不动，时长派生两端。
+						{
+							const t = slotTimes(prev.clip_st, prev.track_st, prev.clip_ed + ext - prev.clip_st);
+							prev.clip_ed = t.clip_ed;
+							prev.track_ed = t.track_ed;
+						}
 						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: prev.clip_id, track_st: r3(cursor), track_ed: r3(cursor + ext), sec: r3(ext) });
 						cursor = prev.track_ed;
 					}
@@ -1746,8 +1753,16 @@ function fastFillBeatGaps(o: {
 					const lo = residue <= MICRO_SLOP ? Math.max(0, seg.lo - residue) : seg.lo;
 					const ext = Math.min(residue, Math.max(0, next.clip_st - lo));
 					if (ext > EPS) {
-						next.clip_st = r3(next.clip_st - ext);
-						next.track_st = r3(next.track_st - ext);
+						// 同上：两个起点各自回退同一个 ext 会让两侧时长分头进位。
+						// 起点先定死，再由「老终点 − 新起点」这一个时长派生两端（终点因此原地不动）。
+						{
+							const cs = r3(next.clip_st - ext);
+							const t = slotTimes(cs, next.track_st - ext, next.clip_ed - cs);
+							next.clip_st = t.clip_st;
+							next.track_st = t.track_st;
+							next.clip_ed = t.clip_ed;
+							next.track_ed = t.track_ed;
+						}
 						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: next.clip_id, track_st: next.track_st, track_ed: r3(g.ed), sec: r3(ext) });
 					}
 				}
