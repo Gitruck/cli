@@ -36,7 +36,10 @@ export interface ArrangeResponse {
 	fills: Record<string, FillSlot[][]>;
 	clip_ids?: string[];
 	stats: FillStats;
+	/** 钉选结算。元素是**段键** `<clip_id>@<round(best×1000)>`，MUST NOT 是 clip_id
+	 * （fix-arrange-diagnostics-granularity：钉选逐段生效，按 clip 去重会在整片单素材的工程上坍缩）。 */
 	pinned: { requested: string[]; yielded: string[] };
+	/** 信号缓存命中/中性计数，同样**按段去重**。 */
 	mark_stats: { hit: number; neutral: number; hlHit: number; hlNeutral: number };
 	anchors: AnchorOutcome[];
 	/** 条件键：吸附未激活时**整键缺席**（MUST NOT 补 null）。 */
@@ -228,6 +231,19 @@ export function applyArrangeResponse(resp: ArrangeResponse, expectedLay: number)
 
 	if (!resp.pinned || !Array.isArray(resp.pinned.requested) || !Array.isArray(resp.pinned.yielded)) {
 		problems.push("缺 pinned.requested / pinned.yielded（让位名单要指名，MUST NOT 只给计数）");
+	} else if (stats && typeof stats === "object" && FINITE(stats.pinnedPlaced) && FINITE(stats.pinnedYielded)) {
+		// ★ 钉选三数自洽律（fix-arrange-diagnostics-granularity）：placed + yielded === requested。
+		//   这条不是形式主义——它拦的是「两个字段不同分母」那一类 bug，而那类 bug 的症状**不是报错**，
+		//   是 `placed=1 / requested=1 / yielded=0` 这种**读起来自洽的错数**（实际钉了 5 个只落了 1 个）。
+		//   用户不会去质疑一个自洽的数，所以只能由机器拦：服务端漏改三处中的任何一处，这里立刻显形。
+		const req = resp.pinned.requested.length;
+		if (stats.pinnedPlaced + stats.pinnedYielded !== req) {
+			problems.push(
+				`钉选诊断三数不自洽：pinnedPlaced=${stats.pinnedPlaced} + pinnedYielded=${stats.pinnedYielded} ` +
+					`≠ pinned.requested=${req} —— 三者 MUST 同分母（按段计，键 <clip_id>@<round(best×1000)>）；` +
+					"对不上通常是服务端只改了其中一处",
+			);
+		}
 	}
 	if (!Array.isArray(resp.anchors)) problems.push("缺 anchors 数组（无锚时应为空数组，不是缺席）");
 	// 降级 MUST NOT 静默：degraded 锚必须带 reason（人读告警与机读诊断共用同一份）

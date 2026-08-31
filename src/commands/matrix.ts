@@ -2303,7 +2303,7 @@ async function layIntoProject(
 	}
 	const markOn = typeof layOpts.markWeight === "number" && layOpts.markWeight > 0;
 	if (markOn) {
-		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 候选 · 中性 ${markStats.neutral} 候选（w=${layOpts.markWeight}）`);
+		log.info(`美观度权重：mark 缓存命中 ${markStats.hit} 段 · 中性 ${markStats.neutral} 段（w=${layOpts.markWeight}）`);
 	}
 	// 零覆盖明示（fix-describe-cache-locality）：库存在但**本片**一条缓存都没命中这一档此前静默通过
 	// ——用户以为加权在跑，实际全部中性、权重原样回吐给 sim（260828 三条美食片 describes=0 实锤）。
@@ -2321,9 +2321,13 @@ async function layIntoProject(
 	}
 	// pinned 让位必须明示（matrix-command spec：冲突后到让位并 summary 明示，MUST NOT 静默）
 	if (pinnedOutcome.yielded.length) {
+		// 名单是**段键** `<clip_id>@<毫秒>`（fix-arrange-diagnostics-granularity）——整片单素材的工程
+		// 里「哪一段没落上」正是用户唯一需要的信息，只报 clip_id 等于什么都没说
 		log.warn(
-			`pinned 候选未能全部入选：${pinnedOutcome.yielded.join("、")} 让位（pinned 间冲突后到让位/供长不足/被排除）——` +
-				`其余 pinned 已优先满足；要强保它们可减少同 beat 的 pinned 数或放宽槽位（--lay/--top-k）后重跑`,
+			`钉选段未能全部入选（${pinnedOutcome.yielded.length}/${pinnedOutcome.requested.length} 段让位）：` +
+				`${pinnedOutcome.yielded.join("、")}（钉选间冲突后到让位/供长不足/被排除）——` +
+				`名单是「素材@段内锚点毫秒」；其余钉选段已优先满足；` +
+				`要强保它们可减少同 beat 的钉选段数或放宽槽位（--lay/--top-k）后重跑`,
 		);
 	}
 	const slotCount = [...fills.values()].flat().reduce((n, s) => n + s.length, 0);
@@ -2604,12 +2608,13 @@ async function layIntoProject(
 			...(hlOn
 				? { highlight_weight: layOpts.highlightWeight, highlight_hit: markStats.hlHit, highlight_neutral: markStats.hlNeutral }
 				: {}),
-			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）
+			// pinned 裁定账面（plan 可编辑契约）：plan 里有钉选才出现（无 pinned 时 lay JSON 逐字节不变）。
+			// 三个数**同分母、按段计**（fix-arrange-diagnostics-granularity）：requested = placed + yielded 恒成立。
 			...(pinnedOutcome.requested.length
 				? {
 						pinned: {
 							requested: pinnedOutcome.requested.length,
-							placedSlots: fillStats.pinnedPlaced,
+							placed: fillStats.pinnedPlaced,
 							yielded: pinnedOutcome.yielded,
 						},
 					}
