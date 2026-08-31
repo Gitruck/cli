@@ -323,6 +323,19 @@ export function validatePlanForLay(planRaw: unknown): string[] {
 						errs.push(`beat ${beat.beat}：direct_slot 的 track_st/track_ed 要么都给要么都不给（只给一半是无意义的半个约束）`);
 						break;
 					}
+					const role = d.slot_role;
+					if (role !== undefined && !(typeof role === "string" && (DIRECT_SLOT_ROLES as readonly string[]).includes(role))) {
+						errs.push(
+							`beat ${beat.beat}：direct_slot 的 slot_role 非法（二选一：${DIRECT_SLOT_ROLES.join(" | ")}；得到 ${JSON.stringify(role)}）——越界值 MUST NOT 静默降级`,
+						);
+						break;
+					}
+					// 引用段没有时间线位置就无从「逐秒对齐」，是不自洽的请求。
+					// ⚠️ 反向不成立：钉了位的硬出处段是合法的，故 MUST NOT 从位置反推 slot_role。
+					if (role === "quote" && track_st === undefined) {
+						errs.push(`beat ${beat.beat}：direct_slot 标了 slot_role:"quote" 却没给 track_st/track_ed——引用段要逐秒对齐，没有时间线位置无从对齐`);
+						break;
+					}
 					if (track_st !== undefined && !(num(track_st) && num(track_ed) && track_st < track_ed)) {
 						errs.push(
 							`beat ${beat.beat}：direct_slot 的时间线位置须为有限数字且 track_st < track_ed（得到 ${JSON.stringify(track_st)}–${JSON.stringify(track_ed)}）`,
@@ -407,6 +420,10 @@ export function anchorAtSec(utteranceText: string, keyword: string, trackSt: num
 export const ARRANGE_TIERS = ["direct", "temporal", "semantic"] as const;
 export type ArrangeTier = (typeof ARRANGE_TIERS)[number];
 
+/** 直排槽的语义类别。取值表用 `as const`：运行期要能 includes（越界即拒）。 */
+export const DIRECT_SLOT_ROLES = ["quote", "provenance"] as const;
+export type DirectSlotRole = (typeof DIRECT_SLOT_ROLES)[number];
+
 /**
  * 直排槽（高档入参）：「这一段就用这条素材的这一段，别检索」。
  *
@@ -429,6 +446,27 @@ export interface DirectSlot {
 	track_ed?: number;
 	/** 溯源用的检索词**原文**。MUST NOT 用 q_idx——下标会因空池折叠而错位（红线 1）。 */
 	query?: string;
+	/** 直排槽的**语义类别**（narration 图纸 §119 并列的两类；上面头注引用的就是它们）。
+	 *
+	 * - `quote` **引用段**：画面与口播逐秒对齐。源窗端点是**硬约束**——解说说到
+	 *   「他咬下这一口」，若那一口正好横跨一个镜头切换，用户要的就是**含这个切换**
+	 *   的那一段；把端点吸走等于删掉他点名要的画面。故 `quote` **跳过切点吸附**。
+	 * - `provenance` **硬出处段**：稿里显式写「【素材：片段03 2:10-2:40】」，那是
+	 *   出处指令，位置可协商，恰恰**需要**切点吸附消端点残片。
+	 *
+	 * ★ **只关切点吸附这一步**：帧网格吸附两类都保留（位移 ≤ 半帧，且它保证端点
+	 * 落在可播的帧边界上；跳过它只是把量化推给下游，而下游两种语言/两个播放器
+	 * 没有共同的取整规则）。切点吸附的位移上界是 `SLIVER_MIN_SEC`（1 秒），
+	 * 那才是画音错位的量级。
+	 *
+	 * **缺席 = 未标注**：决策层按 `provenance` 处置（= 本字段落地前后逐字节一致），
+	 * 但投影层 MUST NOT 补成 `"provenance"`——整键不上行，同 `arrange_mode`/`fps`/
+	 * `motion` 的既有纪律。缺席不能翻成 `quote`：那会追认已发出的字节，并让所有
+	 * 既有硬出处槽**静默**失去消残片。
+	 *
+	 * ⚠️ 与 `PlanResult.pinned` **无关**：那个挂在**候选**上、管**排序**、可让位；
+	 * 本字段挂在**槽**上、管**端点可动性**、不可让位。MUST NOT 合并。 */
+	slot_role?: DirectSlotRole;
 }
 
 export interface PlanBeat {

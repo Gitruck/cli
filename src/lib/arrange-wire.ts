@@ -51,7 +51,7 @@
  *    丢一条，轮转序整体错位一格，而落轨字节照样合法、永不被发现。
  */
 
-import type { ArrangeTier, BrollPlan, DirectSlot, PlanAnchor, PlanBeat, PlanQuery, PlanResult } from "./matrix";
+import type { ArrangeTier, BrollPlan, DirectSlot, DirectSlotRole, PlanAnchor, PlanBeat, PlanQuery, PlanResult } from "./matrix";
 import type { DedupScope, GapFillMode, MarkLookup } from "./matrix-lay";
 import { METERING_ALGO_PIN, arrangeUnits, scaleOfRequest } from "./arrange-metering";
 
@@ -124,6 +124,8 @@ export interface WireDirectSlot {
 	track_st?: number;
 	track_ed?: number;
 	query?: string;
+	/** 语义类别（quote 引用段 / provenance 硬出处段）。缺席 = 未标注，**整键不上行**。 */
+	slot_role?: DirectSlotRole;
 }
 
 export interface WirePlan {
@@ -235,6 +237,10 @@ function projectDirectSlot(d: DirectSlot): WireDirectSlot {
 		out.track_ed = te;
 	}
 	if (d.query) out.query = d.query;
+	// 缺席即整键不上行（同 arrange_mode/motion/fps 的既有纪律）：服务端要能分清
+	// 「用户标了硬出处」和「用户没标」。**不做值过滤**——越界值由 validatePlanForLay
+	// 在上游拒掉；在这里悄悄丢掉等于把它降级成缺席、降级成硬出处、降级成静默动端点。
+	if (d.slot_role !== undefined) out.slot_role = d.slot_role;
 	return out;
 }
 

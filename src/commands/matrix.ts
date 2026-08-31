@@ -2327,7 +2327,14 @@ async function layIntoProject(
 				);
 			}
 			if (d.status === "planned" && d.fps !== null) {
-				log.info(`${d.beat} 直排槽 clip ${d.clip_id} 钉 ${d.track_st}s（精修${d.refined ? "已生效" : "未改动端点"}${d.has_cuts ? "" : " · 无切点数据，仅帧网格吸附"}）`);
+				// 「按你的要求没动端点」与「素材没索引所以动不了」是两种处置，措辞必须分开
+				const snap =
+					d.cut_snap === "skipped_quote"
+						? " · 引用段：按你的标注**不动端点**，端点残片保留"
+						: d.cut_snap === "no_data"
+							? " · 无切点数据，仅帧网格吸附"
+							: "";
+				log.info(`${d.beat} 直排槽 clip ${d.clip_id} 钉 ${d.track_st}s（精修${d.refined ? "已生效" : "未改动端点"}${snap}）`);
 			}
 		}
 		log.info(`高档直排：落位 ${cnt.planned} · 过短照落 ${cnt.sliver} · 未落位 ${cnt.rejected}（共 ${directOutcomes.length} 槽）`);
@@ -2684,6 +2691,8 @@ async function layIntoProject(
 							sliver: directOutcomes.filter((d) => d.status === "sliver").length,
 							rejected: directOutcomes.filter((d) => d.status === "rejected").length,
 							no_fps: directOutcomes.filter((d) => d.fps === null).length,
+							cut_snap_skipped_quote: directOutcomes.filter((d) => d.cut_snap === "skipped_quote").length,
+							cut_snap_no_data: directOutcomes.filter((d) => d.cut_snap === "no_data").length,
 							starved: directOutcomes.filter((d) => typeof d.starved_sec === "number").length,
 						},
 						direct_details: directOutcomes.map((d) => ({
@@ -2693,6 +2702,7 @@ async function layIntoProject(
 							status: d.status,
 							refined: d.refined,
 							has_cuts: d.has_cuts,
+							cut_snap: d.cut_snap,
 							fps: d.fps,
 							...(d.code ? { code: d.code } : {}),
 							...(d.reason ? { reason: d.reason } : {}),

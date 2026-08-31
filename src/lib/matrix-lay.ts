@@ -635,7 +635,14 @@ function refineWindow(
 	 * 既有金样逐字节零回归。**直排槽必须开**：那里 `seg.start/end` 就是用户给的窗
 	 * （`directPair`），就近取整推到窗外会被下面的钳位原样弹回 ⇒ 端点留在非整帧，
 	 * 帧吸附对约一半的输入完全空转。向内取整既恒落网格、又天然不违「只许缩不许撑」。 */
-	opts?: { gridInward?: boolean },
+	 /** `snapCuts: false`：**跳过端点残片收缩**（切点吸附）这一步，帧网格吸附照旧。
+	  * 缺省 = true = 本参数落地前的行为。引用段（`slot_role: "quote"`）要开：
+	  * 它的源窗端点是硬约束——解说说到「他咬下这一口」，若那一口正好横跨镜头切换，
+	  * 用户要的就是含这个切换的那一段，吸走它等于删掉他点名要的画面。
+	  * ⚠️ 关的只有这一步：帧网格吸附位移 ≤ 半帧且保证端点落在可播帧边界上，
+	  * 跳过它只是把量化推给下游，而下游没有跨语言/跨播放器的共同取整规则。
+	  * 切点吸附的位移上界是 SLIVER_MIN_SEC（1 秒），那才是画音错位的量级。 */
+	opts?: { gridInward?: boolean; snapCuts?: boolean },
 ): { clipSt: number; clipEd: number } | null {
 	if (isImagePair(p)) return win;
 	const EPS = 1e-6;
@@ -646,7 +653,7 @@ function refineWindow(
 	// 终点向下取整，宁可少一帧也不越到切点另一侧。
 	let stOnCut = false;
 	let edOnCut = false;
-	const cuts = p.seg.cuts;
+	const cuts = opts?.snapCuts === false ? undefined : p.seg.cuts;
 	if (Array.isArray(cuts) && cuts.length) {
 		const inWin = cuts.filter((c) => Number.isFinite(c) && c > clipSt + EPS && c < clipEd - EPS);
 		if (inWin.length) {
@@ -1184,8 +1191,12 @@ export interface DirectOutcome {
 	code?: "sliver" | "overlap" | "out_of_beat" | "no_room" | "beat_no_span";
 	/** 精修是否真的动了窗口端点——用来如实回答「这一槽的闪帧风险处理了没有」。 */
 	refined: boolean;
-	/** 该槽是否拿得到切点数据。false ⇒ 只有帧网格吸附生效，残片收缩**无数据可用**。 */
+	/** 该槽是否拿得到切点数据。false ⇒ 残片收缩**无数据可用**。 */
 	has_cuts: boolean;
+	/** 端点残片收缩这一步的归宿。三态刻意分开：`skipped_quote`（用户标了引用段、
+	 * 我方主动不动端点）与 `no_data`（素材没索引、想动也无从动）对用户是**两种
+	 * 完全不同的处置**，混成一个 false 会把「按你的要求没动」谎报成「素材没索引」。 */
+	cut_snap: "applied" | "skipped_quote" | "no_data";
 	/** 该槽用到的帧率；`null` ⇒ 全 plan 都查不到 ⇒ **帧网格吸附整步未生效**。
 	 * 与 `has_cuts` 是两条**独立**的诚实边界：切点要素材已索引，帧率只要 plan 里
 	 * 任一 beat 见过这条素材。MUST NOT 把两者混为一谈——混了会让只缺切点的槽
@@ -1302,7 +1313,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	const span = beat.track_ed - beat.track_st;
 	if (!(span > 0)) {
 		for (const d of dsIn) {
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 窗口无长度", code: "beat_no_span", refined: false, has_cuts: false, fps: null });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 窗口无长度", code: "beat_no_span", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 		}
 		return { slots: [], direct: outcomes };
 	}
@@ -1329,13 +1340,16 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	const place = (d: (typeof dsIn)[number], st: number, ed: number, promised: boolean): void => {
 		const p = directPair(beat, d, opts.fpsOf);
 		const hasCuts = Array.isArray(p.seg.cuts) && p.seg.cuts.length > 0;
+		// 引用段主动不吸 vs 素材没索引想吸也没得吸 —— 对用户是两种处置，MUST NOT 混报
+		const snapCuts = d.slot_role !== "quote";
+		const cutSnap: DirectOutcome["cut_snap"] = !snapCuts ? "skipped_quote" : hasCuts ? "applied" : "no_data";
 		const fps = typeof p.cand.fps === "number" && Number.isFinite(p.cand.fps) && p.cand.fps > 0 ? p.cand.fps : null;
 		const room = Math.min(ed - st, beat.track_ed - st);
 		const raw = { clipSt: d.clip_st, clipEd: d.clip_ed };
 		// ★ 本档的核心价值：直排槽照样过 refineWindow（切点吸附 + 帧网格吸附）
 		// `gridInward` 是直排专属：见 refineWindow 的参数注释——不开的话帧吸附对
 		// 约一半的输入会被段界钳位原样弹回，等于没做。
-		const win = refineWindow(p, raw, room, { gridInward: true });
+		const win = refineWindow(p, raw, room, { gridInward: true, snapCuts });
 		const use = win ?? raw;
 		const refined = win !== null && (Math.abs(win.clipSt - raw.clipSt) > 1e-6 || Math.abs(win.clipEd - raw.clipEd) > 1e-6);
 		const dur = Math.min(use.clipEd - use.clipSt, room); // 源侧**供得起**多少
@@ -1370,6 +1384,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 				: {}),
 			refined,
 			has_cuts: hasCuts,
+			cut_snap: cutSnap,
 			fps,
 			...(starved > frame + 1e-6 ? { starved_sec: r3(starved) } : {}),
 		});
@@ -1379,12 +1394,12 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		const st = d.track_st as number;
 		const ed = d.track_ed as number;
 		if (!(ed > st) || st < beat.track_st - 1e-6 || ed > beat.track_ed + 1e-6) {
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置越出 beat 窗口", code: "out_of_beat", refined: false, has_cuts: false, fps: null });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置越出 beat 窗口", code: "out_of_beat", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 			continue;
 		}
 		if (overlaps(st, ed)) {
 			// MUST NOT 静默让位——引用段的位置是硬约束，移一下就是画音错开
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）", code: "overlap", refined: false, has_cuts: false, fps: null });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）", code: "overlap", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 			continue;
 		}
 		place(d, st, ed, true); // 钉位槽：轨窗是用户给的承诺，轨长不跟着源窗缩
@@ -1405,7 +1420,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		}
 		if (!done) {
 			if (beat.track_ed - cursor >= Math.min(want, MIN_SHOT_SEC)) place(d, cursor, Math.min(cursor + want, beat.track_ed), false);
-			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 内已无足够空隙容纳该直排槽", code: "no_room", refined: false, has_cuts: false, fps: null });
+			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 内已无足够空隙容纳该直排槽", code: "no_room", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 		}
 	}
 
