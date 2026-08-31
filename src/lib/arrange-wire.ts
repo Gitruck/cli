@@ -53,6 +53,8 @@
 
 import type { ArrangeTier, BrollPlan, DirectSlot, DirectSlotRole, PlanAnchor, PlanBeat, PlanQuery, PlanResult } from "./matrix";
 import type { DedupScope, GapFillMode, MarkLookup } from "./matrix-lay";
+// ★ 值import：值表探针键的段枚举 MUST 与候选池同源，见 `materializeSignalTable` 头注。
+import { segmentsOf } from "./matrix-lay";
 import { METERING_ALGO_PIN, arrangeUnits, scaleOfRequest } from "./arrange-metering";
 
 // ── 上行体形态 ────────────────────────────────────────────────────────────
@@ -270,19 +272,26 @@ function projectBeat(b: PlanBeat): WireBeat {
 /**
  * 值表物化：把本地的查询闭包变成可上行的字典。
  *
- * 探针键取「决策层会查的每一个 `(clip_id, tsMs)`」——即每个候选每个段的
- * `Math.round(seg.best * 1000)`，与 `matrix-lay.ts:556` 逐字一致。这个集合是**有限且可枚举**的，
- * 所以物化不丢信息，也不会多带（不会把整张缓存表倒上去）。
+ * 探针键取「决策层会查的每一个 `(clip_id, tsMs)`」——枚举 MUST 走 `matrix-lay` 的
+ * `segmentsOf`，**与候选池共用同一个函数**（含无 `segments` 候选降级出的整片伪段）。
+ * 这个集合是**有限且可枚举**的，所以物化不丢信息，也不会多带（不会把整张缓存表倒上去）。
+ *
+ * ⚠️ 这里曾经自己写过一遍 `r.segments ?? []`，并在注释里声称「与 matrix-lay 某行逐字一致」
+ * ——写下那句时它就不一致：无 `segments` 的候选决策层会去查整片伪段的位点，
+ * 而这里从没探测过它。症状不是报错，是**云端与本地复算的融合分不同 ⇒ 落位不同 ⇒
+ * cloud 档自校验判不一致 ⇒ 一份已计费的产物被丢弃**。
+ * 故 MUST NOT 再把枚举抄一份到本文件，注释形式的「口径一致」承诺也 MUST NOT 复辟。
  *
  * ⚠️ 命中不到的 `(clip, ts)` **不进表**：缺席在服务端语义是「该维度无缓存，权重回吐给
  * 语义分」；若补成 0，会变成「该维度得 0 分」——两者对排序的影响方向相反。
+ * 「探哪些键」与「查不到写不写」是两件事，本条不受上面那条修正影响。
  */
 export function materializeSignalTable(plan: BrollPlan, lookup: MarkLookup): WireSignalTable {
 	const table: WireSignalTable = {};
 	for (const beat of plan.beats) {
 		for (const q of beat.queries) {
 			for (const r of q.results ?? []) {
-				for (const seg of r.segments ?? []) {
+				for (const seg of segmentsOf(r)) {
 					const tsMs = Math.round(seg.best * 1000);
 					const key = `${r.clip_id}@${tsMs}`;
 					if (key in table) continue;

@@ -509,6 +509,25 @@ export type MarkLookup = (clipId: string, tsMs: number) => number | undefined;
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
 const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
 
+/**
+ * 候选的命中段序列 —— **候选池与上行值表物化共用的唯一枚举口径**。
+ *
+ * 提出来不是为了短：`arrange-wire.ts` 的 `materializeSignalTable` 要探的键正是
+ * 「决策层会查的每一个 `(clip_id, tsMs)`」，而 `tsMs` 来自这里每一段的 `best`。
+ * 两处各写一遍就是漂移源——**无命中段的整片伪段那一档尤其容易被漏掉**
+ * （漏了它，无段候选的信号值在云端恒缺席，两端融合分不同 ⇒ 落位不同 ⇒
+ * cloud 档自校验判不一致 ⇒ 已计费的产物被丢弃）。
+ *
+ * ⚠️ MUST NOT 退回内联枚举、也 MUST NOT 靠注释声明「与某行逐字一致」：
+ * 行号会漂、两边会各自演化，而没有任何测试会因此变红。
+ */
+export function segmentsOf(cand: PlanResult): NonNullable<PlanResult["segments"]> {
+	if (cand.segments?.length) return cand.segments;
+	// 无命中段的候选降级为整片伪段（少见；score 用 clip 级分）
+	const d = cand.duration ?? SHOT_TARGET_DEFAULT;
+	return [{ start: 0, end: d, best: d / 2, score: cand.score }];
+}
+
 /** 每 query 的取材池：results 展开全部 segments，融合分降序（严格同分视频优先 tie-break，
  * ★ 主理人 2026-08-12 拍板）；excluded_hint 与低于地板的对不进池；noImage（--no-image-broll）
  * 时图片候选完全不进池（不上云）。
@@ -545,11 +564,7 @@ function buildQueryPools(
 			const pinned = cand.pinned === true;
 			if (!pinned && cand.excluded_hint) continue; // 命中派单负词：自动填充跳过（人工面板保留）
 			if (opts.noImage && cand.kind === "image") continue; // 排除开关：图片不出候选池（pinned 也不豁免）
-			const segs = cand.segments?.length
-				? cand.segments
-				: // 无命中段的候选降级为整片伪段（少见；score 用 clip 级分）
-					[{ start: 0, end: cand.duration ?? SHOT_TARGET_DEFAULT, best: (cand.duration ?? SHOT_TARGET_DEFAULT) / 2, score: cand.score }];
-			for (const seg of segs) {
+			for (const seg of segmentsOf(cand)) {
 				if (!pinned && seg.score < scoreFloor) continue; // 低于阈值不采纳（pinned=强制入选，免地板；地板恒看原始 sim）
 				let fused = seg.score;
 				if (w > 0 || wh > 0) {
