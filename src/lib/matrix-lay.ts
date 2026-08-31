@@ -645,6 +645,12 @@ function refineWindow(
 	p: Pair,
 	win: { clipSt: number; clipEd: number },
 	maxD: number,
+	/** `gridInward`：帧网格恒**向内**取整（起点 ceil、终点 floor）而非就近。
+	 * 缺省 = false = 就近 = 本参数落地前的行为，故检索侧四个调用点一字不改、
+	 * 既有金样逐字节零回归。**直排槽必须开**：那里 `seg.start/end` 就是用户给的窗
+	 * （`directPair`），就近取整推到窗外会被下面的钳位原样弹回 ⇒ 端点留在非整帧，
+	 * 帧吸附对约一半的输入完全空转。向内取整既恒落网格、又天然不违「只许缩不许撑」。 */
+	opts?: { gridInward?: boolean },
 ): { clipSt: number; clipEd: number } | null {
 	if (isImagePair(p)) return win;
 	const EPS = 1e-6;
@@ -673,11 +679,12 @@ function refineWindow(
 	}
 	const fps = p.cand.fps;
 	if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) {
-		// 起点：吸附到切点者向上取整（不含切点前那帧），否则就近；再钳回段内
-		const stGrid = stOnCut ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
+		const inward = opts?.gridInward === true;
+		// 起点：吸附到切点者（或 gridInward）向上取整（不含切点前那帧），否则就近；再钳回段内
+		const stGrid = stOnCut || inward ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
 		const st = Math.min(Math.max(stGrid, p.seg.start), clipEd);
-		// 终点：吸附到切点者向下取整（不含切点那帧，它属下一镜头），否则就近
-		let ed = Math.min(edOnCut ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
+		// 终点：吸附到切点者（或 gridInward）向下取整（不含切点那帧，它属下一镜头），否则就近
+		let ed = Math.min(edOnCut || inward ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
 		// 吸附撑长的硬上限：超出剩余空间即把终点**向下**取整到帧网格（宁短一帧不越界）
 		if (ed - st > maxD + EPS) ed = st + Math.floor((maxD + EPS) * fps) / fps;
 		if (ed - st > EPS) {
@@ -1191,6 +1198,15 @@ export interface DirectOutcome {
 	refined: boolean;
 	/** 该槽是否拿得到切点数据。false ⇒ 只有帧网格吸附生效，残片收缩**无数据可用**。 */
 	has_cuts: boolean;
+	/** 该槽用到的帧率；`null` ⇒ 全 plan 都查不到 ⇒ **帧网格吸附整步未生效**。
+	 * 与 `has_cuts` 是两条**独立**的诚实边界：切点要素材已索引，帧率只要 plan 里
+	 * 任一 beat 见过这条素材。MUST NOT 把两者混为一谈——混了会让只缺切点的槽
+	 * 白白丢掉帧吸附。 */
+	fps: number | null;
+	/** 源窗供不满承诺轨长的秒数（**超过一帧才出键**——亚帧亏空渲染侧不可见）。
+	 * 出键即：成片上这一槽的末帧会驻留这么久。与 `sliver`（屏幕上镜头太短）是
+	 * 两回事，MUST NOT 混报。 */
+	starved_sec?: number;
 }
 
 /**
@@ -1203,10 +1219,17 @@ export interface DirectOutcome {
  *   ——用户给的窗是**上界**不是目标。
  * - `seg.cuts` = 该候选**所有命中段**的切点里落在此窗内的。素材未索引 ⇒ 空 ⇒
  *   残片收缩无数据可用（proposal 那条诚实边界的落点）。
- * - `cand` = plan 里同 `clip_id` 的候选（**为了拿 fps**）。找不到就造一个最小壳：
- *   无 fps ⇒ 帧网格吸附整步跳过，这与「未索引素材只得部分收益」是同一件事的两面。
+ * - `cand` = plan 里同 `clip_id` 的候选（**为了拿 fps**）。本 beat 里找不到就退到
+ *   **全 plan** 的帧率表（`fpsOf`）——引用段最典型的形态恰恰是「素材不在本 beat 的
+ *   检索结果里」（你不需要检索就知道自己要引哪一段），早先只在本 beat 内找，
+ *   导致这类槽恒无 fps、帧吸附整步跳过，本档的核心价值在最该生效处恒不生效。
+ *   ⚠️ 帧率与切点是**两条独立**的边界：切点要素材已索引，帧率不要。MUST NOT 合并。
  */
-function directPair(beat: PlanBeat, d: NonNullable<PlanBeat["direct_slots"]>[number]): Pair {
+function directPair(
+	beat: PlanBeat,
+	d: NonNullable<PlanBeat["direct_slots"]>[number],
+	fpsOf?: (clipId: string) => number | undefined,
+): Pair {
 	let cand: PlanResult | undefined;
 	const cuts: number[] = [];
 	for (const q of beat.queries) {
@@ -1221,7 +1244,10 @@ function directPair(beat: PlanBeat, d: NonNullable<PlanBeat["direct_slots"]>[num
 		}
 	}
 	cuts.sort((a, b) => a - b);
-	const c = cand ?? ({ clip_id: d.clip_id, score: 0 } as PlanResult);
+	const base = cand ?? ({ clip_id: d.clip_id, score: 0 } as PlanResult);
+	// 本 beat 的候选没带 fps（或压根没候选）时退到全 plan 帧率表；仍查不到才真的没有
+	const fallbackFps = base.fps === undefined ? fpsOf?.(d.clip_id) : undefined;
+	const c = typeof fallbackFps === "number" ? ({ ...base, fps: fallbackFps } as PlanResult) : base;
 	return {
 		cand: c,
 		seg: {
@@ -1274,6 +1300,9 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	highlightWeight?: number;
 	highlightLookup?: MarkLookup;
 	cutAlign?: CutAlignOpts;
+	/** 全 plan 的 `clip_id → fps` 表。直排槽引用的素材常常**不在本 beat 的检索结果里**
+	 * （引用段不需要检索就知道要引哪一段），只在本 beat 内找 fps 会让帧吸附恒不生效。 */
+	fpsOf?: (clipId: string) => number | undefined;
 }): { slots: FillSlot[]; direct: DirectOutcome[] } {
 	const { beat } = opts;
 	const dsIn = Array.isArray(beat.direct_slots) ? beat.direct_slots : [];
@@ -1285,7 +1314,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	const span = beat.track_ed - beat.track_st;
 	if (!(span > 0)) {
 		for (const d of dsIn) {
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 窗口无长度", refined: false, has_cuts: false });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 窗口无长度", refined: false, has_cuts: false, fps: null });
 		}
 		return { slots: [], direct: outcomes };
 	}
@@ -1298,16 +1327,35 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	const overlaps = (st: number, ed: number): boolean =>
 		placed.some((s) => st < s.track_ed - 1e-6 && ed > s.track_st + 1e-6);
 
-	const place = (d: (typeof dsIn)[number], st: number, ed: number): void => {
-		const p = directPair(beat, d);
+	/**
+	 * `promised` = 这一槽的时间线窗口是**用户给的承诺**（钉位槽），不是顺排算出来的边界。
+	 *
+	 * ★ 承诺槽的轨长以**轨窗**为准，MUST NOT 跟着精修后的源窗缩。理由在渲染侧：
+	 * `allocateFrames`（render.ts）按成片时间线**累计取整**出帧，源窗比槽短时先 `tpad`
+	 * 克隆末帧补足、够用时原样截掉，「真不够时最多多驻留一帧末帧（不可见）」，
+	 * 且明写 **MUST NOT 靠外扩源窗补**（那会把邻场景帧截进来）。
+	 * 也就是说亚帧亏空在渲染侧是**不可见**的；而把轨缩短造出来的缝会被 `beatGaps`
+	 * （容差 1ms）当成真空洞 ⇒ 黑底一帧 —— 恰是本档要消灭的闪帧。两害相权，
+	 * 让渲染侧去吸收，别自己造洞。
+	 */
+	const place = (d: (typeof dsIn)[number], st: number, ed: number, promised: boolean): void => {
+		const p = directPair(beat, d, opts.fpsOf);
 		const hasCuts = Array.isArray(p.seg.cuts) && p.seg.cuts.length > 0;
+		const fps = typeof p.cand.fps === "number" && Number.isFinite(p.cand.fps) && p.cand.fps > 0 ? p.cand.fps : null;
 		const room = Math.min(ed - st, beat.track_ed - st);
 		const raw = { clipSt: d.clip_st, clipEd: d.clip_ed };
 		// ★ 本档的核心价值：直排槽照样过 refineWindow（切点吸附 + 帧网格吸附）
-		const win = refineWindow(p, raw, room);
+		// `gridInward` 是直排专属：见 refineWindow 的参数注释——不开的话帧吸附对
+		// 约一半的输入会被段界钳位原样弹回，等于没做。
+		const win = refineWindow(p, raw, room, { gridInward: true });
 		const use = win ?? raw;
 		const refined = win !== null && (Math.abs(win.clipSt - raw.clipSt) > 1e-6 || Math.abs(win.clipEd - raw.clipEd) > 1e-6);
-		const dur = Math.min(use.clipEd - use.clipSt, room);
+		const dur = Math.min(use.clipEd - use.clipSt, room); // 源侧**供得起**多少
+		const trackDur = promised ? room : dur; // 轨侧**承诺**多少（见本函数头注）
+		// 亏空超过一帧才算「看得见的末帧驻留」；亚帧亏空渲染侧不可见，报了只是噪音。
+		// fps 未知时不做帧长换算，任何亏空都如实报（此时也没有帧吸附，亏空只可能是真的）。
+		const starved = trackDur - dur;
+		const frame = fps ? 1 / fps : 0;
 		placed.push({
 			clip_id: d.clip_id,
 			query: d.query ?? "",
@@ -1315,19 +1363,24 @@ export function fillBeatTrackWithDirectSlots(opts: {
 			clip_st: r3(use.clipSt),
 			clip_ed: r3(use.clipSt + dur),
 			track_st: r3(st),
-			track_ed: r3(st + dur),
+			track_ed: r3(st + trackDur),
 		});
+		// 短镜头判据看**屏幕上多长**（trackDur），不看源侧供了多少——观众看的是前者。
+		// 源侧供不满是另一回事，由 starved_sec 单独报，两者 MUST NOT 混成一条。
+		const isSliver = win === null || trackDur < MIN_SHOT_SEC - 1e-6;
 		outcomes.push({
 			beat: beat.beat,
 			clip_id: d.clip_id,
 			track_st: r3(st),
 			// 精修后短于最小槽长 ⇒ 照落但标出来（直排是指令，MUST NOT 因为短就丢）
-			status: win === null || dur < MIN_SHOT_SEC - 1e-6 ? "sliver" : "planned",
-			...(win === null || dur < MIN_SHOT_SEC - 1e-6
-				? { reason: `直排槽精修后 ${r3(dur)}s，短于最小可用镜头长 ${MIN_SHOT_SEC}s——已按指令照落，成片上会是一个很短的镜头` }
+			status: isSliver ? "sliver" : "planned",
+			...(isSliver
+				? { reason: `直排槽精修后 ${r3(trackDur)}s，短于最小可用镜头长 ${MIN_SHOT_SEC}s——已按指令照落，成片上会是一个很短的镜头` }
 				: {}),
 			refined,
 			has_cuts: hasCuts,
+			fps,
+			...(starved > frame + 1e-6 ? { starved_sec: r3(starved) } : {}),
 		});
 	};
 
@@ -1335,15 +1388,15 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		const st = d.track_st as number;
 		const ed = d.track_ed as number;
 		if (!(ed > st) || st < beat.track_st - 1e-6 || ed > beat.track_ed + 1e-6) {
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置越出 beat 窗口", refined: false, has_cuts: false });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置越出 beat 窗口", refined: false, has_cuts: false, fps: null });
 			continue;
 		}
 		if (overlaps(st, ed)) {
 			// MUST NOT 静默让位——引用段的位置是硬约束，移一下就是画音错开
-			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）", refined: false, has_cuts: false });
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）", refined: false, has_cuts: false, fps: null });
 			continue;
 		}
-		place(d, st, ed);
+		place(d, st, ed, true); // 钉位槽：轨窗是用户给的承诺，轨长不跟着源窗缩
 	}
 
 	// 顺排槽：在钉死区间之外，从 beat 起点开始找第一段够长的空隙
@@ -1353,15 +1406,15 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		let done = false;
 		for (const s of [...placed].sort((x, y) => x.track_st - y.track_st)) {
 			if (s.track_st - cursor >= Math.min(want, MIN_SHOT_SEC)) {
-				place(d, cursor, Math.min(cursor + want, s.track_st));
+				place(d, cursor, Math.min(cursor + want, s.track_st), false); // 顺排：位置是算出来的，不是承诺
 				done = true;
 				break;
 			}
 			cursor = Math.max(cursor, s.track_ed);
 		}
 		if (!done) {
-			if (beat.track_ed - cursor >= Math.min(want, MIN_SHOT_SEC)) place(d, cursor, Math.min(cursor + want, beat.track_ed));
-			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 内已无足够空隙容纳该直排槽", refined: false, has_cuts: false });
+			if (beat.track_ed - cursor >= Math.min(want, MIN_SHOT_SEC)) place(d, cursor, Math.min(cursor + want, beat.track_ed), false);
+			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 内已无足够空隙容纳该直排槽", refined: false, has_cuts: false, fps: null });
 		}
 	}
 
@@ -1594,6 +1647,20 @@ export function planBeatFills(
 		}
 		return { ratio: cutEffRatio, starts: cutAlignOn.starts, state: st };
 	};
+	// 全 plan 的 clip_id → fps（add-arrange-direct-tier）：**只给直排槽用**。
+	// 直排引用的素材常常不在它自己那个 beat 的检索结果里（引用段不必检索就知道要引哪段），
+	// 只在本 beat 内找 fps 会让帧网格吸附对这类槽恒不生效——本档的核心价值恰恰在最典型的
+	// 场景里空转。首次命中即取（同素材帧率恒定；不同值只可能是脏数据，取首个不猜）。
+	const fpsByClip = new Map<string, number>();
+	for (const b of plan.beats) {
+		for (const q of b.queries) {
+			for (const r of q.results ?? []) {
+				const f = r.fps;
+				if (typeof f === "number" && Number.isFinite(f) && f > 0 && !fpsByClip.has(r.clip_id)) fpsByClip.set(r.clip_id, f);
+			}
+		}
+	}
+	const fpsOf = (clipId: string): number | undefined => fpsByClip.get(clipId);
 	// 同槽候选组互斥（同 beat 跨轨同素材互斥）；按 beat 留存——gap 填充规划段（两阶段在后）要接着记账
 	const ownersByBeat = new Map<string, Map<string, number>>();
 	for (const beat of plan.beats) {
@@ -1616,6 +1683,7 @@ export function planBeatFills(
 				beatOwners,
 				stats,
 				cutAlign: cutAlignFor(k),
+				fpsOf,
 			};
 			// 优先布局（锚点 / 高档直排）**只作用于首轨**——备选轨要给的是「另一套方案」，
 			// 钉死同样的位置就失去了备选的意义（口径注记见各自函数头注）。
