@@ -546,6 +546,62 @@ export interface MarkStatsSets {
 /** mark 查询闭包（命令层供给：material_id+ts_ms 就近命中 describes 缓存；纯函数层零 IO）。 */
 export type MarkLookup = (clipId: string, tsMs: number) => number | undefined;
 
+/**
+ * 槽位时码构造 —— **裁剪恒等式的唯一出口**（fix-trim-identity-constructive）。
+ *
+ * 契约 `composition-contract-v1 §3` 原文：「裁剪恒等式 `clip_ed − clip_st = duration`、
+ * `track_ed − track_st = duration` **构造性成立**」，且本仓 `gtrk-patch.ts` 的 E1/E2
+ * 是**整毫秒域零容差**校验（`clip_identity_broken` / `track_identity_broken`）。
+ *
+ * ⚠️ MUST NOT 让两个端点各自 `r3`：`r3(a + d) − r3(a) ≠ r3(d)`，差**恒 1ms**，
+ * 而校验是零容差。真机走查在 15.6% 的槽位上撞到（33 份金样里 55/352），后果有两层：
+ *   ① 客户端两套时码打架 ⇒ **没人报错、成片却可能用陈旧出点**；
+ *   ② 官方悔棋通道 `gtrk patch` 在**自家产物**上整体失效——写方产出的东西
+ *      过不了本仓自己写的校验器。
+ *
+ * 正解：**先把时长舍到毫秒当唯一真值，再由它推两个终点**。
+ * 三个入参都是未舍入的原始值；本函数负责全部舍入，调用方 MUST NOT 自己再 `r3`。
+ */
+function slotTimes(
+	clipSt: number,
+	trackSt: number,
+	dur: number,
+): { clip_st: number; clip_ed: number; track_st: number; track_ed: number } {
+	const cs = r3(clipSt);
+	const ts = r3(trackSt);
+	const d = r3(dur);
+	return { clip_st: cs, clip_ed: r3(cs + d), track_st: ts, track_ed: r3(ts + d) };
+}
+
+/**
+ * 写方自检：裁剪恒等式（fix-trim-identity-constructive §3.1）。
+ *
+ * ★ 为什么必须是**写方**自检，而不是只靠 `gtrk-patch.ts` 的 E1/E2：
+ * 那条校验器只在用户**主动悔棋**（跑 `gtrk patch`）时才经过，于是违约可以长期无声
+ * 存在——实测存量 55/352 槽位（15.6%），而全套测试照样绿、客户端也不报错，
+ * 唯一的症状是「成片可能用陈旧出点」和「悔棋通道在自家产物上失效」。
+ *
+ * 判据与 `gtrk-patch.ts` 逐字同源：**整毫秒域、零容差**。
+ * MUST NOT 在这里放宽成「差 1ms 以内可接受」——那正是本缺陷的形状。
+ */
+export function assertTrimIdentity(
+	c: { clip_st?: number; clip_ed?: number; track_st?: number; track_ed?: number; duration: number },
+	where: string,
+): void {
+	const ms = (v: number | undefined): number | undefined => (typeof v === "number" ? Math.round(v * 1000) : undefined);
+	const [cs, ce, ts, te, du] = [ms(c.clip_st), ms(c.clip_ed), ms(c.track_st), ms(c.track_ed), ms(c.duration)!];
+	if (cs !== undefined && ce !== undefined && ce - cs !== du) {
+		throw new Error(
+			`铺轨自检失败（${where}）：clip_ed − clip_st = ${ce - cs}ms ≠ duration ${du}ms。` +
+				"裁剪恒等式须**构造性成立**（composition-contract-v1 §3），" +
+				"两个端点 MUST NOT 各自舍入——见 slotTimes 头注。",
+		);
+	}
+	if (ts !== undefined && te !== undefined && te - ts !== du) {
+		throw new Error(`铺轨自检失败（${where}）：track_ed − track_st = ${te - ts}ms ≠ duration ${du}ms。`);
+	}
+}
+
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
 const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
 
@@ -1047,10 +1103,7 @@ export function fillBeatTrack(opts: {
 			clip_id: pick.cand.clip_id,
 			query: pick.query,
 			score: pick.seg.score,
-			clip_st: r3(win.clipSt),
-			clip_ed: r3(win.clipEd),
-			track_st: r3(cursor),
-			track_ed: r3(cursor + d),
+			...slotTimes(win.clipSt, cursor, d),
 		});
 		// pinned 落成记账：记**段键**不自增（summary 三数同分母，见 FillStats.pinnedPlaced 头注）
 		if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
@@ -1241,10 +1294,7 @@ export function fillBeatTrackWithAnchors(opts: {
 			clip_id: pick.cand.clip_id,
 			query: a.query,
 			score: pick.seg.score,
-			clip_st: r3(pickWin.clipSt),
-			clip_ed: r3(pickWin.clipEd),
-			track_st: r3(st),
-			track_ed: r3(st + d),
+			...slotTimes(pickWin.clipSt, st, d),
 		});
 		opts.consumed.add(pick.key);
 		opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
@@ -1464,24 +1514,34 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		const win = refineWindow(p, raw, room, { gridInward: true, snapCuts });
 		const use = win ?? raw;
 		const refined = win !== null && (Math.abs(win.clipSt - raw.clipSt) > 1e-6 || Math.abs(win.clipEd - raw.clipEd) > 1e-6);
-		const dur = Math.min(use.clipEd - use.clipSt, room); // 源侧**供得起**多少
+		// 源侧**真正供得起**多少：从（吸附后的）起点算到**用户给的原始终点**。
+		// ⚠️ MUST NOT 用精修后的终点——那一截是我们自己向内取整取掉的，材料其实还在。
+		// 拿它当「源窗不够」的判据，就是把自家的取整 artifact 误报成用户的窗不够
+		// （向内取整两端各缩一次，最坏差两帧，恒会越过一帧的阈值）。
+		const avail = Math.max(0, d.clip_ed - use.clipSt);
+		const dur = Math.min(avail, room);
 		const trackDur = promised ? room : dur; // 轨侧**承诺**多少（见本函数头注）
 		// 亏空超过一帧才算「看得见的末帧驻留」；亚帧亏空渲染侧不可见，报了只是噪音。
 		// fps 未知时不做帧长换算，任何亏空都如实报（此时也没有帧吸附，亏空只可能是真的）。
-		const starved = trackDur - dur;
 		const frame = fps ? 1 / fps : 0;
+		// ▶️ 主理人 2026-08-31 裁定：**两窗同长**（契约 E1 零容差，见 slotTimes 头注）。
+		// 向内取整必然把源窗缩掉不到一帧；若让轨长跟着缩就会在轨上留缝 ⇒ 黑底一帧。
+		// 故这点亏空由**尾部越读**补齐——上界恒一帧，是对「只许缩不许撑」的一次
+		// **有界例外**，且读到的仍是用户原窗附近的同一镜头。
+		// 亏空超过一帧才是源窗**真的**不够（用户给的两个窗本身就不等长），那时如实
+		// 缩轨并报 starved_sec，MUST NOT 靠越读几秒去补——那会把邻场景帧截进来。
+		const shortfall = trackDur - dur;
+		const useDur = shortfall > frame + 1e-6 ? dur : trackDur;
+		const starved = trackDur - useDur;
 		placed.push({
 			clip_id: d.clip_id,
 			query: d.query ?? "",
 			score: 0,
-			clip_st: r3(use.clipSt),
-			clip_ed: r3(use.clipSt + dur),
-			track_st: r3(st),
-			track_ed: r3(st + trackDur),
+			...slotTimes(use.clipSt, st, useDur),
 		});
 		// 短镜头判据看**屏幕上多长**（trackDur），不看源侧供了多少——观众看的是前者。
 		// 源侧供不满是另一回事，由 starved_sec 单独报，两者 MUST NOT 混成一条。
-		const isSliver = win === null || trackDur < MIN_SHOT_SEC - 1e-6;
+		const isSliver = win === null || useDur < MIN_SHOT_SEC - 1e-6;
 		outcomes.push({
 			beat: beat.beat,
 			clip_id: d.clip_id,
@@ -1490,7 +1550,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 			status: isSliver ? "sliver" : "planned",
 			...(isSliver
 				? {
-						reason: `直排槽精修后 ${r3(trackDur)}s，短于最小可用镜头长 ${MIN_SHOT_SEC}s——已按指令照落，成片上会是一个很短的镜头`,
+						reason: `直排槽精修后 ${r3(useDur)}s，短于最小可用镜头长 ${MIN_SHOT_SEC}s——已按指令照落，成片上会是一个很短的镜头`,
 						code: "sliver" as const,
 					}
 				: {}),
@@ -1641,10 +1701,7 @@ function fastFillBeatGaps(o: {
 					clip_id: p.cand.clip_id,
 					query: p.query,
 					score: p.seg.score,
-					clip_st: r3(win.clipSt),
-					clip_ed: r3(win.clipEd),
-					track_st: r3(cursor),
-					track_ed: r3(cursor + d),
+					...slotTimes(win.clipSt, cursor, d),
 					gap_fill: true,
 				};
 				slots.push(slot);
@@ -2539,7 +2596,7 @@ export function layBrollTracks(opts: {
 						newMaterialsById.set(materialId, mat);
 					}
 				}
-				bucket.push({
+				const gclip = {
 					clip_id: `${beat.beat}-broll-${k}-${i}`,
 					material: materialId,
 					clip_st: s.clip_st,
@@ -2547,7 +2604,9 @@ export function layBrollTracks(opts: {
 					track_st: s.track_st,
 					track_ed: s.track_ed,
 					duration: r3(s.track_ed - s.track_st),
-				});
+				};
+				assertTrimIdentity(gclip, `${beat.beat} 轨${trackIndex} 槽${i}`);
+				bucket.push(gclip);
 				laidClips++;
 			});
 			trackClips.set(trackIndex, bucket);
