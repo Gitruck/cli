@@ -12,7 +12,7 @@
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
@@ -39,6 +39,11 @@ import {
 	type MarkLookup,
 	type SourceLayer,
 } from "../lib/matrix-lay";
+import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
+import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
+import { type CutsProbeSlot, MAX_QC_ROUNDS, flashRiskNotice, flashRiskOf, runArrangeQc } from "../lib/arrange-qc";
+import { leadSentencesFrom, makeJudge, sqliteQcCache } from "../lib/arrange-qc-bind";
+import { arrangeUnits, scaleOfRequest } from "../lib/arrange-metering";
 import {
 	BROLL_MOVE_DIR,
 	IMAGE_MOVE_CONCURRENCY,
@@ -111,6 +116,7 @@ import {
 	getNearestCachedHighlight,
 	resolveDescribeUrl,
 	runDescribeItems,
+	type DescribeEndpoint,
 	toDescribeMeta,
 	type DescribeWorkItem,
 	type MaterialDescribe,
@@ -201,6 +207,13 @@ interface MatrixOpts {
 	// ── 主轨 gap 填充（adjust-main-track-gap-fill）──
 	/** `--gap-fill <fast|solid|none>`：音频驱动工程主轨空洞填充（缺省 solid）。 */
 	gapFill?: string;
+	// ── 云端编排（add-broll-arrange-atom P3.1）──
+	/** `--arrange <local|shadow|cloud>`：编排取数路（缺省 local = 行为不变）。 */
+	arrange?: string;
+	/** `--arrange-cost-cap <n>`：云端编排本次编排量硬上限。 */
+	arrangeCostCap?: string;
+	/** `--arrange-qc`：编排期 QC（L2 卡点句画音对齐闭环，落轨前收敛，零渲染）。缺省关。 */
+	arrangeQc?: boolean;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -296,6 +309,25 @@ export function registerMatrix(program: Command): void {
 			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、再不够垫黑片；" +
 				"solid=黑片垫齐（精修时一眼看出「这里没匹配到」）；none=留 gap（客户端主轨磁吸开启时 gap 会被吸除、后续画面整体前移与配音错位，慎用）。" +
 				"口播工程主轨为 A-roll，本参数不适用（照旧留空语义）",
+		)
+		.option(
+			"--arrange <mode>",
+			"B-roll 编排取数路 local|shadow|cloud（缺省 local=全部在本机决策，与以往逐字节一致）：" +
+				"shadow=本机照跑照铺轨，同时把编排交给云端跑一遍**只对拍不采纳**；cloud=采纳云端编排产物，" +
+				"本机复算自校验不一致时自动回落本机。**只作用于本地素材上轨铺排**——素材库/普通素材/概念素材的" +
+				"匹配与铺排一律不受影响，原来什么样以后还什么样。云端档按「编排量」计费，跑前会报预估并征求确认" +
+				"（--yes 跳过）。环境变量 GITRUCK_ARRANGE=off 是总闸，可随时把云端压回本机",
+		)
+		.option(
+			"--arrange-cost-cap <n>",
+			"云端编排单次编排量上限：超限服务端**前置拒绝**、零执行零计费（不是跑到一半掐断）。只在 --arrange shadow|cloud 时有意义",
+		)
+		.option(
+			"--arrange-qc",
+			"编排期质检（缺省关）：**落轨之前**就查每个 beat 的卡点句「画面有没有给到稿子说的东西」，" +
+				`没给到就换候选重排，最多 ${MAX_QC_ROUNDS} 轮，到限即交付并如实登记还差哪几句。全程零渲染——` +
+				"替代「铺完→渲→看→重铺→再渲」那两轮。⚠️ 判定走素材理解口，**按帧计费**（每个卡点句 1 帧/轮），" +
+				"跑前会报预估并征求确认（--yes 跳过）",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -563,6 +595,8 @@ export interface MatrixIndexResult {
 
 /** 检索上下文：plan/adhoc 两模式共用的「一 query 一答」抽象（云端=双口 HTTP；本地=索引点积）。 */
 interface SearchCtx {
+	/** 云端凭据（云端编排端点由 base 推导；`--arrange local` 时不读它）。 */
+	cfg: { base: string; apiKey: string };
 	memberType: Tier | "local";
 	columnId?: string;
 	/** 本轮铺轨来源层（add-broll-dedup-and-layering D2）：--local → local；
@@ -642,6 +676,7 @@ export async function runMatrix(
 	// 来源层判定（add-broll-dedup-and-layering D2）：custom 口 + concept → concept 层；其余云端 → common 层
 	const effectiveMc = tier === "internal" ? (opts.materialClass ?? broll?.material_class_policy) : undefined;
 	const ctx: SearchCtx = {
+		cfg,
 		memberType: tier,
 		columnId: effectiveColumnId,
 		sourceLayer: tier === "internal" && effectiveMc === "concept" ? "concept" : "common",
@@ -1087,6 +1122,8 @@ async function runDescribeMode(
 /** matrix lay：读（编辑后的）plan 文件 → 白名单校验（坏 plan 明示拒绝）→ 现场重投影 → 铺轨。
  * MUST NOT 因「与原始检索结果不一致」拒绝——lay 按 plan 现值执行（去重消费/层带/幂等照常）。 */
 async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<MatrixResult> {
+	// 云端编排端点凭据（`--arrange local` 时 arrangeWiring 不会去用它——那一档一个网络字节都不动）
+	const cfg = loadConfig();
 	// 定位 plan 与工程目录（--plan 显式 > <project>/split/broll-plan.json）
 	let planPath: string;
 	let baseDir: string;
@@ -1241,6 +1278,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 			cutAlign: parseCutAlign(opts.cutAlign),
 			gapFill: parseGapFill(opts.gapFill),
 			gapFillExplicit: opts.gapFill !== undefined,
+			...arrangeWiring(opts, cfg),
 		});
 	} finally {
 		markDb?.close();
@@ -1310,6 +1348,7 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	}
 	const qvecCache = new Map<string, Float32Array>();
 	return {
+		cfg,
 		memberType: "local",
 		sourceLayer: "local",
 		search: async (query) => {
@@ -1481,6 +1520,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 				cutAlign: parseCutAlign(opts.cutAlign),
 				gapFill: parseGapFill(opts.gapFill),
 				gapFillExplicit: opts.gapFill !== undefined,
+				...arrangeWiring(opts, ctx.cfg),
 			},
 		);
 	}
@@ -1554,6 +1594,138 @@ export function parseCutAlign(raw: string | undefined): number {
 	if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
 	log.warn(`--cut-align 取值非法（${raw}），按默认 ${CUT_ALIGN_DEFAULT} 处理`);
 	return CUT_ALIGN_DEFAULT;
+}
+
+/**
+ * 编排期 QC 执行体（P3.2）：预估 → 确认 → 跑闭环。
+ *
+ * 抽出来是因为 `layIntoProject` 已经很长，而这段有完整的「先问再花钱」动线。
+ * 拿不到 lead 句（无 dispatch / 重投影降级）时**如实说明并跳过**——
+ * MUST NOT 当成「查过了都没问题」，那是把没做的事说成做过了。
+ */
+async function runArrangeQcHere(
+	plan: BrollPlan,
+	baseDir: string,
+	reproj: ReprojectResult,
+	arrangeOnce: (p: BrollPlan) => Promise<Awaited<ReturnType<typeof runArrangeWithFallback>>>,
+	/** 首轮编排产物：QC 被跳过 / 被取消时原样交回（那些路径不该重跑一次编排）。 */
+	first: Awaited<ReturnType<typeof runArrangeWithFallback>>,
+	layOpts: { yes: boolean; deps: MatrixRunDeps; describeEndpoint?: DescribeEndpoint },
+	log: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{
+	res: Awaited<ReturnType<typeof runArrangeWithFallback>>;
+	plan: BrollPlan;
+	residual: Array<{ beat: string; sentence: string }>;
+}> {
+	const dispatchPath = join(baseDir, "split", "dispatch.json");
+	const dispatch = existsSync(dispatchPath)
+		? (JSON.parse(readFileSync(dispatchPath, "utf8")) as { film_broll?: Array<{ beat?: string; span?: { from?: string } }> })
+		: undefined;
+	const leads = leadSentencesFrom(dispatch, reproj.utteranceIndex);
+	if (leads.length === 0) {
+		log.warn(
+			"编排期质检跳过：拿不到卡点句（没有 dispatch，或口播轨重投影降级）——" +
+				"**这不等于查过了没问题**，本轮的画音对齐没有被检查。",
+		);
+		return { res: first, plan, residual: [] };
+	}
+	if (!layOpts.describeEndpoint) {
+		log.warn("编排期质检跳过：未配置素材理解端点。");
+		return { res: first, plan, residual: [] };
+	}
+
+	// 预估 + 确认：判定按帧计费（每个卡点句 1 帧/轮，上限 MAX_QC_ROUNDS 轮）
+    const maxFrames = leads.length * MAX_QC_ROUNDS;
+	log.info(
+		`编排期质检：${leads.length} 个卡点句，最多判 ${maxFrames} 帧` +
+			`（每句 1 帧 × 最多 ${MAX_QC_ROUNDS} 轮；命中判定缓存的不重复计费）。`,
+	);
+	if (!layOpts.yes) {
+		const go = await (layOpts.deps.confirm ?? confirmViaStdin)(`确认发起编排期质检（最多 ${maxFrames} 帧判定）？`);
+		if (!go) {
+			log.info("已取消编排期质检——零判定零计费，本轮按未质检的编排产物落轨。");
+			return { res: first, plan, residual: [] };
+		}
+	}
+
+	const sources = new Map<string, string>();
+	for (const b of plan.beats) {
+		for (const q of b.queries) {
+			for (const r of q.results ?? []) if (typeof r.local_path === "string") sources.set(r.clip_id, r.local_path);
+		}
+	}
+	// ffmpeg 缺失不炸整命令：抽不到帧的探针一律回 partial（判不了 ≠ 判不对，见 arrange-qc-bind）
+	const ffmpeg = resolveFfmpeg();
+	if (!ffmpeg) log.warn("未找到 ffmpeg，编排期质检抽不到帧——本轮各句按「跳过判定」处理，不当作画面不对。");
+	const judge = makeJudge({
+		endpoint: layOpts.describeEndpoint,
+		ffmpeg: ffmpeg?.ffmpeg ?? "ffmpeg",
+		sourcePathFor: (id) => sources.get(id),
+		log,
+	});
+
+	let db: Awaited<ReturnType<typeof openLocalIndexDb>> | undefined;
+	try {
+		try {
+			if (existsSync(localIndexDbPath())) db = await openLocalIndexDb(localIndexDbPath());
+		} catch (e) {
+			// 判定缓存打不开只是「这轮多花点钱」，不该让质检整个做不成
+			log.warn(`判定缓存不可用（${(e as Error).message}）——本轮照跑，只是重跑时不能复用判定。`);
+		}
+		const out = await runArrangeQc(plan, leads, {
+			arrange: (p) => arrangeOnce(p as BrollPlan),
+			// ★ 取**全部 beat 的首轨**槽位：lead 句跨多个 beat，只取第一个 beat 会让后面的句
+			//   全部落进「没铺到东西」而被静默跳过——看起来通过了，其实一句都没查。
+			//   首轨（trackOrder 0）是默认可见的主候选轨，用户看到的就是它。
+			slotsOf: (o) => [...o.outcome.fills.values()].flatMap((tracks) => tracks[0] ?? []),
+			judge,
+			...(db ? { cache: sqliteQcCache(db, brollMaterialIdFor) } : {}),
+			log,
+		});
+		return {
+			res: out.outcome,
+			plan: out.plan as BrollPlan,
+			residual: out.residual.map((p) => ({ beat: p.beat, sentence: p.sentence })),
+		};
+	} finally {
+		db?.close();
+	}
+}
+
+/** 云端编排接线（两处 caller 共用一份，避免两边漂移）。
+ *
+ * 端点在 `local` 档**不解析**：那一档一个网络字节都不该动，连凭据都不必读。 */
+function arrangeWiring(
+	opts: MatrixOpts,
+	cfg: { base: string; apiKey: string } | undefined,
+): { arrangeMode: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint } {
+	const arrangeMode = parseArrangeMode(opts.arrange);
+	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
+	const qc = opts.arrangeQc === true;
+	return {
+		arrangeMode,
+		...(costCap !== undefined ? { arrangeCostCap: costCap } : {}),
+		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
+		...(qc ? { arrangeQc: true } : {}),
+		// 判定端点只在真要判时解析（不开 QC 的那条路一个网络字节都不该动）
+		...(qc && cfg ? { describeEndpoint: { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
+	};
+}
+
+/** --arrange 解析：local|shadow|cloud，缺省 local（**零回归**）；越界即参数错误。
+ * MUST NOT 静默忽略——把 `--arrange cloub` 的笔误当成 local 跑掉，用户会以为云端跑了。 */
+function parseArrangeMode(raw: string | undefined): ArrangeMode {
+	if (raw === undefined) return "local";
+	if (raw === "local" || raw === "shadow" || raw === "cloud") return raw;
+	throw new Error(`--arrange 只支持 local、shadow 或 cloud（得到「${raw}」）`);
+}
+
+/** --arrange-cost-cap 解析：正整数；越界即参数错误。 */
+function parseArrangeCostCap(raw: string | undefined): number | undefined {
+	if (raw === undefined) return undefined;
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n <= 0) throw new Error(`--arrange-cost-cap 须为正整数（得到「${raw}」）`);
+	return n;
 }
 
 /** --gap-fill 解析：fast|solid|none，缺省 solid（保守：黑片垫齐）；越界即参数错误（不做静默忽略）。 */
@@ -1841,6 +2013,7 @@ function reportLayRefusal(keptEditedTracks: number[], warnings: string[]): void 
  */
 async function layIntoProject(
 	baseDir: string,
+	/** ⚠️ 可重赋值：编排期 QC 换候选时会把它换成「删过段的 plan」。 */
 	plan: BrollPlan,
 	layN: number,
 	scoreFloor: number,
@@ -1867,6 +2040,18 @@ async function layIntoProject(
 		gapFill?: GapFillMode;
 		/** 用户是否显式传了 --gap-fill（口播工程「不适用」提示只对显式传参出，缺省态不制造噪音）。 */
 		gapFillExplicit?: boolean;
+		/** 编排取数路（add-broll-arrange-atom P3.1）：缺省 `local` = **行为逐字节与本 change 之前一致**。
+		 * `shadow` 本地照跑 + 云端只对拍不采纳；`cloud` 采纳云端产物（自校验不过即回落本地）。
+		 * 总闸 `GITRUCK_ARRANGE=off` 可单向压回 local。 */
+		arrangeMode?: ArrangeMode;
+		/** 云端编排的本次编排量硬上限（超限服务端前置拒绝、零执行零计费）。 */
+		arrangeCostCap?: number;
+		/** 云端编排端点（缺省由 apiBase 推导；缺凭据 ⇒ 回落本地）。 */
+		arrangeEndpoint?: ArrangeEndpoint;
+		/** 编排期 QC（P3.2）：缺省关 = 行为逐字节与开工前一致。 */
+		arrangeQc?: boolean;
+		/** 素材理解端点（QC 判定用；缺省由 apiBase 推导）。 */
+		describeEndpoint?: DescribeEndpoint;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -1940,7 +2125,7 @@ async function layIntoProject(
 
 	// 先定「填哪些颗粒」（纯逻辑），下载集 = 全部槽位 clip 去重；--no-image-broll 时图片不进池；
 	// 全局不二用消费集与跳剪豁免避让在此生效（add-broll-dedup-and-layering D1/D4）
-	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = planBeatFills(plan, layN, scoreFloor, {
+	const decisionOpts = {
 		noImage: !layOpts.imageBroll,
 		dedupScope: layOpts.dedupScope,
 		markWeight: layOpts.markWeight,
@@ -1949,7 +2134,73 @@ async function layIntoProject(
 		highlightLookup: layOpts.highlightLookup,
 		...(cutStarts ? { cutAlign: { ratio: cutRatio, starts: cutStarts } } : {}),
 		...(gapModeEff !== "none" ? { gapFill: gapModeEff } : {}),
-	});
+	};
+	// 编排取数路（add-broll-arrange-atom P3.1）：缺省 local ⇒ 与本 change 之前**逐字节一致**
+	// （`runArrangeWithFallback` 的 local 分支就是直接调 runLocal，零额外动作）。
+	// 云端档只承担**本地素材上轨铺排**——云端素材路由 isLocalArrangeScope 挡在门外，
+	// 那不是回滚，是终裁「按业务线切，不按算法切」的执行面。
+	let arrangeMode = resolveArrangeMode(layOpts.arrangeMode ?? "local");
+	// 预估确认门（P2.2b）：云端档跑前报编排量并征求确认。**只在真会发请求时问**——
+	// 云端素材路与总闸压回的 local 档都不该弹一个用户答了也不会发生的问题。
+	if (arrangeMode !== "local" && isLocalArrangeScope(plan)) {
+		const gate = await estimateGate(arrangeUnits(scaleOfRequest(plan, layN, decisionOpts)), {
+			assumeYes: layOpts.yes,
+			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+			confirm: layOpts.deps.confirm ?? confirmViaStdin,
+			log: { info: (m) => log.info(m), warn: (m) => log.warn(m) },
+		});
+		// 拒绝/无从确认 ⇒ 退回本地编排，**工程照常完成**（不是中止：编排本机也做得了，
+		// 用户拒的是「上云」不是「铺轨」——把整轮掐掉等于替他做了他没做的决定）
+		if (!gate.proceed) arrangeMode = "local";
+	}
+	const gateLog = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };
+	const arrangeOnce = (p: BrollPlan) =>
+		runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, arrangeMode, {
+			runLocal: () => planBeatFills(p, layN, scoreFloor, decisionOpts),
+			...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
+			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
+			log: gateLog,
+		});
+
+	// 编排期 QC（P3.2）：缺省关 ⇒ 与开工前逐字节一致。开启时把「铺完→渲→看→重铺→再渲」
+	// 那两轮收成落轨前的一个闭环，全程零渲染。它对本地档与云端档**一样成立**——
+	// 闭环只调 arrangeOnce，不关心产物来自哪一侧。
+	let arrangeRes = await arrangeOnce(plan);
+	let qcResidual: Array<{ beat: string; sentence: string }> = [];
+	if (layOpts.arrangeQc) {
+		const qcOut = await runArrangeQcHere(plan, baseDir, reproj, arrangeOnce, arrangeRes, layOpts, gateLog);
+		arrangeRes = qcOut.res;
+		plan = qcOut.plan;
+		qcResidual = qcOut.residual;
+	}
+	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills } = arrangeRes.outcome;
+	if (arrangeRes.source === "cloud") {
+		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
+	}
+	void qcResidual;
+
+	// ── L1 结构自检（P3.3）：闪帧风险前置声明。**零成本恒开**——只看已有数据，不抽帧不调模型。
+	//    风险要在落轨前说出来，不等渲完了才发现。⚠️ `cuts` 缺省（没扫过，不可判）与 `cuts: []`
+	//    （扫过且无切点，可判且无风险）是两件事，混为一谈会让「不可判」被静默说成「安全」。
+	{
+		const segCutsOf = (clipId: string, clipSt: number): number[] | undefined => {
+			for (const b of plan.beats) {
+				for (const q of b.queries) {
+					for (const r of q.results ?? []) {
+						if (r.clip_id !== clipId) continue;
+						for (const sg of r.segments ?? []) if (sg.start <= clipSt && clipSt <= sg.end) return sg.cuts;
+					}
+				}
+			}
+			return undefined;
+		};
+		const probes: CutsProbeSlot[] = [];
+		for (const [beat, tracks] of fills) {
+			for (const slot of tracks[0] ?? []) probes.push({ beat, clipId: slot.clip_id, cuts: segCutsOf(slot.clip_id, slot.clip_st) });
+		}
+		const notice = flashRiskNotice(flashRiskOf(probes));
+		if (notice) log.warn(notice);
+	}
 	// 对齐实测明示（人读；机读走 lay JSON 的 cut_align 条件键）
 	if (cutAlignStats) {
 		log.info(
