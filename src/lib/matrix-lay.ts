@@ -1160,6 +1160,214 @@ export function fillBeatTrackWithAnchors(opts: {
 	return { slots, anchors: outcomes };
 }
 
+// ── 高档 · 锚定直排（add-arrange-direct-tier）─────────────────────────────
+
+/** 直排槽落位结果（summary 与人读告警共用；对齐 AnchorOutcome 的形态）。 */
+export interface DirectOutcome {
+	beat: string;
+	clip_id: string;
+	/** 实际落位的时间线起点；被拒时 null。 */
+	track_st: number | null;
+	status: "planned" | "sliver" | "rejected";
+	/** `sliver` = 精修后短于最小可用镜头长但**照落**（直排是指令不是候选）；
+	 * `rejected` = 位置冲突或窗口非法。人读告警与机读诊断共用。 */
+	reason?: string;
+	/** 精修是否真的动了窗口端点——用来如实回答「这一槽的闪帧风险处理了没有」。 */
+	refined: boolean;
+	/** 该槽是否拿得到切点数据。false ⇒ 只有帧网格吸附生效，残片收缩**无数据可用**。 */
+	has_cuts: boolean;
+}
+
+/**
+ * 直排槽 → 等价 Pair。
+ *
+ * 直排不走候选池，但**必须过同一套 `refineWindow`**（本档的核心价值），
+ * 而那个函数吃的是 `Pair`。故在此按「用户给的窗就是段界」造一个等价对：
+ *
+ * - `seg.start/end` = 用户给的源窗。精修**只许缩不许撑**这条既有铁律因此天然成立
+ *   ——用户给的窗是**上界**不是目标。
+ * - `seg.cuts` = 该候选**所有命中段**的切点里落在此窗内的。素材未索引 ⇒ 空 ⇒
+ *   残片收缩无数据可用（proposal 那条诚实边界的落点）。
+ * - `cand` = plan 里同 `clip_id` 的候选（**为了拿 fps**）。找不到就造一个最小壳：
+ *   无 fps ⇒ 帧网格吸附整步跳过，这与「未索引素材只得部分收益」是同一件事的两面。
+ */
+function directPair(beat: PlanBeat, d: NonNullable<PlanBeat["direct_slots"]>[number]): Pair {
+	let cand: PlanResult | undefined;
+	const cuts: number[] = [];
+	for (const q of beat.queries) {
+		for (const r of q.results ?? []) {
+			if (r.clip_id !== d.clip_id) continue;
+			cand ??= r;
+			for (const sg of r.segments ?? []) {
+				for (const c of sg.cuts ?? []) {
+					if (Number.isFinite(c) && c > d.clip_st && c < d.clip_ed) cuts.push(c);
+				}
+			}
+		}
+	}
+	cuts.sort((a, b) => a - b);
+	const c = cand ?? ({ clip_id: d.clip_id, score: 0 } as PlanResult);
+	return {
+		cand: c,
+		seg: {
+			start: d.clip_st,
+			end: d.clip_ed,
+			best: (d.clip_st + d.clip_ed) / 2,
+			score: 0,
+			...(cuts.length ? { cuts } : {}),
+		},
+		query: d.query ?? "",
+		key: `${d.clip_id}@direct@${d.clip_st}`,
+		pinned: false,
+		fused: 0,
+		rank: 0,
+		hot: false,
+		blurry: false,
+	};
+}
+
+/**
+ * 单 beat 首轨**高档直排**（add-arrange-direct-tier）：按 `direct_slots` 钉死，
+ * 剩余区间复用既有序贯填充。
+ *
+ * ★ **骨架与 `fillBeatTrackWithAnchors` 同构，刻意复用而非另写**：锚钉的是一个**点**
+ * （`at_sec` ± 提前量），直排钉的是一个**窗**（`track_st/ed`）；两者之后都是
+ * 「把剩余区间以 sub-beat 形态丢回 `fillBeatTrack`」。这同时天然实现了 design 的
+ * 「**检索只兜出处缺失段**」——直排槽先钉，剩下的才走 queries。
+ *
+ * 与锚点的三处**刻意不同**（都源自「直排是指令，不是候选」）：
+ *
+ * 1. **不进去重账**（`consumed`）也不占 `beatOwners`——用户指名要这一段，
+ *    不该因为「这段已被别的槽用过」而被剥夺。
+ * 2. **精修后过短不丢弃**：检索档返回 null 即换候选，直排没有「换」的语义，
+ *    故保留原窗并标 `sliver` 告警。丢掉等于违抗用户的明确指定。
+ * 3. **位置冲突报错不静默让位**：引用段的位置是硬约束，静默移位就是画音错开
+ *    ——那正是它要防的东西。
+ */
+export function fillBeatTrackWithDirectSlots(opts: {
+	beat: PlanBeat;
+	trackOrder: number;
+	consumed: Set<string>;
+	scoreFloor: number;
+	noImage?: boolean;
+	dedupScope?: DedupScope;
+	beatOwners?: Map<string, number>;
+	stats?: FillStats;
+	markWeight?: number;
+	markLookup?: MarkLookup;
+	markStats?: MarkStatsSets;
+	highlightWeight?: number;
+	highlightLookup?: MarkLookup;
+	cutAlign?: CutAlignOpts;
+}): { slots: FillSlot[]; direct: DirectOutcome[] } {
+	const { beat } = opts;
+	const dsIn = Array.isArray(beat.direct_slots) ? beat.direct_slots : [];
+	// 无直排槽 = 原路序贯填充（零回归：本函数只是 fillBeatTrack 的透明壳）
+	if (!dsIn.length) return { slots: fillBeatTrack(opts), direct: [] };
+
+	const outcomes: DirectOutcome[] = [];
+	const placed: FillSlot[] = [];
+	const span = beat.track_ed - beat.track_st;
+	if (!(span > 0)) {
+		for (const d of dsIn) {
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 窗口无长度", refined: false, has_cuts: false });
+		}
+		return { slots: [], direct: outcomes };
+	}
+
+	// 给了位置的先钉（按 track_st 升序），没给位置的随后顺排——顺排要避开已钉死的区间
+	const pinned = dsIn.filter((d) => typeof d.track_st === "number" && typeof d.track_ed === "number");
+	const flowing = dsIn.filter((d) => !(typeof d.track_st === "number" && typeof d.track_ed === "number"));
+	pinned.sort((a, b) => (a.track_st as number) - (b.track_st as number));
+
+	const overlaps = (st: number, ed: number): boolean =>
+		placed.some((s) => st < s.track_ed - 1e-6 && ed > s.track_st + 1e-6);
+
+	const place = (d: (typeof dsIn)[number], st: number, ed: number): void => {
+		const p = directPair(beat, d);
+		const hasCuts = Array.isArray(p.seg.cuts) && p.seg.cuts.length > 0;
+		const room = Math.min(ed - st, beat.track_ed - st);
+		const raw = { clipSt: d.clip_st, clipEd: d.clip_ed };
+		// ★ 本档的核心价值：直排槽照样过 refineWindow（切点吸附 + 帧网格吸附）
+		const win = refineWindow(p, raw, room);
+		const use = win ?? raw;
+		const refined = win !== null && (Math.abs(win.clipSt - raw.clipSt) > 1e-6 || Math.abs(win.clipEd - raw.clipEd) > 1e-6);
+		const dur = Math.min(use.clipEd - use.clipSt, room);
+		placed.push({
+			clip_id: d.clip_id,
+			query: d.query ?? "",
+			score: 0,
+			clip_st: r3(use.clipSt),
+			clip_ed: r3(use.clipSt + dur),
+			track_st: r3(st),
+			track_ed: r3(st + dur),
+		});
+		outcomes.push({
+			beat: beat.beat,
+			clip_id: d.clip_id,
+			track_st: r3(st),
+			// 精修后短于最小槽长 ⇒ 照落但标出来（直排是指令，MUST NOT 因为短就丢）
+			status: win === null || dur < MIN_SHOT_SEC - 1e-6 ? "sliver" : "planned",
+			...(win === null || dur < MIN_SHOT_SEC - 1e-6
+				? { reason: `直排槽精修后 ${r3(dur)}s，短于最小可用镜头长 ${MIN_SHOT_SEC}s——已按指令照落，成片上会是一个很短的镜头` }
+				: {}),
+			refined,
+			has_cuts: hasCuts,
+		});
+	};
+
+	for (const d of pinned) {
+		const st = d.track_st as number;
+		const ed = d.track_ed as number;
+		if (!(ed > st) || st < beat.track_st - 1e-6 || ed > beat.track_ed + 1e-6) {
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置越出 beat 窗口", refined: false, has_cuts: false });
+			continue;
+		}
+		if (overlaps(st, ed)) {
+			// MUST NOT 静默让位——引用段的位置是硬约束，移一下就是画音错开
+			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "指定的时间线位置与另一直排槽重叠（位置是硬约束，不做静默移位）", refined: false, has_cuts: false });
+			continue;
+		}
+		place(d, st, ed);
+	}
+
+	// 顺排槽：在钉死区间之外，从 beat 起点开始找第一段够长的空隙
+	for (const d of flowing) {
+		const want = d.clip_ed - d.clip_st;
+		let cursor = beat.track_st;
+		let done = false;
+		for (const s of [...placed].sort((x, y) => x.track_st - y.track_st)) {
+			if (s.track_st - cursor >= Math.min(want, MIN_SHOT_SEC)) {
+				place(d, cursor, Math.min(cursor + want, s.track_st));
+				done = true;
+				break;
+			}
+			cursor = Math.max(cursor, s.track_ed);
+		}
+		if (!done) {
+			if (beat.track_ed - cursor >= Math.min(want, MIN_SHOT_SEC)) place(d, cursor, Math.min(cursor + want, beat.track_ed));
+			else outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", reason: "beat 内已无足够空隙容纳该直排槽", refined: false, has_cuts: false });
+		}
+	}
+
+	// 直排槽分割出的区间走既有序贯填充（同锚点：sub-beat 只为节奏种子分流）
+	const intervals: { st: number; ed: number }[] = [];
+	let cur = beat.track_st;
+	for (const s of [...placed].sort((x, y) => x.track_st - y.track_st)) {
+		if (s.track_st - cur >= MIN_SHOT_SEC) intervals.push({ st: cur, ed: s.track_st });
+		cur = Math.max(cur, s.track_ed);
+	}
+	if (beat.track_ed - cur >= MIN_SHOT_SEC) intervals.push({ st: cur, ed: beat.track_ed });
+
+	const slots = [...placed];
+	intervals.forEach((iv, i) => {
+		const sub: PlanBeat = { ...beat, beat: `${beat.beat}~d${i}`, track_st: iv.st, track_ed: iv.ed, direct_slots: undefined };
+		slots.push(...fillBeatTrack({ ...opts, beat: sub }));
+	});
+	slots.sort((x, y) => x.track_st - y.track_st);
+	return { slots, direct: outcomes };
+}
+
 // ── 主轨 gap 填充 · fast 规划段（adjust-main-track-gap-fill）──────────────
 
 /** beat 内首轨槽位未覆盖区间（> EPS；beat 间隙不在职责内）。 */
@@ -1345,6 +1553,8 @@ export function planBeatFills(
 	const stats: FillStats = { emptySlots: 0, emptySlotsByRefine: 0, hotSlotsPlaced: 0, blurrySlotsPlaced: 0, adjacentWaived: 0, pinnedPlaced: 0, pinnedYielded: 0 };
 	const markSets: MarkStatsSets = { hit: new Set(), neutral: new Set(), hlHit: new Set(), hlNeutral: new Set() };
 	const anchorOutcomes: AnchorOutcome[] = [];
+	//: 高档直排的落位结果（add-arrange-direct-tier）；无直排槽的 plan 恒为空数组 ⇒ 出参整键缺席。
+	const directOutcomes: DirectOutcome[] = [];
 	// 句界吸附：每轨一份闭环控制器（跨 beat 共享——比例是全片口径，不是逐 beat 口径）。
 	// 密度自适应标定（design §2）：闭环控制的是「吸附机会的放行份额」，而实测比例的分母是**句起点**
 	// ——够不着的句起点（带宽外/锚槽内/供长不足）把实测系统性压到份额×可达覆盖率。先以全吸（份额 1）
@@ -1392,9 +1602,17 @@ export function planBeatFills(
 				stats,
 				cutAlign: cutAlignFor(k),
 			};
-			// 锚点优先布局只作用于首轨（口径注记见 fillBeatTrackWithAnchors 头注）；无锚 beat 走原路零回归
+			// 优先布局（锚点 / 高档直排）**只作用于首轨**——备选轨要给的是「另一套方案」，
+			// 钉死同样的位置就失去了备选的意义（口径注记见各自函数头注）。
+			// 无锚、无直排槽的 beat 走原路，逐字节零回归。
 			let slots: FillSlot[];
-			if (k === 0 && Array.isArray(beat.anchors) && beat.anchors.length) {
+			if (k === 0 && beat.arrange_mode === "direct" && Array.isArray(beat.direct_slots) && beat.direct_slots.length) {
+				// 高档：出处直给。★ 档位取自 **beat 自己**（design §3 同片可混档），
+				// 故同一份 plan 里这个 beat 走直排、下一个 beat 照样可以走检索。
+				const r = fillBeatTrackWithDirectSlots(trackOpts);
+				slots = r.slots;
+				directOutcomes.push(...r.direct);
+			} else if (k === 0 && Array.isArray(beat.anchors) && beat.anchors.length) {
 				const r = fillBeatTrackWithAnchors(trackOpts);
 				slots = r.slots;
 				anchorOutcomes.push(...r.anchors);
@@ -1452,6 +1670,8 @@ export function planBeatFills(
 		pinnedOutcome: { requested: [...pinnedRequested], yielded },
 		markStats: { hit: markSets.hit.size, neutral: markSets.neutral.size, hlHit: markSets.hlHit.size, hlNeutral: markSets.hlNeutral.size },
 		anchors: anchorOutcomes,
+		// 缺席优于空数组：没有直排槽的 plan 出参形态**逐字节**与本 change 之前一致
+		...(directOutcomes.length ? { direct: directOutcomes } : {}),
 		...(cutAlignStats ? { cutAlign: cutAlignStats } : {}),
 		...(gapFillEntries ? { gapFills: gapFillEntries } : {}),
 	};
