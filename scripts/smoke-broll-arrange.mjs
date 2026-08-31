@@ -63,9 +63,15 @@ console.log(`  ${req.estimated_units === resp.units ? "✓" : "✗"} 本地 ${re
 
 // ★ 真机跨语言对拍：服务端产物必须与本仓金样逐字节相同
 console.log("\n【3】真机产物 vs 金样（跨语言等价性的最终判据）");
-const remote = JSON.stringify(serialize(applyArrangeResponse(resp, lay)));
-const golden = JSON.stringify(fx.expected);
-const local = JSON.stringify(serialize(planBeatFills(plan, lay, score_floor, opts)));
+// ★ 规范化比对：服务端按字母序输出 JSON 键、本地是插入序，值一样但字节不同。
+// 用裸 stringify 比会把「完全一致」判成「全不一致」——上线首日就是这么误报的一次。
+const canon = (v) => JSON.stringify(v, (_k, x) =>
+	x && typeof x === "object" && !Array.isArray(x)
+		? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]]))
+		: x);
+const remote = canon(serialize(applyArrangeResponse(resp, lay)));
+const golden = canon(fx.expected);
+const local = canon(serialize(planBeatFills(plan, lay, score_floor, opts)));
 console.log(`  ${remote === golden ? "✓" : "✗"} 服务端 vs 金样${remote === golden ? "：逐字节一致" : "：**不一致**"}`);
 console.log(`  ${local === golden ? "✓" : "✗"} 本地重跑 vs 金样`);
 

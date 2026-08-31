@@ -62,6 +62,44 @@ export interface ArrangeOutcome {
 	gapFills?: GapFillEntry[];
 }
 
+/** 槽位字段的规范顺序（与本地 `planBeatFills` 的产出顺序逐字一致）。 */
+const SLOT_KEY_ORDER = ["clip_id", "query", "score", "clip_st", "clip_ed", "track_st", "track_ed", "material_id", "gap_fill"] as const;
+
+/**
+ * 归一槽位键序。**已知键按规范序在前，未知键按字典序排在后面**——
+ * 后半段是刻意的：直接照 `SLOT_KEY_ORDER` 重建会**静默丢掉**服务端将来新增的字段，
+ * 而那种丢失不报错、只是数据没了。宁可键序不完美，也不能丢东西。
+ */
+function normalizeSlotKeys(s: FillSlot): FillSlot {
+	const src = s as unknown as Record<string, unknown>;
+	const out: Record<string, unknown> = {};
+	for (const k of SLOT_KEY_ORDER) if (k in src) out[k] = src[k];
+	for (const k of Object.keys(src).sort()) if (!(k in out)) out[k] = src[k];
+	return out as unknown as FillSlot;
+}
+
+/**
+ * 规范化序列化：**对键序不敏感**。
+ *
+ * ★ 为什么必须有它：服务端（Flask）默认按字母序输出 JSON 键，本地是插入序。
+ * 值完全相同、字节却不同。用裸 `JSON.stringify` 比对的后果是致命的——
+ * `cloud` 档的自校验会**每次都失败**，于是用户**每次都被扣钱、然后被告知「产物被丢弃」**；
+ * `shadow` 档的 diff 则全是噪声、淹掉真差异。2026-08-30 上线首日真机冒烟撞到。
+ *
+ * 单测抓不到它：两侧都是 JS 造的对象，键序天然一致。
+ */
+function canon(v: unknown): string {
+	return JSON.stringify(v, (_k, x) =>
+		x && typeof x === "object" && !Array.isArray(x)
+			? Object.fromEntries(
+					Object.keys(x as Record<string, unknown>)
+						.sort()
+						.map((k) => [k, (x as Record<string, unknown>)[k]]),
+				)
+			: x,
+	);
+}
+
 /** 结构性违约 —— 拒绝而非降级。 */
 export class ArrangeResponseInvalid extends Error {
 	constructor(public readonly problems: string[]) {
@@ -148,7 +186,9 @@ export function applyArrangeResponse(resp: ArrangeResponse, expectedLay: number)
 			}
 			slots.forEach((s, si) => checkSlot(s, `beat「${beat}」轨 ${ti} 槽 ${si}`, problems));
 			// 浅拷贝成**可写**对象：图片运镜后置补丁会就地改写它们两次
-			const copied = slots.map((s) => ({ ...s }) as FillSlot);
+			// 同时**归一键序**——服务端走 Flask 的字母序、本地是插入序，值一样但字节不同。
+			// 不归一的后果不是「不好看」：`.gtrk` 里同一份决策会因来源不同而字节不同。
+			const copied = slots.map((s) => normalizeSlotKeys(s as FillSlot));
 			for (const s of copied) if (typeof s.clip_id === "string") clipIds.add(s.clip_id);
 			outTracks.push(copied);
 		});
@@ -225,13 +265,20 @@ export function applyArrangeResponse(resp: ArrangeResponse, expectedLay: number)
  */
 export function diffArrangeOutcome(local: ArrangeOutcome, remote: ArrangeOutcome): string[] {
 	const diffs: string[] = [];
+	// ★ 比的是**集合**不是顺序：`fills` 在响应里是个 JSON 对象，键序不是契约的一部分
+	//   （服务端按字母序输出、本地是 plan 序）。而下游一律**按 beat 名取**、与顺序无关
+	//   （`matrix.ts` 的两处消费都是遍历收集，不依赖次序）。
+	//   照顺序比会让每次真实响应都在这里短路，整个 diff 退化成一句「beat 顺序不同」。
 	const lb = [...local.fills.keys()];
 	const rb = [...remote.fills.keys()];
-	if (JSON.stringify(lb) !== JSON.stringify(rb)) {
-		diffs.push(`beat 集合/顺序不同：本地 [${lb.join(",")}] vs 服务端 [${rb.join(",")}]`);
+	const missing = lb.filter((b) => !remote.fills.has(b));
+	const extra = rb.filter((b) => !local.fills.has(b));
+	if (missing.length || extra.length) {
+		diffs.push(`beat 集合不同：服务端缺 [${missing.join(",") || "无"}]，多出 [${extra.join(",") || "无"}]`);
 		return diffs; // beat 对不上，逐槽比没有意义
 	}
-	for (const beat of lb) {
+	// 逐 beat 比时按名排序，让 diff 输出本身是确定的（否则两次运行的报告顺序会飘）
+	for (const beat of [...lb].sort()) {
 		const lt = local.fills.get(beat) ?? [];
 		const rt = remote.fills.get(beat) ?? [];
 		if (lt.length !== rt.length) {
@@ -246,8 +293,10 @@ export function diffArrangeOutcome(local: ArrangeOutcome, remote: ArrangeOutcome
 				continue;
 			}
 			for (let si = 0; si < a.length; si++) {
-				const x = JSON.stringify(a[si]);
-				const y = JSON.stringify(b[si]);
+				// ★ 规范化比对：服务端键序是字母序、本地是插入序，裸 stringify 会把
+				//   「完全相同」判成「每一颗都不同」——见 canon 的头注。
+				const x = canon(a[si]);
+				const y = canon(b[si]);
 				if (x !== y) diffs.push(`beat「${beat}」轨 ${ti} 槽 ${si}：\n    本地 ${x}\n    服务 ${y}`);
 			}
 		}
