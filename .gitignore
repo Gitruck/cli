@@ -5,6 +5,14 @@ dist/
 out/
 # 测试仅本地（开源项目不外泄测试项；本机开发、无 CI，发版前由 prepublishOnly 自动跑一次，主理人 2026-07-26 定）
 # —— 这是决策不是缺陷：不要再把它当作「忘了入库」提改进
+#
+# 2026-09-01 起 test/ 是本仓的 submodule（见 .gitmodules），指向 Gitea 私仓 Gitruck/cli-test，
+# 与 openspec/ 同一思路。本条对那个 gitlink 条目**无效**（它是 `submodule add -f` 加的），
+# 保留本条是兜底：万一哪天 submodule 被 deinit、test/ 变回普通目录时仍有屏蔽。
+# 真正的硬闸是 .git/hooks/pre-commit（现已同时拦 openspec/ 与 test/ 的**带斜杠**路径）。
+#
+# 迁出的直接动因：此前是「半跟踪」态——本条屏蔽着，却靠 `git add -f` 塞进去 71 个文件，
+# 而盘上实有 153 个。公开仓里的测试集长期只有一半，且新增测试会被 `git add .` 静默漏掉。
 test/
 # 本机工件仅本地（真机验收清单 .plans/*-checklist.md 等留本机、不入 git，主理人 2026-07-26 定）
 # 2026-08-11 主理人拍板：本目录已迁至 openspec/.plans/，与 openspec 工件同进一个 Gitea 私仓统一协作。

@@ -2,3 +2,7 @@
 	path = openspec
 	url = ssh://git@infra.ai-mcn.tv:9012/Gitruck/cli-openspec.git
 	branch = main
+[submodule "test"]
+	path = test
+	url = ssh://git@infra.ai-mcn.tv:9012/Gitruck/cli-test.git
+	branch = main
