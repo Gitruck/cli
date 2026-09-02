@@ -1800,16 +1800,25 @@ function fastFillBeatGaps(o: {
 	};
 	// 槽位的段界回查（延长上限）：找包含该窗口的命中段；整片伪段候选（无 segments）以素材时长为界。
 	// dur = 素材物理时长（微残量借帧的硬上限）。
+	// ⚠️ 搜索面 MUST 含**借来的 beat**（fix-borrow-residue-absorption）：
+	//    借来的料属于别的 beat，只翻 `beat.queries` 恒查不到 ⇒ 延长上限恒 0 ⇒
+	//    ③′ 的复吸变成**死代码**，借后残量照旧落成亚帧黑片。
+	//    实测教训：只补 ③′ 而不补这里，探针打出的残洞纹丝不动（0.010–0.037s），全绿而无效。
+	//    序：**先本 beat、后借来的 beat**（本 beat 的段界才是这颗料的「正主」）；
+	//    借来的 beat 按 `borrowBeats` 原序遍历 —— MUST NOT 依赖 Map/对象遍历序（跨语言分叉源）。
 	const segBoundsOf = (slot: FillSlot): { lo: number; hi: number; dur?: number } | undefined => {
-		for (const q of beat.queries) {
-			for (const rr of q.results ?? []) {
-				if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
-				for (const sg of rr.segments ?? []) {
-					if (sg.start <= slot.clip_st + 1e-6 && slot.clip_ed <= sg.end + 1e-6) {
-						return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+		const beatsToScan = [beat, ...(o.borrowBeats ?? []).filter((b) => b.beat !== beat.beat)];
+		for (const bb of beatsToScan) {
+			for (const q of bb.queries) {
+				for (const rr of q.results ?? []) {
+					if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
+					for (const sg of rr.segments ?? []) {
+						if (sg.start <= slot.clip_st + 1e-6 && slot.clip_ed <= sg.end + 1e-6) {
+							return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+						}
 					}
+					if (!rr.segments?.length) return { lo: 0, hi: rr.duration ?? slot.clip_ed, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
 				}
-				if (!rr.segments?.length) return { lo: 0, hi: rr.duration ?? slot.clip_ed, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
 			}
 		}
 		return undefined;
@@ -1817,12 +1826,18 @@ function fastFillBeatGaps(o: {
 
 	for (const g of beatGaps(beat, slots)) {
 		let cursor = g.st;
+		// 洞的**有效末端**：②b「下一颗反向前伸」会把 next 的起点往回拉，等于从尾侧吃掉一截。
+		// 那一档不推进 `cursor`（它填的是尾侧不是头侧），所以必须另立一个变量记账。
+		// ⚠️ MUST NOT 在 ②b 之后继续拿 `g.ed` 当余量上界：③ 会照着老末端下料，
+		//    压到 next 头上 ⇒ 装配期 assertTrackContinuity 直接抛（E9 零容忍）。
+		//    本轮 proj2-A/B/C 没炸是运气——B18 那处 ②b 恰好没触发。
+		let gEnd = g.ed;
 		// ① 候选填充：放宽地板取剩余候选（不二用/归属互斥/负词照旧；节奏机制不适用）
-		while (g.ed - cursor >= MIN_SHOT_SEC - EPS) {
+		while (gEnd - cursor >= MIN_SHOT_SEC - EPS) {
 			let placed = false;
 			for (const p of pairsRelaxed()) {
 				if (o.consumed.has(p.key)) continue;
-				const room = g.ed - cursor;
+				const room = gEnd - cursor;
 				if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
 				const owner = o.beatOwners.get(p.cand.clip_id);
 				if (owner !== undefined && owner !== 0) continue;
@@ -1852,12 +1867,23 @@ function fastFillBeatGaps(o: {
 		// （黄石实测 1–6ms），做成黑片即亚帧碎片——此档允许延长越过段界（借入邻场景 ≤1 帧，肉眼不可辨），
 		// 硬上限仍为素材物理时长/0。
 		const MICRO_SLOP = 0.05;
-		if (g.ed - cursor > EPS) {
+		// ②a/②a′ 抽成**可复用的一步**（fix-borrow-residue-absorption）：③ 借完会留下新的残量，
+		// 而原先这一档只在借**之前**跑过一次 ⇒ 借后的残洞无人吸收，落成亚帧黑片。
+		// 实测 proj2-B B18：包络 157.816→166.768，借占到 166.765，剩 0.003s（0.1 帧）挂在那儿。
+		// 渲染看不见（取整判 0 帧），但那颗 clip 的 `gtrk patch trim` 悔棋通道从此只剩半条
+		// ——正是 fix-gapfill-subframe-residue 要消灭的东西，被 ③ 从后门放了回来。
+		//
+		// ⚠️ 顺序 MUST 保持「先延长、后借」：延长用的是**同一条素材**，画面连续；
+		//    借来的是别的 beat 的料，相关性天然更弱。反过来会拿弱料顶掉强料。
+		//    所以修法是「借之后**再吸一次**」，不是把 ③ 提到 ② 前面。
+		// ⚠️ 只复跑 ②a/②a′，**不含 ②b** —— ②b 不幂等（见其头注）。
+		const absorbPrev = (): void => {
+			if (gEnd - cursor <= EPS) return;
 			const prev = slots.find((s) => Math.abs(s.track_ed - cursor) <= EPS);
 			if (prev && prev.material_id === undefined) {
 				const seg = segBoundsOf(prev);
 				if (seg) {
-					const residue = g.ed - cursor;
+					const residue = gEnd - cursor;
 					const hi = residue <= MICRO_SLOP ? Math.min(seg.hi + residue, seg.dur ?? seg.hi + residue) : seg.hi;
 					const ext = Math.min(residue, Math.max(0, hi - prev.clip_ed));
 					if (ext > EPS) {
@@ -1889,7 +1915,7 @@ function fastFillBeatGaps(o: {
 					//   ⚠️ MUST NOT 写成「第一步之后 rest 要么归零、要么 ≤ MICRO_SLOP」：那是假的，
 					//     第二种结局就是反例（实测 proj2-B 若头部余量不足即走这一支）。
 					for (let pass = 0; pass < 2; pass++) {
-						const rest = g.ed - cursor;
+						const rest = gEnd - cursor;
 						if (rest <= EPS) break;
 						// 下界与 ②b 的松弛口径**逐字同源**（MUST NOT 另立一套）
 						const loB = rest <= MICRO_SLOP ? Math.max(0, seg.lo - rest) : seg.lo;
@@ -1910,13 +1936,17 @@ function fastFillBeatGaps(o: {
 					}
 				}
 			}
-		}
-		if (g.ed - cursor > EPS) {
-			const next = slots.find((s) => Math.abs(s.track_st - g.ed) <= EPS);
+		};
+		absorbPrev();
+		// ②b 下一颗反向前伸（**尾侧**填充）：它不推进 `cursor`（填的不是头侧），
+		// 所以必须把吃掉的那一截记到 `gEnd` 上，否则 ③ 会按老末端下料、压到 next 头上。
+		// ⚠️ 本档**不幂等**：再跑一次会拿同一个 residue 二次回退 next 的起点。故只跑这一次。
+		if (gEnd - cursor > EPS) {
+			const next = slots.find((s) => Math.abs(s.track_st - gEnd) <= EPS);
 			if (next && next.material_id === undefined) {
 				const seg = segBoundsOf(next);
 				if (seg) {
-					const residue = g.ed - cursor;
+					const residue = gEnd - cursor;
 					const lo = residue <= MICRO_SLOP ? Math.max(0, seg.lo - residue) : seg.lo;
 					const ext = Math.min(residue, Math.max(0, next.clip_st - lo));
 					if (ext > EPS) {
@@ -1930,7 +1960,9 @@ function fastFillBeatGaps(o: {
 							next.clip_ed = t.clip_ed;
 							next.track_ed = t.track_ed;
 						}
-						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: next.clip_id, track_st: next.track_st, track_ed: r3(g.ed), sec: r3(ext) });
+						// 先登记再改 gEnd —— 这条 entry 的 track_ed 是**吃掉之前**的末端。
+						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: next.clip_id, track_st: next.track_st, track_ed: r3(gEnd), sec: r3(ext) });
+						gEnd = next.track_st;
 					}
 				}
 			}
@@ -1947,11 +1979,11 @@ function fastFillBeatGaps(o: {
 		//   · **仍守不二用** —— 照过 `consumed`，借的是本轮没人用的段；
 		//   · **如实登记** —— kind:"borrowed"，画面与本段稿子的相关性天然弱于本 beat 自己的候选。
 		if (o.borrowBeats?.length) {
-			while (g.ed - cursor >= MIN_SHOT_SEC - EPS) {
+			while (gEnd - cursor >= MIN_SHOT_SEC - EPS) {
 				let placed = false;
 				for (const p of pairsBorrowable()) {
 					if (o.consumed.has(p.key)) continue;
-					const room = g.ed - cursor;
+					const room = gEnd - cursor;
 					if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
 					const owner = o.beatOwners.get(p.cand.clip_id);
 					if (owner !== undefined && owner !== 0) continue;
@@ -1976,6 +2008,11 @@ function fastFillBeatGaps(o: {
 				}
 				if (!placed) break;
 			}
+			// ③′ 借完**再吸一次**残量（fix-borrow-residue-absorption）。
+			// 借的落点由 refineWindow 决定，几乎必然与 `gEnd` 差一点点——那一点点若无人接手，
+			// 就是 B18 那 0.003s 亚帧黑片。此处 `prev` 正是刚借来的那颗，延长它即可。
+			// 只在借真的发生过时才有残量；absorbPrev 自带 `gEnd - cursor <= EPS` 的空转保护。
+			absorbPrev();
 		}
 		// ④ 残余中段（两端段界都到顶、且借无可借）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
 	}
