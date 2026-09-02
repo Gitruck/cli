@@ -325,7 +325,8 @@ export function registerMatrix(program: Command): void {
 		)
 		.option(
 			"--gap-fill <mode>",
-			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、再不够垫黑片；" +
+			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、" +
+				"再耗尽跨 beat 借候选、剩下短于最小镜头长的残洞也补真画面（补不满整段才垫黑片）——**尽量不留黑**；" +
 				"solid=黑片垫齐（精修时一眼看出「这里没匹配到」）；none=留 gap（客户端主轨磁吸开启时 gap 会被吸除、后续画面整体前移与配音错位，慎用）。" +
 				"口播工程主轨为 A-roll，本参数不适用（照旧留空语义）",
 		)
@@ -2776,12 +2777,13 @@ async function layIntoProject(
 		const gf = summary.gapFill;
 		// ⚠️ 这份计数器 MUST 覆盖 `GapFillEntry["kind"]` 的**全部**取值——
 		//    漏一个取值 tsc 会红（本次新增 `borrowed` 即由它抓到），别改成 Record<string, number> 绕过去
-		const cnt: Record<GapFillEntry["kind"], number> = { candidate: 0, extend: 0, solid: 0, borrowed: 0 };
+		const cnt: Record<GapFillEntry["kind"], number> = { candidate: 0, extend: 0, solid: 0, borrowed: 0, subfloor: 0 };
 		for (const f of gf.fills) cnt[f.kind]++;
 		log.info(
 			gf.fills.length
 				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend}` +
-						`${cnt.borrowed ? ` · 跨 beat 借 ${cnt.borrowed}` : ""} · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
+						`${cnt.borrowed ? ` · 跨 beat 借 ${cnt.borrowed}` : ""}${cnt.subfloor ? ` · 次地板补画面 ${cnt.subfloor}` : ""}` +
+						` · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
 				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填（主轨本就零 gap）`,
 		);
 		// 跨 beat 借候选如实告知（relax-gapfill-cross-beat-borrow）：MUST NOT 静默——
@@ -2795,6 +2797,18 @@ async function layIntoProject(
 					`${head}${items.length > 5 ? ` 等 ${items.length} 处` : ""}。\n` +
 					"这些段自己的候选被别的 beat 先用掉了，为避免整段黑屏而从全片其它检索结果里取了料——\n" +
 					"**画面与这几句稿子的相关性会弱一些**。想消掉：给这些 beat 补更贴的素材后重跑 `matrix search`。",
+			);
+		}
+		// 次地板补画面如实告知（relax-gapfill-subfloor-picture）：这些槽**短于最小镜头长**，
+		// 是快切。它们本来会是同样长的黑闪——换成画面是改善，但用户仍有权知道自己的成片里
+		// 有几处不到 1.2s 的快切，以及它们在哪。
+		if (cnt.subfloor) {
+			const items = gf.fills.filter((f) => f.kind === "subfloor");
+			const head = items.slice(0, 5).map((f) => `${f.beat}=${f.sec}s`).join("、");
+			log.info(
+				`有 ${cnt.subfloor} 处残洞短于最小镜头长（合计 ${r3(items.reduce((n, f) => n + f.sec, 0))}s），` +
+					`已填**真画面**而非黑片：${head}${items.length > 5 ? ` 等 ${items.length} 处` : ""}。\n` +
+					"这些是快切（不到 1.2s）——它们本来会是同样长的黑闪。槽长与切点未变，只换了内容。",
 			);
 		}
 	}

@@ -96,9 +96,16 @@ export const MIN_SHOT_SEC = 1.2;
  * 异景残片，端点就近**收缩**至切点消除；端点恰落切点上视为无残片。
  *
  * 取 1.0s（tune-shot-rhythm-thresholds，主理人 2026-08-19 走查裁定）：判据不是「残片有多短」
- * 而是**节奏断裂**——「一下慢，一下突然间快，一下又慢」比短镜头本身更难受。铺轨自身的槽长
- * 地板 MIN_SHOT_SEC=1.2s 保证我方从不排出更短的槽，故屏幕上 <1.0s 的镜头必然来自「窗口跨过
- * 源切点且切点贴近端点」，是可修的我方责任。与 QC 的 flashMaxSec 同为 1.0s（防与查同一条线）。
+ * 而是**节奏断裂**——「一下慢，一下突然间快，一下又慢」比短镜头本身更难受。
+ * 与 QC 的 flashMaxSec 同为 1.0s（防与查同一条线）。
+ *
+ * ⚠️ **原头注有一句已不再成立，改在这里**（relax-gapfill-subfloor-picture，2026-09-02）：
+ * 原文说「槽长地板 MIN_SHOT_SEC=1.2s 保证我方从不排出更短的槽，故屏幕上 <1.0s 的镜头**必然**
+ * 来自窗口跨过源切点」。那句话**当时就已经是错的**——gap 填充落黑片时排出的就是次地板槽
+ * （真机 proj2-C 的 B11 = 0.219s 黑片），只是没人注意到地板从来只拦真画面、不拦黑。
+ * 现在次地板档会在同一个槽里把黑换成画面，于是 <1.0s 的真画面镜头有了**第二个**来源。
+ * 排查 <1.0s 镜头时 MUST 先看 `gap_fill.fills` 里有没有 `kind:"subfloor"`：
+ * 有 ⇒ 那是本档的正常产物（槽长由残洞决定，与它本会落的黑片等长），不是窗口收缩的锅。
  *
  * **MUST NOT 再上抬到 1.5s 及以上**：实测那是代价拐点——槽位数被迫增加（打样 51→53，节奏反而
  * 变快）、时间线扰动过半（26/51），并开始吃进源素材真实的 1.0–1.5s 镜头（打样素材有 9 条）。
@@ -141,7 +148,7 @@ export interface GapFillEntry {
 	beat: string;
 	/** ⚠️ `borrowed` 是**新增取值**（relax-gapfill-cross-beat-borrow）：跨 beat 借来的候选。
 	 *  消费方（arrange-apply / lay JSON / 客户端）MUST 容错未知 kind。 */
-	kind: "candidate" | "extend" | "solid" | "borrowed";
+	kind: "candidate" | "extend" | "solid" | "borrowed" | "subfloor";
 	track_st: number;
 	track_ed: number;
 	sec: number;
@@ -1760,6 +1767,18 @@ function fastFillBeatGaps(o: {
 	 * 本件不松动那条铁律——实测供给/需求 4.10×，饿死纯粹是分配问题，不是总量问题。
 	 */
 	borrowBeats?: readonly PlanBeat[];
+	/** 次地板填真画面（relax-gapfill-subfloor-picture，主理人 2026-09-02 拍板）。
+	 *
+	 * 前面各档都要求残洞 ≥ `MIN_SHOT_SEC`，够不着的残洞一律落黑。可**落黑本身就排出了一个
+	 * 次地板槽**（真机 proj2-C 的 B11 是 0.219s 黑片）—— 也就是说地板今天**只拦真画面、
+	 * 不拦黑**。问题从来不是「要不要破地板」，而是这个已然次地板的槽里装的是画面还是黑。
+	 *
+	 * ⚠️ 本档**不改变任何槽的时长与切点**：轨上时长由残洞决定，与它本会落的黑片**逐字节等长**。
+	 *    换的只是内容（黑 → 画面）。故节奏、槽位数、时间线扰动全部为零 —— 这是它敢破地板的全部理由。
+	 *    MUST NOT 借本档之名去放宽 ①/③ 的地板：那才是真的改节奏。
+	 *
+	 * 缺省不传 = 不启用（`solid` / `none` 两档逐字节零变化）。 */
+	subFloorFill?: boolean;
 	/** 钉选落位段键收集器（fix-arrange-diagnostics-granularity）。
 	 * ⚠️ **诚实注记**：这条路今天打不出钉选段——钉选免地板且在池里恒排第一，凡 gap 够得着的位置，
 	 * 常规填充在更宽的口径下（`room ≤ remaining`、枯竭放行无邻接约束）早就够得着了。
@@ -2014,6 +2033,49 @@ function fastFillBeatGaps(o: {
 			// 只在借真的发生过时才有残量；absorbPrev 自带 `gEnd - cursor <= EPS` 的空转保护。
 			absorbPrev();
 		}
+		// ④′ 次地板填真画面（relax-gapfill-subfloor-picture）：落黑之前的**最后一档**。
+		//
+		// 走到这里，残洞必然 < MIN_SHOT_SEC（否则 ①/③ 早填了），前面各档都够不着。
+		// 但它接下来会变成一个**次地板黑片槽** —— 地板从来没拦住黑，只拦真画面。
+		// 真机残留全表（fast 档三条片）：0.219 / 0.357 / 0.360 / 0.395 / 0.431 / 0.634 / 0.711 / 0.988s，
+		// 在 30fps 上是 7–30 帧的黑闪。同长度的真画面只是一次快切，明显不如黑闪难受。
+		//
+		// ⚠️ 三条边界：
+		//   · **全有或全无**：只在能整段覆盖残量时才填。填一半会把 1 个黑槽变成「画面 + 黑」两个槽
+		//     —— 多一刀、且黑还在，比不填更坏；
+		//   · **跳过帧网格吸附**：吸附只会再制造残量，而消灭残量正是本档的目的。
+		//     轨上时长由残洞决定（与它本会落的黑片逐字节等长），源窗取等长即可；
+		//   · **MUST NOT 跨源切点**：在一个已经只有 7–30 帧的镜头里再插一次场景切换，
+		//     那就是本仓一直在治的闪帧。宁可留黑也不排这种槽。
+		if (o.subFloorFill && gEnd - cursor > EPS) {
+			const room = gEnd - cursor;
+			const pool = o.borrowBeats?.length ? [...pairsRelaxed(), ...pairsBorrowable()] : pairsRelaxed();
+			for (const p of pool) {
+				if (o.consumed.has(p.key)) continue;
+				if (pairAvail(p) < room - EPS) continue; // 覆盖不满整段 ⇒ 换下一个（全有或全无）
+				const owner = o.beatOwners.get(p.cand.clip_id);
+				if (owner !== undefined && owner !== 0) continue;
+				const win = sourceWindowFor(p, room);
+				if (win.clipEd - win.clipSt < room - EPS) continue;
+				// 窗内若有源切点，这一槽就是「7–30 帧里含一次场景切换」⇒ 弃用
+				const cuts = p.seg.cuts;
+				if (Array.isArray(cuts) && cuts.some((c) => Number.isFinite(c) && c > win.clipSt + EPS && c < win.clipEd - EPS)) continue;
+				const slot: FillSlot = {
+					clip_id: p.cand.clip_id,
+					query: p.query,
+					score: p.seg.score,
+					...slotTimes(win.clipSt, cursor, room),
+					gap_fill: true,
+				};
+				slots.push(slot);
+				if (p.pinned) o.pinnedPlaced?.add(segDiagKey(p.cand.clip_id, p.seg));
+				o.consumed.add(p.key);
+				o.beatOwners.set(p.cand.clip_id, 0);
+				o.entries.push({ beat: beat.beat, kind: "subfloor", clip_id: p.cand.clip_id, track_st: slot.track_st, track_ed: slot.track_ed, sec: r3(room) });
+				cursor = slot.track_ed;
+				break;
+			}
+		}
 		// ④ 残余中段（两端段界都到顶、且借无可借）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
 	}
 	slots.sort((a, b) => a.track_st - b.track_st);
@@ -2193,6 +2255,9 @@ export function planBeatFills(
 				// 与本圈开头那条「两阶段」注释同源：常规填充**全部**跑完才轮到 gap 填充，
 				// 所以此刻 `consumed` 已定型，借的确实是「没人要」的段。
 				borrowBeats: plan.beats,
+				// 次地板填真画面（relax-gapfill-subfloor-picture）：同样只在 fast 档传。
+				// 它换的只是「已然次地板的那个槽」的内容，不动任何槽的时长与切点。
+				subFloorFill: true,
 				pinnedPlaced: pinnedPlacedKeys,
 			});
 			for (const s of slots) clipIds.add(s.clip_id); // 新填候选进下载集
