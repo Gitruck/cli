@@ -197,6 +197,13 @@ CLI 写 .gtrk ─▶ 客户端打开(自动感知外部改动、先存脏改再�
 
 ## Upgrading
 
+> **Read this first if you are coming from 1.0.x**: projects laid by 1.0.8 and earlier carry a slot-seam
+> defect (a −1 ms same-track overlap on the main track, which `gtrk render` hard-rejects). **This release
+> fixes the cause but cannot repair projects that were already laid** — re-run
+> `gtrk matrix lay --project <dir>` on any existing project. If an old project still fails to render after
+> upgrading, that is the old defect baked into that project, not a regression in this release.
+> See the [CHANGELOG](./CHANGELOG.md).
+
 **CLI + skills** (config preserved as-is):
 
 ```bash

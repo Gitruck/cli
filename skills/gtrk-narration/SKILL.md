@@ -214,6 +214,8 @@ gtrk audio lay --project "<工程>" --file "<bgm>" --volume 0.1 --beat-align --j
 gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
 ```
 
+> **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
+
 配方口径（`--mark-weight 0.3`、BGM 0.10、`--gap-fill fast`、句界吸附缺省）与旅拍图纸 §五 同源，本图纸引用不复制。
 `--highlight-weight 0.2`（260828 新增）：看点维度与 mark 正交——mark 判「好不好看」、highlight 判
 「有没有看点」（信息量/戏剧性/情绪强度/稀缺性）。看点准则按垂类走 L1 rubric（美食/旅拍图纸各持一份

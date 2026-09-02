@@ -185,6 +185,8 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --json
 ```
 
+> **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
+
 **配方级参数口径**（打样标定）：
 - `--mark-weight 0.3`：美观度加权起步值（mark 缺失素材中性不受罚）；
 - `--highlight-weight 0.2`（260828 新增）：看点加权，配 §三′ 的 rubric。与 mark 正交——

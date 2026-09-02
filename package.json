@@ -1,6 +1,6 @@
 {
   "name": "@gitruck/cli",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "description": "同合云成片流水线 CLI —— agent 驱动云端任务、产物拉回本地、三方工程文件（客户端/剪映/PR）互通。",
   "license": "MIT",
   "author": "Gitruck (同合云)",
@@ -24,7 +24,8 @@
     "AGENT.md",
     "README.md",
     "README.en.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=20.6"
