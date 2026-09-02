@@ -139,7 +139,9 @@ export type GapFillMode = "fast" | "solid" | "none";
 /** gap 填充明细（summary gap_fill.fills 条目；track_st/track_ed = 被该动作覆盖的时间区间）。 */
 export interface GapFillEntry {
 	beat: string;
-	kind: "candidate" | "extend" | "solid";
+	/** ⚠️ `borrowed` 是**新增取值**（relax-gapfill-cross-beat-borrow）：跨 beat 借来的候选。
+	 *  消费方（arrange-apply / lay JSON / 客户端）MUST 容错未知 kind。 */
+	kind: "candidate" | "extend" | "solid" | "borrowed";
 	track_st: number;
 	track_ed: number;
 	sec: number;
@@ -1747,6 +1749,17 @@ function fastFillBeatGaps(o: {
 	noImage?: boolean;
 	dedupScope?: DedupScope;
 	entries: GapFillEntry[];
+	/**
+	 * 跨 beat 借候选的来源（relax-gapfill-cross-beat-borrow）：**全 plan 的 beats**。
+	 *
+	 * 缺省不传 = 不借（`solid` / `none` 两档与既有调用方逐字节零变化）。
+	 * 传了才启用第 ③ 级——本 beat 候选被别的 beat 占尽、相邻延长也填不满时，
+	 * 从全片未消费的段里取料，MUST NOT 直接落黑片。
+	 *
+	 * ⚠️ 仍守「宁空不重复」：借的是**未消费**段（照过 `consumed` 过滤）。
+	 * 本件不松动那条铁律——实测供给/需求 4.10×，饿死纯粹是分配问题，不是总量问题。
+	 */
+	borrowBeats?: readonly PlanBeat[];
 	/** 钉选落位段键收集器（fix-arrange-diagnostics-granularity）。
 	 * ⚠️ **诚实注记**：这条路今天打不出钉选段——钉选免地板且在池里恒排第一，凡 gap 够得着的位置，
 	 * 常规填充在更宽的口径下（`room ≤ remaining`、枯竭放行无邻接约束）早就够得着了。
@@ -1765,6 +1778,25 @@ function fastFillBeatGaps(o: {
 				.sort((a, b) => b.rank - a.rank || b.fused - a.fused || b.seg.score - a.seg.score);
 		}
 		return merged;
+	};
+	// 跨 beat 借候选池（relax-gapfill-cross-beat-borrow）：从**全 plan** 建，惰性、只建一次。
+	// ⚠️ 排序 MUST 显式定死（与 pairsRelaxed 同口径 rank→fused→score 降序）——
+	//    MUST NOT 依赖 Map/对象遍历序，那是跨语言移植的头号静默分叉源
+	//    （Python dict 序与 JS Map 序不保证一致）。
+	let borrowed: Pair[] | undefined;
+	const pairsBorrowable = (): Pair[] => {
+		if (!borrowed) {
+			const own = new Set(pairsRelaxed().map((p) => p.key));
+			borrowed = (o.borrowBeats ?? [])
+				.filter((b) => b.beat !== beat.beat)
+				.flatMap((b) => buildQueryPools(b, 0, { noImage: o.noImage, dedupScope: o.dedupScope }).flatMap((q) => q.pool))
+				.filter((p) => !isImagePair(p) && !own.has(p.key)) // 本 beat 自己有的走 ① 那一档，不重复进池
+				.sort((a, b) => b.rank - a.rank || b.fused - a.fused || b.seg.score - a.seg.score);
+			// 同一 (clip,segment) 可能被多个 beat 召回 ⇒ 按 key 去重，保留排序里第一个
+			const seen = new Set<string>();
+			borrowed = borrowed.filter((p) => (seen.has(p.key) ? false : (seen.add(p.key), true)));
+		}
+		return borrowed;
 	};
 	// 槽位的段界回查（延长上限）：找包含该窗口的命中段；整片伪段候选（无 segments）以素材时长为界。
 	// dur = 素材物理时长（微残量借帧的硬上限）。
@@ -1903,7 +1935,49 @@ function fastFillBeatGaps(o: {
 				}
 			}
 		}
-		// ③ 残余中段（两端段界都到顶）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
+		// ③ 跨 beat 借候选（relax-gapfill-cross-beat-borrow）：落黑片**之前**的最后一档。
+		//
+		// 治的是「分配不均」不是「无中生有」：实测 proj2-B 全片供给/需求 **4.10×**，
+		// 而 B18 整段 8.952s 落黑——它自己那 4 条候选**逐条**被 B14/B16 先占。
+		// 全片 139 条段里 75 条被 ≥2 个 beat 召回，先到先得、后面饿死。
+		// 二创解说（一稿对一片、全片单素材）下这是**结构性**的。
+		//
+		// ⚠️ 三条边界（spec 明文）：
+		//   · 只在 fast 档生效 —— `borrowBeats` 不传即整档不启用，solid/none 逐字节零变化；
+		//   · **仍守不二用** —— 照过 `consumed`，借的是本轮没人用的段；
+		//   · **如实登记** —— kind:"borrowed"，画面与本段稿子的相关性天然弱于本 beat 自己的候选。
+		if (o.borrowBeats?.length) {
+			while (g.ed - cursor >= MIN_SHOT_SEC - EPS) {
+				let placed = false;
+				for (const p of pairsBorrowable()) {
+					if (o.consumed.has(p.key)) continue;
+					const room = g.ed - cursor;
+					if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
+					const owner = o.beatOwners.get(p.cand.clip_id);
+					if (owner !== undefined && owner !== 0) continue;
+					const win = refineWindow(p, sourceWindowFor(p, Math.min(room, pairAvail(p))), room);
+					if (!win) continue;
+					const d = win.clipEd - win.clipSt;
+					const slot: FillSlot = {
+						clip_id: p.cand.clip_id,
+						query: p.query,
+						score: p.seg.score,
+						...slotTimes(win.clipSt, cursor, d),
+						gap_fill: true,
+					};
+					slots.push(slot);
+					if (p.pinned) o.pinnedPlaced?.add(segDiagKey(p.cand.clip_id, p.seg));
+					o.consumed.add(p.key);
+					o.beatOwners.set(p.cand.clip_id, 0);
+					o.entries.push({ beat: beat.beat, kind: "borrowed", clip_id: p.cand.clip_id, track_st: slot.track_st, track_ed: slot.track_ed, sec: r3(d) });
+					cursor += d;
+					placed = true;
+					break;
+				}
+				if (!placed) break;
+			}
+		}
+		// ④ 残余中段（两端段界都到顶、且借无可借）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
 	}
 	slots.sort((a, b) => a.track_st - b.track_st);
 }
@@ -2077,6 +2151,11 @@ export function planBeatFills(
 				noImage: opts.noImage,
 				dedupScope: opts.dedupScope,
 				entries: gapFillEntries,
+				// 跨 beat 借候选的来源 = 全 plan（relax-gapfill-cross-beat-borrow）。
+				// ⚠️ 只在这一处（fast 档）传 —— solid/none 走不到这里，天然零影响。
+				// 与本圈开头那条「两阶段」注释同源：常规填充**全部**跑完才轮到 gap 填充，
+				// 所以此刻 `consumed` 已定型，借的确实是「没人要」的段。
+				borrowBeats: plan.beats,
 				pinnedPlaced: pinnedPlacedKeys,
 			});
 			for (const s of slots) clipIds.add(s.clip_id); // 新填候选进下载集

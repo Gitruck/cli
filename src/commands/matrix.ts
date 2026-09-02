@@ -32,13 +32,15 @@ import {
 	planBeatFills,
 	previewUrlFor,
 	projectHasShieldTrack,
-	wouldRefuseLay,
+	r3,
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
+	type GapFillEntry,
 	type GapFillMode,
 	type MarkLookup,
 	type SourceLayer,
+	wouldRefuseLay,
 } from "../lib/matrix-lay";
 import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
 import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
@@ -2772,13 +2774,29 @@ async function layIntoProject(
 	// 主轨 gap 填充明示（adjust-main-track-gap-fill）：生效才出（口播 / none / 不适用零噪音）
 	if (summary.gapFill) {
 		const gf = summary.gapFill;
-		const cnt = { candidate: 0, extend: 0, solid: 0 };
+		// ⚠️ 这份计数器 MUST 覆盖 `GapFillEntry["kind"]` 的**全部**取值——
+		//    漏一个取值 tsc 会红（本次新增 `borrowed` 即由它抓到），别改成 Record<string, number> 绕过去
+		const cnt: Record<GapFillEntry["kind"], number> = { candidate: 0, extend: 0, solid: 0, borrowed: 0 };
 		for (const f of gf.fills) cnt[f.kind]++;
 		log.info(
 			gf.fills.length
-				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend} · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
+				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend}` +
+						`${cnt.borrowed ? ` · 跨 beat 借 ${cnt.borrowed}` : ""} · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
 				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填（主轨本就零 gap）`,
 		);
+		// 跨 beat 借候选如实告知（relax-gapfill-cross-beat-borrow）：MUST NOT 静默——
+		// 借来的画面取自**别的 beat 的检索词**，与本段稿子的相关性天然弱于本 beat 自己的候选，
+		// 那是本件的真实代价，用户有权知道并据此决定要不要去补素材。
+		if (cnt.borrowed) {
+			const items = gf.fills.filter((f) => f.kind === "borrowed");
+			const head = items.slice(0, 5).map((f) => `${f.beat}=${f.sec}s`).join("、");
+			log.warn(
+				`有 ${cnt.borrowed} 处画面是**跨 beat 借**来的（合计 ${r3(items.reduce((n, f) => n + f.sec, 0))}s）：` +
+					`${head}${items.length > 5 ? ` 等 ${items.length} 处` : ""}。\n` +
+					"这些段自己的候选被别的 beat 先用掉了，为避免整段黑屏而从全片其它检索结果里取了料——\n" +
+					"**画面与这几句稿子的相关性会弱一些**。想消掉：给这些 beat 补更贴的素材后重跑 `matrix search`。",
+			);
+		}
 	}
 	for (const w of warnings) log.warn(w);
 	if (dlStats.raw > 0) {
