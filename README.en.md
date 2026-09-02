@@ -470,8 +470,8 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 **Local-footage mode (`matrix index` / `--local`)**: footage does not have to live in the cloud library — retrieve and lay tracks straight from your local footage folders (video and images mixed):
 
 ```bash
-gtrk matrix index --dirs <folder1,folder2>                     # ① build a slice-free index: content-fingerprint incremental, resumable; renames/moves are not recomputed
-gtrk matrix --local --dirs <folder1,folder2> --project <dir>   # ② local retrieval + track laying (--lay 0 = plan only, no laying)
+gtrk matrix index --dirs <folder-or-file,...>                  # ① build a slice-free index: content-fingerprint incremental, resumable; renames/moves are not recomputed
+gtrk matrix --local --dirs <folder-or-file,...> --project <dir>  # ② local retrieval + track laying (--lay 0 = plan only; pass a single media file to narrow the search scope to it)
 gtrk matrix lay --project <dir> [--plan <path>]                # ③ consume the (edited) plan and lay tracks, zero retrieval cost
 ```
 

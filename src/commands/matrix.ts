@@ -42,7 +42,12 @@ import {
 } from "../lib/matrix-lay";
 import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
 import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
-import { type CutsProbeSlot, MAX_QC_ROUNDS, flashRiskNotice, flashRiskOf, runArrangeQc } from "../lib/arrange-qc";
+import {
+	classifyCutsProbe,
+	emptyNotApplicable,
+	type CutsProbeSlot, MAX_QC_ROUNDS, flashRiskNotice, flashRiskOf, runArrangeQc,
+	type FlashRiskNotApplicable,
+} from "../lib/arrange-qc";
 import { leadSentencesFrom, makeJudge, sqliteQcCache } from "../lib/arrange-qc-bind";
 import { arrangeUnits, scaleOfRequest } from "../lib/arrange-metering";
 import {
@@ -126,6 +131,8 @@ import { tmpDir } from "../lib/paths";
 import {
 	BALANCE_INSUFFICIENT_CODE,
 	EMBED_CREDITS_PER_IMAGE,
+	EMBED_DIM,
+	EMBED_MODEL_ID,
 	EMBED_UNREACHABLE_CODE,
 	QUOTA_INSUFFICIENT_CODE,
 	closeEmbedSession,
@@ -140,11 +147,14 @@ import {
 	STABILITY_THRESHOLD_DEFAULT,
 	brollLocalIdForFile,
 	detectScenes,
+	embedSpaceId,
 	extractFrameJpg,
+	getCachedQueryVec,
 	indexLocalMaterials,
 	localIndexDbPath,
 	materialKindForPath,
 	openLocalIndexDb,
+	putCachedQueryVec,
 	type IndexRunResult,
 	type IndexSessionHooks,
 } from "../lib/local-index";
@@ -174,7 +184,8 @@ interface MatrixOpts {
 	// ── 本地第三路（add-matrix-local-search）──
 	/** `--local`：本地索引检索模式（显式开关，跳过身份探针，不触任何云端检索端点）。 */
 	local?: boolean;
-	/** `--dirs a,b`：本地素材文件夹（index 的索引范围 / --local 的检索域）。 */
+	/** `--dirs a,b`：本地素材**文件夹或单个素材文件**（index 的索引范围 / --local 的检索域）。
+	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。 */
 	dirs?: string;
 	/** `--scene-threshold`：matrix index 场景检测阈值（默认 0.3）。 */
 	sceneThreshold?: string;
@@ -260,7 +271,10 @@ export function registerMatrix(program: Command): void {
 		.option("--top-k <n>", `每 query 候选数上限（覆盖派单 shots 翻译；云端服务端上限 50；matrix material 缺省 ${MATERIAL_TOP_K_DEFAULT}）`)
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
-		.option("--dirs <a,b,...>", "本地素材文件夹（逗号分隔）——matrix index 的索引范围 / --local 的检索域")
+		.option(
+			"--dirs <a,b,...>",
+			"本地素材文件夹**或单个素材文件**（逗号分隔）——matrix index 的索引范围 / --local 的检索域；传文件即把检索域收窄到该素材",
+		)
 		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
 		.option(
 			"--stability-threshold <f>",
@@ -511,7 +525,7 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	if (opts.plan) throw new Error("--plan 仅用于 matrix describe / matrix lay（不做静默忽略）");
 	if (opts.materials) throw new Error("--materials 仅用于 matrix describe（不做静默忽略）");
 	if (pos.kind === "index") {
-		if (!dirs.length) throw new Error("matrix index 需要 --dirs <a,b,...> 指定素材文件夹（索引范围永远显式可见）");
+		if (!dirs.length) throw new Error("matrix index 需要 --dirs <a,b,...> 指定素材文件夹**或单个素材文件**（索引范围永远显式可见）");
 		if (opts.sourceWindow !== undefined) throw new Error("--source-window 仅用于 --local 检索（不做静默忽略）");
 		return;
 	}
@@ -830,6 +844,17 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 		stab.stableScenes + stab.unstableScenes > 0
 			? ` · stable 场景 ${stab.stableScenes} / unstable ${stab.unstableScenes}${stab.framesSaved ? `（收敛省 ${stab.framesSaved} 帧）` : ""}`
 			: "";
+	// 零枚举告警（add-local-search-material-scope §2）：ok:true / 退出码 0 维持不变
+	// ——「没找到素材」不是失败，但**静默的成功**会让用户以为索引好了、然后在检索侧撞空。
+	if (run.materials.total === 0) {
+		log.warn(
+			`一个素材都没枚举到（域：${run.dirs.join("、")}）。三种可能，逐条排查：\n` +
+				"  ① `--dirs` 指的路径不存在或拼错了；\n" +
+				"  ② 传的是文件，但扩展名不在素材白名单里（图片/视频之外的一律不收）；\n" +
+				"  ③ 传的是文件夹，但里面（含 4 层子目录内）没有素材文件。\n" +
+				"索引本身没失败，只是这一轮无事可做。",
+		);
+	}
 	log.ok(
 		`索引完成：${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
 			`场景 ${run.scenes} · 帧 ${run.frames}${stabNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
@@ -1336,7 +1361,12 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	const endpoint = embedEndpointFor(cfg);
 	const dbPath = localIndexDbPath();
 	if (!existsSync(dbPath)) {
-		throw new Error(`本地索引不存在（${dbPath}）——先跑 gtrk matrix index --dirs ${dirs.join(",")} 建索引`);
+		// 点名用户实际传的路径：MUST NOT 给出一条会枚举到零素材的命令形态
+		// （`--dirs` 现在既吃文件夹也吃单个素材文件，照抄回去至少是可跑的那一条）
+		throw new Error(
+			`本地索引不存在（${dbPath}）——先建索引：gtrk matrix index --dirs ${dirs.map((d) => JSON.stringify(d)).join(",")}\n` +
+				"（--dirs 可传素材文件夹，也可直接传单个素材文件——一稿对一片时钉到那一部片，邻片候选就抢不走了）",
+		);
 	}
 	log.step(`▶ 本地检索模式：载入索引（域：${dirs.join("、")}）…`);
 	const db = await openLocalIndexDb(dbPath);
@@ -1348,7 +1378,9 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	}
 	if (index.frames.length === 0) {
 		throw new Error(
-			`索引里没有该检索域的素材帧（域：${dirs.join("、")}）——先跑 gtrk matrix index --dirs ${dirs.join(",")}（文件消失/未索引的素材不参与检索）`,
+			`索引里没有该检索域的素材帧（域：${dirs.join("、")}）——这些路径未索引过。\n` +
+				`对它们本身、或它们所在的文件夹跑：gtrk matrix index --dirs ${dirs.map((d) => JSON.stringify(d)).join(",")}\n` +
+				"（文件消失 / 扩展名不在素材白名单 / 从没索引过，三者都会走到这里）",
 		);
 	}
 	log.info(`索引就绪：${index.materials.length} 个素材 · ${index.frames.length} 帧（消失文件已过滤）`);
@@ -1360,16 +1392,48 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	if (sourceWindow) {
 		log.info(`源时间窗过滤：${sourceWindow[0]}s–${sourceWindow[1]}s（段级交集、段边界不裁剪；图片候选不参与；无命中即空结果，扩窗与否由你裁定）`);
 	}
+	// 查询向量三级缓存（fix-embed-ratelimit-backoff §4）：进程内 Map → 索引库 → 端点。
+	// 取到即**两级回填**。进程内那层一退出就没了，于是每次重跑都从头烧一遍、还把限流窗口撑爆——
+	// 库这一层就是为了让「重跑同一条片」变成零请求。
 	const qvecCache = new Map<string, Float32Array>();
+	const qvecSpace = embedSpaceId(EMBED_MODEL_ID, EMBED_DIM, endpoint.url);
 	return {
 		cfg,
 		memberType: "local",
 		sourceLayer: "local",
 		search: async (query) => {
+			// ⚠️ query 原样做键，MUST NOT 归一化大小写/空格——那是不同的 query，合并等于偷改语义
 			let vec = qvecCache.get(query);
+			if (!vec) {
+				// ★ 库这一级用**短连接**：上面的 `db` 在载入索引后就 close 了，那条生命周期纪律
+				//   不为缓存破例。开一次 SQLite 实测 6–8ms（不是「约 1ms」——那是初稿拍的数），
+				//   相对它省掉的一次 embed 往返（百毫秒~秒级）仍可忽略。
+				//   缓存读写失败一律降级走端点，MUST NOT 让「缓存坏了」变成「检索炸了」。
+				try {
+					const cdb = await openLocalIndexDb(dbPath);
+					try {
+						vec = getCachedQueryVec(cdb, query, qvecSpace);
+					} finally {
+						cdb.close();
+					}
+					if (vec) qvecCache.set(query, vec);
+				} catch (e) {
+					log.warn(`查询向量缓存读取失败，降级走端点：${e instanceof Error ? e.message : String(e)}`);
+				}
+			}
 			if (!vec) {
 				[vec] = await embedInputs(endpoint, [{ text: query }]); // 除此一请求外零网络
 				qvecCache.set(query, vec!);
+				try {
+					const cdb = await openLocalIndexDb(dbPath);
+					try {
+						putCachedQueryVec(cdb, query, qvecSpace, vec!);
+					} finally {
+						cdb.close();
+					}
+				} catch (e) {
+					log.warn(`查询向量缓存写入失败（不影响本次检索）：${e instanceof Error ? e.message : String(e)}`);
+				}
 			}
 			const { recalled, results } = searchLoadedIndex(index, vec!, {
 				scoreFloor: floor,
@@ -2312,22 +2376,21 @@ async function layIntoProject(
 	//    风险要在落轨前说出来，不等渲完了才发现。⚠️ `cuts` 缺省（没扫过，不可判）与 `cuts: []`
 	//    （扫过且无切点，可判且无风险）是两件事，混为一谈会让「不可判」被静默说成「安全」。
 	{
-		const segCutsOf = (clipId: string, clipSt: number): number[] | undefined => {
-			for (const b of plan.beats) {
-				for (const q of b.queries) {
-					for (const r of q.results ?? []) {
-						if (r.clip_id !== clipId) continue;
-						for (const sg of r.segments ?? []) if (sg.start <= clipSt && clipSt <= sg.end) return sg.cuts;
-					}
-				}
-			}
-			return undefined;
-		};
+		// ★ 三态化（fix-cut-scan-warning-semantics §2）：MUST NOT 再让一个 `undefined` 兼四义。
+		//   旧写法把「云端候选」「图片伪段」「整个没有 segments 数组」「plan 里找不到候选」
+		//   四种**不适用**，和唯一真正的「没扫过切点」全都回成 `undefined`，
+		//   于是分母虚高、还给它们开出「重跑索引」这条永远无效的处方。
 		const probes: CutsProbeSlot[] = [];
+		const na = emptyNotApplicable();
 		for (const [beat, tracks] of fills) {
-			for (const slot of tracks[0] ?? []) probes.push({ beat, clipId: slot.clip_id, cuts: segCutsOf(slot.clip_id, slot.clip_st) });
+			for (const slot of tracks[0] ?? []) {
+				const got = classifyCutsProbe(plan, slot.clip_id, slot.clip_st);
+				if (got.kind === "na") na[got.why]++;
+				else probes.push({ beat, clipId: slot.clip_id, cuts: got.cuts });
+			}
 		}
-		const notice = flashRiskNotice(flashRiskOf(probes));
+		// 判据成立数为 0 时静默——分母为 0 的告警说不出任何事实
+		const notice = probes.length ? flashRiskNotice(flashRiskOf(probes), na) : null;
 		if (notice) log.warn(notice);
 	}
 	// 对齐实测明示（人读；机读走 lay JSON 的 cut_align 条件键）
@@ -2835,8 +2898,18 @@ async function layIntoProject(
 			// 口播 / --no-black-bed 路径的 lay JSON 逐字节零新键
 			...(summary.blackBedSkipped ? { blackBedSkipped: summary.blackBedSkipped } : {}),
 			// 主轨 gap 填充账面（adjust-main-track-gap-fill）：仅音频驱动形态且 mode ≠ none 时出现
+			// ⚠️ 这里是**逐键重投影**，不是整个对象透传：决策层往 summary.gapFill 上加的新键
+			// 若不在这里补一行，就永远到不了产物——机读那一半会变成死代码而无人察觉。
 			...(summary.gapFill
-				? { gap_fill: { mode: summary.gapFill.mode, filled_sec: summary.gapFill.filledSec, fills: summary.gapFill.fills } }
+				? {
+						gap_fill: {
+							mode: summary.gapFill.mode,
+							filled_sec: summary.gapFill.filledSec,
+							fills: summary.gapFill.fills,
+							// 过短黑片账面（add-short-black-fill-warning）：条件键，无则整键缺席
+							...(summary.gapFill.short_solid ? { short_solid: summary.gapFill.short_solid } : {}),
+						},
+					}
 				: {}),
 			// 空洞是「告知」不是「阻断」：人读走上面的 warnings 通道单独成行，机读全量出这两个字段，
 			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。

@@ -143,7 +143,8 @@ description: 通用解说视频创作图纸（解说链正本）——把「一�
 
 ```bash
 # 卡点句：窗收到出处邻域，让检索在窗内挑最好的那颗（而不是我盲猜一个窗）
-gtrk matrix --project "<工程>" --local --dirs "<素材语料>"   --source-window "<出处起,出处止>" --lay 0 --json
+# ★ 铁则：解说链**一稿对一片**，--dirs MUST 钉到那一部片的绝对路径，**不许传素材夹**
+gtrk matrix --project "<工程>" --local --dirs "<这一部片的绝对路径>"   --source-window "<出处起,出处止>" --lay 0 --json
 ```
 
 它同时给到四样甲档给不了的东西：① 段边界**天然落在场景切点**上（闪帧从源头消失，不必事后
@@ -184,7 +185,7 @@ QC 反算重铺）；② 段带 `cuts`，端点残片收缩生效；③ 段带 `
 ```bash
 # ① 索引前置（第一步就起，不是可选项——它是质量信号的载体，见 §三 代价表）
 #    4K 长片索引慢，未提速期**与写稿/TTS/检查点①并行跑**，别串行干等
-gtrk matrix index --dirs "<素材语料>" &     # 后台起，写稿同时跑
+gtrk matrix index --dirs "<这一部片的绝对路径>" &     # 后台起，写稿同时跑（索引侧同口径：也钉单片）
 gtrk transcript "<长片>" --json            # 影视/游戏类：台词与时码双锚（可选）
 
 # ②③ 写稿（甲档出处共生 / 乙路对照表对齐）→ 检查点①拍板（§六）
@@ -199,7 +200,8 @@ gtrk project init --tts-task <id> --canvas <WxH> --no-open --json
 
 # ⑥⑦ 拆分派单 → 铺排（叙述段走甲′出处窗内检索；引用段/硬出处段才直写 plan）
 gtrk split --project "<工程>" --json && gtrk split "<拆分稿>" --project "<工程>" --json
-gtrk matrix --project "<工程>" --local --dirs "<素材语料>" --source-window "<出处起,出处止>" --lay 0 --json
+# ★ 同上铁则：--dirs 钉单片，MUST NOT 传素材夹
+gtrk matrix --project "<工程>" --local --dirs "<这一部片的绝对路径>" --source-window "<出处起,出处止>" --lay 0 --json
 gtrk matrix describe --plan "<工程>/split/broll-plan.json" --yes --json   # ← 不跑这步，下面三个权重全是摆设
 gtrk matrix lay --project "<工程>" --mark-weight 0.3 --highlight-weight 0.2 --gap-fill fast --json
 #   ↑ lay 会在「开了权重但本片零缓存覆盖」时告警——看到它就说明 describe 那步漏了或没生效

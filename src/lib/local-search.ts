@@ -154,7 +154,14 @@ export interface LoadedIndex {
 	materials: LoadedMaterial[];
 }
 
-/** path 是否落在任一 dirs 之下（win32 不区分大小写；resolve 归一）。 */
+/**
+ * path 是否落在任一 dirs 之下，**或恰为该路径本身**（win32 不区分大小写；resolve 归一）。
+ *
+ * ★ `p === base` 那一支是**单文件收窄**（add-local-search-material-scope）：
+ * `--dirs` 传一个素材文件时，检索域就是那一个素材。这条分支本来就在（写它是为了
+ * 「传目录时目录自身也算命中」），单文件恰好落进来是个巧合——本 change 把巧合**升为立意**，
+ * 表达式一字不改，改的是索引侧的枚举（那边此前枚举不到单文件，于是这条路走不通）。
+ */
 export function pathInDirs(path: string, dirs: string[]): boolean {
 	const norm = (p: string): string => {
 		const r = resolve(p);
@@ -466,7 +473,12 @@ export function searchLoadedIndex(
 			...(mat.width != null && mat.height != null ? { orientation: mat.width >= mat.height ? "landscape" : "portrait" } : {}),
 			segments: kept.map((s) => {
 				// 段内切点明细（fix-broll-flash-frames D5）：切点全集中严格落在段开区间内者随段透出
-				// （铺轨端点吸附消残片用）；cuts_indexed 未置位（旧库）或段内无切点时省略字段。
+				// （铺轨端点吸附消残片用）。
+				// ★ 字段在不在场 ⇔ **该素材扫没扫过切点**（fix-cut-scan-warning-semantics）：
+				//   · 缺席 = `cuts_indexed` 未置位（旧库/没建过索引）⇒ 真的不可判；
+				//   · `[]`  = 扫过了，只是这一段里恰好没有切点 ⇒ 可判，且判出来是「没有」。
+				//   上一版拿 `cutsInSeg.length` 当判据，把后者也写成缺席，于是下游把
+				//   「这段没切点」误报成「这素材没扫过切点」，并开出「重跑索引」这条昂贵且无效的处方。
 				const cutsInSeg = mat.cutsMs?.filter((t) => t > s.start_ms && t < s.end_ms) ?? [];
 				// 段级运动量（add-material-motion-signal）：无信号时省略字段（「不可判」≠「平稳」）
 				const motion = mat.motionScenes?.length ? segmentMotion(mat.motionScenes, s.start_ms, s.end_ms) : undefined;
@@ -475,7 +487,7 @@ export function searchLoadedIndex(
 					end: r3(s.end_ms / 1000),
 					best: r3(s.best_ts_ms / 1000),
 					score: s.score,
-					...(cutsInSeg.length ? { cuts: cutsInSeg.map((t) => r3(t / 1000)) } : {}),
+					...(mat.cutsMs !== undefined ? { cuts: cutsInSeg.map((t) => r3(t / 1000)) } : {}),
 					...(motion ? { motion } : {}),
 				};
 			}),

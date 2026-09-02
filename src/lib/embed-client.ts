@@ -28,6 +28,8 @@
  */
 import { CloudError } from "./cloud";
 import { noticeOnce } from "./compliance-notice";
+import { log } from "./log";
+import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import { readUserConfig } from "./user-config";
 
 export const EMBED_UNREACHABLE_CODE = "embed_endpoint_unreachable";
@@ -40,12 +42,19 @@ export const BALANCE_INSUFFICIENT_CODE = 6202;
 export const EMBED_CREDITS_PER_IMAGE = 0.1;
 /** 单请求输入上限（infra 防滥用：≤16 图；文本从严同批）。 */
 export const EMBED_BATCH_MAX = 16;
+/** 模型标识——**向量空间身份的第一分量**（fix-embed-ratelimit-backoff §4.3）。
+ *  换模就是换空间：旧向量与新向量点积无意义，缓存 MUST 按它分区。 */
+export const EMBED_MODEL_ID = "jina-clip-v2";
 /** jina-clip-v2 满维（normalized）。 */
 export const EMBED_DIM = 1024;
 /** HTTP 超时：≥180s 容冷启动（infra D4，与 media_matrix 内部调用口径一致）。 */
 export const EMBED_TIMEOUT_MS = 180_000;
 /** 指数退避重试次数（失败面 = 1 次首发 + 3 次重试后硬失败）。 */
 export const EMBED_RETRIES = 3;
+/** 服务端限流阈值（次/分钟，固定窗口）：`embed_gateway_services.py` 的
+ *  `EMBED_RATE_LIMIT_PER_MINUTE`（默认 60，可由 env 覆盖）。仅用于告知文案。
+ *  ⚠️ 引常量名而非行号 —— 早先写作 `:307`，那其实是拼窗口键的那一行。 */
+export const EMBED_RATE_LIMIT_PER_MIN = 60;
 const BACKOFF_BASE_MS = 1000;
 
 export type EmbedInput = { text: string } | { image: string };
@@ -95,8 +104,12 @@ export function resolveEmbedUrl(apiBase: string): string {
 export interface EmbedDeps {
 	fetchFn?: typeof fetch;
 	sleep?: (ms: number) => Promise<void>;
-	/** 退避基数（毫秒，默认 1000 → 1s/2s/4s）；测试压短。 */
+	/** 退避基数（毫秒，默认 1000 → 1s/2s/4s）；测试压短。**只管非限流的传输面失败**。 */
 	backoffBaseMs?: number;
+	/** 限流（429）等待值（毫秒）。用途只有两个：**断言等待值** + 给命令层测试留门。
+	 *  ⚠️ MUST NOT 当成生产可调参数——生产恒走 `nextRateLimitWaitMs()`，
+	 *  等多久由服务端的固定窗口决定，不由调用方拍脑袋。 */
+	rateLimitWaitMs?: number;
 	timeoutMs?: number;
 	/** 计量会话 token（请求体字段 `session_token`）：图像请求必带；纯文本/internal 豁免可缺省。 */
 	sessionToken?: string;
@@ -145,7 +158,11 @@ async function embedOnce(
 		const text = await res.text().catch(() => "");
 		const rejected = parseBusinessRejection(res.status, text);
 		if (rejected) throw rejected;
-		throw new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
+		const err = new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
+		// 限流打标（fix-embed-ratelimit-backoff）：429 与 5xx 都是传输面、都进重试，
+		// 但**等法完全不同**——5xx 该指数退避，429 该等到窗口翻页。上层据此分流。
+		if (res.status === 429) (err as { rateLimited?: boolean }).rateLimited = true;
+		throw err;
 	}
 	const body = (await res.json()) as { code?: unknown; msg?: unknown; data?: unknown };
 	if (typeof body.code === "number" && body.code !== 200) {
@@ -193,14 +210,24 @@ export async function embedInputs(
 		const batch = inputs.slice(off, off + EMBED_BATCH_MAX);
 		let lastErr = "";
 		let done = false;
+		let lastRateLimited = false;
 		for (let attempt = 0; attempt <= EMBED_RETRIES; attempt++) {
-			if (attempt > 0) await sleep(backoffBase * 2 ** (attempt - 1)); // 1s → 2s → 4s
+			if (attempt > 0) {
+				// ★ 两种传输面失败，两种等法（fix-embed-ratelimit-backoff）：
+				//   · 限流（429）⇒ 固定窗口，等到翻页；指数退避在这里是错配的
+				//     （撞限流时离翻页可能还有 50s，1+2+4s 退完三次全撞、预算耗尽硬失败）；
+				//   · 其余（5xx / 超时 / 网络）⇒ 节奏**逐字不变**：1s → 2s → 4s。
+				const waitMs = lastRateLimited ? (deps.rateLimitWaitMs ?? nextRateLimitWaitMs()) : backoffBase * 2 ** (attempt - 1);
+				if (lastRateLimited) log.warn(rateLimitWaitNotice(EMBED_RATE_LIMIT_PER_MIN, waitMs, attempt, EMBED_RETRIES));
+				await sleep(waitMs);
+			}
 			try {
 				out.push(...(await embedOnce(endpoint, batch, { fetchFn, timeoutMs, sessionToken: deps.sessionToken })));
 				done = true;
 				break;
 			} catch (e) {
 				if ((e as { rejected?: unknown } | null)?.rejected === true) throw e; // 业务拒绝：重试无意义
+				lastRateLimited = (e as { rateLimited?: unknown } | null)?.rateLimited === true;
 				lastErr = e instanceof Error ? e.message : String(e);
 			}
 		}
@@ -250,8 +277,17 @@ async function postSessionJson(
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;
 	const timeoutMs = deps.timeoutMs ?? EMBED_TIMEOUT_MS;
 	let lastErr = "";
+	// 会话端点撞 429 时的等法**与 embed 同款**（等到窗口翻页，不是指数退避）。
+	// ⚠️ **预置**：服务端今天并**没有**给会话端点接限流——`embed_gateway_services.py` 的
+	// `is_rate_limited` 只挂在 embed 请求路径上。初稿写「共享同一限流池」是把一件不成立的事
+	// 当现行事实。先把接线做齐，服务端哪天接上就自动生效，而不是等那天再回来改三个文件。
+	let lastRateLimited = false;
 	for (let attempt = 0; attempt <= EMBED_RETRIES; attempt++) {
-		if (attempt > 0) await sleep(backoffBase * 2 ** (attempt - 1));
+		if (attempt > 0) {
+			const waitMs = lastRateLimited ? (deps.rateLimitWaitMs ?? nextRateLimitWaitMs()) : backoffBase * 2 ** (attempt - 1);
+			if (lastRateLimited) log.warn(rateLimitWaitNotice(EMBED_RATE_LIMIT_PER_MIN, waitMs, attempt, EMBED_RETRIES));
+			await sleep(waitMs);
+		}
 		try {
 			const res = await fetchFn(url, {
 				method: "POST",
@@ -278,9 +314,11 @@ async function postSessionJson(
 			if (code !== undefined && code !== 200 && res.status !== 429 && res.status < 500) {
 				throw new CloudError(code, typeof body.msg === "string" && body.msg ? body.msg : `code=${code}`);
 			}
+			lastRateLimited = res.status === 429;
 			lastErr = `HTTP ${res.status}：${(typeof body.msg === "string" ? body.msg : text).slice(0, 200)}`;
 		} catch (e) {
 			if (e instanceof CloudError) throw e; // 本模块内刚抛出的业务拒绝：透传
+			lastRateLimited = false; // 网络/超时异常：**不是**限流，MUST 复位（否则上一轮的 429 会污染这一轮的等法）
 			lastErr = e instanceof Error ? e.message : String(e);
 		}
 	}

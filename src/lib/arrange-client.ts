@@ -28,6 +28,8 @@
  */
 
 import { noticeOnce } from "./compliance-notice";
+import { log } from "./log";
+import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import type { ArrangeRequest } from "./arrange-wire";
 import type { ArrangeResponse } from "./arrange-apply";
 
@@ -47,6 +49,9 @@ export const BALANCE_INSUFFICIENT_CODE = 6202;
 /** 编排是纯 CPU 几十毫秒 + 一个来回；给 120s 是为了容大 plan 的上行体（极端密剪 269KB gzip）。 */
 export const ARRANGE_TIMEOUT_MS = 120_000;
 export const ARRANGE_RETRIES = 3;
+/** 服务端限流阈值（次/分钟）——⚠️ **未定**：broll_arrange 端点今天没接限流。
+ *  取 60 只是告知文案的占位；服务端接上后 MUST 回来对齐真值，别让文案说假话。 */
+export const ARRANGE_RATE_LIMIT_PER_MIN = 60;
 const BACKOFF_BASE_MS = 1000;
 
 export class ArrangeError extends Error {
@@ -101,6 +106,8 @@ export interface ArrangeDeps {
 	fetchFn?: typeof fetch;
 	sleep?: (ms: number) => Promise<void>;
 	backoffBaseMs?: number;
+	/** 限流（429）等待值（毫秒）：断言用 + 测试留门；生产恒走 `nextRateLimitWaitMs()`。 */
+	rateLimitWaitMs?: number;
 	timeoutMs?: number;
 	retries?: number;
 }
@@ -146,7 +153,13 @@ async function arrangeOnce(
 		const text = await res.text().catch(() => "");
 		const rejected = parseBusinessRejection(res.status, text);
 		if (rejected) throw rejected;
-		throw new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
+		const err = new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
+		// 限流打标（fix-embed-ratelimit-backoff §3.2）——⚠️ **预置，今天打不到**：
+		// broll_arrange 端点尚未接限流（`add-broll-arrange-atom/tasks.md:106` 明记「限流与
+		// --dump-request 未做」）。先把接线做齐，服务端一旦接上就自动生效，
+		// 而不是等那天再回来改三个文件。MUST NOT 因为「现在走不到」就删掉它。
+		if (res.status === 429) (err as { rateLimited?: boolean }).rateLimited = true;
+		throw err;
 	}
 	const body = (await res.json()) as { code?: unknown; msg?: unknown; data?: unknown };
 	if (typeof body.code === "number" && body.code !== 200) {
@@ -179,12 +192,19 @@ export async function requestArrange(
 	const bodyText = JSON.stringify(req);
 
 	let lastErr = "";
+	let lastRateLimited = false;
 	for (let attempt = 0; attempt <= retries; attempt++) {
-		if (attempt > 0) await sleep(backoffBase * 2 ** (attempt - 1)); // 1s → 2s → 4s
+		if (attempt > 0) {
+			// 同 embed/describe（见 rate-limit-wait.ts）。★ 本条是**预置**：服务端未接限流前恒走 else 支。
+			const waitMs = lastRateLimited ? (deps.rateLimitWaitMs ?? nextRateLimitWaitMs()) : backoffBase * 2 ** (attempt - 1);
+			if (lastRateLimited) log.warn(rateLimitWaitNotice(ARRANGE_RATE_LIMIT_PER_MIN, waitMs, attempt, retries));
+			await sleep(waitMs);
+		}
 		try {
 			return await arrangeOnce(endpoint, bodyText, fetchFn, timeoutMs);
 		} catch (e) {
 			if ((e as { rejected?: unknown } | null)?.rejected === true) throw e; // 业务拒绝：确定性，重试无意义
+			lastRateLimited = (e as { rateLimited?: unknown } | null)?.rateLimited === true;
 			lastErr = e instanceof Error ? e.message : String(e);
 		}
 	}

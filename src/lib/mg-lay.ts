@@ -52,6 +52,11 @@ function ownAssetCompositionId(p: unknown): string | undefined {
 	}
 	return undefined;
 }
+// 本文件原为零 import 的自足模块；本条是唯一的例外（fix-mg-beat-clip-track-ed D2）：
+// 裁剪恒等式的判据 MUST 只有一份，复制一遍就是给「两份判据慢慢漂开」留门。
+// 已核不成环（matrix-lay 不引 mg-lay），无额外加载成本。
+import { assertTrimIdentity } from "./matrix-lay";
+
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /**
@@ -276,7 +281,7 @@ export function layMgTracks(opts: {
 		}
 		const materialId = `${MG_MATERIAL_PREFIX}${it.composition_id}`;
 		newMaterials.push({ id: materialId, path: it.html_rel });
-		clips.push({
+		const clip = {
 			// clip_id 取 composition_id（非 beat）：一 beat 可派生主 + N 个 -aux<n> 颗粒，
 			// 用 beat 会撞 clip_id；composition_id 全局唯一（add-aux-rrv-overlay-particle）。
 			clip_id: it.composition_id,
@@ -284,8 +289,15 @@ export function layMgTracks(opts: {
 			html_material: materialId,
 			opaque: it.opaque,
 			track_st: it.track_st,
+			// 契约 §3 要求冗余时码两套都给。★ MUST 由 envelope 派生，MUST NOT 写 r3(it.track_ed)
+			// ——那会重演 fix-trim-identity-constructive 治过的「两端各自舍入差 1ms」。
+			// 缺这一键时 gtrk-patch 的 E2 因 edMs 为 NaN 被 Number.isFinite 守卫短路，
+			// 在 beat 轨上是**空转通过**：校验器在册、却什么都没校。
+			track_ed: r3(it.track_st + envelope),
 			duration: envelope,
-		});
+		};
+		assertTrimIdentity(clip, `mg:${it.composition_id}`);
+		clips.push(clip);
 		metaBeats.push({ ...toMetaBeat(it), laid: { track_index: newIndex } });
 	}
 

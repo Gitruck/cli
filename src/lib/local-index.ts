@@ -30,6 +30,7 @@ import { open } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { dirname, extname, join, resolve, basename } from "node:path";
 import { createBLAKE3 } from "hash-wasm";
+import { log } from "./log";
 import { homeFile, tmpDir } from "./paths";
 import { requireFfmpeg, runFfmpeg, type FfmpegResolution } from "./ffmpeg";
 import { probeGeometry } from "./media";
@@ -236,6 +237,19 @@ CREATE TABLE IF NOT EXISTS describes (
   created_at TEXT NOT NULL,
   PRIMARY KEY (material_id, ts_ms)
 );
+-- 查询向量持久缓存（fix-embed-ratelimit-backoff §4）：检索词 → 向量。
+-- 一次成片会反复用同一批 query 打 embed（三条片实测 104 次请求里绝大多数是重复的），
+-- 而进程内 Map 一退出就没了 ⇒ 每次重跑都从头烧一遍、还把限流窗口撑爆。
+-- ⚠️ query 列存**原文**，MUST NOT 归一化大小写/空格——那本就是不同的 query，
+--    合并等于替用户偷改语义，而检索结果会静默变。
+CREATE TABLE IF NOT EXISTS query_vecs (
+  query TEXT NOT NULL,                  -- 检索词原文（未归一化）
+  space TEXT NOT NULL,                  -- 向量空间身份：模型+维度+端点（换任一维即换空间，见 embedSpaceId）
+  dim INTEGER NOT NULL,                 -- 维度（读回时与 BLOB 长度互校）
+  vec BLOB NOT NULL,                    -- float32 小端（复用 encodeVec/decodeVec，MUST NOT 另造编码）
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (query, space)
+);
 `;
 
 /** 打开（或初建）索引库：建三表 + kind/stable 列幂等迁移 + schema 版本登记。 */
@@ -358,6 +372,54 @@ export function recordConfirmedCuts(db: SqlDb, materialId: string, tsMs: number[
  * 生命周期独立，重建向量不该报废花过钱的 VLM 缓存）。 */
 export function clearDescribesForMaterial(db: SqlDb, materialId: string): void {
 	db.run("DELETE FROM describes WHERE material_id = ?", [materialId]);
+}
+
+// ── 查询向量持久缓存（fix-embed-ratelimit-backoff §4）────────────────────────
+
+/**
+ * 向量空间身份串 —— 缓存键的第二维。
+ *
+ * 三个分量缺一不可，**任一维变了，缓存里的向量就不再可比**：
+ *
+ * 1. **模型标识**（`jina-clip-v2`）——换模就是换空间，旧向量与新向量点积无意义；
+ * 2. **维度**（`EMBED_DIM`）——维度不同连算都算不了，且能兜住「模型名没变但截断维度变了」；
+ * 3. **端点身份**（`resolveEmbedUrl()`）——自建镜像/测试端点/生产端点可能挂着不同权重，
+ *    这一维是「同名不同物」的唯一防线。
+ *
+ * 拼进键而不是拿来做校验：换空间时**旧行原样留着**（下次换回来还能用），
+ * 不 DELETE、不迁移。索引库本就是可随时重建的本机缓存，多留几行 4KB 不值得写迁移码。
+ */
+export function embedSpaceId(model: string, dim: number, endpointUrl: string): string {
+	return `${model}#${dim}#${endpointUrl}`;
+}
+
+/** 读一条查询向量缓存；未命中或 BLOB 长度与 dim 不符回 undefined。 */
+export function getCachedQueryVec(db: SqlDb, query: string, space: string): Float32Array | undefined {
+	const row = db.all<{ dim: number; vec: Uint8Array }>("SELECT dim, vec FROM query_vecs WHERE query = ? AND space = ?", [query, space])[0];
+	if (!row) return undefined;
+	const bytes = row.vec instanceof Uint8Array ? row.vec : new Uint8Array(row.vec as ArrayLike<number>);
+	// ⚠️ 坏缓存 MUST NOT 抛 —— 一条写坏的行不该让整次检索炸掉。当作未命中走端点即可。
+	// 但也 MUST NOT **静默**：良性降级要打可读的一行，否则「为什么这条 query 每次都重发」
+	// 就成了无从排查的怪事（本仓「良性降级打可读 INFO」那条口径）。
+	if (bytes.byteLength !== row.dim * 4) {
+		log.warn(`查询向量缓存行损坏（query=${JSON.stringify(query).slice(0, 40)}，声称 ${row.dim} 维 = ${row.dim * 4} 字节，实为 ${bytes.byteLength}）——当未命中走端点，本次检索不受影响。`);
+		return undefined;
+	}
+	return decodeVec(bytes);
+}
+
+/** 写一条查询向量缓存（幂等覆盖）。 */
+export function putCachedQueryVec(db: SqlDb, query: string, space: string, vec: Float32Array): void {
+	// 排障留痕：把当前空间身份记进 meta（`INSERT OR IGNORE` 范式，与 schema_version 同款）。
+	// 换端点/换模之后翻库能一眼看出「这库里躺着哪几个空间的向量」，不必去逐行解 space 串。
+	db.run("INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)", [`embed_space:${space}`, new Date().toISOString()]);
+	db.run("INSERT OR REPLACE INTO query_vecs(query, space, dim, vec, created_at) VALUES (?, ?, ?, ?, ?)", [
+		query,
+		space,
+		vec.length,
+		encodeVec(vec),
+		new Date().toISOString(),
+	]);
 }
 
 // ── 向量编解码（float32 小端 BLOB；平台字节序无关的确定性写读）──────────────
@@ -885,6 +947,26 @@ export interface IndexRunResult {
 }
 
 /** 通用枚举（递归，深度上限 4；隐藏目录跳过）。 */
+/**
+ * 把一个文件路径的**末段**换成盘上真实大小写（父目录段不动——索引键是绝对路径，
+ * 而父目录的大小写在同一台机器上由用户的 `--dirs` 决定、两条路径都会指向同一批文件，
+ * 真正会造成「同一文件两行」的是文件名本身）。
+ *
+ * 读不到父目录（权限/竞态）时原样返回：宁可退回旧行为，也 MUST NOT 因为归一化失败就丢掉这个文件。
+ */
+function realBasenamePath(abs: string): string {
+	try {
+		const dir = dirname(abs);
+		const want = basename(abs).toLowerCase();
+		for (const name of readdirSync(dir)) {
+			if (name.toLowerCase() === want) return join(dir, name);
+		}
+	} catch {
+		/* 读不到就原样返回 */
+	}
+	return abs;
+}
+
 function listFilesMatching(dirs: string[], match: (name: string) => boolean): string[] {
 	const out: string[] = [];
 	const walk = (dir: string, depth: number): void => {
@@ -902,16 +984,45 @@ function listFilesMatching(dirs: string[], match: (name: string) => boolean): st
 			else if (e.isFile() && match(e.name)) out.push(resolve(p));
 		}
 	};
-	for (const d of dirs) walk(resolve(d), 0);
-	return out.sort();
+	// 枚举分流（add-local-search-material-scope）：`--dirs` 的每一项既可以是**文件夹**，
+	// 也可以是**单个素材文件**——传文件即把检索域收窄到该素材。
+	// ★ 这不是新增能力，是把已有的巧合扶正：检索侧 `pathInDirs` 的 `p === base` 分支
+	//   本来就认单文件，只是索引侧枚举不到它，于是「钉到某一部片」这件事一直做不成。
+	//   二创解说场景实测：三片同夹时 187 个候选里有 86 条来自邻片（46.0%），
+	//   agent 只能事后按 clip_id 手删——那是把结构性问题当成个案在擦。
+	for (const d of dirs) {
+		const abs = resolve(d);
+		let st: ReturnType<typeof statSync>;
+		try {
+			st = statSync(abs);
+		} catch {
+			continue; // 路径不存在/不可读：跳过该项，MUST NOT 中止整轮（其余项照枚举）
+		}
+		// 显式传入的文件即使 basename 以 `.` 开头也**尊重**——`walk` 里那条跳过隐藏项的规则
+		// 是给「遍历目录时不要自作主张收录」用的，用户点名要的东西不适用。
+		if (st.isFile()) {
+			if (!match(basename(abs))) continue;
+			// ⚠️ **MUST 取盘上真实大小写**，MUST NOT 直接 push 用户手打的路径。
+			// 目录分支的 basename 一直来自 readdirSync（盘上真名），单文件分支若原样收用户输入，
+			// Windows 上大小写一错，同一个物理文件就会被枚举成两条：
+			// materials 表两行、去重失效、增量失效、**重复烧 embed 积分**，检索侧还吐重复候选
+			// —— 正是本 change 要消灭的那类污染，从另一个方向又造了一遍。
+			out.push(realBasenamePath(abs));
+			continue;
+		}
+		if (st.isDirectory()) walk(abs, 0);
+	}
+	// 去重：同时传「文件夹」与「其内部某文件」时不重复计数（否则素材总数会虚高）
+	return [...new Set(out)].sort();
 }
 
-/** 枚举文件夹内视频文件。 */
+/** 枚举视频文件。`dirs` 的每一项可以是**文件夹**（递归）或**单个素材文件**（见 listFilesMatching）。 */
 export function listVideoFiles(dirs: string[]): string[] {
 	return listFilesMatching(dirs, (n) => VIDEO_EXT.test(n));
 }
 
-/** 枚举文件夹内视频+图片素材（add-matrix-local-image-broll：索引缺省枚举口，图片与视频一视同仁）。 */
+/** 枚举视频+图片素材（add-matrix-local-image-broll：索引缺省枚举口，图片与视频一视同仁）。
+ *  `dirs` 的每一项可以是**文件夹**（递归）或**单个素材文件**（见 listFilesMatching）。 */
 export function listMaterialFiles(dirs: string[]): string[] {
 	return listFilesMatching(dirs, (n) => VIDEO_EXT.test(n) || IMAGE_EXT.test(n));
 }

@@ -59,7 +59,9 @@ import { METERING_ALGO_PIN, arrangeUnits, scaleOfRequest } from "./arrange-meter
 
 // ── 上行体形态 ────────────────────────────────────────────────────────────
 
-/** 段级上行形态（6 键；`cuts` / `motion` 缺省即整键缺席）。 */
+/** 段级上行形态（6 键；`cuts` / `motion` 缺省即整键缺席）。
+ *  ⚠️ `cuts` 有三态，MUST NOT 只认「有/无」：整键缺席 = 该素材**没扫过切点**（不可判）、
+ *  `[]` = 扫过且段内无切点（可判，判为无）、非空 = 段内切点时码。见 `matrix.ts` 的类型注。 */
 export interface WireSegment {
 	start: number;
 	end: number;

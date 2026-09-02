@@ -30,6 +30,8 @@
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { noticeOnce } from "./compliance-notice";
+import { log } from "./log";
+import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import { readUserConfig } from "./user-config";
 import type { MaterialDescribeMeta } from "./matrix";
 import type { SqlDb } from "./local-index";
@@ -45,6 +47,9 @@ export const DESCRIBE_CONFIRM_THRESHOLD = 20;
 export const DESCRIBE_TIMEOUT_MS = 120_000;
 /** 指数退避重试次数（同 embed：1 次首发 + 3 次重试后硬失败；仅作用于提交阶段）。 */
 export const DESCRIBE_RETRIES = 3;
+/** 服务端限流阈值（次/分钟，固定窗口）：`describe_gateway_services.py:76`。
+ *  ⚠️ 是 **30** 不是 embed 的 60——两个端点各有各的池，抄错了告知文案就是假话。 */
+export const DESCRIBE_RATE_LIMIT_PER_MIN = 30;
 /** 轮询间隔（照 cloud.ts pollTask 范式）。 */
 export const DESCRIBE_POLL_INTERVAL_MS = 5000;
 /** 轮询墙钟上限（30 分钟兜底，照 pollTask 范式）。 */
@@ -117,6 +122,8 @@ export interface DescribeDeps {
 	fetchFn?: typeof fetch;
 	sleep?: (ms: number) => Promise<void>;
 	backoffBaseMs?: number;
+	/** 限流（429）等待值（毫秒）：断言用 + 测试留门；生产恒走 `nextRateLimitWaitMs()`。 */
+	rateLimitWaitMs?: number;
 	timeoutMs?: number;
 	/** 轮询间隔（默认 5000ms；测试注入假 sleep 秒过）。 */
 	pollIntervalMs?: number;
@@ -220,7 +227,10 @@ async function submitDescribeTask(
 		const text = await res.text().catch(() => "");
 		const rejected = parseBusinessRejection(res.status, text);
 		if (rejected) throw rejected;
-		throw new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
+		const err = new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
+		// 限流打标（fix-embed-ratelimit-backoff §3）：429 与 5xx 同属传输面，但等法不同
+		if (res.status === 429) (err as { rateLimited?: boolean }).rateLimited = true;
+		throw err;
 	}
 	const body = (await res.json()) as { code?: unknown; msg?: unknown; data?: unknown };
 	if (typeof body.code === "number" && body.code !== 200) {
@@ -340,13 +350,21 @@ export async function describeImages(
 		// ── 提交阶段：指数退避重试（1s → 2s → 4s；仅传输面，业务拒绝短路）──
 		let taskId: string | undefined;
 		let lastErr = "";
+		let lastRateLimited = false;
 		for (let attempt = 0; attempt <= DESCRIBE_RETRIES; attempt++) {
-			if (attempt > 0) await sleep(backoffBase * 2 ** (attempt - 1)); // 1s → 2s → 4s
+			if (attempt > 0) {
+				// 限流走窗口等待，其余仍 1s → 2s → 4s（与 embed 同款，见 rate-limit-wait.ts）。
+				// ⚠️ 限值取 **30**（`describe_gateway_services.py:76`），不是 embed 的 60。
+				const waitMs = lastRateLimited ? (deps.rateLimitWaitMs ?? nextRateLimitWaitMs()) : backoffBase * 2 ** (attempt - 1);
+				if (lastRateLimited) log.warn(rateLimitWaitNotice(DESCRIBE_RATE_LIMIT_PER_MIN, waitMs, attempt, DESCRIBE_RETRIES));
+				await sleep(waitMs);
+			}
 			try {
 				taskId = await submitDescribeTask(endpoint, batch, { fetchFn, timeoutMs }, batchShotCard);
 				break;
 			} catch (e) {
 				if ((e as { rejected?: unknown } | null)?.rejected === true) throw e; // 业务拒绝：重试无意义
+				lastRateLimited = (e as { rateLimited?: unknown } | null)?.rateLimited === true;
 				lastErr = e instanceof Error ? e.message : String(e);
 			}
 		}

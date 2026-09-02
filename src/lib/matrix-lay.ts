@@ -43,6 +43,28 @@ export const BROLL_PREVIEW_DIR = "assets/broll-preview";
 /** 本地素材封面目录（工程内相对路径；铺轨时 ffmpeg 现抽 best 帧落此，add-matrix-local-search 4.2）。 */
 export const BROLL_COVER_DIR = "assets/broll-cover";
 export const BROLL_MATERIAL_PREFIX = "broll-";
+
+/**
+ * 产出方身份的命名空间与版本位（add-clip-producer-identity）—— 逐字对齐契约 §3.3 的举例值。
+ *
+ * 契约明写：`producer` 是**不透明字符串**，消费方 MUST NOT 解析 / 归一化 / 截断。
+ * 内部结构（`{by, run}`）属说明性举例、不构成条文，由 CLI 独立演进。
+ */
+export const PRODUCER_BY = "gtrk:matrix@1";
+
+/**
+ * 产出方身份标签 —— **唯一出口**。三处 clip 造点 MUST 只调它，MUST NOT 各拼一遍串。
+ *
+ * ★ 返回值 MUST 是字符串（不是裸对象）：客户端的承载体 `ParamValue` 只吃
+ * `number | string | boolean`，裸对象存不下 ⇒ 那是违约数据、不在保真承诺内，
+ * 用户存一次就没了，而「存一次就丢 = 等于没写」。
+ *
+ * @param run 批次 id（取 `opts.generatedAt`，与 `struct_meta.broll.generated_at` 同源同值
+ *            ⇒ 身份与登记可对账）。用于区分「这颗是这一轮铺的」与「从上一轮复制来的」。
+ */
+export function producerTag(run: string): string {
+	return JSON.stringify({ by: PRODUCER_BY, run });
+}
 /**
  * 客户端「确认原片」后把 clip 的 material 切成的前缀（`broll-` 的子集，见姊妹仓
  * `broll-actions.ts:460-464`）。CLI 自己从不写它——它出现即证明用户在客户端做过确认动作。
@@ -559,7 +581,25 @@ export type MarkLookup = (clipId: string, tsMs: number) => number | undefined;
  *   ② 官方悔棋通道 `gtrk patch` 在**自家产物**上整体失效——写方产出的东西
  *      过不了本仓自己写的校验器。
  *
- * 正解：**先把时长舍到毫秒当唯一真值，再由它推两个终点**。
+ * ⚠️⚠️ 第二条同等重要的约束（fix-slot-seam-continuity）：**接缝两侧 MUST 同式**。
+ * 相邻两槽由同一个游标推出——前一槽的 `track_ed` 与后一槽的 `track_st`
+ * 说的是时间轴上**同一个点**，因此 MUST 是同一个表达式 `r3(cursor + d)` 的两次求值。
+ *
+ * 上一版为了让恒等式成立，把 `track_ed` 改成由 `r3(dur)` 推（`r3(ts + d)`），
+ * 恒等式确实构造性成立了，**但接缝塌了**：后一槽的 `track_st = r3(cursor + d)`
+ * 与前一槽的 `track_ed = r3(r3(cursor) + r3(d))` 在非整毫秒相位上差 1ms，
+ * 而 `gtrk render` 对同轨重叠是**零容差硬拒**（E9）——真机三条工程全部渲不出来。
+ *
+ * 正解是**让轨轴当权威**：`track_ed` 由未舍入的 `trackSt + dur` **一次取整**，
+ * 时长退为导出量 `durMs = teMs − tsMs`，`clip_ed` 再由 `durMs` 推。于是：
+ *   · `track_ed` 与下一槽 `track_st` 同式  ⇒ 接缝零由构造保证
+ *   · `track_ed − track_st ≡ durMs`        ⇒ E2 成立
+ *   · `clip_ed  − clip_st  ≡ durMs`        ⇒ E1 成立
+ *
+ * MUST NOT 改走「量化游标」（`cursor = track_ed`）那条路来修接缝：那会让游标偏离
+ * 真实实数和并逐槽累加，`remaining` / `dTarget` / 吸附带全部跟着漂，
+ * **可能翻选段**——为 1ms 的接缝去动切分位置，代价与收益倒挂。
+ *
  * 三个入参都是未舍入的原始值；本函数负责全部舍入，调用方 MUST NOT 自己再 `r3`。
  */
 function slotTimes(
@@ -567,10 +607,13 @@ function slotTimes(
 	trackSt: number,
 	dur: number,
 ): { clip_st: number; clip_ed: number; track_st: number; track_ed: number } {
-	const cs = r3(clipSt);
-	const ts = r3(trackSt);
-	const d = r3(dur);
-	return { clip_st: cs, clip_ed: r3(cs + d), track_st: ts, track_ed: r3(ts + d) };
+	const csMs = Math.round(clipSt * 1000);
+	const tsMs = Math.round(trackSt * 1000);
+	// ★ 由**未舍入**的 trackSt + dur 一次取整 —— 与下一槽 track_st 的算法逐字同源。
+	const teMs = Math.round((trackSt + dur) * 1000);
+	// ★ 时长是导出量，不是自由量：两条恒等式都用它，于是两条都构造性成立。
+	const durMs = teMs - tsMs;
+	return { clip_st: csMs / 1000, clip_ed: (csMs + durMs) / 1000, track_st: tsMs / 1000, track_ed: teMs / 1000 };
 }
 
 /**
@@ -599,6 +642,42 @@ export function assertTrimIdentity(
 	}
 	if (ts !== undefined && te !== undefined && te - ts !== du) {
 		throw new Error(`铺轨自检失败（${where}）：track_ed − track_st = ${te - ts}ms ≠ duration ${du}ms。`);
+	}
+}
+
+/**
+ * 写方自检：同轨零重叠（fix-slot-seam-continuity）。
+ *
+ * ★ 为什么与 `assertTrimIdentity` 分两条：那条管的是**单颗槽位内部**两个时基自洽，
+ * 这条管的是**相邻两颗之间**。前者全绿时后者照样可以塌——上一版就是这么塌的：
+ * 恒等式构造性成立了，接缝却在非整毫秒相位上差 1ms，而 `gtrk render` 对同轨重叠
+ * 是零容差硬拒（E9），真机三条工程全部渲不出来，全套测试却是绿的。
+ *
+ * 判据与 `gtrk-patch.ts` 的 E9 逐字同源：**整毫秒域、零容差**。
+ *
+ * ⚠️ 本条只判**重叠**，不判空洞：候选枯竭造成的留空是有意为之（填槽循环里
+ * 「宁空不重复」那条铁律的正常产物），在这里看不出与违约的区别——
+ * 「相邻两颗中间有没有过一次空槽推进」这个信息只在填槽循环内存在，到组装期已经丢了。
+ * 所以**严格接缝**（两个方向都管，含 1ms 空洞）由填槽循环内那条断言负责，
+ * 本条是覆盖全轨的兜底网：重叠在任何情况下都不合法，无需分流即可判。
+ */
+export function assertTrackContinuity(
+	clips: { clip_id?: string; track_st?: number; track_ed?: number }[],
+	where: string,
+): void {
+	const ms = (v: number | undefined): number | undefined => (typeof v === "number" ? Math.round(v * 1000) : undefined);
+	const ordered = clips.filter((c) => typeof c.track_st === "number" && typeof c.track_ed === "number").sort((a, b) => a.track_st! - b.track_st!);
+	for (let i = 0; i + 1 < ordered.length; i++) {
+		const prevEd = ms(ordered[i]!.track_ed)!;
+		const nextSt = ms(ordered[i + 1]!.track_st)!;
+		if (nextSt < prevEd) {
+			throw new Error(
+				`铺轨自检失败（${where}）：同轨相邻槽位重叠 ${prevEd - nextSt}ms` +
+					`（${ordered[i]!.clip_id ?? "?"} 的 track_ed=${ordered[i]!.track_ed} > ` +
+					`${ordered[i + 1]!.clip_id ?? "?"} 的 track_st=${ordered[i + 1]!.track_st}）。` +
+					"接缝两侧 MUST 由同一个表达式求值——见 slotTimes 头注。",
+			);
+		}
 	}
 }
 
@@ -961,6 +1040,14 @@ export function fillBeatTrack(opts: {
 	let lastPlaced: { slotIdx: number; clipId: string; clipEd: number } | null = null;
 	let lastPick: Pair | null = null;
 	let gapRun = 0;
+	/**
+	 * 接缝严格性开关（fix-slot-seam-continuity）：上一颗槽位落位后**没有**发生过空槽推进
+	 * ⇒ 本颗与上一颗之间的接缝 MUST 恒 0（两个方向都管：既不许重叠，也不许出现 1ms 空洞）。
+	 * 空槽推进后置 false ⇒ 那处留空是「宁空不重复」的正常产物，放行。
+	 * ★ MUST NOT 改用「差值是否为 0」当分流依据——那会把 1ms 空洞当成合法 gap 放过，
+	 *   而它恰是同一个双重舍入缺陷的另一个方向。
+	 */
+	let seamStrict = false;
 
 	for (let slotIdx = 0; slotIdx < MAX_SLOTS_PER_BEAT; slotIdx++) {
 		const remaining = beat.track_ed - cursor;
@@ -1089,6 +1176,7 @@ export function fillBeatTrack(opts: {
 			gapRun++;
 			if (gapRun >= 2) break;
 			cursor += Math.min(dTarget, remaining);
+			seamStrict = false; // 有意留空：下一颗与上一颗之间的间隔不再受严格接缝约束
 			continue;
 		}
 		gapRun = 0;
@@ -1099,12 +1187,25 @@ export function fillBeatTrack(opts: {
 		// 句界吸附退账：供长不足/窗口精修把边界拉离吸附点 → 本次实际未对齐，退还闭环账（后续机会续补）
 		if (ca && snapTarget !== undefined && Math.abs(cursor + d - snapTarget) > CUT_ALIGN_EPS) ca.state.snapped--;
 
+		const t = slotTimes(win.clipSt, cursor, d);
+		if (seamStrict) {
+			const prev = slots[slots.length - 1];
+			const seamMs = prev ? Math.round(t.track_st * 1000) - Math.round(prev.track_ed * 1000) : 0;
+			if (seamMs !== 0) {
+				throw new Error(
+					`铺轨自检失败（${beat.beat} 轨${trackOrder} 槽${slotIdx}）：` +
+						`连续落位的相邻槽位接缝 ${seamMs > 0 ? "空洞" : "重叠"} ${Math.abs(seamMs)}ms` +
+						`（${prev!.track_ed} → ${t.track_st}）。接缝两侧 MUST 由同一个表达式求值——见 slotTimes 头注。`,
+				);
+			}
+		}
 		slots.push({
 			clip_id: pick.cand.clip_id,
 			query: pick.query,
 			score: pick.seg.score,
-			...slotTimes(win.clipSt, cursor, d),
+			...t,
 		});
+		seamStrict = true;
 		// pinned 落成记账：记**段键**不自增（summary 三数同分母，见 FillStats.pinnedPlaced 头注）
 		if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++; // 取用高运动段（降权未挡住=候选稀疏）
@@ -1738,6 +1839,43 @@ function fastFillBeatGaps(o: {
 						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: prev.clip_id, track_st: r3(cursor), track_ed: r3(cursor + ext), sec: r3(ext) });
 						cursor = prev.track_ed;
 					}
+					// ②a′ 反向借帧（fix-gapfill-subframe-residue）：尾被**段界/素材物理末端**钳死时
+					// （`hi - prev.clip_ed` 已为 0），回头借**头部**——源窗整体前移，轨上仍是顺延。
+					// 不补这一支，残洞就落成亚帧黑片：渲染看不见（累计取整判 0 帧），
+					// 但那颗 clip 的 `gtrk patch trim` 悔棋通道从此只剩半条。
+					// MICRO_SLOP 的头注（本函数上方）说的是同一条法的另一半：那边管「尾能借」，这边管「尾借不动」。
+					// ⚠️ **两步借**，缺一不可（实测教训）：
+					//   第一步用段界下界，能吃掉大洞的绝大部分；但若头部余量不够，会剩下十几毫秒——
+					//   而那个余数恰恰是**亚帧**，等于把「一个看得见的洞」换成「一个看不见但废掉 trim 的残片」，
+					//   正是本件要消灭的东西。实测 proj2-B 的 B16：1.28s 洞 → 借到段界后余 0.013s。
+					//   第二步：余数此时已 ≤ MICRO_SLOP，够格走松弛下界（越过段界 ≤ 一帧，肉眼不可辨，
+					//   与 ②a/②b 的 MICRO_SLOP 同一条法），把它一次吃干净。
+					// 循环上界恒 2，**由 `back <= EPS` 的 break 保证**（不是靠 rest 一定变小）：
+					//   · 头部余量够 ⇒ 第一步借到段界，余数 ≤ MICRO_SLOP，第二步用松弛下界吃干净；
+					//   · 头部余量**先耗尽** ⇒ 第二步的 `back` 恒为 0（下界没变、prev.clip_st 已到底）⇒ break，
+					//     残余如实留洞交给 solid 兜底。此时 rest 仍可能很大 —— 这是正常结局，不是异常。
+					//   ⚠️ MUST NOT 写成「第一步之后 rest 要么归零、要么 ≤ MICRO_SLOP」：那是假的，
+					//     第二种结局就是反例（实测 proj2-B 若头部余量不足即走这一支）。
+					for (let pass = 0; pass < 2; pass++) {
+						const rest = g.ed - cursor;
+						if (rest <= EPS) break;
+						// 下界与 ②b 的松弛口径**逐字同源**（MUST NOT 另立一套）
+						const loB = rest <= MICRO_SLOP ? Math.max(0, seg.lo - rest) : seg.lo;
+						const back = Math.min(rest, Math.max(0, prev.clip_st - loB));
+						if (back <= EPS) break;
+						{
+							// 两端**一律经 slotTimes 派生**，含期望不动的 clip_ed——
+							// MUST NOT 写 `prev.clip_ed = prev.clip_ed` 跳过唯一出口（见其头注）。
+							// track_st 一行不赋值（轨上起点是不变量）。
+							const cs = r3(prev.clip_st - back);
+							const t = slotTimes(cs, prev.track_st, prev.clip_ed - cs);
+							prev.clip_st = t.clip_st;
+							prev.clip_ed = t.clip_ed;
+							prev.track_ed = t.track_ed;
+							o.entries.push({ beat: beat.beat, kind: "extend", clip_id: prev.clip_id, track_st: r3(cursor), track_ed: r3(cursor + back), sec: r3(back) });
+							cursor = prev.track_ed;
+						}
+					}
 				}
 			}
 		}
@@ -2035,7 +2173,25 @@ export interface LayResult {
 		blackBedHoles: BlackBedHole[];
 		/** 主轨 gap 填充账面（adjust-main-track-gap-fill）：仅音频驱动形态且 mode ≠ none 时出现
 		 * （口播工程 / none / 不适用路径 MUST NOT 出现该键——lay JSON 零新键）。 */
-		gapFill?: { mode: GapFillMode; filledSec: number; fills: GapFillEntry[] };
+		gapFill?: {
+			mode: GapFillMode;
+			filledSec: number;
+			fills: GapFillEntry[];
+			/**
+			 * 过短黑片账面（add-short-black-fill-warning）：`sec < MIN_SHOT_SEC` 的 solid 填充。
+			 *
+			 * ★ **条件键**——无过短黑片时整键缺席，MUST NOT 补 `null` / `0` / 空数组。
+			 * 与本能力既有的「有 `gapFill` 键但 `fills` 空 = 填充开着、本轮无洞可填」同构：
+			 * 那条口径立的就是「缺席与空是两件事」。
+			 *
+			 * `items` 是**全量**明细，MUST NOT 按告警阈值过滤（同 `blackBedHoles` 头注：
+			 * 机读字段一旦被过滤，`0` 就会同时意味着「没有」与「有但没超阈值」）。
+			 *
+			 * ⚠️ 刻意**不带帧数**：帧数是 `video_rate` 的函数，属派生量。写进产物等于把
+			 * 「换了画布帧率之后这个数就不对了」的坑埋进契约面。帧数只出现在人读文案里。
+			 */
+			short_solid?: { count: number; sec: number; items: Array<{ beat: string; sec: number }> };
+		};
 	};
 	broll: StructMetaBroll;
 	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
@@ -2066,11 +2222,26 @@ export interface TrackVerdict {
 	rawClips: number;
 	/** 非自产前缀的 clip 数（>0 即 L1 不成立）。 */
 	foreignClips: number;
+	/** 缺产出方身份（`producer`）的 clip 数。**只在轨上至少有一颗带身份时才有意义**——
+	 *  全轨零身份 = 老档，走回落分支，此值恒等于 clipCount 但 MUST NOT 据此判定。 */
+	unsignedClips: number;
+	/** 轨上是否至少有一颗 clip 带 `producer`（= 该轨由带身份的新版 CLI 铺过）。 */
+	hasProducer: boolean;
 	matched: ExpectedTrack | null;
 	/** 人读证据。★ MUST NOT 报窗口偏移量——窗口不进中档判据，报它等于给假证据。 */
 	reason: string;
 	/** material 样例（≤2 条，够用户在客户端里认出这条轨）。 */
 	samples: string[];
+}
+
+/**
+ * **认领资格**的唯一判据（add-clip-producer-identity §4.3）。
+ *
+ * ★ 认领过滤与 `classifyTrack` MUST 共用它。判据分家的后果 `evaluateStripVerdicts` 已立过纪律：
+ * 预判放行而定案拒铺——用户会看到「说好要铺，结果整轮拒了」，而两处各自看都是对的。
+ */
+function isClaimable(v: TrackVerdict): boolean {
+	return v.clipCount > 0 && v.rawClips === 0 && v.foreignClips === 0 && !(v.hasProducer && v.unsignedClips > 0);
 }
 
 const expectedLabel = (e: ExpectedTrack): string =>
@@ -2145,6 +2316,11 @@ function pickExpectation(
  *
  *   0. 空轨 / 无登记（期望集合为空）           → `user`（宁留勿删、照常追加，MUST NOT 拒铺）
  *   1. 有任一 `broll-raw-*` clip                → `self-produced-edited`（★ 确认原片即算已编辑，先于 L1/L2）
+ *   1.5 **身份闸**（add-clip-producer-identity）：轨上有 `producer` 且**任一 clip 缺键**
+ *                                                → `user`（保留、不剥、照常追加新轨）
+ *       · 位置 MUST 在 1 之后、2 之前：倒置会把「确认原片 ⇒ 整轮拒铺」降级成「静默追加新轨」。
+ *       · 全轨零 `producer` ⇒ 老档，**整条身份闸跳过**，行为逐字节回到本 change 之前。
+ *       · 只判在场/缺席，MUST NOT 解析 `by`/`run`——契约 §3.3 明写它是不透明字符串。
  *   2. L1 ❌（有非自产前缀 clip，含混合轨）     → `user`（★ 本轮取保守法）
  *   3. L1 ✅ 且命中某条期望指纹（clip 数相等）  → `self-produced`（唯一可剥态）
  *   4. L1 ✅ 未命中但号在 `lay_tracks` 在册     → `self-produced-edited`（疑似我们的轨被改过，如 SA 重编号）
@@ -2165,11 +2341,16 @@ export function classifyTrack(
 	const foreignClips = materials.filter(
 		(m) => !(m.startsWith(BROLL_MATERIAL_PREFIX) || m.startsWith(SOLID_MATERIAL_PREFIX)),
 	).length;
+	const signedClips = clips.filter((c) => typeof (c as { producer?: unknown })?.producer === "string").length;
+	const hasProducer = signedClips > 0;
+	const unsignedClips = clips.length - signedClips;
 	const base = {
 		trackIndex,
 		clipCount: clips.length,
 		rawClips,
 		foreignClips,
+		unsignedClips,
+		hasProducer,
 		samples: [...new Set(materials.filter(Boolean))].slice(0, 2),
 		matched: null as ExpectedTrack | null,
 	};
@@ -2184,6 +2365,17 @@ export function classifyTrack(
 			...base,
 			cls: "self-produced-edited",
 			reason: `${rawClips}/${clips.length} 个 clip 的 material 已是 broll-raw-*（你在客户端确认过原片）`,
+		};
+	}
+	// ★ 身份闸（add-clip-producer-identity）：material 前缀反推认不出**复制粘贴的副本**——
+	// 用户在客户端删一颗、贴一颗，条数不变、前缀一样，旧判据会认领整轨然后把副本一起剥掉。
+	// 产出方身份是唯一能分辨「我铺的」与「你复制的」的证据。
+	// ⚠️ 只在轨上**至少有一颗带身份**时才启用：全轨零身份 = 老档，那时缺席不构成证据。
+	if (hasProducer && unsignedClips > 0) {
+		return {
+			...base,
+			cls: "user",
+			reason: `${unsignedClips}/${clips.length} 个 clip 无产出方身份（不是本工具铺的——多半是你复制/新建的）⇒ 判为你的轨、本轮另铺新轨`,
 		};
 	}
 	if (foreignClips > 0) {
@@ -2226,7 +2418,7 @@ export function classifyVideoTracks(
 	// 可认领的轨 = L1 ✅ 且不含 raw（含 raw 者已由优先条款判已编辑，不参与认领）
 	const eligible = tracks
 		.map((t, i) => ({ i, idx: typeof t.track_index === "number" ? t.track_index : null, v: classifyTrack(t, [], { registered: true, matched: null }) }))
-		.filter((e) => e.v.clipCount > 0 && e.v.rawClips === 0 && e.v.foreignClips === 0);
+		.filter((e) => isClaimable(e.v));
 	const claimed = new Map<number, ExpectedTrack>();
 	const taken = new Set<number>();
 	for (const exp of expected) {
@@ -2313,6 +2505,32 @@ export function editedTrackWarnings(verdicts: TrackVerdict[], forceRelay: boolea
 }
 
 /**
+ * 身份闸判「你的轨」时的证据文案（add-clip-producer-identity §3.6，MUST NOT 静默）。
+ *
+ * ★ 为什么单立一条、不并进 `editedTrackWarnings`：那条只覆盖 `self-produced-edited`
+ * （「已被你编辑、本轮不剥也不铺」），而身份闸判出的是 `user`（「这不是我铺的，保留、
+ * 并在旁边另铺新轨」）——两件事对用户的含义与后续动作完全不同，合成一条会说不清。
+ *
+ * 不出这条的后果不是崩：用户会看到工程里凭空多出一条候选轨、而他改过的那条还在，
+ * 却不知道为什么——而这恰恰是本件**修好了**的那个行为，不说出来等于白修。
+ */
+export function unsignedTrackWarnings(verdicts: TrackVerdict[]): string[] {
+	const out: string[] = [];
+	for (const v of verdicts) {
+		// 只报身份闸这一档：轨上有身份、但混进了无身份 clip
+		if (v.cls !== "user" || !v.hasProducer || v.unsignedClips === 0) continue;
+		const samples = v.samples.length ? `，material 样例 ${v.samples.join(" / ")}` : "";
+		out.push(
+			`候选轨 track_index=${v.trackIndex} 判定为「你的轨」：${v.reason}（该轨 ${v.clipCount} clip${samples}）。
+` +
+				"最常见的成因是你在客户端**复制粘贴**过其中的片段——复制出来的那颗没有产出方身份，" +
+				"本工具据此认出整条轨已被你接管，于是**保留它、另铺一条新轨**，而不是把你的改动剥掉。",
+		);
+	}
+	return out;
+}
+
+/**
  * 拒铺预判（纯函数，零 IO 零计费）：供命令层在**一切计费/下载动作之前**短路。
  *
  * 拒铺是「能不能铺」的停点，按公约（skill-charter「计费动作恒在停点之后」）计费必须在它之后发生。
@@ -2327,7 +2545,7 @@ export function wouldRefuseLay(
 	return {
 		refused: editedTracks.length > 0 && !forceRelay,
 		keptEditedTracks,
-		warnings: editedTrackWarnings(verdicts, forceRelay),
+		warnings: [...editedTrackWarnings(verdicts, forceRelay), ...unsignedTrackWarnings(verdicts)],
 	};
 }
 
@@ -2414,6 +2632,9 @@ export function layBrollTracks(opts: {
 
 	// 逐轨告警：被判「自产内容但已被编辑」的轨必须带证据出场，MUST NOT 静默
 	warnings.push(...editedTrackWarnings(verdicts, forceRelay));
+	// 同上，身份闸判「你的轨」那一档（add-clip-producer-identity §3.6）：
+	// 保留了你的轨、另铺了新轨——这件事 MUST 说出来，否则用户只看到凭空多一条轨
+	warnings.push(...unsignedTrackWarnings(verdicts));
 
 	// ②-B 拒铺：存在已编辑自产轨且未开逃生门 → 工程零改动（不剥、不追加、不写 struct_meta.broll）
 	if (editedTracks.length > 0 && !forceRelay) {
@@ -2616,11 +2837,17 @@ export function layBrollTracks(opts: {
 					track_st: s.track_st,
 					track_ed: s.track_ed,
 					duration: r3(s.track_ed - s.track_st),
+					// 产出方身份（契约 §3.3）：CLI 靠它认领自产物。缺了它，幂等重铺只能靠
+					// material 的 broll- 前缀反推——而用户在客户端**复制粘贴**出来的副本前缀一样，
+					// 会被当成自产物剥掉。见 classifyTrack 的身份闸。
+					producer: producerTag(opts.generatedAt),
 				};
 				assertTrimIdentity(gclip, `${beat.beat} 轨${trackIndex} 槽${i}`);
 				bucket.push(gclip);
 				laidClips++;
 			});
+			// 整轨兜底网：同轨零重叠（E9 镜像）。逐颗自检管不到相邻两颗之间，这层管。
+			assertTrackContinuity(bucket, `${beat.beat} 轨${trackIndex}`);
 			trackClips.set(trackIndex, bucket);
 			laid.push({ order: k, clip_id: slots[0].clip_id, track_index: trackIndex, slots, source_layer: targetLayer });
 		}
@@ -2671,6 +2898,7 @@ export function layBrollTracks(opts: {
 							track_st: h.track_st,
 							track_ed: h.track_ed,
 							duration: len,
+							producer: producerTag(opts.generatedAt),
 						});
 						// 黑片槽位照进 slots 登记（幂等硬约束：轨上 clip 数 === 登记 slots 数，L2 指纹闭环）
 						entry!.slots.push({ clip_id: solidId, query: "gap_fill", score: 0, clip_st: 0, clip_ed: len, track_st: h.track_st, track_ed: h.track_ed, gap_fill: true });
@@ -2722,11 +2950,51 @@ export function layBrollTracks(opts: {
 	// gap_fill summary（adjust-main-track-gap-fill）：规划明细中素材仍在下载集者 + solid 兜底明细，
 	// 时间升序。下载失败的 candidate 槽位已被丢弃、其窗口由洞检测落黑片——明细 MUST NOT 以成功姿态保留。
 	// 有键但 fills 空 = 「填充开着、本轮无洞可填」（与「没开」机读可分）。
-	let gapFillSummary: { mode: GapFillMode; filledSec: number; fills: GapFillEntry[] } | undefined;
+	// ⚠️ 类型 MUST 与 `LayResult.summary.gapFill`（本文件上方那条声明）**保持同形**：
+	// 这里是局部变量、那里是出参，两处各写一遍 ⇒ 加了新键只改一边就会 tsc 红（实测踩过）。
+	let gapFillSummary:
+		| { mode: GapFillMode; filledSec: number; fills: GapFillEntry[]; short_solid?: { count: number; sec: number; items: Array<{ beat: string; sec: number }> } }
+		| undefined;
 	if (gapFillOn && gapFillReq) {
 		const surviving = gapFillReq.planned.filter((e) => e.clip_id !== undefined && downloads.has(e.clip_id));
 		const fillsAll = [...surviving, ...gapSolidEntries].sort((a, b) => a.track_st - b.track_st || a.track_ed - b.track_ed);
 		gapFillSummary = { mode: gapFillReq.mode, filledSec: r3(fillsAll.reduce((n, f) => n + f.sec, 0)), fills: fillsAll };
+		// ── 过短黑片可观测面（add-short-black-fill-warning）──
+		// 黑片本身是**正确的兜底**：候选枯竭时不落它，主轨就露洞、客户端开磁吸后配音与画面错位。
+		// 用一秒黑闪换整片音画错位是更坏的交易，故本段 MUST NOT 改变黑片是否落、落多长、落在哪。
+		// 要治的是**沉默**：同一个 filled_sec 背后既可能是一段 8 秒整段留白，
+		// 也可能是十几处几帧的黑闪，而今天的产物说不出这两者的区别。
+		// 上界取 MIN_SHOT_SEC 不是凑数——短于它的黑片，按铺轨自己的口径就不该单独存在。
+		// 帧率按**顶层 video_rate** 取；缺失或非正 ⇒ 判不了帧数，此时下界退化为「大于 0」
+		// （秒数仍是确定事实，账面照记；只是没法说它是几帧）。
+		const rate = typeof gtrk.video_rate === "number" && gtrk.video_rate > 0 ? gtrk.video_rate : null;
+		// ★ **双边**区间 [1 帧, MIN_SHOT_SEC)：
+		//   · 下界 —— 不足一帧的是**亚帧残片**，渲染侧累计取整判 0 帧、观众根本看不见，
+		//     报成「黑闪」就是假话；那一档归 fix-gapfill-subframe-residue（它负责**消掉**它们，
+		//     不是报它们）。两件的射程在 1 帧处接壤，本件 MUST NOT 越界去认领。
+		//   · 上界 —— MIN_SHOT_SEC：短于它的黑片按铺轨自己的口径就不成一个镜头。
+		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && (rate === null ? f.sec > 0 : f.sec * rate >= 1));
+		if (shortSolids.length) {
+			gapFillSummary.short_solid = {
+				count: shortSolids.length,
+				sec: r3(shortSolids.reduce((n, f) => n + f.sec, 0)),
+				// 全量，MUST NOT 按阈值过滤
+				items: shortSolids.map((f) => ({ beat: f.beat, sec: f.sec })),
+			};
+			// 帧数只在能判时出现；判不了就只报秒数，MUST NOT 编造
+			// （与 cuts 三态 / motion 缺省同口径：判不了就说判不了）。
+			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s${rate ? `（${Math.round(f.sec * rate)} 帧）` : ""}`;
+			const head = shortSolids.slice(0, 5).map(fmt).join("、");
+			warnings.push(
+				`主轨落了 ${shortSolids.length} 处**过短黑片**（短于最小槽长 ${MIN_SHOT_SEC}s，合计 ` +
+					`${gapFillSummary.short_solid.sec}s）：${head}${shortSolids.length > 5 ? ` 等 ${shortSolids.length} 处` : ""}。\n` +
+					(rate ? "" : "（工程 video_rate 不可用，只报秒数、不换算帧数。）\n") +
+					"短到不成一个镜头的黑片，在成片里就是一下黑闪。这**不阻断交片**——黑片是候选枯竭时的正确兜底，\n" +
+					"没有它主轨会露洞、客户端开主轨磁吸后配音与画面错位，那是更坏的结果。\n" +
+					"真要消掉它，只有扩候选池这一条路：① 给这些 beat 补素材、重跑 `matrix index`；\n" +
+					"② 放宽 `--score-floor` 让更多候选够得着。",
+			);
+		}
 	}
 
 	const createdTracks = [...trackClips.entries()]
@@ -2841,6 +3109,7 @@ export function layBrollTracks(opts: {
 						track_st: s.track_st,
 						track_ed: s.track_ed,
 						duration: r3(s.track_ed - s.track_st),
+						producer: producerTag(opts.generatedAt),
 					})),
 				};
 			}

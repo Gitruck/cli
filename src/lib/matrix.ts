@@ -38,7 +38,12 @@ export interface PlanResult {
 	/** 按 score 降序（非时间序）；best = 段内最像 query 的一帧时刻（截取/缩略锚点）。
 	 * cuts（fix-broll-flash-frames · broll-plan-contract）：本地形态可选——段内已知场景切点时码
 	 * （素材时基秒，升序，严格落在 (start,end) 开区间内），铺轨据此吸附窗口端点消残片；
-	 * 缺省=无已知切点（旧 plan/旧库容错）；云端形态 MUST NOT 出现。
+	 * ★ **在不在场 ⇔ 该素材扫没扫过切点**（fix-cut-scan-warning-semantics）：
+	 *   · 缺省 = 该素材**未扫过切点**（旧 plan / `cuts_indexed` 未置位）⇒ 真的不可判；
+	 *   · `[]` = 扫过了，只是这一段内没有切点 ⇒ **可判**，判出来是「没有」。
+	 *   两者 MUST NOT 混为一谈——混了就会把「这段没切点」误报成「这素材没索引」，
+	 *   并开出「重跑索引」这条昂贵且无效的处方。与下面 `motion` 的「缺省=不可判」同构。
+	 * 云端形态 MUST NOT 出现该字段——那是**不适用**，不是「不可判」，MUST NOT 进不可判分母。
 	 * motion（add-material-motion-signal）：本地形态可选——该段去重后的帧间跳变分位与样本数，
 	 * 供铺轨择窗降权、agent 换段裁定；缺省=**不可判**（旧库/样本不足），MUST NOT 当「平稳」用。 */
 	segments?: {

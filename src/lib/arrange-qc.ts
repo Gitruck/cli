@@ -285,7 +285,11 @@ export async function runArrangeQc<O>(
 // ── L1 结构自检：闪帧风险前置声明（P3.3）────────────────────────────────────
 
 /**
- * ★ **`cuts` 缺省与 `cuts: []` 是两件完全不同的事**（`local-index.ts:796` 的既有口径）：
+ * ★ **`cuts` 缺省与 `cuts: []` 是两件完全不同的事**——依据是**段级** `cuts` 的产方保证
+ * （`local-material-search` 能力的「段内切点明细透出」，产方在 `local-search.ts`）。
+ * ⚠️ MUST NOT 再引 `local-index.ts` 的**素材级** `cuts_indexed` 字段当依据：
+ *   层级错配就是从那条注开始的——素材级说的是「这个素材扫没扫过」，
+ *   段级说的是「这一段里有没有切点」，产方一度拿后者的空集去表达前者的缺席。
  *
  * - `cuts` **整键缺省** = 这条素材**没被扫过切点**（旧库 / 未 `--rebuild`）⇒ 段内有没有隐藏
  *   场景切点**不可判**。窗口精修的端点残片收缩这一步在它身上等于没开——铺出来可能带一段
@@ -323,16 +327,108 @@ export function flashRiskOf(slots: CutsProbeSlot[]): FlashRiskReport {
 	return report;
 }
 
-/** L1 的人读结论。无风险时回 `null`（没事就别制造噪音）。 */
-export function flashRiskNotice(r: FlashRiskReport): string | null {
+/**
+ * 判据**不适用**的槽位分档（fix-cut-scan-warning-semantics §2）。
+ *
+ * ★ 「不适用」≠「不可判」。混在一起会让分母虚高、把「本来就不该判」说成「没索引」，
+ * 并开出「重跑索引」这条对它们**永远无效**的处方。
+ */
+export interface FlashRiskNotApplicable {
+	/** 云端候选：契约明写云端形态 MUST NOT 出现 `cuts`（broll-plan-contract）。 */
+	cloud: number;
+	/** 图片候选：静帧没有时间轴，闪不了帧。 */
+	image: number;
+	/** 候选整个没有 `segments` 数组：定位不到段，判不了——但病因是 plan 本身，不是索引。 */
+	noSegments: number;
+	/** 落位槽位在 plan 里找不到对应候选（理论上不该发生，出现即数据不自洽）。 */
+	noMatch: number;
+}
+
+export const emptyNotApplicable = (): FlashRiskNotApplicable => ({ cloud: 0, image: 0, noSegments: 0, noMatch: 0 });
+
+/** L1 探针的分类结果（三态之一）。 */
+export type CutsLookup = { kind: "judged"; cuts: number[] | undefined } | { kind: "na"; why: keyof FlashRiskNotApplicable };
+
+/** plan 的最小可读形态（本函数只读这几个字段，不把命令层类型拖进来）。 */
+export interface CutsProbePlan {
+	beats: Array<{
+		queries?: Array<{
+			results?: Array<{ clip_id?: string; kind?: string; source?: string; local_path?: string; segments?: Array<{ start: number; end: number; cuts?: number[] }> }>;
+		}>;
+	}>;
+}
+
+/**
+ * 给一个落位槽位定位它取用的那一段，并分类（fix-cut-scan-warning-semantics §2）。
+ *
+ * ★ 提取成导出纯函数、而不是留在命令层当闭包，是因为**留在闭包里就测不到**——
+ * 而它恰恰是最容易静默回归的一处：三态化时曾把「扫遍所有 result」写成「撞见第一条就 return」，
+ * 大量本可判的槽位被误判成「不适用」踢出分母、还打出一句假事实，而全套测试照样绿。
+ *
+ * ⚠️ **MUST 扫完所有 result 再判**：query 轮转会让同一素材出现在多条 query / 多个 beat 的
+ * results 里，覆盖该点的那一段完全可能落在**后面**的条目上。
+ *
+ * 「不适用」的四档 MUST NOT 与唯一真正的「没扫过切点」混为一谈（后者才该开「重跑索引」的处方）。
+ */
+export function classifyCutsProbe(plan: CutsProbePlan, clipId: string, clipSt: number): CutsLookup {
+	let na: keyof FlashRiskNotApplicable | null = null;
+	const note = (why: keyof FlashRiskNotApplicable): void => {
+		if (na === null) na = why; // 首个成因优先；judged 一旦命中直接短路，不受此影响
+	};
+	for (const b of plan.beats) {
+		for (const q of b.queries ?? []) {
+			for (const r of q.results ?? []) {
+				if (r.clip_id !== clipId) continue;
+				// 云端形态：契约明写 MUST NOT 出现 cuts（broll-plan-contract）——不适用，不是不可判
+				if (!(r.source === "local" || typeof r.local_path === "string")) {
+					note("cloud");
+					continue;
+				}
+				// 静帧不可能闪帧；其零长伪段还恒会命中下面的 start<=clipSt<=end
+				if (r.kind === "image") {
+					note("image");
+					continue;
+				}
+				if (!Array.isArray(r.segments)) {
+					note("noSegments");
+					continue;
+				}
+				for (const sg of r.segments) if (sg.start <= clipSt && clipSt <= sg.end) return { kind: "judged", cuts: sg.cuts };
+				note("noSegments"); // 有数组但没有段覆盖该点：这一条定位不到，继续看别的条目
+			}
+		}
+	}
+	return { kind: "na", why: na ?? "noMatch" };
+}
+
+/**
+ * L1 的人读结论。无风险时回 `null`（没事就别制造噪音）。
+ *
+ * `na` 可选：仅用于在文案里如实交代「有多少槽位压根不适用本判据」，
+ * 它们**不进分母**。缺省不传时行为与旧版逐字一致。
+ */
+export function flashRiskNotice(r: FlashRiskReport, na?: FlashRiskNotApplicable): string | null {
 	if (r.unknown.length === 0) return null;
 	const total = r.unknown.length + r.clean + r.withCuts;
 	const beats = [...new Set(r.unknown.map((u) => u.beat))];
+	const naParts = na
+		? [
+				na.cloud ? `云端候选 ${na.cloud}` : "",
+				na.image ? `图片 ${na.image}` : "",
+				na.noSegments ? `无 segments 数组 ${na.noSegments}` : "",
+				na.noMatch ? `plan 里找不到候选 ${na.noMatch}` : "",
+			].filter(Boolean)
+		: [];
 	return (
-		`闪帧风险**不可判**：${total} 颗落位镜头里有 ${r.unknown.length} 颗取自**没扫过切点**的素材` +
+		`闪帧风险**不可判**：${total} 颗**判据成立**的落位镜头里有 ${r.unknown.length} 颗取自**没扫过切点**的素材` +
 		`（${beats.slice(0, 5).join("、")}${beats.length > 5 ? ` 等 ${beats.length} 个段` : ""}）。\n` +
+		(naParts.length ? `（另有 ${naParts.join("、")} 不适用本判据，已排除在分母外。）\n` : "") +
 		"这不是「有闪帧」，是「不知道有没有」——那些段里若藏着场景切点，铺轨的端点残片收缩这一步\n" +
-		"在它们身上等于没开，成片可能出现一闪而过的异景。跑 `gtrk matrix index --dirs <素材夹> --rebuild`\n" +
-		"补上切点数据后重铺即可判定；不补也能交片，只是这条风险留在暗处。"
+		"在它们身上等于没开，成片可能出现一闪而过的异景。\n" +
+		"两种病因，处方不同：\n" +
+		"  ① **素材真的没建过切点索引** ⇒ 跑 `gtrk matrix index --dirs <素材夹> --rebuild` 补上后重铺即可判定；\n" +
+		"  ② **手组 plan 时重写了 `segments`、把 `cuts` 抹掉了** ⇒ 重跑索引一万遍也不会消，\n" +
+		"     出路是把 `results` 条目**原样搬回**（含 `cuts`/`motion`），别自己拼段。\n" +
+		"跑完 ① 若这条告警还在，说明是 ②。不补也能交片，只是这条风险留在暗处。"
 	);
 }

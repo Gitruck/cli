@@ -488,8 +488,8 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 **本地素材模式（`matrix index` / `--local`）**：素材不必入云端素材库，用你本地的素材文件夹（视频+图片混合）直接检索铺轨：
 
 ```bash
-gtrk matrix index --dirs <素材夹1,素材夹2>                     # ① 免切片建索引：内容指纹增量、断点续传，素材改名/移动不重算
-gtrk matrix --local --dirs <素材夹1,素材夹2> --project <目录>   # ② 本地检索铺轨（--lay 0 = 只出 plan 不铺轨）
+gtrk matrix index --dirs <素材夹或素材文件,...>                # ① 免切片建索引：内容指纹增量、断点续传，素材改名/移动不重算
+gtrk matrix --local --dirs <素材夹或素材文件,...> --project <目录>  # ② 本地检索铺轨（--lay 0 = 只出 plan 不铺轨；传单个素材文件即把检索域收窄到它）
 gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（可编辑后的）plan 铺轨，零检索开销
 ```
 
