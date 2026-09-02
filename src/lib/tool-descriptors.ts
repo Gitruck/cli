@@ -1883,6 +1883,11 @@ const audioTtsClone: ToolDescriptor = {
 		{ flag: "--split-method <m>", desc: "长文切分法 cut0~cut5（未传则跟随该音色调好的参数）；它也决定字幕的断句粒度，要一句一条传 cut5" },
 		{ flag: "--batch-size <n>", desc: "分段并发批大小 1~16（未传则服务端默认）" },
 		{ flag: "--subtitle-format <fmt>", desc: "同时产出字幕文件，如 srt（未传则不出字幕；不额外计费，取值以服务端为准）" },
+		{
+			flag: "--fragment-interval <sec>",
+			desc: "句间停顿秒数（**仅自训音色**；云引擎音色传了会报错而非静默忽略）。未传则跟随引擎默认。" +
+				"实测参考：默认档全片约 25% 时长是句间静音，调到 0.2 可显著提紧节奏",
+		},
 	],
 	buildPayloadNone(ctx) {
 		const o = ctx.opts;
@@ -1901,6 +1906,13 @@ const audioTtsClone: ToolDescriptor = {
 		const speed = parseNumFlag(o.speed, "--speed");
 		if (speed != null) p.speed = speed;
 		if (typeof o.splitMethod === "string") p.text_split_method = o.splitMethod;
+		// 句间停顿（link-add-tts-fragment-interval-cli）：给了才写键，不给一个键都不加
+		// ——与 --split-method 同口径，保证不传时 payload 逐字节与从前一致。
+		// ⚠️ 区间（服务端 [0.05, 1.0]）**不在 CLI 冻结**：合法值由服务端校验并在报错里给出，
+		//    照抄一份到这里就会有两个真相，服务端调区间时 CLI 变成错的那个。
+		//    这里只挡「根本不是数字」——那是本地就能判死、不值得往返一次的输入错误。
+		const fi = parseNumFlag(o.fragmentInterval, "--fragment-interval");
+		if (fi != null) p.fragment_interval = fi;
 		const bs = parseNumFlag(o.batchSize, "--batch-size");
 		if (bs != null) {
 			if (!Number.isInteger(bs)) throw new Error(`--batch-size 需要整数，拿到「${String(o.batchSize)}」`);

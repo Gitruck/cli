@@ -215,14 +215,31 @@ export async function runArrangeWithFallback(
 		throw e; // 非本层的异常不吞——吞了会把真 bug 伪装成「网络不好」
 	}
 
+	// 计费口径（link-arrange-replay-honesty）：**MUST NOT 无条件断言「已计费」**。
+	//
+	// 2026-09-02 真机事故：三次调用全部命中服务端幂等回放（服务端日志只有 SELECT、零 INSERT、
+	// 亚秒返回），按幂等设计**不二次扣费**；而 CLI 无条件告诉用户「白花了 109 编排量」，
+	// 三次全是误报。吓唬用户的错误信息比没有信息更坏 —— 它把注意力引向一笔不存在的账，
+	// 盖住了真正的问题（服务端回放了两次部署之前的结果）。
+	//
+	// 服务端**本来就给了**标记，只是这里一直没读。
+	// ⚠️ 契约是「命中幂等回放时为 `true`，**其余情况缺席**」（见路由 swagger）——
+	//    所以缺席**不是**「不确定」，它明确等于「真执行了」。
+	//    MUST NOT 把缺席当成第三档「无法确定」：那会让**每一次正常执行**都被说成不确定，
+	//    比原来的误报更没用（本件初版就这么写过，走查时判死）。
+	const billingNote =
+		resp.idempotent_replay === true
+			? "ℹ️ 本次是服务端**幂等回放**（未重新执行、未新增计费）。产物陈旧的常见成因是" +
+				"服务端决策层已升级而幂等条目尚未失效——重试即可，**不必去核对计费流水**。"
+			: `⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
+				"成片不受影响，但这笔账你花得不明不白——请把这条反馈给我们。";
+
 	let remote: ArrangeOutcome;
 	try {
 		remote = applyArrangeResponse(resp, lay);
 	} catch (e) {
-		// 产物结构违约：**已计费**（服务端成功返回过），如实说
-		const billed =
-			`⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
-			"请把这条连同上面的违约明细反馈给我们。";
+		// 产物结构违约：服务端成功返回过，计费口径同上三分
+		const billed = `${billingNote}\n请把这条连同上面的违约明细反馈给我们。`;
 		if (strict) throw new ArrangeUnavailableError("malformed", `服务端编排产物结构违约：${(e as Error).message}\n${billed}`);
 		log.warn(`服务端编排产物结构违约，本轮弃用：${(e as Error).message}\n${billed}`);
 		return { outcome: local, source: "local", mode, fallback: "malformed", ...(resp.units !== undefined ? { units: resp.units } : {}) };
@@ -254,12 +271,11 @@ export async function runArrangeWithFallback(
 
 	// cloud 档
 	if (deps.selfCheck !== false && diffs.length) {
-		// ★ 已计费却弃用产物——这是四层里唯一一处「用户付了钱、我们扔了东西」，MUST 大声说
+		// ★ 弃用服务端产物。计费口径走上面的三分（MUST NOT 在这里再写一份「已计费」断言）。
 		log.warn(
 			`本地复算自校验不一致（${diffs.length} 处），本轮弃用服务端产物、改用本地编排：\n  ${diffs.slice(0, 5).join("\n  ")}` +
 				(diffs.length > 5 ? `\n  …另有 ${diffs.length - 5} 处` : "") +
-				`\n⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
-				"成片不受影响，但这笔账你花得不明不白——请把这条反馈给我们。",
+				`\n${billingNote}`,
 		);
 		return { outcome: local, source: "local", fallback: "self_check_failed", ...common };
 	}
