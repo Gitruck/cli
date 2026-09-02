@@ -12,6 +12,19 @@ export interface BeatAnalysis {
 	bpm?: number;
 	beats?: number[];
 	downbeats?: number[];
+	/**
+	 * 整首歌的**情绪峰值**时刻（BGM 自时间轴秒）＝ `output_result.highlight.time`。
+	 *
+	 * 服务端 `detect_highlight()` 的定位是「可作为 30s 预览起点的单点时间戳」（网易云式预览起点），
+	 * 即峰值的**起点**而非区间中心；且服务端已在 4s 容差内把它 snap 到最近 downbeat
+	 * （`gitruck-infra/utils/process/media/audio/analyze/highlight.py:62-65`，2026-09-02 抽查在位），
+	 * 所以它本身通常就落在小节线上。音频 < 10s 时服务端返回 `None`（同文件 `:44-45`）⇒ 这里 `undefined`。
+	 *
+	 * 消费方：`gtrk audio lay --beat-align`（redesign-beat-align-climax-anchor）。
+	 * ⚠️ `chorus` / `segments` **MUST NOT** 一并提取：目前无消费方，取了就是死字段
+	 * （`chorus.start` 按构造是「最长重复段第一次出现」，不是情绪峰值，语义对不上）。
+	 */
+	highlightSec?: number;
 }
 
 /** 母时间线上一个窗口的落点与展示时长。 */

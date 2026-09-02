@@ -120,14 +120,17 @@ import {
 } from "../lib/matrix-material";
 import {
 	describeImages,
+	flagDescMismatchNote,
 	getNearestCachedMark,
 	getNearestCachedHighlight,
 	resolveDescribeUrl,
 	runDescribeItems,
+	summarizeFlagDescMismatch,
 	type DescribeEndpoint,
 	toDescribeMeta,
 	type DescribeWorkItem,
 	type MaterialDescribe,
+	type OverlayFlagDim,
 } from "../lib/describe";
 import { tmpDir } from "../lib/paths";
 import {
@@ -948,6 +951,14 @@ export interface MatrixDescribeResult {
 	exempt?: boolean;
 	/** 计费身份探针失败：按非豁免继续报数，但「探不到」MUST NOT 呈现成「确定不豁免」。 */
 	exempt_probe?: "failed";
+	/** [add-describe-flag-desc-crosscheck] 叠加物交叉校验：desc 自述有叠加元素、对应 flag 仍为 false 的条目。
+	 * 纯本地判据（零调用零计费），**缓存命中项一并受检**。缺席 = 本轮零差异。
+	 * ⚠️ 只报差异，`usable_flags` 一字未改（信号归裁定层，零件不裁定）。 */
+	flag_desc_mismatch?: {
+		count: number;
+		by_dim: Partial<Record<OverlayFlagDim, number>>;
+		items: { material_id: string; ts_ms: number; dims: OverlayFlagDim[]; desc_excerpt: string }[];
+	};
 	/** 计费确认被拒：零服务端调用中止（ok:false + 非 0 退出码）。 */
 	reason?: string;
 	/** --materials 模式明细（--plan 模式产物在 plan 文件里）。 */
@@ -1228,6 +1239,21 @@ async function runDescribeMode(
 			});
 		}
 	}
+	// ── [add-describe-flag-desc-crosscheck] 叠加物交叉校验（纯本地、零调用、零计费）──────
+	// 真机 260902 硬证据：`broll-local-e28be73e24d82c35 @111117ms` 的 desc 亲口写了
+	// 「左上角有'REC'等视频录制界面元素」，`text_overlay` 仍是 false。那一帧按 CLI 现行 512px
+	// 口径重抽出来目视核对，HUD 文字清晰可读 ⇒ 模型是**看见了却没打标**，不是看不见
+	// （最初「提高抽帧分辨率」的假设据此被推翻，改判到服务端提示词偏置，由 infra 侧另件承接）。
+	// 本条只做「模型自己都说了、flag 却没打」的差异告知：
+	//   ① 独立于服务端提示词——将来 prompt 回归了这条判据仍在；
+	//   ② **缓存命中项一并受检**（读的是缓存里的 desc_text），既有旧条目零成本受益；
+	//   ③ 只报差异 MUST NOT 覆写 flag——覆写就是 CLI 越权裁定，与「零件不裁定」直接冲突。
+	// 放在计费文案之前、两种输入形态之后 ⇒ --plan 与 --materials 两路共用一份文案（不各写一份）。
+	const mismatch = summarizeFlagDescMismatch(
+		items.map((it, i) => ({ materialId: it.materialId, tsMs: it.tsMs, describe: run.results[i] ?? null })),
+	);
+	if (mismatch) log.info(flagDescMismatchNote(mismatch));
+
 	// 计费文案（fix-describe-billing-report-honesty）：报的必须是**服务端本次真会扣多少**。
 	// 豁免那一档此前只在 >20 张的运行里才可能出现（探测被焊在护栏里），≤20 张恒落非豁免分支
 	// 言之凿凿地告诉豁免账号「≈N 积分」。正面范例在同一个文件里：`matrix material` 的 internal 档
@@ -1257,6 +1283,20 @@ async function runDescribeMode(
 		credits_would_be: run.creditsWouldBe,
 		...(run.exempt !== undefined ? { exempt: run.exempt } : {}),
 		...(probeFailed ? { exempt_probe: "failed" as const } : {}),
+		...(mismatch
+			? {
+					flag_desc_mismatch: {
+						count: mismatch.count,
+						by_dim: mismatch.byDim,
+						items: mismatch.items.map((m) => ({
+							material_id: m.materialId,
+							ts_ms: m.tsMs,
+							dims: m.dims,
+							desc_excerpt: m.excerpt,
+						})),
+					},
+				}
+			: {}),
 		...(planObj
 			? {}
 			: {

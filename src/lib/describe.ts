@@ -486,6 +486,144 @@ export function putCachedDescribe(
 	);
 }
 
+// ── 叠加物交叉校验（add-describe-flag-desc-crosscheck）─────────────────────────────
+//
+// 起因（真机硬证据，260902）：本地索引库 `describes` 表里
+// `broll-local-e28be73e24d82c35 @111117ms` 一条，
+//   flags_json = {"black_border":false,"blurry":false,"text_overlay":false,"watermark":false}
+//   desc_text  = 「…画面左上角有'REC'等视频录制界面元素，似拍摄中的一帧。」
+// **模型在自己的 desc 里已经写出了取景器 HUD，`text_overlay` 仍判 false。**
+// 起草期一度怀疑是 CLI 只喂 512px 缩略帧「把字打瞎」，已被证伪：按 CLI 现行 512px 口径
+// 把该帧重抽出来目视核对，REC / RAW 16:9 / Menu / 时码 00:16:30:26 / 电量与 2 min 全部清晰可读
+// ⇒ 是「看见了却不打标」，不是「看不见」。真根因在服务端提示词的保守偏置
+// （`material_describe_handler.py:127` "when uncertain, use false"），由 infra 侧另件承接。
+//
+// 本零件做的是**纯本地、零计费、零额外调用**的兜底：desc 说了、flag 没打，就如实报一条。
+// 它独立于服务端提示词 —— 即使将来 prompt 回归，这条判据仍在。
+//
+// ⚠️ MUST NOT 据此覆写 flag。既有条款「CLI MUST NOT 依据 flags 自动剔除候选（信号归裁定层，
+//    零件不裁定）」同理适用于反向：CLI 报差异，裁定权仍在人/agent 手里。
+
+/** 交叉校验覆盖的三维「叠加物」信号（`blurry` 不是叠加物，不在射程内）。 */
+export type OverlayFlagDim = "text_overlay" | "watermark" | "black_border";
+
+/**
+ * desc 文本里的**叠加物特征词**。
+ *
+ * 词表是拿本机 341 条真实 describe 反复收敛出来的，**收紧是刻意的**——
+ * 判据要的是精确率不是召回率：报错一次，用户下次就不信这条提示了。
+ * 实测（341 条全库跑）：命中 2 条，其中 1 条 flag 已为 true（不报），
+ * 1 条正是上面那条 REC 漏判，**零误报**。
+ *
+ * 明确**排除**的高频陷阱词（各带全库实测计数，别再往回加）：
+ *   - `贴纸`：4 条命中全是**画面内**贴纸（自动售货机机身贴纸 ×2、木墙贴纸、门上卡通贴纸），
+ *     不是叠加层；
+ *   - `标识 / logo / 标志 / 招牌`：10 条命中全是**画面内**招牌（VENDOR 售货机、KIRIN 店招、
+ *     禁停标志、日文商品包装），不是台标水印；
+ *   - 光秃秃的 `文字 / 文本`：中日文街景里画面内文字遍地都是，单独当判据必然刷屏。
+ * ⇒ 只有**叠加语义自带**的词才进表（`叠加`/`字幕`/`时码`/`录制界面`/`水印`/`台标`/`黑边`…）。
+ */
+export const OVERLAY_DESC_CUES: Record<OverlayFlagDim, RegExp[]> = {
+	text_overlay: [
+		/字幕/,
+		/叠加(?:文字|文本|字幕|层)?/,
+		/时间码/,
+		/时码/,
+		/录制界面/,
+		/界面元素/,
+		/取景器/,
+		/花字/,
+		/弹幕/,
+		/标题卡/,
+		/\bHUD\b/i,
+		/\bREC\b/, // 大小写敏感：录制指示灯恒为大写 REC，小写 rec 多半是 record 的词根
+		/\bsubtitle/i,
+		/\btimecode\b/i,
+		/\bviewfinder\b/i,
+		/\boverlaid?\s+text\b/i,
+		/\btext\s+overlay\b/i,
+	],
+	watermark: [/水印/, /台标/, /频道标/, /角标/, /\bwatermark\b/i],
+	black_border: [/黑边/, /信箱式?画幅/, /上下(?:有|是)?黑(?:色)?(?:边|条|块|带)/, /左右(?:有|是)?黑(?:色)?(?:边|条|块|带)/, /\bletterbox/i, /\bpillarbox/i],
+};
+
+/**
+ * 单条产物的交叉校验：返回「desc 里提到了、flag 却是 false」的维度。
+ * 纯函数、零 IO。flag 已为 true 的维度不报（本来就打对了）。
+ */
+export function crossCheckFlagsAgainstDesc(d: Pick<MaterialDescribe, "desc" | "usable_flags">): OverlayFlagDim[] {
+	const text = d.desc ?? "";
+	if (!text) return [];
+	const out: OverlayFlagDim[] = [];
+	for (const dim of Object.keys(OVERLAY_DESC_CUES) as OverlayFlagDim[]) {
+		if (d.usable_flags?.[dim] === true) continue; // 已打标，无差异可报
+		if (OVERLAY_DESC_CUES[dim].some((re) => re.test(text))) out.push(dim);
+	}
+	return out;
+}
+
+export interface FlagDescMismatchItem {
+	materialId: string;
+	tsMs: number;
+	dims: OverlayFlagDim[];
+	/** desc 摘录（截断，只为让人认出是哪一帧）。 */
+	excerpt: string;
+}
+
+export interface FlagDescMismatchSummary {
+	/** 有差异的条目数（不是维度数）。 */
+	count: number;
+	/** 逐维计数（同一条可同时命中多维，各计各的）。 */
+	byDim: Partial<Record<OverlayFlagDim, number>>;
+	/** 逐条明细（全量，文案侧自行截断）。 */
+	items: FlagDescMismatchItem[];
+}
+
+/** 样本行在提示文案里的展示上限（多了刷屏，机读侧读 `items` 拿全量）。 */
+const MISMATCH_SAMPLE_LIMIT = 5;
+
+/**
+ * 批量汇总：对一轮 describe 的产物（**含缓存命中项**——缓存里的旧条目同样受检，
+ * 且这一路零调用零计费）逐条交叉校验。无差异返回 null（不打扰）。
+ */
+export function summarizeFlagDescMismatch(
+	rows: Array<{ materialId: string; tsMs: number; describe: MaterialDescribe | null }>,
+): FlagDescMismatchSummary | null {
+	const items: FlagDescMismatchItem[] = [];
+	const byDim: Partial<Record<OverlayFlagDim, number>> = {};
+	const seen = new Set<string>();
+	for (const r of rows) {
+		if (!r.describe) continue;
+		const key = `${r.materialId}@${r.tsMs}`;
+		if (seen.has(key)) continue; // 同帧多引用只报一次（与 describe 的唯一键去重同口径）
+		seen.add(key);
+		const dims = crossCheckFlagsAgainstDesc(r.describe);
+		if (dims.length === 0) continue;
+		for (const d of dims) byDim[d] = (byDim[d] ?? 0) + 1;
+		items.push({ materialId: r.materialId, tsMs: r.tsMs, dims, excerpt: r.describe.desc.slice(0, 60) });
+	}
+	if (items.length === 0) return null;
+	return { count: items.length, byDim, items };
+}
+
+/**
+ * 提示文案（良性降级打可读 INFO：这是「信号可能不全」的告知，不是失败，
+ * MUST NOT 抛成 warn/error 去吓人，也 MUST NOT 静默吞掉）。
+ */
+export function flagDescMismatchNote(s: FlagDescMismatchSummary): string {
+	const dimNote = (Object.keys(s.byDim) as OverlayFlagDim[]).map((d) => `${d} ${s.byDim[d]}`).join(" · ");
+	const lines = s.items
+		.slice(0, MISMATCH_SAMPLE_LIMIT)
+		.map((it) => `     · ${it.materialId} @${(it.tsMs / 1000).toFixed(1)}s [${it.dims.join("/")}] ${it.excerpt}`);
+	const more = s.items.length > MISMATCH_SAMPLE_LIMIT ? `\n     · …另 ${s.items.length - MISMATCH_SAMPLE_LIMIT} 条（--json 读 flag_desc_mismatch.items 拿全量）` : "";
+	return (
+		`叠加物交叉校验：${s.count} 项的 desc 自己描述了叠加元素、对应 usable_flags 仍为 false（${dimNote}）。\n` +
+		`   这是模型「看见了却没打标」的形态（真机 260902 已实证），⇒ MUST NOT 把 flag=false 当作「画面没有叠加元素」的证明，这几帧请人工复核：\n` +
+		`${lines.join("\n")}${more}\n` +
+		`   CLI 只报差异、不改写 flag（信号归裁定层，零件不裁定）。`
+	);
+}
+
 /** 注入 plan result 的裁剪形态（describe 字段随 plan 流转，broll-plan-contract delta）。 */
 export function toDescribeMeta(d: MaterialDescribe): MaterialDescribeMeta {
 	return {
