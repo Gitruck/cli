@@ -13,7 +13,7 @@
  *     MUST NOT 失败整命令；无 `--beat-align` 零云端零计费。
  */
 import type { Command } from "commander";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
@@ -40,6 +40,20 @@ import { submitTask } from "../lib/cloud";
 import { pollToolTask } from "../lib/tool-runner";
 import { recordBgmUseFromFile } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
+import { requireFfmpeg, runFfmpeg } from "../lib/ffmpeg";
+import {
+	CVE_TICKS_PER_SEC,
+	SILENCE_REL_THRESHOLD,
+	SILENCE_WIN_SEC,
+	TIGHTEN_BOUNDARY_TOL_DEFAULT,
+	TIGHTEN_KEEP_DEFAULT,
+	TIGHTEN_MIN_SILENCE_DEFAULT,
+	detectSilenceRuns,
+	keepIntervals,
+	makeTightenMapper,
+	planTightenCuts,
+	splitIntervalsAt,
+} from "../lib/audio-tighten";
 
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
 // ★ 主理人 2026-08-19 拍板:BGM 垫底口径 -20dB=线性 0.10(契约 volume 只写线性,MUST NOT 写 dB——composition-contract-v1 §4)
@@ -54,10 +68,10 @@ const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 /** positional 解析：`lay` 或 `align [<视频> <外录>]`。 */
 export function parseAudioPositional(
 	words: string[] | undefined,
-): { sub: "lay" } | { sub: "align"; video?: string; extAudio?: string } {
+): { sub: "lay" } | { sub: "align"; video?: string; extAudio?: string } | { sub: "tighten" } {
 	if (!words || words.length === 0) {
 		throw new Error(
-			"缺少子命令——用法：gtrk audio lay --project <目录> --file <音频>；或 gtrk audio align <视频> <外录音频>",
+			"缺少子命令——用法：gtrk audio lay --project <目录> --file <音频>；gtrk audio align <视频> <外录音频>；或 gtrk audio tighten --project <目录>",
 		);
 	}
 	if (words[0] === "lay") {
@@ -68,7 +82,11 @@ export function parseAudioPositional(
 		if (words.length > 3) throw new Error("align 最多收两个 positional：<视频毛片> <外录音频>");
 		return { sub: "align", video: words[1], extAudio: words[2] };
 	}
-	throw new Error(`未知子命令「${words.join(" ")}」——支持：gtrk audio lay / gtrk audio align`);
+	if (words[0] === "tighten") {
+		if (words.length > 1) throw new Error(`未知参数「${words.slice(1).join(" ")}」——tighten 不收 positional`);
+		return { sub: "tighten" };
+	}
+	throw new Error(`未知子命令「${words.join(" ")}」——支持：gtrk audio lay / gtrk audio align / gtrk audio tighten`);
 }
 
 /** 素材 id：audio-lay-<sha256(音频绝对路径) 前 16 hex>——同源（同路径）恒同 id，幂等替换天然对齐。 */
@@ -505,11 +523,271 @@ function logAlignDone(out: string): void {
 	log.info("⚠️ 该文件是后续工程的素材，请留存——删了工程会素材脱机。原毛片未动（内录保底轨）。");
 }
 
+// ── audio tighten（add-audio-tighten-pauses）────────────────────────────────
+
+export interface AudioTightenOpts {
+	project?: string;
+	keep?: string;
+	minSilence?: string;
+	boundaryTol?: string;
+	dryRun?: boolean;
+	ffmpegPath?: string;
+	json?: boolean;
+}
+
+export interface AudioTightenResult {
+	oldDur: number;
+	newDur: number;
+	removedSec: number;
+	cuts: number;
+	skippedInterior: number;
+	skippedProtected: number;
+	voiceClips: number;
+	captions: number;
+	dryRun: boolean;
+}
+
+const numOpt = (v: string | undefined, name: string, dflt: number): number => {
+	if (v === undefined) return dflt;
+	const n = Number(v);
+	if (!Number.isFinite(n) || n < 0) throw new Error(`${name} 需要非负有限数值，拿到「${v}」`);
+	return n;
+};
+
+/** 16kHz：语音标准率。⚠️ MUST NOT 降到 4k —— 抗混叠滤波会改变低电平包络，
+ *  少数静音段会跨过 2% 阈值，同一条音频在不同采样率下压出不同刀数（实测 4k 比 24k 多 1 刀）。 */
+const TIGHTEN_PCM_RATE = 16000;
+
+export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTightenResult> {
+	if (opts.json) routeLogsToStderr();
+	if (!opts.project) throw new Error("gtrk audio tighten 需要 --project <工程产物目录>");
+	const pdir = resolve(opts.project);
+	const gtrkPath = join(pdir, "gtrk", "project.gtrk");
+	const planPath = join(pdir, "split", "broll-plan.json");
+	const trPath = join(pdir, "transcript", "transcript.json");
+	for (const [p, what] of [[gtrkPath, "工程"], [trPath, "文字稿"]] as const) {
+		if (!existsSync(p)) throw new Error(`找不到${what}：${p}`);
+	}
+	const keep = numOpt(opts.keep, "--keep", TIGHTEN_KEEP_DEFAULT);
+	const minSilence = numOpt(opts.minSilence, "--min-silence", TIGHTEN_MIN_SILENCE_DEFAULT);
+	const boundaryTol = numOpt(opts.boundaryTol, "--boundary-tol", TIGHTEN_BOUNDARY_TOL_DEFAULT);
+
+	const { gtrk, revision } = readGtrk(gtrkPath);
+	assertGtrkV1(gtrk);
+	const transcript = JSON.parse(readFileSync(trPath, "utf8")) as {
+		material_id?: string | number;
+		duration?: number;
+		utterances: { id: string; st: number; ed: number }[];
+	};
+	const us = transcript.utterances ?? [];
+	if (!us.length) throw new Error("文字稿没有 utterances，无从判断句界");
+
+	// 配音素材 = transcript.material_id 指向的那条（**不是**「第一条音频素材」——BGM 也是音频）
+	const materials = (gtrk.materials as Record<string, unknown>[]) ?? [];
+	const voiceMat = materials.find((m) => String(m.id) === String(transcript.material_id));
+	if (!voiceMat) throw new Error(`工程里找不到文字稿指向的配音素材（material_id=${transcript.material_id}）`);
+	const voicePath = String(voiceMat.path);
+	if (!existsSync(voicePath)) throw new Error(`配音素材文件不存在：${voicePath}`);
+
+	// 已铺过画面就提醒：beat 窗口会变，跑完必须重铺
+	const laid = ((gtrk.video_track as { track_timeline?: unknown[] }[]) ?? []).some(
+		(t) => (t.track_timeline ?? []).length > 0,
+	);
+
+	// ── 静音检测：相对 RMS（MUST NOT 用 silencedetect，见 audio-tighten.ts 头注 ②）──
+	const { ffmpeg } = requireFfmpeg(opts.ffmpegPath);
+	const work = audioCacheDir();
+	await mkdir(work, { recursive: true });
+	const pcmPath = join(work, `tighten-${createHash("sha256").update(voicePath).digest("hex").slice(0, 12)}.pcm`);
+	await runFfmpeg(ffmpeg, [
+		"-y", "-v", "error", "-i", voicePath,
+		"-vn", "-ac", "1", "-ar", String(TIGHTEN_PCM_RATE), "-f", "s16le", "-c:a", "pcm_s16le",
+		pcmPath,
+	]);
+	const buf = readFileSync(pcmPath);
+	const pcm = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 2));
+	const oldDur = Math.round((pcm.length / TIGHTEN_PCM_RATE) * 1000) / 1000;
+	const win = Math.round(TIGHTEN_PCM_RATE * SILENCE_WIN_SEC);
+	const rms: number[] = [];
+	for (let i = 0; i + win <= pcm.length; i += win) {
+		let s = 0;
+		for (let k = i; k < i + win; k++) s += (pcm[k] as number) ** 2;
+		rms.push(Math.sqrt(s / win));
+	}
+	const runs = detectSilenceRuns(rms, SILENCE_WIN_SEC, SILENCE_REL_THRESHOLD);
+
+	// 句界 = 每句 ed（末句除外）+ 片头 0（引导静音也该收）
+	const boundaries = [0, ...us.slice(0, -1).map((u) => u.ed)];
+	// 豁免 = 引用段（direct_slots）在轨上的区间
+	const plan = existsSync(planPath) ? (JSON.parse(readFileSync(planPath, "utf8")) as PlanShape) : undefined;
+	const protect: { st: number; ed: number }[] = (plan?.beats ?? []).flatMap((b) =>
+		(b.direct_slots ?? []).map((d) => ({ st: d.track_st, ed: d.track_ed })),
+	);
+
+	const planned = planTightenCuts(runs, boundaries, protect, { keep, minSilence, boundaryTol });
+	const newDur = Math.round((oldDur - planned.removedSec) * 1000) / 1000;
+	const m = makeTightenMapper(planned.cuts);
+	// 引用段边界再切一刀：让它单独成 clip，用户能单独选中调出入点（仍在配音轨上、仍是同一素材）
+	const keeps = splitIntervalsAt(
+		keepIntervals(oldDur, planned.cuts),
+		protect.flatMap((p) => [p.st, p.ed]),
+	);
+
+	const result: AudioTightenResult = {
+		oldDur, newDur, removedSec: planned.removedSec, cuts: planned.cuts.length,
+		skippedInterior: planned.skippedInterior, skippedProtected: planned.skippedProtected,
+		voiceClips: keeps.length, captions: 0, dryRun: opts.dryRun === true,
+	};
+
+	log.info(
+		`句间停顿收紧：${oldDur}s → ${newDur}s（削 ${planned.removedSec}s / ${planned.cuts.length} 刀）· ` +
+			`配音轨 ${keeps.length} 段 · 跳过句内换气 ${planned.skippedInterior} 处 · 豁免引用段 ${planned.skippedProtected} 处`,
+	);
+	if (planned.skippedInterior > 0) {
+		log.info(
+			`跳过的是**句内换气**（说话人的呼吸节奏，压了句子会发赶）——只有跨句界的停顿被收紧。`,
+		);
+	}
+	if (opts.dryRun) {
+		log.info("--dry-run：未写盘。");
+		return result;
+	}
+	if (!planned.cuts.length) {
+		log.info("没有可收紧的句间停顿，工程未改动。");
+		return result;
+	}
+
+	applyTightenToProject(gtrk, plan, m, newDur, keeps, String(voiceMat.id), oldDur);
+	result.captions = countCaptions(gtrk);
+	writeGtrkAtomic(gtrkPath, gtrk, revision, "audio tighten");
+	if (plan) writeFileSync(planPath, `${JSON.stringify(plan, null, 1)}\n`, "utf8");
+
+	log.info(`已写回：${gtrkPath}${plan ? ` · ${planPath}` : ""}`);
+	if (laid) {
+		log.warn(
+			"工程里已有铺好的画面轨，而 beat 窗口刚刚变了——**必须重铺**（`gtrk matrix lay --project <目录>`），" +
+				"否则画面与配音整体错位。",
+		);
+	}
+	return result;
+}
+
+interface PlanShape {
+	beats: {
+		track_st: number;
+		track_ed: number;
+		anchors?: { at_sec?: number }[];
+		direct_slots?: { clip_st: number; clip_ed: number; track_st: number; track_ed: number }[];
+	}[];
+}
+
+const countCaptions = (gtrk: Record<string, unknown>): number => {
+	const cve = ((gtrk.struct_meta as Record<string, unknown>)?.client_visual_elements ?? {}) as {
+		lanes?: { elements?: unknown[] }[];
+	};
+	return (cve.lanes ?? []).reduce((n, l) => n + (l.elements ?? []).length, 0);
+};
+
+/**
+ * 把新轴落进工程。
+ *
+ * ⚠️ **逐字段点名，MUST NOT 递归全量替换时码**：plan 里还有**素材源片**的时码
+ * （`results[].segments[].start/end`、`direct_slots[].clip_st/clip_ed`），
+ * 映射它们会把工程彻底毁掉**且不报错**——画面取错段落、无任何告警。
+ *
+ * ⚠️ `transcript` 不在本函数的射程内，也**不该**在：见 `audio-tighten.ts` 头注 ⑤。
+ */
+function applyTightenToProject(
+	gtrk: Record<string, unknown>,
+	plan: PlanShape | undefined,
+	m: (t: number) => number,
+	newDur: number,
+	keeps: { st: number; ed: number }[],
+	voiceMatId: string,
+	oldDur: number,
+): void {
+	gtrk.duration = newDur;
+	// 配音素材时长保持**原件**时长——clip 引用的是源文件，不是压缩产物（判据 ④）
+	for (const mt of (gtrk.materials as Record<string, unknown>[]) ?? []) {
+		if (String(mt.id) === voiceMatId) mt.duration = oldDur;
+	}
+	// 配音轨：逐保留区间成 clip
+	const tracks = (gtrk.audio_track as { track_index: number; track_timeline: Record<string, unknown>[] }[]) ?? [];
+	const voiceTrack = tracks.find((t) => t.track_timeline.some((c) => String(c.material) === voiceMatId));
+	if (voiceTrack) {
+		const proto = voiceTrack.track_timeline.find((c) => String(c.material) === voiceMatId) ?? {};
+		voiceTrack.track_timeline = keeps.map((k) => {
+			const { clip_st: _a, clip_ed: _b, track_st: _c, track_ed: _d, duration: _e, ...rest } = proto;
+			return { ...rest, material: voiceMatId, clip_st: k.st, clip_ed: k.ed, track_st: m(k.st), track_ed: m(k.ed), duration: Math.round((m(k.ed) - m(k.st)) * 1000) / 1000 };
+		});
+	}
+	// BGM 等其它音轨：按素材时长循环铺满新时长
+	// ⚠️ 素材短于成片时本来就是**多段循环**，压成单段会同轨自我重叠（真机踩过）
+	const matById = new Map(((gtrk.materials as Record<string, unknown>[]) ?? []).map((x) => [String(x.id), x]));
+	for (const t of tracks) {
+		if (t === voiceTrack || !t.track_timeline.length) continue;
+		const proto = t.track_timeline[0] as Record<string, unknown>;
+		const md = Number(matById.get(String(proto.material))?.duration ?? newDur) || newDur;
+		const out: Record<string, unknown>[] = [];
+		for (let cur = 0; cur < newDur - 1e-6; cur += md) {
+			const seg = Math.round(Math.min(md, newDur - cur) * 1000) / 1000;
+			out.push({ ...proto, clip_st: 0, clip_ed: seg, track_st: Math.round(cur * 1000) / 1000, track_ed: Math.round((cur + seg) * 1000) / 1000, duration: seg });
+		}
+		t.track_timeline = out;
+	}
+	// MG 轨
+	for (const t of (gtrk.beat_track as { track_timeline: Record<string, unknown>[] }[]) ?? []) {
+		for (const c of t.track_timeline) {
+			const st = m(Number(c.track_st));
+			const ed = m(Number(c.track_st) + Number(c.duration));
+			c.track_st = st;
+			c.duration = Math.round((Math.min(ed, newDur) - st) * 1000) / 1000;
+		}
+	}
+	const sm = (gtrk.struct_meta as Record<string, unknown>) ?? {};
+	for (const b of ((sm.split as { beats?: Record<string, unknown>[] })?.beats ?? [])) {
+		b.track_st = m(Number(b.track_st));
+		b.track_ed = m(Number(b.track_ed));
+		for (const r of (b.source_ranges as Record<string, unknown>[]) ?? []) {
+			r.st = m(Number(r.st));
+			r.ed = m(Number(r.ed));
+		}
+	}
+	for (const b of ((sm.mg as { beats?: Record<string, unknown>[] })?.beats ?? [])) {
+		const st = m(Number(b.track_st));
+		const ed = m(Number(b.track_ed));
+		b.track_st = st;
+		b.track_ed = ed;
+		b.duration = Math.round((ed - st) * 1000) / 1000;
+	}
+	// 字幕：tick 单位（120000/秒），MUST 换算后再映射
+	for (const lane of ((sm.client_visual_elements as { lanes?: { elements?: Record<string, unknown>[] }[] })?.lanes ?? [])) {
+		for (const e of lane.elements ?? []) {
+			const s = m(Number(e.startTime) / CVE_TICKS_PER_SEC);
+			const t2 = m((Number(e.startTime) + Number(e.duration)) / CVE_TICKS_PER_SEC);
+			e.startTime = Math.round(s * CVE_TICKS_PER_SEC);
+			e.duration = Math.max(1, Math.round((t2 - s) * CVE_TICKS_PER_SEC));
+		}
+	}
+	// plan：逐字段点名
+	for (const b of plan?.beats ?? []) {
+		b.track_st = m(b.track_st);
+		b.track_ed = m(b.track_ed);
+		for (const a of b.anchors ?? []) if (typeof a.at_sec === "number") a.at_sec = m(a.at_sec);
+		for (const d of b.direct_slots ?? []) {
+			// 引用段轨长 MUST 恒等于源长（它被豁免、内部没有刀）
+			const src = d.clip_ed - d.clip_st;
+			d.track_st = m(d.track_st);
+			d.track_ed = Math.round((d.track_st + src) * 1000) / 1000;
+		}
+	}
+}
+
 export function registerAudio(program: Command): void {
 	program
 		.command("audio [words...]")
 		.description(
-			"音频零件族：gtrk audio lay 往 .gtrk 追加 audio_track（BGM 上轨）；gtrk audio align 外录音轨对轨换声（互相关测偏移+置信度分流，纯本地零计费）",
+			"音频零件族：gtrk audio lay 往 .gtrk 追加 audio_track（BGM 上轨）；gtrk audio align 外录音轨对轨换声；gtrk audio tighten 收紧配音的句间停顿（均纯本地零计费）",
 		)
 		.option("--project <dir>", "[lay] 工程产物目录（定位 gtrk/project.gtrk）")
 		.option("--file <audio>", "[lay] 要上轨的音频文件（BGM/配乐等）")
@@ -525,11 +803,21 @@ export function registerAudio(program: Command): void {
 		.option("-o, --out <path>", "[align] 产物路径（缺省 <视频名>_extaudio.<ext>；低置信时为对齐工程路径）")
 		.option("--force", "[align] 产物已存在时覆盖")
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统 PATH）")
+		.option("--keep <sec>", `[tighten] 收紧后保留的静音秒数（缺省 ${TIGHTEN_KEEP_DEFAULT}；实测认可值，换题材/音色可调）`)
+		.option("--min-silence <sec>", `[tighten] 短于此的静音不动（缺省 ${TIGHTEN_MIN_SILENCE_DEFAULT}，那是字词间的自然停顿）`)
+		.option("--boundary-tol <sec>", `[tighten] 判「贴着句界」的容差（缺省 ${TIGHTEN_BOUNDARY_TOL_DEFAULT}）`)
+		.option("--dry-run", "[tighten] 只报会压几处、共几秒、跳过几处句内换气，不写盘")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
-		.action(async (words: string[] | undefined, opts: AudioLayOpts & AudioAlignOpts) => {
+		.action(async (words: string[] | undefined, opts: AudioLayOpts & AudioAlignOpts & AudioTightenOpts) => {
 			const parsed = parseAudioPositional(words);
 			if (parsed.sub === "lay") {
 				await runAudioLay(opts as AudioLayOpts);
+				return;
+			}
+			if (parsed.sub === "tighten") {
+				const r = await runAudioTighten(opts as AudioTightenOpts);
+				if (opts.json) process.stdout.write(`${JSON.stringify(r)}
+`);
 				return;
 			}
 			await runAudioAlign(parsed.video, parsed.extAudio, opts as AudioAlignOpts);
