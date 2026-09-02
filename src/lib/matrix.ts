@@ -759,7 +759,10 @@ async function fetchUserInfo(cfg: CloudConfig): Promise<Record<string, unknown> 
 	return r.data;
 }
 
-/** 身份探针（素材矩阵维度）：读 matrix_member_type——**只管云端检索双口路由**。探针失败 = 整体失败（没有身份就没有正确的口）。 */
+/** 身份探针（素材矩阵维度）：读 matrix_member_type——**只管云端检索双口路由**。探针失败 = 整体失败（没有身份就没有正确的口）。
+ *
+ * ⚠️ 计费豁免**不看它**：describe / qc --alignment 等平台能力看 `probeGcMemberType`（gc_member_type）。
+ * 服务端已明示「矩阵 internal 而计费 external 则不豁免」，两条轴正交——合并即重犯 260902 那次误判。 */
 export async function probeMemberType(cfg: CloudConfig): Promise<Tier> {
 	return decideRoute((await fetchUserInfo(cfg))?.matrix_member_type).tier;
 }

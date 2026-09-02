@@ -22,6 +22,8 @@
  * cve lanes[0]（被客户端保存过的真实字幕 lane），已抽进 test/fixtures/subtitle-golden/。
  */
 import { randomUUID } from "node:crypto";
+// 第 ② 级切点护栏的词表与判据（tasks §2 要求词表落独立文件：换表只动那一个文件）。
+import { splitsWord } from "./caption-word-guard";
 
 /** 客户端 MediaTime 刻度（opencut wasm TICKS_PER_SECOND）。 */
 export const SUBTITLE_TICKS_PER_SECOND = 120000;
@@ -443,30 +445,210 @@ export function textUnits(text: string): number {
 	return n;
 }
 
+// ── 切点选择：三级回退（fix-caption-split-word-boundary，2026-09-02 旅拍三条真机复盘）────
+//
+// 归因（proposal §〇/§一）：真机上的「嫌|冷」「正|对」「这件|事」「真实|过着」四处词中断
+// **不是** TTS 切的（引擎六种 `text_split_method` 全部只在标点处切，句内切不出这种断点），
+// 是本文件自己切的——原实现只抄到 infra `subtitle-line-split` 正本的第 ①「均分定锚点」，
+// 第 ②「在锚点浮动窗内挑词边界」③「词边界无解才字符强切」两步从来没写；更难堪的是旧头注
+// 已经把「切点在 ±2 字符内有空格则吸附到空格」承诺出去了，实现里只有一句 `p.trim()`。
+// 本节补的就是 ②③（并把那句承诺真正兑现），锚点那一步一行不动。
+// 第 ② 级的词表与判据不在本文件——它是待替换品（HanLP 蒸馏快照到位后整表换掉），
+// 单独落在 `caption-word-guard.ts`，本节只 import `splitsWord` 这一个入口。
+
 /**
- * 超宽句均分拆窗（口径对齐服务端「均分不贪心」）：按 ceil(units/max) 段均分字宽，
- * 时间按各段字宽比例内插；切点在 ±2 字符内有空格则吸附到空格（空格是天然停顿点）。
+ * 锚点浮动窗（单位=字宽）。对齐 infra `subtitle-line-split` 正本 spec:8-14
+ * 「切点浮动窗口的用途是**在预算内挑一个更好的词边界**，MUST NOT 成为越过预算的通道」
+ * ——不是 CLI 自创的旋钮，所以不开 CLI 开关（`--max-units` 已是唯一旋钮，0 即关）。
  */
-export function splitCaptionWindow(win: CaptionWindow, maxUnits: number): CaptionWindow[] {
+export const CAPTION_SPLIT_FLOAT_UNITS = 2;
+
+/** 天然停顿点：切在这些字**之后**零歧义（取 infra `text_segmentation_method.py` 的 splits 集 + 常见收尾标点）。 */
+const CAPTION_BREAK_AFTER_PUNCT = new Set([
+	"，", "。", "？", "！", "、", "；", "：", "…", "—", "～",
+	",", ".", "?", "!", ";", ":", "~",
+	"」", "』", "》", "】", "）", ")", "”", "’",
+]);
+
+/** ASCII 原子字符（字母/数字）——原子串守卫的基元。 */
+const ATOMIC_ASCII = /[0-9A-Za-z]/;
+
+/**
+ * 原子串守卫：连续 ASCII 字母/数字串、以及 `3.5` / `1,000` / `example.com` 这类含中缀符的
+ * 数值/点分形态 SHALL 视为不可切原子。判据与 `stripSubtitlePunctuation`（:251）对小数、
+ * 千分位、域名的保护口径同源（那边是「别把标点换成空格」，这边是「别在这儿下刀」），
+ * 但**只读不改**那个函数。
+ *
+ * 返回 true = 切点 `cut`（切在 chars[cut] 之前）落在某个原子串内部。
+ */
+function splitsAtomicRun(chars: string[], cut: number): boolean {
+	const a = chars[cut - 1] ?? "";
+	const b = chars[cut] ?? "";
+	const prev2 = chars[cut - 2] ?? "";
+	const next2 = chars[cut + 1] ?? "";
+	const alnum = (ch: string) => ch !== "" && ATOMIC_ASCII.test(ch);
+	const digit = (ch: string) => ch !== "" && /[0-9]/.test(ch);
+	if (alnum(a) && alnum(b)) return true;
+	// 切在中缀符**之前**：`3|.5`、`example|.com`、`1|,000`
+	if (alnum(a) && b === "." && alnum(next2)) return true;
+	if (digit(a) && b === "," && digit(next2)) return true;
+	// 切在中缀符**之后**：`3.|5`、`example.|com`、`1,|000`
+	if (a === "." && alnum(b) && alnum(prev2)) return true;
+	if (a === "," && digit(b) && digit(prev2)) return true;
+	return false;
+}
+
+/** 切点左侧是标点之后位 / 空白位（第 ① 级信号；空白位顺带兑现旧头注承诺的「空格吸附」）。 */
+function isPunctOrSpaceBoundary(chars: string[], cut: number): boolean {
+	const a = chars[cut - 1] ?? "";
+	const b = chars[cut] ?? "";
+	if (/\s/.test(a) || /\s/.test(b)) return true;
+	return CAPTION_BREAK_AFTER_PUNCT.has(a);
+}
+
+/** chars[from, to) 里是否有非空白字符（纯空白窗会被下游 `filter(Boolean)` 吞掉 ⇒ 凭空少一段）。 */
+function hasVisible(chars: string[], from: number, to: number): boolean {
+	for (let i = from; i < to; i++) if (!/\s/.test(chars[i])) return true;
+	return false;
+}
+
+/** 切点命中级别：punct=① 标点/空白，guard=② 词表护栏放行，anchor=③ 退化回锚点。 */
+export type CaptionSplitTier = "punct" | "guard" | "anchor";
+
+/**
+ * 在锚点浮动窗内挑一个合规切点（纯函数）。
+ *
+ * @param chars       本窗全部字符（码点切分）
+ * @param prefixUnits 字宽前缀和（`prefixUnits[i]` = chars[0..i) 的字宽），长度 chars.length+1
+ * @param startIndex  本段起点下标（预算守卫要算「本段字宽」，光有锚点算不出来——
+ *                    故比 tasks 1.2 的签名草稿多这一个入参）
+ * @param anchorIndex 第 ① 步均分定出的锚点切点（切在 chars[anchorIndex] 之前）
+ * @param maxUnits    单窗字宽上限
+ * @param partsLeft   本次切点**之后**还要产生的段数（含末段）
+ *
+ * 三级回退：① 标点/空白 → ② 词表护栏 → ③ 退回 anchorIndex。
+ * ①② 两级都受**预算守卫**约束（对齐 infra spec:8-10「MUST NOT 成为越过预算的通道」）：
+ * 本段字宽 ≤ maxUnits **且** 剩余字宽 ≤ maxUnits × partsLeft，缺一即拒——只守前者会把
+ * 超宽整块推给末段。③ 不受预算守卫约束：它就是落地前的行为本身，逐字符一致，永不失败。
+ */
+export function pickSplitIndex(
+	chars: string[],
+	prefixUnits: number[],
+	startIndex: number,
+	anchorIndex: number,
+	maxUnits: number,
+	partsLeft: number,
+): { index: number; tier: CaptionSplitTier } {
+	const total = prefixUnits[chars.length];
+	const anchorAt = prefixUnits[anchorIndex];
+	const cands: number[] = [];
+	for (let c = startIndex + 1; c < chars.length; c++) {
+		if (Math.abs(prefixUnits[c] - anchorAt) > CAPTION_SPLIT_FLOAT_UNITS + 1e-9) continue;
+		// 后面还要切出 partsLeft 段，每段至少留 1 个字——段数由第 ① 步定死，MUST NOT 被切点浮动改掉
+		if (chars.length - c < partsLeft) continue;
+		// 两侧都得有实字：切出一个纯空白窗会被 `filter(Boolean)` 吞掉，等于凭空少一段
+		if (!hasVisible(chars, startIndex, c) || !hasVisible(chars, c, chars.length)) continue;
+		cands.push(c);
+	}
+	// 排序：先近后远；等距时**向回收缩**优先（infra 正本「算法 SHALL 自锚点向回收缩」）
+	cands.sort((x, y) => {
+		const dx = Math.abs(prefixUnits[x] - anchorAt);
+		const dy = Math.abs(prefixUnits[y] - anchorAt);
+		if (Math.abs(dx - dy) > 1e-9) return dx - dy;
+		return x - y;
+	});
+	const inBudget = (c: number) =>
+		prefixUnits[c] - prefixUnits[startIndex] <= maxUnits + 1e-9 &&
+		total - prefixUnits[c] <= maxUnits * partsLeft + 1e-9;
+	// ① 标点 / 空白优先（零歧义、零词表；原子串守卫仍然生效——`3.5` 里的 `.` 不是停顿点）
+	for (const c of cands) {
+		if (!inBudget(c) || splitsAtomicRun(chars, c)) continue;
+		if (isPunctOrSpaceBoundary(chars, c)) return { index: c, tier: "punct" };
+	}
+	// ② 词表护栏（含锚点自身：锚点若本来就不切词，走的就是这一级，不算退化）
+	for (const c of cands) {
+		if (!inBudget(c) || splitsAtomicRun(chars, c)) continue;
+		if (!splitsWord(chars, c)) return { index: c, tier: "guard" };
+	}
+	// ③ 退化：退回锚点。宁可一处切得难看，也不抛错、不吞字、不越预算段数。
+	return { index: anchorIndex, tier: "anchor" };
+}
+
+/** 拆窗统计出参（退化计数走出参而非返回值：`splitCaptionWindow` 的数组返回形状 MUST NOT 变）。 */
+export interface CaptionSplitStats {
+	/** 第 ③ 级（无词边界可用、退回字宽均分）命中次数。 */
+	fallbackCount: number;
+}
+
+/**
+ * 超宽句拆窗：**① 锚点均分（不贪心）→ ② 浮动窗内挑不切词的切点 → ③ 无解退回锚点**
+ * 三步（与 infra `subtitle-line-split` 正本同构）。段数由第 ① 步定死，时间按各段字宽比例内插、
+ * 末端对齐原句末——第 ②③ 步只改**文本分配点**，时间线零扰动。
+ *
+ * 第 ① 级的空白位就是旧头注承诺过的「空格吸附」（旧实现只有一句 `p.trim()`，承诺了没写）；
+ * 第 ③ 级命中次数经 `stats` 出参上抛，由命令层出 INFO 与 `--json`——看不见的退化等于没修。
+ */
+export function splitCaptionWindow(
+	win: CaptionWindow,
+	maxUnits: number,
+	stats?: CaptionSplitStats,
+): CaptionWindow[] {
 	const total = textUnits(win.text);
 	if (!maxUnits || total <= maxUnits) return [win];
 	const parts = Math.max(2, Math.ceil(total / maxUnits));
 	const target = total / parts;
 	const chars = [...win.text];
-	const pieces: string[] = [];
-	let acc = 0;
-	let cur = "";
-	for (const ch of chars) {
-		cur += ch;
-		acc += ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5;
-		if (pieces.length < parts - 1 && acc >= target - 1e-9) {
-			pieces.push(cur);
-			cur = "";
-			acc = 0;
+	// 字宽前缀和（prefix[i] = chars[0..i) 的字宽），供锚点定位与预算守卫 O(1) 取值
+	const prefix: number[] = [0];
+	for (const ch of chars) prefix.push(prefix[prefix.length - 1] + (ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5));
+
+	// 段数以**落地前的锚点法产物**为准，而不是 parts：字宽粒度让每段有少量过冲，极端输入下
+	// 末几段够不到 target（少切一刀），或末刀正好落在句尾（没有尾窗）——两种情况下落地前的
+	// 段数都不等于 parts（fuzz 实证：maxUnits=3 的乱码串上 ~23% 命中，13/20 两个真实档位 0 命中）。
+	// 本件只改切点位置、MUST NOT 改段数，所以先照落地前的实现原样跑一遍，只取它切出几段。
+	const refPieces: string[] = [];
+	{
+		let acc = 0;
+		let cur = "";
+		for (const ch of chars) {
+			cur += ch;
+			acc += ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5;
+			if (refPieces.length < parts - 1 && acc >= target - 1e-9) {
+				refPieces.push(cur);
+				cur = "";
+				acc = 0;
+			}
 		}
+		if (cur.trim()) refPieces.push(cur);
 	}
-	if (cur.trim()) pieces.push(cur);
-	// 空格吸附：段尾/段首紧邻空格时归并空白（避免窗首悬空格）
+	const cutsNeeded = refPieces.filter((p) => p.trim()).length - 1;
+
+	const cuts: number[] = [];
+	let start = 0;
+	for (let seg = 1; seg <= cutsNeeded; seg++) {
+		const partsLeft = cutsNeeded - seg + 1; // 本次切点之后还要产生的段数（含末段）
+		// 锚点 = 自**本段起点**累加到 target 的第一个下标（与落地前逐字符同式：旧实现每段把 acc 归零）
+		let anchor = start + 1;
+		while (anchor < chars.length && prefix[anchor] - prefix[start] < target - 1e-9) anchor++;
+		// 切点浮动会让后面的段起点跟着挪，挪多了末几段够不到 target。此时把锚点夹到
+		// 「后面每段至少留 1 个字」的边界上，保证刀数恒为 cutsNeeded（段数守恒的兜底，正常语料夹不动）。
+		const hardLimit = chars.length - partsLeft;
+		if (anchor > hardLimit) anchor = hardLimit;
+		if (anchor <= start) break;
+		const picked = pickSplitIndex(chars, prefix, start, anchor, maxUnits, partsLeft);
+		if (picked.tier === "anchor" && stats) stats.fallbackCount += 1;
+		cuts.push(picked.index);
+		start = picked.index;
+	}
+	const pieces: string[] = [];
+	let from = 0;
+	for (const c of cuts) {
+		pieces.push(chars.slice(from, c).join(""));
+		from = c;
+	}
+	const tail = chars.slice(from).join("");
+	if (tail.trim()) pieces.push(tail);
+	// 切点若落在空白处，两侧的悬空格在此裁掉（文本无损的唯一豁免：仅空白）
 	const cleaned = pieces.map((p) => p.trim()).filter(Boolean);
 	const out: CaptionWindow[] = [];
 	let cursor = win.startSec;
@@ -506,6 +688,8 @@ export function captionsFromProjection(
 	captions: CaptionWindow[];
 	droppedShort: number;
 	splitCount: number;
+	/** 拆窗时第 ③ 级退化（无词边界可用、退回字宽均分）命中次数——词表够不够用的唯一可观测信号。 */
+	splitFallbackCount: number;
 	bridgedCount: number;
 } {
 	const raw: CaptionWindow[] = [];
@@ -519,11 +703,12 @@ export function captionsFromProjection(
 		}
 		raw.push({ text: u.text, startSec: u.track_st, durationSec });
 	}
-	// ① 拆窗
+	// ① 拆窗（拆出的子窗 MUST NOT 二次复检 MIN_CAPTION_SEC——丢一个子窗 = 丢一段文本，比一个短窗更糟）
 	let splitCount = 0;
+	const splitStats: CaptionSplitStats = { fallbackCount: 0 };
 	const captions: CaptionWindow[] = [];
 	for (const w of raw) {
-		const parts = shaping.maxUnits ? splitCaptionWindow(w, shaping.maxUnits) : [w];
+		const parts = shaping.maxUnits ? splitCaptionWindow(w, shaping.maxUnits, splitStats) : [w];
 		if (parts.length > 1) splitCount += parts.length - 1;
 		captions.push(...parts);
 	}
@@ -540,7 +725,7 @@ export function captionsFromProjection(
 			}
 		}
 	}
-	return { captions, droppedShort, splitCount, bridgedCount };
+	return { captions, droppedShort, splitCount, splitFallbackCount: splitStats.fallbackCount, bridgedCount };
 }
 
 // ── cve 幂等替换 ─────────────────────────────────────────────────────────

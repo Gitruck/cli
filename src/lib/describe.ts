@@ -518,7 +518,10 @@ export interface DescribeRunDeps {
 	extractFrame: (src: string, tsSec: number, outJpg: string) => Promise<boolean>;
 	/** 计费确认（--yes 跳过；测试注入）。 */
 	confirm: (msg: string) => Promise<boolean>;
-	/** internal 豁免探测（复用 probeGcMemberType；仅护栏触发时才探测——零多余云端调用）。 */
+	/** 计费身份豁免探测（复用 probeGcMemberType，**gc_member_type** 不是 matrix_member_type）。
+	 * [fix-describe-billing-report-honesty] 触发条件已由「护栏触发」改成「本次有实际调用」——
+	 * 护栏只消费结果，不再兼任探测开关；`pending` 为空（全缓存命中）时仍不调，保持零云端请求。
+	 * 单次 runDescribeItems 至多调一次（下方只有一个调用点）。 */
 	probeExempt: () => Promise<boolean>;
 	yes: boolean;
 	/** 抽帧临时目录（即传即弃，整目录清理兜底）。 */
@@ -540,9 +543,15 @@ export interface DescribeRunResult {
 	called: number;
 	/** 抽帧/读文件失败数（局部化：单帧失败不拖垮整轮）。 */
 	failed: number;
-	/** 预估积分（= called 计划值 × 单价；护栏与账面同源）。 */
+	/** 预估积分——**实耗口径**（fix-describe-billing-report-honesty）：豁免时恒 0。
+	 * 服务端 `skip_quota_check=is_internal_member(user_id)` 时预扣整段短路（record_id 恒 null，
+	 * 结算侧 `if record_id:` 二重兜底），豁免账号真扣 0；报原价就是报了一个不会发生的数。
+	 * 要原价读 `creditsWouldBe`。 */
 	estimatedCredits: number;
-	/** internal 豁免（仅护栏触发探测过时出现）。 */
+	/** 原价（= pending × 单价），恒出——供解释「省了多少」。 */
+	creditsWouldBe: number;
+	/** 计费身份豁免（`gc_member_type=internal`）。**有实际调用时恒出**；
+	 * pending 为空（全缓存命中、无扣费可报）时缺席。 */
 	exempt?: boolean;
 	/** 与入参 items 一一对位（null=该项失败/被跳过）。 */
 	results: (MaterialDescribe | null)[];
@@ -571,15 +580,29 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 		}
 	}
 	const cached = resolved.size - pending.length;
-	const estimatedCredits = pending.length * DESCRIBE_CREDITS_PER_IMAGE;
+	const creditsWouldBe = pending.length * DESCRIBE_CREDITS_PER_IMAGE;
+
+	// ── 计费身份探测（fix-describe-billing-report-honesty）──────────────────────────────
+	// 此前这一句焊死在下方 `pending > 20` 的护栏内部 ⇒ **≤20 张的运行从不探身份**，
+	// `exempt` 恒 undefined、报数恒落非豁免分支按原价走。真机 260902 三条旅拍片
+	// 单次 pending 分别是 6 / 13 / 8 张，三次全落在这个洞里，执行方把相加得来的
+	// 「≈27 积分」当实耗转述给了用户——豁免账号被误告知要花钱，非豁免账号只是碰巧蒙对。
+	// 现在判据改成「本次有没有实际调用」：有调用就探一次（护栏只消费结果，不再兼任探测开关）。
+	// ⚠️ `pending` 为空（全缓存命中）SHALL NOT 探——那次运行既无扣费也无数可报，
+	//    MUST NOT 为了拿身份给零调用的运行白加一次云端请求。
+	// ⚠️ 全函数只有这一个探测点 ⇒ 单次运行至多一次 get_user_info（别在护栏里再探一次）。
+	let exempt: boolean | undefined;
+	if (pending.length > 0) exempt = await deps.probeExempt();
+	const estimatedCredits = exempt ? 0 : creditsWouldBe;
 
 	// ── 确认护栏（spec：单次将调用 >20 张时提示预估积分并确认）──
-	let exempt: boolean | undefined;
+	// ⚠️ 阈值 20 一字不动：本件只解耦探测，MUST NOT 顺手改护栏本身的触发条件。
 	if (pending.length > DESCRIBE_CONFIRM_THRESHOLD) {
-		exempt = await deps.probeExempt();
-		const hint =
-			`本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
-			`预估 ${estimatedCredits} 积分（${DESCRIBE_CREDITS_PER_IMAGE} 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）`;
+		const hint = exempt
+			? `本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
+				`原价 ${creditsWouldBe} 积分，本次实耗 0`
+			: `本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
+				`预估 ${estimatedCredits} 积分（${DESCRIBE_CREDITS_PER_IMAGE} 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）`;
 		if (exempt) {
 			log(`${hint}——同合云内部成员（gc_member_type=internal）计费豁免，免确认继续`);
 		} else if (deps.yes) {
@@ -596,6 +619,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 					called: 0,
 					failed: 0,
 					estimatedCredits,
+					creditsWouldBe,
 					...(exempt !== undefined ? { exempt } : {}),
 					results: items.map((it) => resolved.get(keyOf(it)) ?? null),
 				};
@@ -649,6 +673,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 		called,
 		failed,
 		estimatedCredits,
+		creditsWouldBe,
 		...(exempt !== undefined ? { exempt } : {}),
 		results,
 	};

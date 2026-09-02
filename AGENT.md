@@ -253,7 +253,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --json
 |---|---|---|
 | `<本地视频>` | 用户电脑上的视频文件；拒绝 URL、平台地址和远端下载 | 必填 |
 | `-o, --out <file>` | 唯一 Markdown 产物路径 | `<视频同目录>/<视频名>-transcript.md` |
-| `--lang <code>` | 识别语言 | `zh-CN` |
+| `--lang <code>` | 识别语言（`zh-CN` 普通话 / `zh-HK` 粤语 / `en-US` / `ja-JP`…） | `zh-CN` |
 | `--ffmpeg-path <dir>` | 指定本地 ffmpeg/ffprobe | 自动解析 |
 | `--reupload` | 忽略上传缓存，强制重传抽取音频 | 关 |
 | `--json` | stdout 只留 `{ok,taskId,fileId,output,summaryPending}` | agent 必带 |

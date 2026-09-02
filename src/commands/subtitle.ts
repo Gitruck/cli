@@ -76,6 +76,11 @@ export interface SubtitleLayResult {
 	replacedLanes: number;
 	/** 短于最小可读时长（0.8s，客户端同标尺）被丢弃的投影实例数。 */
 	droppedShort: number;
+	/**
+	 * 拆窗切点退化次数（fix-caption-split-word-boundary）：浮动窗内既无标点/空白、又无合规词边界，
+	 * 只能退回字宽均分锚点的处数。>0 = 这几处仍可能切在词中；持续偏高说明内置词表的蒸馏语料不够。
+	 */
+	splitFallbackCount: number;
 	style: string;
 	color: string;
 	canvas: [number, number];
@@ -179,18 +184,25 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 	}
 	// 整形口径（fix-subtitle-lay-split-and-gap）：拆窗按画布档位（横屏 20 / 竖屏 13，全线同口径）；
 	// gap 桥接缺省 0.5s（真机挑刺：几百 ms 的字幕消失-再现闪得难受）。--max-units/--max-gap 可覆盖，0=关。
+	// 切点选择（fix-caption-split-word-boundary）：拆窗看到的是**带标点的原文**——清洗（stripSubtitlePunctuation）
+	// 在 buildCaptionElement 里、拆窗之后跑，两者顺序 MUST NOT 反转，反转会毁掉切点第 ① 级赖以工作的标点信号。
 	const orientation = orientationOf(canvas);
 	const defaultUnits = orientation === "portrait" ? 13 : 20;
 	const maxUnits = opts.maxUnits != null ? Math.max(0, Number(opts.maxUnits) || 0) : defaultUnits;
 	const maxGapSec = opts.maxGap != null ? Math.max(0, Number(opts.maxGap) || 0) : 0.5;
-	const { captions, droppedShort, splitCount, bridgedCount } = captionsFromProjection(view.utterances, {
-		maxUnits,
-		maxGapSec,
-	});
+	const { captions, droppedShort, splitCount, splitFallbackCount, bridgedCount } = captionsFromProjection(
+		view.utterances,
+		{ maxUnits, maxGapSec },
+	);
 	if (droppedShort > 0) {
 		log.warn(`丢弃 ${droppedShort} 条短于最小可读时长（${MIN_CAPTION_SEC}s）的投影实例`);
 	}
-	if (splitCount > 0) log.info(`超宽句拆窗：+${splitCount} 窗（上限 ${maxUnits} 字宽单位/${orientation === "portrait" ? "竖" : "横"}屏档）`);
+	// 退化 MUST NOT 静默（本仓「良性降级打可读 INFO」口径）：K=0 时不打后半句，别拿零值刷屏。
+	if (splitCount > 0)
+		log.info(
+			`超宽句拆窗：+${splitCount} 窗（上限 ${maxUnits} 字宽单位/${orientation === "portrait" ? "竖" : "横"}屏档，切点优先落标点/空白/词边界）` +
+				(splitFallbackCount > 0 ? `，其中 ${splitFallbackCount} 处无词边界可用、已退回字宽均分` : ""),
+		);
 	if (bridgedCount > 0) log.info(`小 gap 桥接：${bridgedCount} 处（阈值 ${maxGapSec}s，消灭字幕闪烁）`);
 	if (captions.length === 0) {
 		throw new Error(`存活投影实例全部短于最小可读时长（${MIN_CAPTION_SEC}s），无字幕可上——请检查剪辑是否把整句都切碎了`);
@@ -236,6 +248,7 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 		laneElements: elements.length,
 		replacedLanes,
 		droppedShort,
+		splitFallbackCount,
 		style: presetId,
 		color: colorId,
 		canvas: [canvas.width, canvas.height],
@@ -259,7 +272,7 @@ export function registerSubtitle(program: Command): void {
 		.option("--style <id>", "字幕样式（default/outline/cinema_yellow/immersive_box/wide_spacing/deep_shadow/boxed，默认 default）")
 		.option("--color <id>", "字幕颜色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金，默认 雅黑）")
 		.option("--keep-punctuation", "保留原始标点（默认清洗：中英逗号句号替换为空格，小数/千分位/缩写不误伤）")
-		.option("--max-units <n>", "单窗最大字宽（CJK=1/ASCII=0.5；缺省按画布档：横屏 20/竖屏 13；0=不拆窗）")
+		.option("--max-units <n>", "单窗最大字宽（CJK=1/ASCII=0.5；缺省按画布档：横屏 20/竖屏 13；0=不拆窗；切点优先落标点/空白/词边界，不切词）")
 		.option("--max-gap <s>", "相邻字幕 gap ≤ 此秒数时桥接前一条（缺省 0.5，消灭闪烁；0=不桥接）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action((words: string[] | undefined, opts: SubtitleLayOpts) => {

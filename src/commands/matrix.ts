@@ -567,7 +567,25 @@ export interface MatrixResult {
 	columnId?: string;
 	planPath?: string;
 	results?: PlanResult[];
-	counts: { beats: number; queries: number; results: number; errors: number };
+	counts: {
+		beats: number;
+		queries: number;
+		/** ⚠️ **去重前**逐 query 累加的检索响应条数（既有口径，MUST NOT 改）——
+		 * 15 条 query 各命中同一条素材时这里是 15，而 plan 落盘可能只有 8 行、只对应 1 个素材
+		 * （真机 P1 260902 实测）。要判「到底有多少料」读 `plan_results` / `distinct_clips`。 */
+		results: number;
+		errors: number;
+		// ⚠️ 以下三键 [add-broll-plan-summary-honesty] 只在**派单消费模式**（本命令产 plan 那一路）出现。
+		// ad-hoc `matrix search` 与 `matrix lay` 的 counts 逐字节不变（本件只动产 plan 这一路，
+		// 给它们补 0 等于把「没这个概念」和「测出来是 0」抹平成同一个数）。
+		/** 真·零产出的 query 条数：判据取**检索响应** `data.results.length === 0`，
+		 * MUST NOT 事后扫 plan 的 `results: []`（beat 内去重会把命中折进同 beat 兄弟 query，折叠 ≠ 零产出）。 */
+		zero_yield?: number;
+		/** plan **落盘后**实际 result 行数（去重后）。 */
+		plan_results?: number;
+		/** plan 内 distinct `clip_id` 数——「8 行 result 其实只有 1 条素材」这件事只有它说得出来。 */
+		distinct_clips?: number;
+	};
 	[k: string]: unknown;
 }
 
@@ -829,6 +847,12 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 		embed: (inputs, sessionToken) => embedInputs(endpoint, inputs, { sessionToken }),
 		session: exempt ? undefined : buildIndexSessionHooks(endpoint),
 		onProgress: (line) => log.info(line),
+		// 长跑心跳（add-matrix-index-phase-progress）：本仓既有的 tick/tickEnd 口径（render / oralcut /
+		// transcript / long2short / music-visualizer / chunk-upload 六处在用），index 是唯一漏掉的长跑命令。
+		// 收口纪律在编排层：任何 onProgress 之前先 tickEnd，命令层这里只做直连、MUST NOT 自己再判。
+		// `--json` 下 routeLogsToStderr() 已把 humanOut 整体搬到 stderr ⇒ 心跳同走 stderr，stdout 仍纯 JSON。
+		onTick: (line) => log.tick(line),
+		onTickEnd: () => log.tickEnd(),
 	});
 	const m = run.materials;
 	const billing = composeIndexBilling(exempt, run);
@@ -909,18 +933,78 @@ export interface MatrixDescribeResult {
 	described: number;
 	/** 缓存命中数（零调用零计费——缓存即钱）。 */
 	cached: number;
-	/** 实际调服务端张数（计费口径：1 积分/张同步计费）。 */
+	/** 实际调服务端张数（计费口径：1 积分/张，异步任务计费——提交预扣→完成结算，失败自动退款）。 */
 	called: number;
 	/** 取帧失败被跳过数（局部化，不拖垮整轮）。 */
 	failed: number;
+	/** **实耗口径**（fix-describe-billing-report-honesty）：豁免时为 0。原价读 `credits_would_be`。
+	 * ⚠️ 下游若原先按原价读本键，改读 `credits_would_be`。 */
 	credits_estimated: number;
-	/** internal 豁免（仅确认护栏触发过探测时出现）。 */
+	/** 原价（= 实际调用张数 × 1 积分），恒与 `credits_estimated` 成对出现。 */
+	credits_would_be: number;
+	/** 计费身份豁免（`gc_member_type=internal`）：**有实际调用时恒出**；
+	 * 零调用（全缓存命中）时缺席——没扣费就没有计费可报。
+	 * ⚠️ 与 `matrix material` 的 `memberType`（matrix_member_type，矩阵检索维度）是两条正交的身份轴。 */
 	exempt?: boolean;
+	/** 计费身份探针失败：按非豁免继续报数，但「探不到」MUST NOT 呈现成「确定不豁免」。 */
+	exempt_probe?: "failed";
 	/** 计费确认被拒：零服务端调用中止（ok:false + 非 0 退出码）。 */
 	reason?: string;
 	/** --materials 模式明细（--plan 模式产物在 plan 文件里）。 */
 	items?: { material_id: string; ts_ms: number; source: string; describe: MaterialDescribe | null }[];
 	[k: string]: unknown;
+}
+
+/**
+ * [add-broll-plan-summary-honesty] plan **落盘态**的候选账面（纯只读统计：零 IO、零检索、零计费）。
+ * 摘要行与 describe 的掏空风险清单共用这一份口径——两处各算各的迟早会对不上。
+ *
+ * ⚠️ 只回答「这个 beat 现在还剩几条候选」，**MUST NOT** 拿 `count === 0` 反推「那条 query 零产出」：
+ * beat 内去重（`dedupeBeatQueries`）会把某条 query 的命中折进同 beat 兄弟 query 的
+ * `also_matched_queries`，使它的 `results` 变空，而该 beat 的候选池（beat 级并集）一条都不少
+ * ——真机 260902 三份 plan 里 25 条 `results:[]` 全是这种折叠，genuine 零产出为 0。
+ * 零产出判据在检索响应侧（见 `runPlanMode` 的 `zeroYieldQueries`），两者 MUST NOT 互相顶替。
+ */
+export function summarizePlanCandidates(plan: BrollPlan): {
+	planResults: number;
+	distinctClips: number;
+	beatCandidateCounts: Array<{ beat: string; count: number }>;
+} {
+	let planResults = 0;
+	const clips = new Set<string>();
+	const beatCandidateCounts: Array<{ beat: string; count: number }> = [];
+	for (const beat of plan.beats ?? []) {
+		let count = 0;
+		for (const q of beat.queries ?? []) {
+			for (const r of q.results ?? []) {
+				planResults++;
+				count++;
+				if (typeof r.clip_id === "string" && r.clip_id) clips.add(r.clip_id);
+			}
+		}
+		beatCandidateCounts.push({ beat: beat.beat, count });
+	}
+	return { planResults, distinctClips: clips.size, beatCandidateCounts };
+}
+
+/** [add-broll-plan-summary-honesty] 掏空风险清单文案（候选数 ≤1 的 beat 逐个点名）。
+ * 纯函数：给定账面即出文案，`null` = 全 beat 候选 ≥2（不打扰）。
+ * **只补判据不夺裁定权**：CLI MUST NOT 依据本清单剔除/保留/改写任何 result 条目
+ * （`matrix.ts` 那句「剔除与否由你裁定」是设计意图，不是疏漏）。 */
+export function emptyRiskNote(counts: Array<{ beat: string; count: number }>): string | null {
+	const risky = counts.filter((c) => c.count <= 1);
+	if (risky.length === 0) return null;
+	const head = risky
+		.slice(0, 12)
+		.map((c) => `${c.beat}（${c.count === 0 ? "当前已零候选" : "仅 1 条，删掉即零候选"}）`)
+		.join("、");
+	return (
+		`剔除风险：${risky.length} 个 beat 的候选总数 ≤1 —— ${head}${risky.length > 12 ? ` 等 ${risky.length} 个` : ""}。\n` +
+		// 归宿两种都写：describe 这一路刻意不读工程（形态信息在 .gtrk 的 struct_meta.broll.black_track 里），
+		// 为一句提示去开工程等于给「只读统计」加 IO——本件明令 MUST NOT。宁可两种都说，让用户自己对号入座。
+		"掏空后的归宿看工程形态：音频驱动工程 ⇒ 该段整段黑屏，或由主轨 gap 填充从别的 beat 借画面（相关性更弱）；\n" +
+		"口播工程 ⇒ 该段露出主轨 A-roll。想留余地就先补素材重跑 `gtrk matrix`，别先删。"
+	);
 }
 
 /** --plan 模式取件：每 query 前 top-k 候选 → (材料 id, best 帧) 工作项；素材源缺失局部化跳过。 */
@@ -1018,15 +1102,26 @@ async function runDescribeMode(
 	const describeBatch = deps.describeBatch ?? ((images: string[]) => describeImages(endpoint, images));
 	const extractFrame =
 		deps.extractFrame ?? (async (src: string, tsSec: number, outJpg: string) => extractFrameJpg(requireFfmpeg().ffmpeg, src, tsSec, outJpg));
+	// 计费身份探针（fix-describe-billing-report-honesty）：
+	// ① memo 一次——runDescribeItems 里只有一个调用点，这层再兜一道，防日后有人加第二个探测点；
+	// ② 失败置位 `probeFailed`——「探不到所以按非豁免」与「探到了、确实不豁免」是两件事，
+	//    报成同一件就是拿不确定冒充确定（机读侧靠 `exempt_probe:"failed"` 区分）。
+	let probeFailed = false;
+	let probedExempt: boolean | undefined;
 	const probeExempt =
 		deps.probeExempt ??
 		(async () => {
+			if (probedExempt !== undefined) return probedExempt;
 			try {
-				return (await probeGcMemberType(cfg)) === "internal";
+				probedExempt = (await probeGcMemberType(cfg)) === "internal";
 			} catch (e) {
-				log.warn(`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（1 积分/张同步计费）继续`);
-				return false;
+				log.warn(
+					`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（1 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）继续`,
+				);
+				probeFailed = true;
+				probedExempt = false;
 			}
+			return probedExempt;
 		});
 	const topK = opts.topK ? Number(opts.topK) : undefined;
 
@@ -1084,7 +1179,9 @@ async function runDescribeMode(
 			called: 0,
 			failed: run.failed,
 			credits_estimated: run.estimatedCredits,
+			credits_would_be: run.creditsWouldBe,
 			...(run.exempt !== undefined ? { exempt: run.exempt } : {}),
+			...(probeFailed ? { exempt_probe: "failed" as const } : {}),
 			reason: "describe_billing_declined",
 		};
 		process.exitCode = 1;
@@ -1107,6 +1204,12 @@ async function runDescribeMode(
 			`理解完成并回写 plan：注入 ${injected} 条 result.describe（缓存命中 ${run.cached} · 实际调用 ${run.called} 张${run.failed ? ` · 取帧失败 ${run.failed}` : ""}${skipped ? ` · 无源跳过 ${skipped}` : ""}）→ ${planPath}`,
 		);
 		log.info("usable_flags 只是给你的信号：剔除与否由你编辑 plan 裁定（删 result 条目后 gtrk matrix lay），CLI 不会替你剔。");
+		// [add-broll-plan-summary-honesty] 把裁定权交出去的同时得给判据：候选数 ≤1 的 beat 逐个点名。
+		// 真机 260902 P3 八个 beat 里七个全 beat 只有 1 条候选——按 text_overlay 信号删掉那一条，
+		// 该 beat 立刻零候选，而此前 CLI 全程没点过一次名（gap 填充 INFO 是事后、间接、不点 beat 名的聚合信号）。
+		// 数据顺着 planObj 遍历就有：零额外 IO、零额外检索、零额外计费。
+		const risk = emptyRiskNote(summarizePlanCandidates(planObj).beatCandidateCounts);
+		if (risk) log.warn(risk);
 	} else {
 		log.ok(
 			`理解完成：${run.described} 项（缓存命中 ${run.cached} · 实际调用 ${run.called} 张${run.failed ? ` · 取帧失败 ${run.failed}` : ""}${skipped ? ` · 跳过 ${skipped}` : ""}）`,
@@ -1125,10 +1228,20 @@ async function runDescribeMode(
 			});
 		}
 	}
+	// 计费文案（fix-describe-billing-report-honesty）：报的必须是**服务端本次真会扣多少**。
+	// 豁免那一档此前只在 >20 张的运行里才可能出现（探测被焊在护栏里），≤20 张恒落非豁免分支
+	// 言之凿凿地告诉豁免账号「≈N 积分」。正面范例在同一个文件里：`matrix material` 的 internal 档
+	// 写的是「0 积分（矩阵成员免费…）」——describe 是掉队的那个。
+	// 口径统一为**异步**：describe 自 2026-08-12 已改异步任务计费（提交预扣→完成结算，失败自动退款），
+	// 而命令层三处措辞还停在「同步」那套旧说法，同一条命令两套说法本身就是报数不诚实的一种。
+	// （防回潮：全仓 grep 这四个字应零命中，故此处也不复述那个词。）
 	const billNote = run.exempt
-		? "计费豁免（同合云内部成员）"
+		? `计费豁免（同合云内部成员，gc_member_type=internal）——原价 ${run.creditsWouldBe} 积分，本次实耗 0`
 		: run.called > 0
-			? `实际调用 ${run.called} 张 ≈ ${run.called * 1} 积分（1 积分/张同步计费）`
+			// ⚠️ 这里刻意仍用 `called * 1` 而非 `creditsWouldBe`（= pending × 1）：取帧失败的帧不上送也不扣费，
+			// 非豁免档的**数字**要与本件落地前逐字一致（本件只订正措辞与豁免档，不改这一档的算法）。
+			? `实际调用 ${run.called} 张 ≈ ${run.called * 1} 积分（1 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）` +
+				(probeFailed ? "；⚠️ 计费身份没探到，这里按**非豁免**保守报数，实际可能不扣" : "")
 			: "零调用零计费（全部缓存命中）";
 	log.info(`计费：${billNote}；理解产物已入本地缓存（同素材同帧下次零调用）。`);
 
@@ -1141,7 +1254,9 @@ async function runDescribeMode(
 		called: run.called,
 		failed: run.failed,
 		credits_estimated: run.estimatedCredits,
+		credits_would_be: run.creditsWouldBe,
 		...(run.exempt !== undefined ? { exempt: run.exempt } : {}),
+		...(probeFailed ? { exempt_probe: "failed" as const } : {}),
 		...(planObj
 			? {}
 			: {
@@ -1503,6 +1618,10 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	let okCount = 0;
 	let errCount = 0;
 	let resultCount = 0;
+	// [add-broll-plan-summary-honesty] 真·零产出名单。判据 MUST 取**检索响应**的 results 长度，
+	// 且 MUST 在这里（`buildPlanBeat` 去重之前）落账——去重之后再扫 plan 会把 beat 内折叠
+	// （命中被折进兄弟 query 的 also_matched_queries）误算成零产出，那是完全不同的两件事。
+	const zeroYieldQueries: string[] = [];
 	for (const entry of queue) {
 		const outcomes: QueryOutcome[] = [];
 		// 锚 query 并入同一检索链（add-keyword-anchored-broll）：与普通 queries 同口同参跑；
@@ -1519,8 +1638,11 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 			try {
 				const data = await ctx.search(q, entry);
 				outcomes.push({ query: q, data });
+				// ⚠️ `okCount` 的判据是「`ctx.search` 没抛异常」= **执行**成功，与有没有产出无关。
+				// 这条语义此前被摘要行的「N/N query 成功」四个字含混掉了，故下面单独记零产出。
 				okCount++;
 				resultCount += data.results?.length ?? 0;
+				if ((data.results?.length ?? 0) === 0) zeroYieldQueries.push(q);
 				log.info(`${entry.beat}「${q}」${isAnchorQ ? "（锚）" : ""}→ ${data.results?.length ?? 0} 条候选（召回 ${data.recalled ?? "?"}）`);
 			} catch (e) {
 				// embed 端点硬失败绝不局部化吞掉：本地模式没有查询向量=整体不可用（MUST NOT 静默降级）
@@ -1572,7 +1694,27 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	await mkdir(splitDir, { recursive: true });
 	const planPath = join(splitDir, "broll-plan.json");
 	await writeFile(planPath, JSON.stringify(plan, null, 2));
-	log.ok(`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query 成功 · ${resultCount} 条候选）`);
+	// [add-broll-plan-summary-honesty] 摘要行三段数：「执行成功」「有产出」「落盘还剩多少」是三件事。
+	// 真机 P1 260902：`resultCount` 报 15 条候选，plan 里只有 8 行 result、且全指向 **1 条**素材
+	// ——只看那一个数会让调用方判「料够了」，而实际上这个 beat 一删就空。
+	const planStats = summarizePlanCandidates(plan);
+	log.ok(
+		`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query **执行**成功` +
+			` · 其中 ${zeroYieldQueries.length} 条零候选 · plan 落盘 ${planStats.planResults} 行 / ${planStats.distinctClips} 个素材` +
+			`；逐条日志里的 ${resultCount} 条候选是**去重前**口径）`,
+	);
+	// 零产出点名（非致命）：此前调用方只能去 57 行 dim 灰 info 里自己扒 `→ 0 条候选`。
+	// ⚠️ 这条 warn MUST NOT 改退出码、MUST NOT 触发任何补检索——只是把已知事实说出来。
+	// `--lay 0`（只出 plan 不铺轨）下同样会走到这里：lay 侧的 emptySlots / upsell 通道那时整段不执行，
+	// 本条是该场景下唯一的告警通道。
+	if (zeroYieldQueries.length > 0) {
+		const head = zeroYieldQueries.slice(0, 5).map((q) => `「${q}」`).join("、");
+		log.warn(
+			`${zeroYieldQueries.length} 条 query 执行成功但**零候选**：${head}${zeroYieldQueries.length > 5 ? ` 等 ${zeroYieldQueries.length} 条` : ""}。\n` +
+				"这些词在索引域里一条都没检出（≠ 被 beat 内去重折叠——折叠的那种仍在同 beat 兄弟 query 名下，池子不少料）。\n" +
+				"想补：换更具象的检索词，或给这些 beat 补素材后重跑。",
+		);
+	}
 	if (isLocal) {
 		log.info("清单只含引用不含素材：本地素材以绝对路径直引（local_path，无 url 签名/过期语义）；封面铺轨时现抽。");
 	} else {
@@ -1637,7 +1779,16 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 		...(laid?.integrity ? { integrity: laid.integrity } : {}),
 		...(layUpsell ? { upsell: layUpsell } : {}),
 		reprojection: reproj.summary,
-		counts: { beats: beats.length, queries: totalQueries, results: resultCount, errors: errCount },
+		counts: {
+			beats: beats.length,
+			queries: totalQueries,
+			results: resultCount,
+			errors: errCount,
+			// [add-broll-plan-summary-honesty] 新增三键纯增量：既有四键取值与语义一字不改
+			zero_yield: zeroYieldQueries.length,
+			plan_results: planStats.planResults,
+			distinct_clips: planStats.distinctClips,
+		},
 	};
 	if (!result.ok) process.exitCode = 1;
 	if (layUpsell && !opts.json) log.warn(layUpsell.message);
@@ -2812,6 +2963,28 @@ async function layIntoProject(
 			);
 		}
 	}
+	// ── [add-broll-plan-summary-honesty] 零候选 beat 出口 ─────────────────────────────
+	// 决策层早就在 `matrix-lay.ts` 里算了 `beatsWithCandidates`（进了 LayResult.summary），
+	// 但命令层这段是**逐键重投影**，没人把它投出去 ⇒ 事实上的死指标。名单侧同理：
+	// 唯一会喊「这段底下没画面」的黑底空洞告警，恰好把「整 beat 零候选」显式豁免掉了
+	// （matrix-lay-tracks spec:526 的沉默条件 + `metaBeats.filter((b) => b.laid.length > 0)`）。
+	// ⚠️ 纯只读统计：本段 MUST NOT 参与任何铺轨决策，写回的 .gtrk 逐字节不受影响。
+	// ⚠️ 名单口径 MUST 与 `summary.beatsWithCandidates` 同源（都走 `mergedCandidates` 的 beat 级并集），
+	//    否则 `beatsWithCandidates + emptyBeats.length === plan.beats.length` 这条自洽式会破。
+	const emptyBeats = plan.beats.filter((b) => mergedCandidates(b).length === 0).map((b) => b.beat);
+	if (emptyBeats.length > 0) {
+		// 归宿判据与 `matrix-lay.ts` 的 `gapFillOn` 同源：summary.gapFill 有键 ⟺ 填充真开着
+		// （`gapFillOn && gapFillReq` 才写这个键），不必在命令层重算一遍那五个条件。
+		const gapFillOn = summary.gapFill !== undefined;
+		log.warn(
+			`${emptyBeats.length} 个 beat **零候选**（整段没有任何可铺的画面）：${emptyBeats.slice(0, 12).join("、")}` +
+				`${emptyBeats.length > 12 ? ` 等 ${emptyBeats.length} 个` : ""}。\n` +
+				(gapFillOn
+					? "已开主轨 gap 填充：这些段最终会是黑片，或从别的 beat 借来的画面（相关性天然更弱，逐条明细见 lay.gap_fill.fills）。"
+					: "未开 gap 填充：这些段会露出主轨 A-roll（音频驱动工程跳铺黑底时则是画布底色）。") +
+				"\n给这些 beat 补素材或换检索词后重跑 `gtrk matrix` 即可消掉。",
+		);
+	}
 	for (const w of warnings) log.warn(w);
 	if (dlStats.raw > 0) {
 		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
@@ -2923,6 +3096,11 @@ async function layIntoProject(
 				: {}),
 			laidTracks: summary.laidTracks,
 			laidClips: summary.laidClips,
+			// [add-broll-plan-summary-honesty] 候选覆盖账面：`beatsWithCandidates` 决策层早就算了，
+			// 但一直没人在这段逐键重投影里补它 ⇒ 到不了产物。两键恒满足
+			// `beatsWithCandidates + emptyBeats.length === plan.beats.length`（同源于 mergedCandidates）。
+			beatsWithCandidates: summary.beatsWithCandidates,
+			emptyBeats,
 			removedTracks: summary.removedTracks,
 			keptEditedTracks: summary.keptEditedTracks,
 			blackTrack: summary.blackTrack,

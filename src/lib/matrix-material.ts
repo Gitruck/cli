@@ -40,10 +40,18 @@ export const MATERIAL_ENDPOINTS: Record<Tier, string> = {
 	external: "/task/material_search",
 };
 
-/** 计费口径（人类可读输出如实提示）：公开口 1 积分/次；custom 口 0 元（成员免费，0 元照留痕带 task_id）。 */
+/** 计费口径（人类可读输出如实提示）：公开口 1 积分/次；custom 口 0 元（成员免费，0 元照留痕带 task_id）。
+ *
+ * ⚠️ 两档文案末尾那句边界不是废话：本常量只覆盖**矩阵检索**这一路（档位来自 matrix_member_type）。
+ * 服务端已明示「矩阵 internal 而计费 external 则不豁免」，两条轴正交——260902 就是把这里的
+ * 「0 积分」读成了全平台豁免而误判。文案不写破，下一个人还会照样读错。 */
 export const MATERIAL_BILLING_NOTE: Record<Tier, string> = {
-	internal: "0 积分（矩阵成员免费，0 元照留痕带 task_id）",
-	external: "1 积分/次",
+	internal:
+		"0 积分（矩阵成员免费，0 元照留痕带 task_id）" +
+		"——本条只是**矩阵检索**计费口径（matrix_member_type）；describe / qc --alignment 等平台能力另按 gc_member_type 计费，两档可以不同",
+	external:
+		"1 积分/次" +
+		"——本条只是**矩阵检索**计费口径（matrix_member_type）；describe / qc --alignment 等平台能力另按 gc_member_type 计费，两档可以不同",
 };
 
 // ── 卡脖子 upsell（收敛触发，不污染候选）──────────────────────────────────

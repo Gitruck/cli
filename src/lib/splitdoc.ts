@@ -162,6 +162,21 @@ function enumOk<T extends readonly string[]>(v: unknown, list: T): boolean {
 }
 
 /**
+ * 有限集合拒绝理由的合法值提示（add-split-doc-field-completeness）。
+ *
+ * 为什么单开一个 helper：2026-09-02 真机复盘里 `irreplaceability` 按字面意思填了自然语言，
+ * 整稿被拒，而报错只说「四枚举之一」——**同一个 forEach 里相邻的 lane 那行却把四个值摆出来了**。
+ * 于是写稿人只能退出去翻 `skills/gtrk-splitter/references/field-schema.md` 才知道那四个值是什么。
+ * 报错自带答案，就把「文档缺失」降级成一次无害重试。七处有限集合判定统一走这里，免得日后再分叉。
+ *
+ * ⚠️ 入参 MUST 是代码常量或**当次生效**的栏目 vocab 引用；本函数内 MUST NOT 出现任何硬编码字面值——
+ * 手抄一份副本必然与正本漂移，而**漂移的合法值列表比不列更坏**（把人引向一个当次并不生效的答案）。
+ */
+function enumHint(list: readonly string[]): string {
+	return `（合法值：${list.join(" | ")}）`;
+}
+
+/**
  * 全量校验拆分稿。返回逐条错误 + 警告；`errors` 非空即整体拒绝（命令层非 0 退出、零副作用）。
  */
 export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationResult {
@@ -226,13 +241,16 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 			if (!isNonEmptyStr(b.narrative)) errors.push(`${tag}：缺 narrative`);
 			if (!isNonEmptyStr(b.container_stage)) errors.push(`${tag}：缺 container_stage`);
 		} else {
-			if (!enumOk(b.base_track, vocab.base_track)) errors.push(`${tag}：base_track 非法（栏目词表：${vocab.base_track.join(" | ")}）`);
-			if (!enumOk(b.narrative, vocab.narrative)) errors.push(`${tag}：narrative 非法（不在栏目词表内）`);
-			if (!enumOk(b.container_stage, vocab.container_stage)) errors.push(`${tag}：container_stage 非法（不在栏目词表内）`);
+			// 三项回显 **当次生效** 的 vocab：栏目覆写后内置八/七枚举就不作数了，
+			// 回显一张当次没在用的表 = 把人引向错误答案，故入参只能是 vocab.*、不能是 NARRATIVES/CONTAINER_STAGES
+			if (!enumOk(b.base_track, vocab.base_track)) errors.push(`${tag}：base_track 非法${enumHint(vocab.base_track)}`);
+			if (!enumOk(b.narrative, vocab.narrative)) errors.push(`${tag}：narrative 非法${enumHint(vocab.narrative)}`);
+			if (!enumOk(b.container_stage, vocab.container_stage)) errors.push(`${tag}：container_stage 非法${enumHint(vocab.container_stage)}`);
 		}
-		// lane 双名认旧：遗留品牌值（如 RRV_MG）归一后放行，不判非法（既有工程零迁移）
-		if (!normalizeLane(b.lane)) errors.push(`${tag}：lane 非法（四选一：${LANES.join(" | ")}）`);
-		if (!enumOk(b.irreplaceability, IRREPLACEABILITY)) errors.push(`${tag}：irreplaceability 非法（四枚举之一）`);
+		// lane 双名认旧：遗留品牌值（如 RRV_MG）归一后放行，不判非法（既有工程零迁移）。
+		// 提示只列中性新名：遗留别名是读旧兼容，不是给写稿人挑的答案。
+		if (!normalizeLane(b.lane)) errors.push(`${tag}：lane 非法${enumHint(LANES)}`);
+		if (!enumOk(b.irreplaceability, IRREPLACEABILITY)) errors.push(`${tag}：irreplaceability 非法${enumHint(IRREPLACEABILITY)}`);
 		if (!isNonEmptyStr(b.rhythm)) errors.push(`${tag}：缺 rhythm（人读节奏标签）`);
 		if (!isNonEmptyStr(b.visual_task)) errors.push(`${tag}：缺 visual_task（一句话视觉任务）`);
 
@@ -298,7 +316,7 @@ function validateHandoff(
 		}
 		// category 可选软校验（裁决⑩，lane 不新增故宽松：非法只告警不拒）；已知集含新旧品类键，遗留值不告警
 		if (handoff && handoff.category !== undefined && !isKnownCategory(handoff.category)) {
-			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${MG_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类${enumHint(MG_CATEGORIES)}，已透传但下游按 opaque 反推`);
 		}
 		return;
 	}
@@ -382,7 +400,7 @@ function validateAux(
 		return;
 	}
 	const a = raw as Record<string, unknown>;
-	if (!enumOk(a.type, AUX_TYPES)) errors.push(`${tag}：type 非法（八类之一）`);
+	if (!enumOk(a.type, AUX_TYPES)) errors.push(`${tag}：type 非法${enumHint(AUX_TYPES)}`);
 	if (!isNonEmptyStr(a.role)) errors.push(`${tag}：缺 role（职责）`);
 	// overlay 叠层颗粒类型（add-aux-rrv-overlay-particle）：强校验 handoff.duration_hint 正数
 	// （该 aux 要生成颗粒，无时长不成立）；category 走软校验（非法告警不拒，同 lane 分型纪律）。
@@ -392,7 +410,7 @@ function validateAux(
 			errors.push(`${tag}：overlay aux 缺颗粒时长（handoff.duration_hint 必填且须为正数）`);
 		}
 		if (handoff && handoff.category !== undefined && !isKnownCategory(handoff.category)) {
-			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${MG_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类${enumHint(MG_CATEGORIES)}，已透传但下游按 opaque 反推`);
 		}
 	}
 	const m = a.mount;

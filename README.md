@@ -41,7 +41,7 @@
 | 🔎 | `gtrk matrix` | B-roll 检索+**候选铺轨**：消费 FILM_BROLL 派单 → 产候选清单 + 下载 preview 代理铺 N 条候选轨（`--lay N` 默认 1，opencut 打开即可用轨道小眼睛对比；`--lay 0` 只出清单）；`matrix search "<词>"` 单条 ad-hoc；`matrix fetch <clip_id...>` 精剪期拉原片（已授予素材免费重签+下载落盘，直接拖进剪映）；**本地素材模式**：`matrix index --dirs <素材夹>` 免切片建索引 → `--local --dirs` 检索铺轨（**素材本体不上云**）→ `matrix lay` 消费（可编辑的）plan；`matrix describe` 按需理解候选 |
 | 🎨 | `gtrk mg` | MG 动态图颗粒铺轨：消费 MG 派单 → 把 html-particle 颗粒（透明叠加 / 满屏底层，由你栏目的 MG 生产 skill 所产）铺进 `.gtrk` 的 beat_track；`mg lint <颗粒.html>` 铁律静态子集校验、`mg status --project <dir>` 编排看板（缺 HTML / 已产未铺 / 已铺）；`mg render <颗粒.html> --duration <sec>` 脱离工程独立云渲单颗颗粒为剪映可读 qtrle 透明 MOV（精剪补给口）；aux 叠层颗粒同段多铺（一 beat 派生主 + `-aux<n>`）。旧名 `gtrk rrv` 保留为弃用别名 |
 | 🎙️ | `gtrk project init` | 音频驱动工程起盘：从一条配音建 `.gtrk` 工程——主路 `--tts-task <task_id>` 引用已完成的 TTS 配音任务（直取产物音频+句级时码，零 ASR）；兜底 `--audio`+`--transcript` 自备配音成对给。落好即可 `gtrk split --project` 接成片流水线 |
-| 🎼 | `gtrk audio lay` | 音频轨零件：往 `.gtrk` 工程追加一条音频轨（BGM/配乐上轨，同源幂等替换不堆轨）；`--beat-align` 云端节拍分析把入点吸附最近 downbeat（计费一次，无 Key/失败自动降级不失败） |
+| 🎼 | `gtrk audio lay` / `tighten` | 音频轨零件：`lay` 往 `.gtrk` 工程追加一条音频轨（BGM/配乐上轨，同源幂等替换不堆轨）；`--beat-align` 云端节拍分析把入点吸附最近 downbeat（计费一次，无 Key/失败自动降级不失败）。`tighten` 收紧配音的句间停顿（纯本地零计费，只压跨句界的静音、句内换气不动） |
 | 🎯 | `gtrk audio align` | 音画对轨零件（纯本地零计费）：外录音轨（领夹麦/录音笔）与视频互相关测偏移+置信度；高置信直接换轨（视频流零像素改动），低置信产对齐工程交客户端拖齐后 `--resume` 读回；`--offset` 显式偏移直换 |
 | 🧰 | `gtrk tool <name>` | 单点工具族：图转运镜、图片/视频抠像、图片去黑边/比例转换/净化/转方图/LivePhoto、智能拼图封面/拼长图（多图输入）、视频去黑边/比例转换/防抖/蒸汽波滤镜/机械·智能分镜/运镜高光/智能字幕、人声伴奏分离/说话人分轨/变调变速、钢琴转MIDI/修复、音视频降噪、静音移除、MAD 等；`gtrk tool list` 查全部输入/产物/实时价格/状态。单发单收、共享 runner，接新工具只加一个 descriptor |
 | 💬 | `gtrk feedback` | 把用得不顺手的地方反馈给我们：`gtrk feedback "<一句话>" --command <命令名>`。**告知式提交**——助手代提时必须先把要发的内容原样念给你、得到同意后才加 `--disclosed` 重跑；管道/非交互环境下没有这句声明会直接拒发。发送前内容会先做一遍脱敏（本机路径、凭据、邮箱、手机号等按形态替换），你看到的就是将要发出的那一份 |
@@ -486,6 +486,8 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 >
 > **重跑会剥旧重铺，但不碰你改过的轨**：候选轨的身份按「素材前缀 + 上一轮登记指纹」认，不再认轨号（客户端保存会把 overlay 轨整体重编号）。一旦某条候选轨被判定「你编辑过」（改过 clip，或在客户端确认过原片使 material 变成 `broll-raw-*`），本次**整体不铺**：不剥任何轨、不追加新轨、`.gtrk` 逐字节不变，`broll-plan.json` 照常产出，命令给出「哪条轨 / 什么证据 / 下一步」并以非 0 退出码结束（`--json` 出 `{ok:false, refused:[…]}`）。要强行重铺加 `--force-relay`。
 >
+> **机读账面：`counts.results` 是「去重前」口径**：`--json` 的 `counts.results` 恒是**逐 query 累加的检索响应条数**（既有口径不动）——15 条 query 各命中同一条素材时它就是 15，而 plan 落盘可能只有 8 行、只对应 1 个素材。要判「到底有多少料」读派单消费模式另出的三键：`counts.zero_yield`（**真·零产出**的 query 数，判据取**检索响应**为空，而非事后扫 plan 的 `results: []`——beat 内去重会把命中折进同 beat 的兄弟 query，折叠 ≠ 零产出）、`counts.plan_results`（plan **落盘后**的实际 result 行数，去重后）、`counts.distinct_clips`（plan 内 distinct `clip_id` 数）。这三键**只在派单消费模式**出现，ad-hoc `matrix search` 与 `matrix lay` 的 `counts` 逐字节不变（**缺席 = 没这个概念，不是「测出来是 0」**）。铺轨侧同理另出 `lay.beatsWithCandidates`（有候选的 beat 数）与 `lay.emptyBeats`（**零候选 beat 名单**——整段没有任何可铺的画面），两者恒满足 `beatsWithCandidates + emptyBeats.length = plan 的 beat 总数`。
+>
 > **素材落盘自检**：写回工程之后自动查一遍 `materials[].path` 是不是真的都落盘了（**只读、只报不动**）。相对路径恒以 **`.gtrk` 文件所在目录**（`<产物目录>/gtrk/`）为基准解析。`--json` 出 `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`——`dangling` 是工程自带素材的**悬空引用**（登记在、文件不在）全量清单，每条标出**是否被时间线引用**及引用位置（被引用 = 那一段没素材可放，比孤儿严重得多）；绝对路径缺失另计 `external`（外接盘没挂载也会这样，不混进主判）；http(s) 素材只计数、**不发网络请求**。**这是告知不是拦阻**：查出悬空不改 `ok`、不改退出码、不删任何素材条目或文件。悬空多半是历史遗留（如客户端「确认原片」下载中断），修法是在客户端重新确认原片或删掉那条 clip。没写回的运行（`--lay 0` / 拒铺 / 工程缺失）**不出 `integrity` 字段**——缺席 = 本次没查，不是「查过且干净」。
 >
 > **纯黑底垫轨**：默认在全部候选轨之下、口播主轨之上垫一条纯黑底轨（`struct_meta.broll.black_track` 记其 `track_index`），按已落成的 beat 包络整条铺满，使 B-roll 期间（含候选轨留空处）不漏出底下的口播画面。**代价是「黑底空洞」**：候选轨没填满的地方就是纯黑压口播，铺轨会把它算出来——`--json` 恒出 `lay.blackBedHoleSec` 与逐段的 `lay.blackBedHoles`，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时另出一条非致命告警（不改退出码、不阻断铺轨），可据此调 `--score-floor`、改用 `--no-black-bed`、或到客户端手动补片。字节落 `assets/builtin/solid-000000-<W>x<H>.png`，与客户端内置纯色素材同 id 命名空间、幂等复用。删候选轨时别误删它；换片请拖到候选轨颗粒上、**别拖到黑底条上**——客户端 0.2.10 起（2026-07-31 发版强更）**拖到黑底条上会被直接拒绝并提示**。若客户端仍是 0.2.10 之前旧版（强更未拉到），旧行为是静默新建一条 video 轨插入、落点在下半区时预览完全看不见（按一次 `Ctrl+Z` 可整条撤销）——先重启客户端吃到强更。不想要黑底加 `--no-black-bed` 重跑即剥净。
@@ -502,7 +504,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - **图片一视同仁**：图片可检索可铺轨；被选中时经云端 `image_move` 转 5 秒运镜视频入轨——**图片本体会上云**（2 积分/张，铺轨前汇总确认；同图同参恒复用不重复扣费）。零图片上云 → `--no-image-broll`。
 - **同素材不二用**：单轮铺轨一个素材单元全局只用一次（本地视频按场景、图片按文件），候选枯竭宁空不重复；`--dedup-scope material` 收严到文件级。
 - **含本地素材的工程不能云渲**：提交会被拒（`local_broll_cloud_render_rejected`）——走客户端本地出片或 `gtrk render`。
-- **可选零件**：`matrix describe --plan <path> [--top-k N]` / `--materials <a,b>` 按需理解候选（VLM 描述/标签/质量分/水印·字幕·黑边·模糊信号，1 积分/张、产物注入 plan 并本地缓存、缓存命中零计费、>20 张确认护栏）；`--source-window <start,end>` 源时间窗过滤（仅 `--local`，影视解说式「第 N 段解说配影片第 N 段邻域画面」）；`matrix lay --mark-weight <0..1>` 把 describe 的质量分融进候选排序（融合分 = sim×(1-w)+(mark/100)×w，只重排序不改准入，无缓存候选按中性处理）。
+- **可选零件**：`matrix describe --plan <path> [--top-k N]` / `--materials <a,b>` 按需理解候选（VLM 描述/标签/质量分/水印·字幕·黑边·模糊信号，1 积分/张（**异步任务计费**：提交预扣→完成结算，失败自动退款；同合云内部成员豁免，跑时自动探测，`--json` 的 `credits_estimated` 即实耗、`credits_would_be` 为原价）、产物注入 plan 并本地缓存、缓存命中零计费、>20 张确认护栏）；`--source-window <start,end>` 源时间窗过滤（仅 `--local`，影视解说式「第 N 段解说配影片第 N 段邻域画面」）；`matrix lay --mark-weight <0..1>` 把 describe 的质量分融进候选排序（融合分 = sim×(1-w)+(mark/100)×w，只重排序不改准入，无缓存候选按中性处理）。
 - **索引参数与量纲**：`--scene-threshold` 调场景切分粒度、`--stability-threshold` 固定机位判稳收敛抽帧、`--rebuild` 强制重建（理解缓存不清）；索引跨机不可移植（键=绝对路径，换机重跑 index 即可）。本地 score 量纲与云端不同（完美命中可低至 ~0.25），`--score-floor` 别按云端直觉调高。
 
 编排配方（纯匹配 / 先理解后铺 / 时间窗 / 素材先行编剧 / 三层层叠）与 plan 编辑口径见随包 skill `/gtrk-matrix`。
@@ -544,18 +546,21 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 > **aux 叠层颗粒**：`gtrk split` 若在某 beat 的 `aux_layers` 派了 `overlay` 颗粒，会派生 `<beat>-aux<n>` 合成条目进 `dispatch.mg`——`gtrk mg` 一并铺，实现「同段既有底轨主视觉、又叠透明概念图解」。
 > **双读兼容**：`dispatch.mg`（读旧 `rrv_mg`）、源目录 `mg/`（读旧 `rrv/`）、素材前缀 `mg-`（读旧 `rrv-`）——去品牌化前的既有工程零迁移。
 
-### `gtrk project init` / `gtrk audio lay` — 音频驱动工程零件（配音先行）
+### `gtrk project init` / `gtrk audio lay` / `gtrk audio tighten` — 音频驱动工程零件（配音先行）
 
-不从口播毛片、而从**一条配音**起盘的工程入口：先有配音（TTS 合成或自己录的），`project init` 建好 `.gtrk` 工程，之后 `gtrk split --project` 投影拆分照常接成片流水线；`audio lay` 则给任意工程补音频轨（BGM/配乐）。
+不从口播毛片、而从**一条配音**起盘的工程入口：先有配音（TTS 合成或自己录的），`project init` 建好 `.gtrk` 工程，之后 `gtrk split --project` 投影拆分照常接成片流水线；`audio lay` 则给任意工程补音频轨（BGM/配乐）；`audio tighten` 收紧配音的句间停顿。
 
 | 命令 | 作用 |
 |---|---|
 | `gtrk project init --tts-task <task_id>` | **主路**：引用一个已完成的 `audio_tts_clone` 配音任务——服务端直取产物音频与句级时码（零 ASR、零额外计费），音频下载落工程 `audio/` |
 | `gtrk project init --audio <配音> --transcript <transcript.json>` | **兜底路**：自备配音音频 + 句级时码稿成对给（时码稿由 `gtrk transcript <配音音频> --json` 产出；TTS 合成的配音请走主路，别重跑 ASR） |
-| `gtrk audio lay --project <目录> --file <bgm.mp3>` | 往工程追加一条音频轨；**同源幂等替换**（同一来源重跑替换不堆轨、零引用保护剥旧）；`--volume <0..1>`（默认 0.3 垫底音量）、`--offset <ms>` 定入点 |
+| `gtrk audio lay --project <目录> --file <bgm.mp3>` | 往工程追加一条音频轨；**同源幂等替换**（同一来源重跑替换不堆轨、零引用保护剥旧）；`--volume <0..1>`（默认 0.1 垫底音量——契约 volume 只写线性增益、不写 dB；客户端音量面板显示 -20.0，两侧同一标尺）、`--offset <ms>` 定入点 |
 | `gtrk audio lay … --beat-align` | 云端节拍分析（`audio_music_analyze`，计费一次）把入点吸附最近 downbeat；无 Key / 分析失败 / 出界一律自动降级为不对齐，命令不失败 |
+| `gtrk audio tighten --project <目录>` | 收紧配音轨的**句间**停顿（**纯本地、零计费**）：只压跨句界的静音，**句内换气与原声引用段不动**，出参如实报「跳过句内换气 N 处」。`--keep <秒>` 收紧后保留的静音、`--min-silence <秒>` 短于此不动、`--boundary-tol <秒>` 判「贴着句界」的容差、`--dry-run` 只报会压几处共几秒、不写盘。三个缺省值见 `gtrk audio tighten --help`（实测认可值，换题材/音色可调） |
 
 `project init` 另有 `--canvas <WxH>`（默认 1080x1920）、`-o/--out`、`--reupload`、`--no-open`、`--json`，语义与 `oralcut` 一致；两命令 `--json` 恒出单行结果 JSON（人读日志走 stderr）。
+
+> **`tighten` 该在铺轨之前跑**：它会改配音轨时长，`gtrk split` / `gtrk matrix` 的 beat 时码按当刻工程重投影——先收紧再铺轨，省一次返工。想要合成时就对，自训音色可在 TTS 阶段直接传 `--fragment-interval`（见下节 `audio_tts_clone`）；云引擎音色不支持该参数，才用本命令在合成之后收。
 
 ### `gtrk tool <name> [输入...]` — 单点工具族
 
@@ -581,7 +586,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 | `video_motion_cut` | 单条本地视频 | 运镜/高光片段结构 `result-output.json`（结构化数据，非下载文件） | 运行前实时查询 | 已上线 |
 | `video_speaker_detect` | 单条本地视频；可选 `--language`/`--max-faces-per-frame`/`--detect-body`/`--track-sample-fps`（重 GPU） | 可见说话人结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_face_track` | 单条本地视频；可选 `--sample-fps`/`--max-faces`/`--min-face-ratio`/`--enable-body-match`/`--similarity-threshold`；`time_ranges` 走 `--params-json`（重 GPU） | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
-| `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤5000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法/字幕 | 配音音频 wav/mp3（+ 可选字幕）；按文本字符数计费，计量单位与单价以 `gtrk tool list` 实时显示为准 | 运行前实时查询 | 已上线 |
+| `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤5000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法/字幕/**句间停顿**（`--fragment-interval <秒>`，**仅自训音色**；云引擎音色传了会**报错**而非静默忽略，合法区间由服务端校验并在报错里给出） | 配音音频 wav/mp3（+ 可选字幕）；按文本字符数计费，计量单位与单价以 `gtrk tool list` 实时显示为准 | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color`。默认只传本地抽出的音频（毛片不上传） | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `subtitle_translate` | 单个**字幕文件** `.ass` / `.srt`；`--language <码>` 与 `--translate-language <码>` **双必填**；可选 `--output-format`、`--line-mode`、`--bilingual`、`--subtitle-type`、`--subtitle-color`、`--canvas <WxH>`。不含语音识别 | 译文字幕 `.ass` 或 `.srt` + `result-output.json`（条数统计 + 降级标记） | 运行前实时查询 | 已上线 |
 | `video_long2short_pro` | 单条长视频（整片上传）；`--language <码>` 必填；可选 `--output-language`、`--main-topic`、`--output-size`、`--no-jump-cut`、`--duration-pref`、`--max-clip-sec`、`--split-screen`、`--split-orientation`、`--speed-factor`、`--no-camera-move`、`--no-subtitle`、`--subtitle-translate-language` | 逐条成片 `clip{i}.mp4` + 人读报告 `clips.md`（含润色降级明细） + `result-output.json` | 运行前实时查询 | 已上线 |

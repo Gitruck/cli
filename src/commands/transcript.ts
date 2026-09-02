@@ -255,7 +255,7 @@ export function configureTranscriptCommand(cmd: Command, deps?: Partial<Transcri
 			"本地视频/配音音频转文字稿：原文件不上传，只上传 16k 音频衍生物，生成单个待 Agent 补总结的 Markdown（--json 时另产 transcript.json 供 project init 兜底路）",
 		)
 		.option("-o, --out <file>", "输出 Markdown 文件（缺省 <源文件同目录>/<源文件名>-transcript.md）")
-		.option("--lang <code>", "识别语言代码（默认 zh-CN）", "zh-CN")
+		.option("--lang <code>", "识别语言代码（zh-CN 普通话 / zh-HK 粤语 / en-US / ja-JP…，默认 zh-CN）", "zh-CN")
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录")
 		.option("--reupload", "强制重新上传抽取音频，忽略上传缓存")
 		.option("--json", "机读模式：stdout 只输出最终结果 JSON；并额外产出 <名>-transcript.json（句级时码，供 project init/split 消费）")

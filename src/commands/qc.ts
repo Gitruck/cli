@@ -13,6 +13,10 @@ import { openLocalIndexDb, recordConfirmedCuts } from "../lib/local-index";
 import { log, routeLogsToStderr } from "../lib/log";
 import { runAlignmentQc, tryOpenIndexDb } from "../lib/alignment-qc";
 import { resolveDescribeUrl } from "../lib/describe";
+// 计费身份探针（fix-describe-billing-report-honesty）：读 **gc_member_type**，
+// ⚠️ MUST NOT 换成 `probeMemberType`（那是 matrix_member_type = 素材矩阵检索维度，与计费无关；
+//    服务端已明示「矩阵 internal 而计费 external 则不豁免」，两条轴正交）。
+import { probeGcMemberType } from "../lib/matrix";
 import { loadConfig } from "../lib/config";
 import { requireFfmpeg } from "../lib/ffmpeg";
 
@@ -80,7 +84,10 @@ export function registerQc(program: Command): void {
 			"把段内跳切映射回源时码并补录进本地索引（标 qc_confirmed，治检测阈值漏网）——须配 --gtrk；不带本开关时常规扫描零写库",
 		)
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统）")
-		.option("--alignment", "对齐质检：逐叙述句判定已铺画面是否给到稿句所说（须配 --project；引用段按结构校验跳过；计费=1 积分/句帧）")
+		.option(
+			"--alignment",
+			"对齐质检：逐叙述句判定已铺画面是否给到稿句所说（须配 --project；引用段按结构校验跳过；计费=1 积分/句帧，异步任务计费；同合云内部成员豁免，跑时自动探测）",
+		)
 		.option("--project <dir>", "[alignment] 工程产物目录（定位 gtrk/transcript/split 三件）")
 		.option("--yes", "[alignment] 跳过计费确认")
 		.action(async (input: string | undefined, opts: QcOpts) => {
@@ -165,6 +172,10 @@ async function runAlignmentMode(input: string | undefined, opts: QcOpts): Promis
 			endpoint,
 			ffmpeg,
 			yes: opts.yes === true,
+			// 计费身份探针注入（fix-describe-billing-report-honesty）：与 `matrix describe` 同一条判据。
+			// 抛错不吞在这里——编排层已按非豁免继续并如实标注 probe:"failed"，
+			// 在这吞成 false 会把「探不到」洗成「确定不豁免」。
+			probeExempt: async () => (await probeGcMemberType(cfg)) === "internal",
 			confirm: async (q) => {
 				const rl = createInterface({ input: process.stdin, output: process.stderr });
 				try {
