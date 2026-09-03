@@ -345,7 +345,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 ```
 
 - `--json`：人读日志走 stderr，成功时 stdout 只有一行结果 JSON：
-  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
+  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], arrange_run?:{calls,source,mode,fallback?,units_total,billed,idempotency_recorded?,diff_count?,diffs?:[…],rounds:[{round,mode,source,fallback?,units?,idempotent_replay?,idempotency_recorded?,diff_count?}]}, downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
   （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/injected?, describe_coverage?:{frames,segments,ratio,image_candidates}, items? }`）
 - **拒铺结局**（候选轨已被用户编辑）：stdout 出 `{ ok:false, refused:[…], reason:"tracks_edited", planReusable:true, … }` 且非 0 退出——不是命令失败，plan 已产出，处置见下表。
 - **命令失败**（缺派单、鉴权失败、全部 query 失败、参数越界、坏 plan 被 lay 拒）→ 非 0 退出、报错在 stderr、stdout 无 JSON。先看退出码，把 stderr 报错如实回给用户。
@@ -367,6 +367,14 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
   覆盖率低不等于「没 describe」——一个素材通常只有一个时间点有描述行，离它太远（>15s）的段就近命中不上，**素材越长覆盖率越低**。所以：`coverage` 为 0 ⇒ 本片确实没理解过，去跑 `matrix describe --plan`；`coverage` 偏低但非 0 ⇒ **重跑 describe 不会改善**，如实告诉用户「信号只对这 N% 的候选段起了作用，其余按中性、排序主要还是语义分」，别让他以为加权在全面生效。
 - `lay.anchors` / `lay.anchor_details`（拆分稿圈了关键词锚才出现）：`planned` 钉位数 / `pinned` 用户钉选占锚槽数 / `degraded` 降级数——`degraded` 非零要按 `anchor_details` 指名哪个关键词没锚上及原因（无合格命中/文本漂移/窗口不足），提示用户该处「听到关键词看到画面」的卡点没兑现、可换 query 或补素材后重跑。
 - `lay.downloads`：`raw` 原片回落 / `failed` 掉槽位非零时提一句。
+- `lay.arrange_run`（**本地素材路**才出现；素材矩阵路与总闸压回本地时**整键缺席**）：这一轮**云端编排**的账与归因，MUST 主动读、别当噪声跳过。⚠️ 它与 `--arrange-estimate-only` 出的 `lay.arrange` **不是同一个东西**：那个是零调用的**本地预估**，这个是**服务端复算的实收量**，MUST NOT 拿去互相核账。
+  - `fallback:"self_check_failed"` ⇒ **MUST 主动告诉用户**：这一轮云端产物被弃、已花掉 `units_total` 编排量、成片走的是本地编排；并把 `diffs` 前几条贴给他 / 反馈给我们（`diffs` 是**全量**，机读面不截断）。成片**没问题**（`ok` 仍是 `true`），但这笔钱花得不明不白。
+  - `fallback:"decision_pin_mismatch"` ⇒ 两侧跑的**不是同一版决策算法**，产物不可比而非「算得不一样」。告诉用户服务端版本与本机期望版本这两个数，让他稍后重试；持续如此就反馈给我们。这一档**没有** `diffs`（根本没比过）。
+  - `fallback:"unreachable"/"rejected"/"malformed"` ⇒ 没拿到可用的云端产物；`diff_count`/`diffs` 会**一起缺席**（那是「压根没对拍成」，不是「对拍过且一致」）。
+  - `mode:"shadow"` ⇒ 成片走的**本来就是**本地产物（设计如此，不是回落、没出事），但云端那一次**照样计了费**⇒ MUST 如实报 `units_total`，**MUST NOT** 因为 `source:"local"` 就说「没走云端」。
+  - `units_total > 0` ⇒ 如实报花了多少；`billed:false` ⇒ 全部命中服务端幂等回放，本轮**零新增计费**，别吓唬用户。
+  - `idempotency_recorded:false` ⇒ 幂等登记没写成，**提示用户重发会重新计费**（别建议他「重跑一次试试」）。
+  - `rounds` **恒在**（开 `--arrange-qc` 时不止一条）：逐轮的账在这里，`units_total` 已按轮累加并跳过回放轮。某轮的 `units` 缺席 = 那一轮「已计费但服务端没告诉我们计了多少」，**MUST NOT** 读成「那轮没花钱」。
 - `integrity`（素材落盘自检，只在真写回过时出现）：`dangling` 悬空引用全量清单；`danglingReferenced`（时间线上没素材可放）与 `danglingOrphan`（只挂在 materials 里）严重度差一个量级，**分开说**；`external` 绝对路径找不到文件另一档。告知不拦阻，别自己删素材。
 - 单 query 失败是局部化的（`counts.errors>0` 但 `ok:true`）：如实说哪几段没检到。
 - 工程缺失/非 v1 → 告警跳过铺轨但仍产 plan（`lay` 字段缺失）。

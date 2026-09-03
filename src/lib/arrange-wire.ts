@@ -22,11 +22,32 @@
  * ## 上行集是怎么定的：从服务端**实读**字段反推
  *
  * 不是照着 design 的字段表抄，而是把移植后的决策层（infra
- * `utils/process/media/vision/broll_arrange/`）里所有 `r.get(...)` / `s[...]` 扫一遍，
- * 得到 result 级 10 键、segment 级 6 键、beat 级 8 键、anchor 级 3 键。
- * 判据是「投影前后本地 `planBeatFills` 产物**逐字节相同**」，由 26 份金样对拍钉死
- * （见 `test/broll-arrange-wire.test.mjs`）——那条测试同时证明了两件事：
- * 没多传（隐私）、没少传（正确性）。
+ * `utils/process/media/vision/broll_arrange/`）里所有 `r.get(...)` / `s[...]` 扫一遍。
+ *
+ * **键计数（2026-09-03 实数一遍，fix-arrange-wire-decision-signal-dropped）**：
+ * result 级 **10** 键（其中 `describe` 是容器，内含 **2** 键：`usable_flags.blurry` /
+ * `at_sec`——本次由 1 增到 2）、segment 级 **7** 键（本次由 6 增到 7，新增 `black`）、
+ * beat 级 **9** 键、anchor 级 3 键、query 级 2 键、direct_slot 级 7 键。
+ * ⟲ 订正记录：beat 级原写 8，是 `add-arrange-direct-tier` 加 `arrange_mode` /
+ * `direct_slots` 之后**没跟着改**留下的陈数（本次一并数正，非本件引入）。
+ * ⚠️ 这几个数是**人数的**，没有任何装置在维持它——改白名单的人 MUST 同批数一遍。
+ *
+ * 判据是「投影前后本地 `planBeatFills` 产物**逐字节相同**」，由 **50 份**金样
+ * （`cases/` 42 + `real/` 8）对拍钉死（见 `test/broll-arrange-wire.test.mjs`）。
+ *
+ * ★ **这条判据证明什么、不证明什么（2026-09-03 订正）**：
+ * 它原先被写成「同时证明了两件事：没多传（隐私）、没少传（正确性）」——**那句话不成立**。
+ * · **没多传**由另一条测试单独负责（逐条枚举脏字段哨兵、搜整棵上行体 JSON 树），
+ *   不是本判据的产物：多传的字段决策层不读，产物照样逐字节相同。
+ * · **没少传**只在**金样里出现过该字段**时才可判。金样中不存在的字段，这条等式对它
+ *   **恒真** —— 2026-09-03 凯奇坎那次就是这么全绿放行的：`describe.at_sec` 与
+ *   `segment.black` 已被决策层消费、却一份金样都没带过，闸对它们**结构上不存在**。
+ *
+ * ⇒ **持续义务（spec 条款，非注释建议）**：新增一个会被客户端决策层读取的 plan 字段时，
+ * MUST 同批 ① 纳入本白名单（或按 spec 显式登记 / 走归一化免登记的第三条出路），
+ * 且 ② 补一份**带该字段**的金样。清单与那条会红的断言在
+ * `test/broll-arrange-wire.test.mjs` 的「决策层实读字段清单」一节，
+ * 条款正本见 change `fix-arrange-wire-decision-signal-dropped` 的 delta。
  *
  * ## 三处形态是刻意「不优化」的
  *

@@ -43,7 +43,7 @@ import {
 	type SourceLayer,
 	wouldRefuseLay,
 } from "../lib/matrix-lay";
-import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
+import { type ArrangeEndpoint, estimateGate, type requestArrange, resolveArrangeUrl } from "../lib/arrange-client";
 import { type ArrangeGateResult, type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
 import {
 	classifyCutsProbe,
@@ -279,6 +279,12 @@ export interface MatrixRunDeps {
 	 *  没有它，零枚举以外的结局（部分为空、断链上报）在单测里根本走不到：
 	 *  真索引一个素材必然要 ffprobe + 云端 embed，而单测两样都不许有。 */
 	indexRun?: typeof indexLocalMaterials;
+	/** 云端编排请求替身（缺省 = 真实 `requestArrange`，生产路恒 `undefined` ⇒ 行为逐字节不变）。
+	 *  ⚠️ 同 `indexRun` 的理由：没有它，命令层**一次云端编排响应都造不出来**——
+	 *  `arrange-gate` 侧的 `request` 注入到不了命令层（`arrangeWiring` 只注 endpoint），
+	 *  于是 `lay.arrange_run` 的端到端闸（自校验回落 / shadow / 回放 / 违约）一条都跑不起来。
+	 *  射程就这一个字段，MUST NOT 顺手加别的替身。 */
+	arrangeRequest?: typeof requestArrange;
 }
 
 export function registerMatrix(program: Command): void {
@@ -2671,42 +2677,87 @@ function anchorRankNote(d: AnchorOutcome): string | null {
  * 零个 arrange 键 ⇒ 对 agent 而言，这一轮与「云端顺利产出」**在机读面上无从分辨**。
  * 更糟：日志里被「…另有 N 处」吞掉的差异明细，此前在任何地方都拿不到。
  *
- * ## 三条口径
+ * ## 出现条件是**黑名单**，MUST NOT 退回白名单
  *
- * 1. **只在真发过请求时出现**（`called === true`）。判据 MUST NOT 靠 `source`/`fallback` 反推：
- *    shadow 档返回 `source:"local"` 且无 `fallback`，与总闸压回本地完全同形，而前者真计费。
- * 2. **`billed` 是三态**：`true` 真执行真计费 / `false` 命中幂等回放未新增计费 /
- *    缺席=不适用（没发过请求）。缺席 ⟺ 真执行了这条契约在 gate 层，此处只做转述。
- * 3. **逐轮累加**：`--arrange-qc` 下最多真调 3 次，units MUST 求和而不是取末轮。
+ * 默认出键；只有下面两种「本来就没有云端编排这个概念」的形态整键缺席：
+ *
+ * | 被采纳那一轮的形态 | 出键？ |
+ * |---|---|
+ * | `mode === "local"`（总闸压回 / 素材矩阵路缺省档） | ❌ |
+ * | `fallback === "out_of_scope"`（矩阵路显式点了云端档仍留本地） | ❌ |
+ * | 其余全部：unreachable / rejected / malformed / decision_pin_mismatch / self_check_failed / cloud 采纳 / **shadow** | ✅ |
+ *
+ * ⚠️ **判别位是 `mode === "local"` 不是 `fallback === "kill_switch"`**：素材矩阵路的缺省档
+ * 在 `arrange-gate.ts` 那条早返回里**根本不出 `fallback` 键**（只有 `requestedMode !== "local"`
+ * 才写它），只认 `fallback` 会把 `matrix` 主流量全部误命中——那就是「绝大多数工程的 lay JSON 无故改字节」。
+ *
+ * ⚠️ **MUST NOT 改回「`source === "cloud"` 或 `fallback` 属于某四种」那条白名单**：它**漏 shadow 档**。
+ * shadow 返回的是 `source: "local"` 且**不带 `fallback`**，与总闸压回本地在这两个字段上完全同形，
+ * 而前者真发过请求、真计过费、真有 diffs。白名单的失效模式是**静默漏项**——今天漏 shadow，
+ * 明天新增一个 `FallbackReason` 照漏，而漏了没有任何一处会红；黑名单的失效模式是多出一个键
+ * （吵，但看得见）。本键的整个论点就是「静默比吵更坏」，判据自己 MUST NOT 反着来。
+ *
+ * ⚠️ 如实登记一处**过报**（本轮自裁：照出，不收窄）：`unreachable` 含「未配置编排端点」那一支
+ * ——严格说没有字节离开本机。照出键是因为那一路恰恰是本键要治的病（用户以为走云端、
+ * 实际悄悄换了本地引擎），且它 `units` / `diffs` 双缺席 ⇒ **不谎报任何计费**。
+ *
+ * ## 三条形态纪律
+ *
+ * 1. **`rounds` 恒在**（长度 = 真调用次数，单次也是长度 1）：键的定义是「每一次真调用一条」，
+ *    少一条就是缺项而不是压缩——这让「只留最后一轮」那个 bug 类别**结构上不可复发**。
+ * 2. **`units_total` = Σ 已知的那些，跳过回放轮**。开 `--arrange-qc` 时第 2 次调用的上行字节
+ *    与第 1 次相同 ⇒ 几乎必然命中服务端幂等回放，不看标记就累加会把同一笔账数两遍。
+ *    某轮拿不到 `units` 时 `rounds[i].units` **如实缺席**（MUST NOT 补 0）——
+ *    `malformed` 那一路是**已计费但数不知道**，补 0 是假话。
+ * 3. **`diff_count` 与 `diffs` 成对**出现或成对缺席。没对拍过（unreachable / rejected /
+ *    malformed / decision_pin_mismatch 几路）时整对缺席，MUST NOT 出 `diff_count: 0` + `diffs: []`
+ *    ——那读作「对拍过且逐字节一致」，与「压根没对拍成」是两件相反的事。
+ *    `diffs` **全量投出，MUST NOT 截断**：人读日志的 5 条上限只属于日志。
+ *
+ * ★ 导出**仅供测试**（`test/matrix-arrange-surface.test.mjs`）：多轮累加要开 `--arrange-qc`，
+ *   而那条闭环在进程内跑不起来（真 ffmpeg + 真素材理解端点），偏偏「只留最后一轮」正是本函数要防的 bug。
+ *
+ * @param adopted 被**采纳**的那一轮（开 QC 时 = 最后一轮）。顶层 `source` / `mode` / `fallback` /
+ *   `diff_count` / `diffs` 取它——它才是产物的来源；逐轮的账在 `rounds` 里。
  */
-function summarizeArrangeRun(calls: ArrangeGateResult[]): Record<string, unknown> | undefined {
-	const cloudCalls = calls.filter((c) => c.called === true);
-	if (!cloudCalls.length) return undefined;
-	const last = cloudCalls[cloudCalls.length - 1]!;
-	// units 逐轮求和：每一轮都是一次独立的服务端执行，计费也是逐轮发生的
-	const unitsTotal = cloudCalls.reduce((a, c) => a + (typeof c.units === "number" ? c.units : 0), 0);
-	const anyBilled = cloudCalls.some((c) => c.idempotentReplay !== true);
-	const rounds = cloudCalls.map((c) => ({
+export function summarizeArrangeRun(calls: ArrangeGateResult[], adopted: ArrangeGateResult | undefined): Record<string, unknown> | undefined {
+	if (!adopted || calls.length === 0) return undefined;
+	// ★ 黑名单：只有这两种形态整键缺席（见上表），其余一律出键
+	if (adopted.mode === "local" || adopted.fallback === "out_of_scope") return undefined;
+	// units 逐轮求和：跳过回放轮（零新增计费）与 units 缺席的轮（那几轮「数不知道」，补 0 是假话）
+	const unitsTotal = calls.reduce((a, c) => a + (c.idempotentReplay === true || typeof c.units !== "number" ? 0 : c.units), 0);
+	const anyBilled = calls.some((c) => c.idempotentReplay !== true);
+	const rounds = calls.map((c, i) => ({
+		round: i,
 		mode: c.mode,
 		source: c.source,
 		...(c.fallback ? { fallback: c.fallback } : {}),
 		...(typeof c.units === "number" ? { units: c.units } : {}),
 		...(c.idempotentReplay === true ? { idempotent_replay: true } : {}),
 		...(c.idempotencyRecorded === false ? { idempotency_recorded: false } : {}),
-		diff_count: c.diffs?.length ?? 0,
+		// 成对纪律的逐轮半边：没对拍过就整个不出（MUST NOT 补 0）
+		...(c.diffs ? { diff_count: c.diffs.length } : {}),
+		...(c.decisionPin ? { decision_pin: c.decisionPin } : {}),
 	}));
 	return {
-		calls: cloudCalls.length,
-		source: last.source,
-		mode: last.mode,
-		...(last.fallback ? { fallback: last.fallback } : {}),
+		calls: calls.length,
+		source: adopted.source,
+		mode: adopted.mode,
+		...(adopted.fallback ? { fallback: adopted.fallback } : {}),
 		units_total: unitsTotal,
 		billed: anyBilled,
-		diff_count: last.diffs?.length ?? 0,
-		// ★ 差异明细全量出（人读日志只打前 5 条 + 「…另有 N 处」，被吞掉的那几处此前无处可取）
-		...(last.diffs?.length ? { diffs: last.diffs } : {}),
-		// 多轮时才出 rounds（单轮时它与顶层逐字重复，白占体积）
-		...(cloudCalls.length > 1 ? { rounds } : {}),
+		// ⚠️ 幂等登记按**任一轮**判：只要有一轮没登记成，「重跑会命中幂等、不二次计费」这句承诺就作不得数。
+		//    这是一句关于钱的承诺，取值宁可保守。
+		...(calls.some((c) => c.idempotencyRecorded === false) ? { idempotency_recorded: false } : {}),
+		// ★ 成对出：有对拍过才有这两个。差异明细**全量**（人读日志只打前 5 条 + 「…另有 N 处」，
+		//   被吞掉的那几处此前无处可取，而跨语言决策分叉恰恰要逐槽比对才认得出根因与级联）
+		...(adopted.diffs ? { diff_count: adopted.diffs.length, diffs: adopted.diffs } : {}),
+		// 决策层版本核对结论（link-arrange-decision-pin-echo）：本对象与 rounds[i] **两处**都出，
+		// 沿用同一条条件键纪律 —— 拿到过响应才有；`server: null` 是「服务端没给」，
+		// 整键缺席才是「这一档没跑到」。MUST NOT 预留空字段或补 null。
+		...(adopted.decisionPin ? { decision_pin: adopted.decisionPin } : {}),
+		// ★ 恒在，不为单轮做特例
+		rounds,
 	};
 }
 
@@ -2846,7 +2897,16 @@ async function layIntoProject(
 	// 本地素材路走 cloud，素材矩阵路走 local（逐字不动）。显式档位恒优先。
 	// 云端档只承担本地素材上轨铺排；素材矩阵路由 isLocalArrangeScope 挡在门外，
 	// 那不是回滚，是终裁「按业务线切，不按算法切」的执行面。
-	let arrangeMode = resolveArrangeMode(resolveAutoArrangeMode(layOpts.arrangeMode, plan));
+	// ⚠️ **两个变量不是一回事，MUST NOT 合成一个**（2026-09-03 实测抓出的一处静默）：
+	//    · `requestedArrangeMode` = 定档结果，**未经总闸**。它是交给 gate 的那个参数。
+	//    · `arrangeMode`          = 过完总闸的实际取数路。命令层自己的门（预估确认 /
+	//                               `--arrange-estimate-only` 的 applicable）看的是它。
+	//    合成一个的后果**不是**档位算错（两次 resolve 幂等），而是 gate 里
+	//    `requestedMode !== "local"` 这个判别位被抹平 ⇒ 总闸压回本地时
+	//    `fallback: "kill_switch"` 与那句 log.info **双双不触发** ⇒ 悄悄换了引擎而无人知情。
+	//    那正是 §0.2「人读机读双静默」记的病灶，且它在命令层根本不可达（只有 gate 单测能看见）。
+	const requestedArrangeMode = resolveAutoArrangeMode(layOpts.arrangeMode, plan);
+	let arrangeMode = resolveArrangeMode(requestedArrangeMode);
 	// ★ 抽芯的实质：本地素材路**不再自动回落本地**。
 	//   端点不可达 / 服务端业务拒绝 / 产物结构违约 ⇒ 明确报错，而不是悄悄换一套算法把活干完。
 	//   理由是诚实性：回落产出的是**另一套算法**的结果，用户以为自己拿到的是云端那套。
@@ -2859,6 +2919,17 @@ async function layIntoProject(
 	// ── 只预估不执行（add-arrange-estimate-only）：停在**计价确认之前**，与确认门同一处取值 ──
 	//    MUST NOT 另算一份编排量——两处各算一遍，预估与实收迟早会漂，而漂了没人会发现。
 	//    结局是**成功**：「我在做决定」不是「我拒绝了」，压成同一个 declined 会让调用方分不清。
+	//
+	// ⚠️ **键名判别（本块出的是 `lay.arrange`，不是 `lay.arrange_run`）**
+	//    ——fix-arrange-selfcheck-json-surface §0.1 兜底档，两处各写一份，因为下一个人只会读到其中一处：
+	//
+	//    · `lay.arrange`     ⟺ **只预估、零云端调用**。这里的 `units` 是**本地规模公式算出的预估值**，
+	//                           服务端一个字节都没跑过，**MUST NOT 拿它去核账**。
+	//    · `lay.arrange_run` ⟺ 本轮**走上了云端取数路**（含 shadow、含没跑成的那几路）。
+	//                           那里的 `units_total` 是**服务端复算的实收量**，是账单上的数。
+	//
+	//    两处叫同一个名字迟早被人当同一个数去核账 —— 那正是「读起来自洽的错数」，
+	//    而自洽的错数没人会去质疑。另一份判别注释在本文件 `summarizeArrangeRun` 的投影点旁。
 	if (layOpts.arrangeEstimateOnly) {
 		const applicable = arrangeMode !== "local" && isLocalArrangeScope(plan);
 		if (!applicable) {
@@ -2937,11 +3008,16 @@ async function layIntoProject(
 	//   包一层采集，任何调用路径（含 QC 内部）都跑不掉，MUST NOT 改成在 QC 里各记一份。
 	const arrangeCalls: ArrangeGateResult[] = [];
 	const arrangeOnce = async (p: BrollPlan) => {
-		const r = await runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, arrangeMode, {
+		// ⚠️ 传的是 `requestedArrangeMode`（**未过总闸**）不是 `arrangeMode`：总闸由 gate 自己再压一次，
+		//    这样它才分得清「用户点的是云端、被我们压回了本地」与「本来就该走本地」——
+		//    传已压过的值等于把这个判别位抹平，`kill_switch` 归因与那句 log.info 会双双静默。
+		const r = await runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, requestedArrangeMode, {
 			runLocal: () => planBeatFills(p, layN, scoreFloor, decisionOpts),
 			...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
 			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
 			...(strictCloud ? { strictCloud: true } : {}),
+			// 测试替身（MatrixRunDeps.arrangeRequest）：生产路恒缺席 ⇒ gate 走真 `requestArrange`
+			...(layOpts.deps.arrangeRequest ? { request: layOpts.deps.arrangeRequest } : {}),
 			log: gateLog,
 		});
 		arrangeCalls.push(r);
@@ -2965,7 +3041,7 @@ async function layIntoProject(
 	}
 	// 机读归因：**在早返回之前算好**——下面还有两条 post-arrange 早返回（图片运镜拒付 / 拒铺），
 	// 那两条也已经真发过请求真计费了，同样要带上归因，MUST NOT 只在正常出口出。
-	const arrangeRun = summarizeArrangeRun(arrangeCalls);
+	const arrangeRun = summarizeArrangeRun(arrangeCalls, arrangeRes);
 	void qcResidual;
 
 	// ── L1 结构自检（P3.3）：闪帧风险前置声明。**零成本恒开**——只看已有数据，不抽帧不调模型。
@@ -3155,8 +3231,15 @@ async function layIntoProject(
 				//   原文这里写「**零云端调用**」，那是**错误陈述**——本分支位于 arrangeOnce 之后，
 				//   云端编排早已执行并计费。把「图片运镜这一步零调用」说成「本轮零调用」，
 				//   会让用户以为这一轮没花钱。零调用的只有图片运镜那一项。
+				//   ⚠️ 后半句的「重跑会命中幂等」MUST 与 `idempotency_recorded === false` 联动：
+				//     登记没写成时**不许**这么承诺——那种情形下字节相同的重发会真的重算并重新计费
+				//     （`arrange-gate.ts` 已有同款告警）。承诺错了比不承诺更坏：用户会照着它重跑。
 				(arrangeRun
-					? `\n⚠️ 注意：本轮的 **B-roll 云端编排已经跑过并计费**（编排量 ${arrangeRun.units_total ?? "?"}），零调用的只是图片运镜这一步。`
+					? `\n⚠️ 注意：本轮的 **B-roll 云端编排已经跑过并计费**（编排量 ${arrangeRun.units_total ?? "?"}），零调用的只是图片运镜这一步 ⇒ 这笔编排量已经花掉了。\n` +
+						"plan 与编排产物照常可复用；" +
+						(arrangeRun.idempotency_recorded === false
+							? "⚠️ 但服务端本轮**幂等登记未写成** ⇒ 重跑同参数会**重新执行并重新计费**，不受幂等保护。"
+							: "重跑时同参数会命中服务端幂等（24h 内不二次计费）。")
 					: "零云端调用。") +
 				"（broll-plan.json 照常可用）可用 --yes 跳过确认，或 --no-image-broll 排除图片候选后重跑。",
 		);
