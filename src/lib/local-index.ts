@@ -1725,8 +1725,12 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	const stability = { stableScenes: 0, unstableScenes: 0, framesSaved: 0, blackVetoScenes: 0, blackVetoFrames: 0 };
 	let sceneCount = 0;
 	let frameCount = 0;
-	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）
-	const ff = opts.planMaterial && opts.embedFrames ? null : requireFfmpeg(opts.ffmpegPath);
+	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）。
+	// ⚠️ 零枚举时 MUST NOT 要 ffmpeg：一个素材都没有就没有任何抽帧要做，这里若先 `requireFfmpeg` 抛
+	//    「未找到 ffmpeg」，命令层的零枚举诊断（真因点名 / ok:false / 退出码 1）就一句都到不了用户面前——
+	//    用户看到的是一条与真因无关的装包提示（2026-09-03 parity CI 的 Linux runner 首跑实证：
+	//    intake-dirs-path 三条 + local-search-material-scope 一条正是这么红的）。`ff` 只在逐素材循环里解引用。
+	const ff = (opts.planMaterial && opts.embedFrames) || files.length === 0 ? null : requireFfmpeg(opts.ffmpegPath);
 	// ── 解码车道状态（speedup-matrix-index-proxy-decode）────────────────────────
 	// requested=auto 时才允许自动降级；用户钉死车道时失败必须响亮——显式指定的意图就是验证这条路，
 	// 静默换成别的路等于没验。
