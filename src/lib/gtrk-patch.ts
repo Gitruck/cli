@@ -312,32 +312,38 @@ export function validateAll(gtrk: Obj): Violation[] {
 
 	for (const el of els) {
 		const cls = classifyForValidation(el);
-		const where = `${el.ref.kind}:${el.ref.trackIndex}#${el.ref.clipArrayIndex}`;
 		const id = el.clipId || "(gap)";
+		// `where` 只进人读 message（带数组序号，方便定位）；`ident` 才进集合差用的 key。
+		// ⚠️ 数组序号 MUST NOT 入 key：`insertElement`（split 后半）会让插入点之后的元素全部换号，
+		//    序号入 key 就把入档既存的违规判成「本次造成」而硬拒（真机实证：切在既存 E1 之前的 split 被拒、
+		//    且文案指向与改动无关的 clip）。key = 元素身份 + 违规码 + 该违规自身的证据数值：未触碰元素的
+		//    数值一字不变 ⇒ key 位置无关；被触碰元素只有当编辑真改了该违规涉及的数值时才会重判为本次。
+		const where = `${el.ref.kind}:${el.ref.trackIndex}#${el.ref.clipArrayIndex}`;
+		const ident = `${el.ref.kind}:${el.ref.trackIndex}:${id}`;
 		const stMs = readMs(el.clip.track_st);
 		const durMs = readMs(el.clip.duration);
 		const edMs = readMs(el.clip.track_ed);
 
 		if (!Number.isFinite(stMs) || !Number.isFinite(durMs)) {
-			out.push({ key: `${where}/required`, code: "missing_required_timecode",
+			out.push({ key: `${ident}/required`, code: "missing_required_timecode",
 				message: `${where}（${id}）缺 track_st 或 duration` });
 			continue;
 		}
 		// E6：duration > 0
 		if (durMs <= 0) {
-			out.push({ key: `${where}/dur_positive`, code: "duration_not_positive",
+			out.push({ key: `${ident}/dur_positive/${durMs}`, code: "duration_not_positive",
 				message: `${where}（${id}）duration=${ms2sec(durMs)}s，须 > 0` });
 		}
 		// E2：track_ed − track_st = duration（整毫秒域，零容差）
 		if (Number.isFinite(edMs) && edMs - stMs !== durMs) {
-			out.push({ key: `${where}/E2`, code: "track_identity_broken",
+			out.push({ key: `${ident}/E2/${edMs - stMs}!=${durMs}`, code: "track_identity_broken",
 				message: `${where}（${id}）track_ed − track_st = ${edMs - stMs}ms ≠ duration ${durMs}ms` });
 		}
 
 		if (cls === "gap" || cls === "beat") {
 			// E7 / E8：gap 与 beat MUST NOT 写 clip_st / clip_ed
 			if (el.clip.clip_st !== undefined || el.clip.clip_ed !== undefined) {
-				out.push({ key: `${where}/no_src_range`, code: "src_range_on_non_clip",
+				out.push({ key: `${ident}/no_src_range`, code: "src_range_on_non_clip",
 					message: `${where}（${id}）是 ${cls}，MUST NOT 含 clip_st/clip_ed` });
 			}
 			continue;
@@ -348,13 +354,13 @@ export function validateAll(gtrk: Obj): Violation[] {
 		const cedMs = readMs(el.clip.clip_ed);
 		// E1：clip_ed − clip_st = duration（整毫秒域，零容差）
 		if (Number.isFinite(cstMs) && Number.isFinite(cedMs) && cedMs - cstMs !== durMs) {
-			out.push({ key: `${where}/E1`, code: "clip_identity_broken",
+			out.push({ key: `${ident}/E1/${cedMs - cstMs}!=${durMs}`, code: "clip_identity_broken",
 				message: `${where}（${id}）clip_ed − clip_st = ${cedMs - cstMs}ms ≠ duration ${durMs}ms` });
 		}
 		// E4：material 须在 materials 中
 		const matId = typeof el.clip.material === "string" ? el.clip.material : String(el.clip.material ?? "");
 		if (matId && !mats.has(matId)) {
-			out.push({ key: `${where}/E4`, code: "material_not_found",
+			out.push({ key: `${ident}/E4/${matId}`, code: "material_not_found",
 				message: `${where}（${id}）material=${matId} 不在 materials 中` });
 		}
 		// E5 源界。⚠️ 上界那个 1ms 是全档校验器里**唯一**的容差，且恒为 1ms：
@@ -362,16 +368,16 @@ export function validateAll(gtrk: Obj): Violation[] {
 		//    容差 MUST NOT 扩大到下界、MUST NOT 扩大到 clip_st < clip_ed、MUST NOT 用于任何恒等式。
 		if (Number.isFinite(cstMs)) {
 			if (cstMs < 0) {
-				out.push({ key: `${where}/E5_lower`, code: "src_out_of_range",
+				out.push({ key: `${ident}/E5_lower/${cstMs}`, code: "src_out_of_range",
 					message: `${where}（${id}）clip_st=${ms2sec(cstMs)}s < 0` });
 			}
 			if (Number.isFinite(cedMs) && cstMs >= cedMs) {
-				out.push({ key: `${where}/E5_order`, code: "src_range_not_increasing",
+				out.push({ key: `${ident}/E5_order/${cstMs}>=${cedMs}`, code: "src_range_not_increasing",
 					message: `${where}（${id}）clip_st 须 < clip_ed` });
 			}
 			const matDur = mats.get(matId);
 			if (matDur !== null && matDur !== undefined && Number.isFinite(cedMs) && cedMs > matDur + 1) {
-				out.push({ key: `${where}/E5_upper`, code: "src_exceeds_material",
+				out.push({ key: `${ident}/E5_upper/${cedMs}>${matDur}`, code: "src_exceeds_material",
 					message: `${where}（${id}）clip_ed=${ms2sec(cedMs)}s 超出素材时长 ${ms2sec(matDur)}s（容差 1ms）` });
 			}
 		}
