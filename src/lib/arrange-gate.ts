@@ -43,7 +43,7 @@
 import type { BrollPlan } from "./matrix";
 import type { ArrangeOutcome } from "./arrange-apply";
 import { applyArrangeResponse, diffArrangeOutcome } from "./arrange-apply";
-import { type LocalArrangeOpts, projectArrangeRequest } from "./arrange-wire";
+import { type ArrangeRequest, type LocalArrangeOpts, projectArrangeRequest } from "./arrange-wire";
 import { type ArrangeDeps, type ArrangeEndpoint, requestArrange } from "./arrange-client";
 import { compareDecisionPin, type DecisionPinRelation, decisionPinCauses, LOCAL_DECISION_ALGO_PIN } from "./arrange-decision-pin";
 
@@ -154,6 +154,17 @@ export interface ArrangeGateDeps {
 	 *   扔掉一个手上就有的可用产物对用户没有任何好处。照旧回落 + 大声告知。
 	 */
 	strictCloud?: boolean;
+	/**
+	 * `--dump-request <file>` 的落盘钩子（**纯透传**，add-broll-arrange-atom 1.3）。
+	 *
+	 * 拿到的是**实际上行的那个对象**，在发请求**之前**回调——`unreachable` / `rejected`
+	 * 那几路同样留得下证据，而那恰恰是客服最需要复现的场景（跑成功的那次没人来问）。
+	 *
+	 * ⚠️ 本文件**不认识文件系统，也 MUST NOT 认识**：gate 的职责是取数路与四层回滚，
+	 *    往里塞一个 `writeFileSync` 会让「怎么落盘」这件事在两处各有一份口径。
+	 *    落点解析、工程目录禁写、多轮命名全在命令层（`makeArrangeDumper`）。
+	 */
+	dumpRequest?: (req: ArrangeRequest) => void;
 }
 
 /** 抽芯档下不再回落的那三种情形共用的错误。
@@ -242,6 +253,9 @@ export async function runArrangeWithFallback(
 	if (!deps.endpoint) return fallback("unreachable", "未配置编排端点");
 
 	const req = projectArrangeRequest(plan, lay, scoreFloor, opts, deps.costCap !== undefined ? { costCap: deps.costCap } : {});
+	// `--dump-request`：**发请求之前**落盘。放在 try 外、放在 await 前，是为了让
+	// 「连不上」「被拒」那两路也留得下证据——那才是有人会拿着来找我们的场景。
+	deps.dumpRequest?.(req);
 	let resp;
 	try {
 		resp = await (deps.request ?? requestArrange)(deps.endpoint, req, deps.clientDeps ?? {});

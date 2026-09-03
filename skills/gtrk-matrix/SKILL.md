@@ -142,6 +142,8 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 落轨前先质检画音对齐 | `--arrange-qc` | 开关 · 缺省关 | 只查各 beat 的**卡点句**（span.from 领衔句）：画面没给到稿句说的东西就换候选重排，最多 2 轮，到限即交付 + 如实登记残余。零渲染。⚠️ 按帧计费（每卡点句 1 帧/轮），跑前报预估求确认。**默认关，用户没说就别带**。拿不到卡点句（无 dispatch / 重投影降级）时会明说「跳过 ≠ 查过」，别把那条日志读成通过 |
 | 云端编排本次上限 | `--arrange-cost-cap <n>` | 正整数 · 不限 | 超限服务端**前置拒绝**、零执行零计费（不是跑一半掐断）。只在 `--arrange shadow\|cloud` 时有意义 |
 | 先估价再决定跑不跑 | `--arrange-estimate-only` | 开关 · 缺省关 | 走到云端编排的计价确认那一步就停：报出编排量后**成功**返回（`ok:true` + `estimateOnly:true`，不是「被拒绝」），零云端调用、工程零改动。机读值在 `lay.arrange.units` 与 `lay.arrange.scale`。⚠️ 它省的是**云端那一次调用与其计费**（及其后的下载落轨），不是整条链——工程/plan/重投影照样要走。素材矩阵路会报 `applicable:false` 而**不是 0**。与 `--yes` 同给时以它为准 |
+| 云端编排请求体存证 | `--dump-request <file>` | 路径 · 缺省不写 | **排障专用，用户没提就别带。** 把**实际上行的**云端编排请求体逐字节落到该文件——服务端**不保存 plan 全文**，所以复现一次调用只能靠它。⚠️ **不能指向工程目录内**（工程会被打包拷走，而它含 beat 名与检索词），传了会报参数错；开 `--arrange-qc` 时每轮各一份（第 N 轮加 `.roundN`）。回执在 `lay.arrange_run.dump_request`。⚠️ 转交这份文件前 MUST 先告诉用户里面有什么，别替他做决定 |
+| 外发调参仪表 | `--explain` | 开关 · 缺省关 | 缺省 `lay.dedup` 只出 `emptySlots`（判素材池够不够用，upsell 判据就是它）；本开关再补 `emptySlotsByRefine` / `adjacentWaived` / `hotSlotsPlaced` / `blurrySlotsPlaced` 四个**调参仪表**，人读日志同口径。**不改任何决策**，工程产物逐字节不变。⚠️ 用户问「为什么这颗抖/糊/空」时才带，别缺省开着刷噪音 |
 | 不要黑底垫轨 | `--no-black-bed` | 开关 · 默认铺 | 黑底按 beat 包络整条铺，B-roll 期间遮口播 |
 | 已编辑轨强铺逃生门 | `--force-relay` | 开关 · 关 | 用户明确点头才带；raw 登记删除不可恢复 |
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
@@ -247,7 +249,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
 | 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 自己组的 plan 从这进。⚠️ 组的时候把检索返回的 `results` 条目**原样搬**——`cuts` / `motion` 住在 `segments[]` 里面，自己重写 segments 就把它们丢了（后果：端点残片收缩空转、高运动降权失效，见配方 C 要点） |
 | 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
-| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
+| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--dump-request/--explain/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
 ## plan 编辑口径（法定通道的边界）
 
@@ -345,7 +347,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 ```
 
 - `--json`：人读日志走 stderr，成功时 stdout 只有一行结果 JSON：
-  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], arrange_run?:{calls,source,mode,fallback?,units_total,billed,idempotency_recorded?,diff_count?,diffs?:[…],rounds:[{round,mode,source,fallback?,units?,idempotent_replay?,idempotency_recorded?,diff_count?}]}, downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
+  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots}（**调参仪表四件只在 `--explain` 时才出**）, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], arrange_run?:{calls,source,mode,fallback?,units_total,billed,idempotency_recorded?,diff_count?,diffs?:[…],rounds:[{round,mode,source,fallback?,units?,idempotent_replay?,idempotency_recorded?,diff_count?}], dump_request?, dump_request_files?}, downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
   （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/injected?, describe_coverage?:{frames,segments,ratio,image_candidates}, items? }`）
 - **拒铺结局**（候选轨已被用户编辑）：stdout 出 `{ ok:false, refused:[…], reason:"tracks_edited", planReusable:true, … }` 且非 0 退出——不是命令失败，plan 已产出，处置见下表。
 - **命令失败**（缺派单、鉴权失败、全部 query 失败、参数越界、坏 plan 被 lay 拒）→ 非 0 退出、报错在 stderr、stdout 无 JSON。先看退出码，把 stderr 报错如实回给用户。
@@ -375,6 +377,8 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
   - `units_total > 0` ⇒ 如实报花了多少；`billed:false` ⇒ 全部命中服务端幂等回放，本轮**零新增计费**，别吓唬用户。
   - `idempotency_recorded:false` ⇒ 幂等登记没写成，**提示用户重发会重新计费**（别建议他「重跑一次试试」）。
   - `rounds` **恒在**（开 `--arrange-qc` 时不止一条）：逐轮的账在这里，`units_total` 已按轮累加并跳过回放轮。某轮的 `units` 缺席 = 那一轮「已计费但服务端没告诉我们计了多少」，**MUST NOT** 读成「那轮没花钱」。
+  - `dump_request`（只在带了 `--dump-request` 时出）：上行请求体的落点。**服务端不留 plan 全文**，所以这份文件是复现这次调用的唯一凭据。写了不止一份时另出 `dump_request_files` 全量清单——**按它读，MUST NOT 自己按命名规则拼后几轮的路径**。
+  - 服务端**频率保护**（按 key 限流 / 相似请求指纹，同回 HTTP 429）⇒ CLI 先按限流窗口对齐等待并重试，仍不通过才落到 `fallback:"unreachable"`，**零执行零计费**。此时报错原文里带的是服务端说法（「频率保护」而非「端点不可达」）——MUST 照那句转述：**不是余额问题、也不是请求写错了**，隔一会儿再来，或先用 `--arrange-estimate-only` 只看规模。⚠️ MUST NOT 建议用户立刻连着重跑（那只会把窗口撑得更满）。
 - `integrity`（素材落盘自检，只在真写回过时出现）：`dangling` 悬空引用全量清单；`danglingReferenced`（时间线上没素材可放）与 `danglingOrphan`（只挂在 materials 里）严重度差一个量级，**分开说**；`external` 绝对路径找不到文件另一档。告知不拦阻，别自己删素材。
 - 单 query 失败是局部化的（`counts.errors>0` 但 `ok:true`）：如实说哪几段没检到。
 - 工程缺失/非 v1 → 告警跳过铺轨但仍产 plan（`lay` 字段缺失）。

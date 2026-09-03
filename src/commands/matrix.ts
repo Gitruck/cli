@@ -11,8 +11,8 @@
  * 检索域用户可见、本地与云端结果绝不静默混合；与仅云端语义的参数（--column/--material-class）互斥。
  */
 import type { Command } from "commander";
-import { resolve, join, dirname, basename, isAbsolute } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { resolve, join, dirname, basename, isAbsolute, relative, sep } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
@@ -44,6 +44,7 @@ import {
 	wouldRefuseLay,
 } from "../lib/matrix-lay";
 import { type ArrangeEndpoint, estimateGate, type requestArrange, resolveArrangeUrl } from "../lib/arrange-client";
+import type { ArrangeRequest } from "../lib/arrange-wire";
 import { type ArrangeGateResult, type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
 import {
 	classifyCutsProbe,
@@ -245,6 +246,11 @@ interface MatrixOpts {
 	arrangeQc?: boolean;
 	/** `--arrange-estimate-only`：只报编排量，走到计价确认那一步就停（零云端调用、工程零改动）。 */
 	arrangeEstimateOnly?: boolean;
+	/** `--dump-request <file>`：把**实际上行的**云端编排请求体逐字节落到该文件（客服排障用）。
+	 *  缺省不写；MUST NOT 指向工程目录内（design §6「服务端一行不留」的客户端那一半）。 */
+	dumpRequest?: string;
+	/** `--explain`：外发调参仪表（缺省只回 `emptySlots` 供 upsell，其余诊断收在本开关后）。 */
+	explain?: boolean;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -390,6 +396,19 @@ export function registerMatrix(program: Command): void {
 				"⚠️ 它省的是**云端那一次调用与其计费**（以及其后的候选下载与落轨），不是整条链：" +
 				"编排量的分母（beat 数/候选段数/轨数/标定遍数）本来就要读工程、读 plan、做重投影才算得出，该走的还得走。" +
 				"与 --yes 同时给时以本开关为准（--yes 的意思是「别问我」，不是「无论如何都跑」）",
+		)
+		.option(
+			"--dump-request <file>",
+			"排障用：把**实际上行的**云端编排请求体（投影后的 plan + opts + algo_pin + 本地预估编排量）逐字节写到该文件。" +
+				"服务端**一行不留**（它只存规模摘要，不存你的 plan），所以出了问题只有这份文件能复现——把它发给我们即可。" +
+				"缺省不写；**不能指向工程目录内**（那会让它随工程一起被分发出去）。" +
+				"开 --arrange-qc 时每一轮各写一份，第 N 轮落在 <file> 同名加 .roundN",
+		)
+		.option(
+			"--explain",
+			"外发调参仪表：缺省的机读账面只给「留空槽数」（够判断素材池是不是不够用），" +
+				"其余用于调参的细账（其中多少是窗口精修致空、跳剪避让枯竭放行了几次、取用了几个高运动/模糊段）收在本开关后。" +
+				"人读日志同口径。不影响任何决策，工程产物逐字节不变",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -2282,13 +2301,25 @@ async function runArrangeQcHere(
 function arrangeWiring(
 	opts: MatrixOpts,
 	cfg: { base: string; apiKey: string } | undefined,
-): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint; arrangeEstimateOnly?: boolean } {
+): {
+	arrangeMode?: ArrangeMode;
+	arrangeCostCap?: number;
+	arrangeEndpoint?: ArrangeEndpoint;
+	arrangeEstimateOnly?: boolean;
+	arrangeDumpRequest?: string;
+	explain?: boolean;
+} {
 	const arrangeMode = parseArrangeMode(opts.arrange);
 	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
 	const qc = opts.arrangeQc === true;
 	return {
 		...(arrangeMode !== undefined ? { arrangeMode } : {}),
 		...(costCap !== undefined ? { arrangeCostCap: costCap } : {}),
+		// 两个开关都是**纯透传**：路径合法性要拿到 baseDir 才判得了（工程目录内不许写），
+		// 那件事留在 layIntoProject 做，这里 MUST NOT 提前 resolve 成绝对路径——
+		// 提前解析会让「相对哪儿」的答案在两处各有一份。
+		...(opts.dumpRequest !== undefined ? { arrangeDumpRequest: opts.dumpRequest } : {}),
+		...(opts.explain === true ? { explain: true } : {}),
 		// ★ 端点只在**显式 local** 时不解析。抽芯后不传 `--arrange` 是 auto，
 		//   本地素材路会定档 cloud —— 那时端点必须已经在手，否则 auto 永远走不到云端。
 		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
@@ -2667,6 +2698,69 @@ function anchorRankNote(d: AnchorOutcome): string | null {
 	);
 }
 
+/**
+ * `--dump-request <file>` 的落点解析（add-broll-arrange-atom 1.3 / design §6「排障」）。
+ *
+ * **两条硬约束，缺一不可**：
+ *
+ * ① **MUST NOT 落在工程目录内**。工程目录是要被打包、被拷给别人、被同步到网盘的东西；
+ *    这份文件里是完整的上行请求体（beat 名 + 检索词 + 候选 clip_id + 全部配方参数）。
+ *    掉进工程里就意味着它会跟着工程走到我们无从预料的地方——而它存在的全部理由，
+ *    恰恰是「服务端一行不留、所以这份东西只该待在你自己机器上」。
+ *    判据用 `relative()` 而不是字符串前缀比：`/x/proj-2` 不是 `/x/proj` 的子目录，
+ *    前缀比会把它误判成子目录并拒掉一个合法路径。
+ *
+ * ② **缺省不写**。整条链上只有显式传了 `--dump-request` 才会有字节落盘。
+ */
+export function resolveDumpRequestPath(raw: string, baseDir: string): string {
+	const abs = resolve(raw);
+	const rel = relative(resolve(baseDir), abs);
+	// rel === "" ⇒ 就是工程目录本身；不以 ".." 开头且不是绝对路径 ⇒ 在工程目录内
+	if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) {
+		throw new Error(
+			`--dump-request 不能指向工程目录内（${abs}）。\n` +
+				"这份文件里是完整的上行请求体（beat 名、检索词、候选 id 与全部配方参数)——" +
+				"放进工程目录，它就会跟着工程被打包、被拷贝、被同步出去。\n" +
+				"换个工程外的路径，比如系统临时目录或桌面。",
+		);
+	}
+	return abs;
+}
+
+/** `<file>` → 第 n 轮的落点：`plan.json` ⇒ `plan.round1.json`（无扩展名则直接追加 `.roundN`）。 */
+function dumpRoundPath(primary: string, round: number): string {
+	const dot = basename(primary).lastIndexOf(".");
+	if (dot <= 0) return `${primary}.round${round}`;
+	const cut = primary.length - (basename(primary).length - dot);
+	return `${primary.slice(0, cut)}.round${round}${primary.slice(cut)}`;
+}
+
+/**
+ * 请求体落盘器。**每一轮各写一份**，MUST NOT 覆盖同一个文件。
+ *
+ * 覆盖看起来更整洁，代价是把出问题的那一轮抹掉：开 `--arrange-qc` 时最多真调 3 次，
+ * 而客服要复现的往往正是中间某一轮（比如第 2 轮换了候选之后才开始不对）。
+ * 只留最后一轮 = 把证据丢了，与 `summarizeArrangeRun` 的 `rounds` 恒在是同一条纪律。
+ */
+function makeArrangeDumper(rawPath: string, baseDir: string): { files: string[]; write: (req: ArrangeRequest) => void } {
+	const primary = resolveDumpRequestPath(rawPath, baseDir);
+	const files: string[] = [];
+	return {
+		files,
+		write(req: ArrangeRequest): void {
+			const target = files.length === 0 ? primary : dumpRoundPath(primary, files.length);
+			mkdirSync(dirname(target), { recursive: true });
+			// ★ 与 `requestArrange` 用**同一种**序列化（那里是裸 `JSON.stringify(req)`，无缩进无排序）：
+			//   同一个对象两次 stringify 逐字节相同 ⇒ 这份文件就是真上行的那串字节，
+			//   拿它 `curl --data-binary @file` 能命中同一个服务端幂等键。
+			//   ⚠️ MUST NOT 为了「好看」加缩进或 sort_keys：那会变成一份**看着像**上行体的东西，
+			//      而幂等键、请求体摘要全都对不上，复现出来的是另一个请求。
+			writeFileSync(target, JSON.stringify(req));
+			files.push(target);
+		},
+	};
+}
+
 /** 机读的云端编排归因（fix-arrange-selfcheck-json-surface）。
  *
  * ## 它治的病
@@ -2720,7 +2814,12 @@ function anchorRankNote(d: AnchorOutcome): string | null {
  * @param adopted 被**采纳**的那一轮（开 QC 时 = 最后一轮）。顶层 `source` / `mode` / `fallback` /
  *   `diff_count` / `diffs` 取它——它才是产物的来源；逐轮的账在 `rounds` 里。
  */
-export function summarizeArrangeRun(calls: ArrangeGateResult[], adopted: ArrangeGateResult | undefined): Record<string, unknown> | undefined {
+export function summarizeArrangeRun(
+	calls: ArrangeGateResult[],
+	adopted: ArrangeGateResult | undefined,
+	/** `--dump-request` 实际写出的文件（按轮次顺序）。缺省空数组 ⇒ 两个键都不出。 */
+	dumps: string[] = [],
+): Record<string, unknown> | undefined {
 	if (!adopted || calls.length === 0) return undefined;
 	// ★ 黑名单：只有这两种形态整键缺席（见上表），其余一律出键
 	if (adopted.mode === "local" || adopted.fallback === "out_of_scope") return undefined;
@@ -2756,6 +2855,11 @@ export function summarizeArrangeRun(calls: ArrangeGateResult[], adopted: Arrange
 		// 沿用同一条条件键纪律 —— 拿到过响应才有；`server: null` 是「服务端没给」，
 		// 整键缺席才是「这一档没跑到」。MUST NOT 预留空字段或补 null。
 		...(adopted.decisionPin ? { decision_pin: adopted.decisionPin } : {}),
+		// `--dump-request` 回执：**没传就整键缺席**（缺省不写一个字节，也不出一个键）。
+		// ⚠️ `dump_request` 恒是**用户给的那个路径**（第 0 轮）；只有真写了不止一份时才补
+		//    `dump_request_files` 全量清单。MUST NOT 让调用方按命名规则自己拼后几轮的路径——
+		//    那等于把一条私下的约定塞进机读面，改个命名就全线断。
+		...(dumps.length ? { dump_request: dumps[0], ...(dumps.length > 1 ? { dump_request_files: dumps } : {}) } : {}),
 		// ★ 恒在，不为单轮做特例
 		rounds,
 	};
@@ -2810,6 +2914,11 @@ async function layIntoProject(
 		arrangeEstimateOnly?: boolean;
 		/** 素材理解端点（QC 判定用；缺省由 apiBase 推导）。 */
 		describeEndpoint?: DescribeEndpoint;
+		/** `--dump-request <file>`（design §6 排障）：**实际上行的**请求体逐字节落盘路径。
+		 *  缺省缺席 ⇒ 一个字节都不写。路径合法性在本函数里判（要 baseDir）。 */
+		arrangeDumpRequest?: string;
+		/** `--explain`（design §2）：外发调参仪表。缺省缺席 ⇒ `lay.dedup` 只带 `emptySlots`。 */
+		explain?: boolean;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -2916,6 +3025,10 @@ async function layIntoProject(
 	// 无条件 `loadConfig()`，缺 Key 在这之前几百行就已经明确报错了 —— 那个分支不可达。
 	// 不可达的兜底 + 跑不起来的测试，比没有更糟（它会让人以为这条路被守住了）。
 	const strictCloud = isLocalArrangeScope(plan);
+	// ── `--dump-request <file>`（design §6「排障」）──────────────────────────────
+	//    立在**计价确认之前**：路径写错是参数错误，该在花钱之前就炸，
+	//    而不是让用户付完钱、跑完编排，再在写文件那一步失败。
+	const dumper = layOpts.arrangeDumpRequest !== undefined ? makeArrangeDumper(layOpts.arrangeDumpRequest, baseDir) : undefined;
 	// ── 只预估不执行（add-arrange-estimate-only）：停在**计价确认之前**，与确认门同一处取值 ──
 	//    MUST NOT 另算一份编排量——两处各算一遍，预估与实收迟早会漂，而漂了没人会发现。
 	//    结局是**成功**：「我在做决定」不是「我拒绝了」，压成同一个 declined 会让调用方分不清。
@@ -3018,6 +3131,8 @@ async function layIntoProject(
 			...(strictCloud ? { strictCloud: true } : {}),
 			// 测试替身（MatrixRunDeps.arrangeRequest）：生产路恒缺席 ⇒ gate 走真 `requestArrange`
 			...(layOpts.deps.arrangeRequest ? { request: layOpts.deps.arrangeRequest } : {}),
+			// `--dump-request`：gate 在**发请求之前**回调，故连不上 / 被拒的那几路同样留得下证据
+			...(dumper ? { dumpRequest: dumper.write } : {}),
 			log: gateLog,
 		});
 		arrangeCalls.push(r);
@@ -3041,7 +3156,14 @@ async function layIntoProject(
 	}
 	// 机读归因：**在早返回之前算好**——下面还有两条 post-arrange 早返回（图片运镜拒付 / 拒铺），
 	// 那两条也已经真发过请求真计费了，同样要带上归因，MUST NOT 只在正常出口出。
-	const arrangeRun = summarizeArrangeRun(arrangeCalls, arrangeRes);
+	const arrangeRun = summarizeArrangeRun(arrangeCalls, arrangeRes, dumper?.files ?? []);
+	if (dumper && dumper.files.length > 0) {
+		log.info(
+			`上行请求体已落盘（--dump-request）：${dumper.files.join("、")}。\n` +
+				"服务端不保存 plan 全文，所以复现这一次调用只能靠这份文件——排障时把它发给我们即可。" +
+				"⚠️ 它含你的 beat 名与检索词，别往公开渠道贴。",
+		);
+	}
 	void qcResidual;
 
 	// ── L1 结构自检（P3.3）：闪帧风险前置声明。**零成本恒开**——只看已有数据，不抽帧不调模型。
@@ -3528,22 +3650,54 @@ async function layIntoProject(
 		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
 	}
 	if (integrity) reportMaterialIntegrity(integrity, log);
+	// ── `--explain` 的人读那一半（add-broll-arrange-atom 4.2）────────────────────
+	//    与机读面**同一个口径、同一个开关**：不开就一个字都不说。
+	//    分成两处写是必须的（一处机读一处人读），但判据只有 `layOpts.explain` 这一个——
+	//    两处判据一旦分叉，收拢就会从某一侧漏出去，而漏了没有任何一处会红。
+	if (layOpts.explain) {
+		log.info(
+			`调参仪表（--explain）：留空槽 ${fillStats.emptySlots} 个` +
+				`（其中窗口精修致空 ${fillStats.emptySlotsByRefine}）、跳剪避让枯竭放行 ${fillStats.adjacentWaived} 次、` +
+				`取用高运动段 ${fillStats.hotSlotsPlaced} 处、取用模糊段 ${fillStats.blurrySlotsPlaced} 处。\n` +
+				"这几个数只用于调参诊断，不影响任何决策；缺省不出（机读面同口径，见 lay.dedup）。",
+		);
+	}
 	return {
 		lay: {
 			refused: false,
 			sourceLayer: summary.sourceLayer,
-			// 全局不二用统计（add-broll-dedup-and-layering）：宁空不重复的空槽事件数 + 跳剪避让枯竭放行数
+			// 全局不二用统计（add-broll-dedup-and-layering）。
+			//
+			// ── 诊断收拢（add-broll-arrange-atom 4.2，design §2）────────────────────
+			// **缺省只出 `emptySlots`**，其余四个是**调参仪表**、只在 `--explain` 时外发。
+			//
+			// 判据是「这个数拿来干什么」：
+			//   · `emptySlots` = 素材池够不够用的直接信号，upsell 通道（`decideLayUpsell`）
+			//     真在读它，且用户看得懂 ⇒ **恒出**；
+			//   · 其余四个（精修致空 / 跳剪枯竭放行 / 取用高运动段 / 取用模糊段）是我们调常量时
+			//     才看的仪表 —— 它们把「哪几条降权规则在什么密度下会被突破」按工程逐份外发，
+			//     等于把阈值结构做成可回归拟合的监督信号。同 design §2 判 `fused/rank` 数值
+			//     MUST NOT 回传是同一条理由：**决策产物该给，产生它的仪表不该白送**。
+			//
+			// ⚠️ 收拢 MUST 只做在**命令层投影**这一层：`planBeatFills` 的返回值（`FillStats`）
+			//    逐字段不动、金样 expected 一个字节不变。决策层少算一个数就是另一套算法了。
+			// ⚠️ 人读日志同口径（见下方 `--explain` 那行 log.info），MUST NOT 一边收机读面
+			//    一边从日志里漏出去 —— 那样收拢只是看起来做了。
 			dedup: {
 				scope: layOpts.dedupScope ?? "scene",
 				emptySlots: fillStats.emptySlots,
-				// 其中因窗口精修（残片收缩后不足最小槽长）而留空的部分——SLIVER_MIN_SEC 的真实代价
-				// 只可能在此显形（候选充足时恒 0，候选稀疏工程才可能非 0）
-				emptySlotsByRefine: fillStats.emptySlotsByRefine,
-				// 取用了高运动段的槽位数（降权不排除，候选稀疏时仍会取——让「为什么这颗抖」可追溯）
-				hotSlotsPlaced: fillStats.hotSlotsPlaced,
-				// 同款：取用了 describe 判模糊候选的槽位数（fix-describe-cache-locality）
-				blurrySlotsPlaced: fillStats.blurrySlotsPlaced,
-				adjacentWaived: fillStats.adjacentWaived,
+				...(layOpts.explain
+					? {
+							// 其中因窗口精修（残片收缩后不足最小槽长）而留空的部分——SLIVER_MIN_SEC 的真实代价
+							// 只可能在此显形（候选充足时恒 0，候选稀疏工程才可能非 0）
+							emptySlotsByRefine: fillStats.emptySlotsByRefine,
+							// 取用了高运动段的槽位数（降权不排除，候选稀疏时仍会取——让「为什么这颗抖」可追溯）
+							hotSlotsPlaced: fillStats.hotSlotsPlaced,
+							// 同款：取用了 describe 判模糊候选的槽位数（fix-describe-cache-locality）
+							blurrySlotsPlaced: fillStats.blurrySlotsPlaced,
+							adjacentWaived: fillStats.adjacentWaived,
+						}
+					: {}),
 			},
 			// mark 融合账面（add-audio-project-atoms）：仅开启时出现（默认 0 时 lay JSON 逐字节不变）
 			...(markOn ? { mark_weight: layOpts.markWeight, mark_hit: markStats.hit, mark_neutral: markStats.neutral } : {}),

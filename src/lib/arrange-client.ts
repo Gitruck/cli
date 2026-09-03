@@ -49,9 +49,14 @@ export const BALANCE_INSUFFICIENT_CODE = 6202;
 /** 编排是纯 CPU 几十毫秒 + 一个来回；给 120s 是为了容大 plan 的上行体（极端密剪 269KB gzip）。 */
 export const ARRANGE_TIMEOUT_MS = 120_000;
 export const ARRANGE_RETRIES = 3;
-/** 服务端限流阈值（次/分钟）——⚠️ **未定**：broll_arrange 端点今天没接限流。
- *  取 60 只是告知文案的占位；服务端接上后 MUST 回来对齐真值，别让文案说假话。 */
-export const ARRANGE_RATE_LIMIT_PER_MIN = 60;
+/** 服务端限流阈值（次/分钟）。
+ *
+ * ★ 2026-09-03 对齐真值：服务端已接限流
+ * （`broll_arrange_services.ARRANGE_RATE_LIMIT_PER_MINUTE`，默认 **30**、键前缀 `gc:arrange:rate:`）。
+ * 此前这里是「未定，取 60 占位」——那句占位话在服务端接上的当天就必须消掉，
+ * 否则等待告知会当面报一个假数（用户按它估「还要等多久」，估出来的是别的口径）。
+ * ⚠️ 服务端改限值 ⇒ MUST 同批改这里。它只进**人读文案**，不参与任何判定。 */
+export const ARRANGE_RATE_LIMIT_PER_MIN = 30;
 const BACKOFF_BASE_MS = 1000;
 
 export class ArrangeError extends Error {
@@ -154,10 +159,13 @@ async function arrangeOnce(
 		const rejected = parseBusinessRejection(res.status, text);
 		if (rejected) throw rejected;
 		const err = new Error(`HTTP ${res.status}：${text.slice(0, 200)}`);
-		// 限流打标（fix-embed-ratelimit-backoff §3.2）——⚠️ **预置，今天打不到**：
-		// broll_arrange 端点尚未接限流（`add-broll-arrange-atom/tasks.md:106` 明记「限流与
-		// --dump-request 未做」）。先把接线做齐，服务端一旦接上就自动生效，
-		// 而不是等那天再回来改三个文件。MUST NOT 因为「现在走不到」就删掉它。
+		// 限流打标（fix-embed-ratelimit-backoff §3.2）。
+		// ⟲ 2026-09-03：**这条已经真能打到了**——服务端接了两层保护，命中都回 429/6032：
+		//   ① 按 key 限流（固定窗口，30 次/分钟）；
+		//   ② 相似请求指纹（同一份 plan 骨架换参数重提 = 参数微扰探阈值，窗口以小时计）。
+		// 两者同码不同窗口，故这里**不区分**：一律按可退避处理（①等一个窗口就好了），
+		// 分辨留给退避用尽后的终局文案——那里会把服务端原文带出来，②的原文自己会说清。
+		// （原注「预置，今天打不到」已作废，留档见 tasks 1.3。）
 		if (res.status === 429) (err as { rateLimited?: boolean }).rateLimited = true;
 		throw err;
 	}
@@ -195,7 +203,7 @@ export async function requestArrange(
 	let lastRateLimited = false;
 	for (let attempt = 0; attempt <= retries; attempt++) {
 		if (attempt > 0) {
-			// 同 embed/describe（见 rate-limit-wait.ts）。★ 本条是**预置**：服务端未接限流前恒走 else 支。
+			// 同 embed/describe（见 rate-limit-wait.ts）：固定窗口限流要**等到下一个窗口**，指数退避是错配。
 			const waitMs = lastRateLimited ? (deps.rateLimitWaitMs ?? nextRateLimitWaitMs()) : backoffBase * 2 ** (attempt - 1);
 			if (lastRateLimited) log.warn(rateLimitWaitNotice(ARRANGE_RATE_LIMIT_PER_MIN, waitMs, attempt, retries));
 			await sleep(waitMs);
@@ -207,6 +215,20 @@ export async function requestArrange(
 			lastRateLimited = (e as { rateLimited?: unknown } | null)?.rateLimited === true;
 			lastErr = e instanceof Error ? e.message : String(e);
 		}
+	}
+	// ★ 终局文案分两支：**限流不是「端点不可达」**。
+	//
+	//   服务端的两层保护同回 429，但窗口长度差两个数量级：按 key 限流是 1 分钟一页
+	//   （等一个窗口就好了），相似请求指纹是小时级（等三个窗口也没用）。
+	//   把两者都说成「端点不可达或响应异常」会把用户引到错误的方向——他会去查网络、查凭据，
+	//   而真正该做的是**隔一会儿再来**。分辨谁是谁不靠猜：把服务端原文带出来，它自己会说清。
+	//   ⚠️ 无论哪一支都 MUST 说明「零执行零计费」：撞了保护是没花钱的，别让人以为白扣了一笔。
+	if (lastRateLimited) {
+		throw new ArrangeError(
+			`云端编排被服务端的频率保护挡住了（${endpoint.url}）：${lastErr}\n` +
+				`已按窗口对齐等待并重试 ${retries} 次仍未通过。**本次零执行零计费**——这不是余额问题，也不是请求写错了。\n` +
+				"出路：隔一会儿再跑；只想先看看这一轮多大，用 --arrange-estimate-only（零云端调用）。",
+		);
 	}
 	throw new ArrangeError(
 		`编排端点不可达或响应异常（${endpoint.url}）：${lastErr}——已指数退避重试 ${retries} 次。\n` +
