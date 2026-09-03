@@ -33,6 +33,7 @@ import {
 	previewUrlFor,
 	projectHasShieldTrack,
 	r3,
+	type AnchorOutcome,
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
@@ -2623,6 +2624,44 @@ function reportLayRefusal(keptEditedTracks: number[], warnings: string[]): void 
 }
 
 /**
+ * 锚落位名次的人读一行（fix-anchor-top-hit-guarantee 3.3）。
+ *
+ * **只在 `sim_rank > 1` 时返回文案，完美钉位返回 null**——落到队首是本件承诺兑现的样子，
+ * 为它再打一行等于把「一切正常」也变成噪声，用户下次就不看这类行了。
+ *
+ * 措辞按本仓「良性降级打可读 INFO」：这是**已知根因**的降级（top-1 的去向就在 `top_by` 里），
+ * 所以 MUST NOT 抛天书、MUST NOT 升级成 warn/异常——画面仍然来自本锚 query 的合格命中，
+ * 片子能看，只是没能钉到最贴的那一段。真正该 warn 的是 degraded（那条在上面，锚整个没钉住）。
+ *
+ * ⚠️ 文案**按机读 code 现渲染**，MUST NOT 直接印 outcome 里的字段拼串：
+ * 同 `directWhy` 的理由——人读文案内嵌数值会在 JS/Python 之间产生 `"1"` vs `"1.0"` 的纯格式差，
+ * 一旦那种串进了跨语言逐字节对拍面就是永久噪声。故 `top_miss` 只过 code、数值本地格式化。
+ *
+ * ⚠️ `top_by` 可能在 `top_miss === "consumed"` 时仍然缺席（消费归属账是**纯诊断**的旁路，
+ * 库层没记上就是没记上），此处 MUST NOT 印出 `undefined` —— 分支兜住，如实说「去向未记账」。
+ */
+function anchorRankNote(d: AnchorOutcome): string | null {
+	if (typeof d.sim_rank !== "number" || d.sim_rank <= 1) return null;
+	const whither =
+		d.top_miss === "consumed"
+			? d.top_by
+				? `已被 ${d.top_by} 取用`
+				: "已被别处取用（消费去向未记账）"
+			: d.top_miss === "reserved"
+				? "被另一个锚预留着（两锚争同一段时 at_sec 更早的先得）"
+				: d.top_miss === "unfit"
+					? "在本锚窗口用不上（供长不足 / 同 beat 跨轨归属互斥 / 精修后不足最小镜头长）"
+					: "去向未记账";
+	const sim = typeof d.sim === "number" ? r3num(d.sim) : "?";
+	const top = typeof d.top_sim === "number" ? r3num(d.top_sim) : "?";
+	return (
+		`${d.beat} 锚「${d.keyword}」取的是 sim 第 ${d.sim_rank} 名（${sim}）——top-1（${top}）${whither}。\n` +
+		"   画面仍来自本锚 query 的合格命中（不是无关素材），属良性降级；" +
+		"想钉到 top-1：给这条 query 补更贴的素材，或让占用方另有可用画面后重跑。"
+	);
+}
+
+/**
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
  * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
  * → layBrollTracks → 原子写回 → 素材落盘自检（只读）。
@@ -2907,6 +2946,8 @@ async function layIntoProject(
 				log.info(
 					`${d.beat} 锚「${d.keyword}」@ ${d.at_sec}s → clip ${d.clip_id} 钉 ${d.track_st}s（提前量 0.5s${d.status === "pinned" ? " · 用户钉选候选占锚槽" : ""}）`,
 				);
+				const note = anchorRankNote(d);
+				if (note) log.info(note);
 			}
 		}
 		log.info(`关键词锚：钉位 ${cnt.planned} · 用户钉选 ${cnt.pinned} · 降级 ${cnt.degraded}（共 ${anchorOutcomes.length} 锚）`);
@@ -3406,6 +3447,22 @@ async function layIntoProject(
 							clip_id: d.clip_id,
 							status: d.status,
 							...(d.reason ? { reason: d.reason } : {}),
+							// 名次五键（fix-anchor-top-hit-guarantee 第三刀）：数据早就在 outcome 上了，
+							// 这里只是**渲染**——真机 2026-09-02 验收时去 result.json 找 `anchor_details`，
+							// 五个字段一个都没有：库层算了、命令层没投，等于白算。
+							//
+							// ⚠️ 一律**条件键**（有才带），MUST NOT 写成 `sim_rank: d.sim_rank ?? null`：
+							//   · degraded 的锚**没落位**，「第几名」这件事根本不存在——补 null 是把
+							//     「不适用」谎报成「有值且为空」，消费侧被迫多写一层判空；
+							//   · `top_miss`/`top_by` 的**缺席本身就是信号**（缺席 ⟺ 完美钉位取到队首），
+							//     补 null 会把这条信号抹掉，跨语言逐字节对拍面也会多出五个恒定噪声键。
+							//   与同一份 lay JSON 里 `mark_weight` / `signal_coverage` / `pinned` 的
+							//   「没开这一维就整键缺席、MUST NOT 补 0」是同一条纪律。
+							...(d.sim_rank !== undefined ? { sim_rank: d.sim_rank } : {}),
+							...(d.sim !== undefined ? { sim: d.sim } : {}),
+							...(d.top_sim !== undefined ? { top_sim: d.top_sim } : {}),
+							...(d.top_miss !== undefined ? { top_miss: d.top_miss } : {}),
+							...(d.top_by !== undefined ? { top_by: d.top_by } : {}),
 						})),
 					}
 				: {}),

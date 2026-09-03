@@ -256,7 +256,9 @@ gtrk split --project "<工程目录>" --json          # 投影：拿 utterance i
 #   lane 全 FILM_BROLL、base_track="旁白主导"、narrative 用八枚举、
 #   字卡挂 aux_layers type:"overlay"（handoff.category:"overlay"+duration_hint，进 dispatch.mg）、
 #   看点关键词圈 handoff.anchors（[{keyword,utterance,query}] ≤2 个/beat——地名/奇观/数字头衔类实词，
-#   铺轨把锚 query 最高分命中钉在关键词说出时刻：听到「野牛高速」的瞬间看到野牛；圈定指引见 gtrk-splitter）
+#   铺轨把锚 query **原始 sim 最高的合格命中**（原始检索相似度，不是 mark/highlight 融合分）
+#   钉在关键词说出时刻：听到「野牛高速」的瞬间看到野牛；锚预留优先于普通序贯槽消费，
+#   取不到第一名时锚 outcome 如实报名次与去向；圈定指引见 gtrk-splitter）
 #   ⚠️ 上面这串是**非穷举**摘录（另含 irreplaceability / rhythm / visual_task / container_stage 四个必填项）：
 #   beat 必填字段全表以 gtrk-splitter 的 references/field-schema.md 为准，MUST 照该表写全
 gtrk split "<拆分稿>" --project "<工程目录>" --json

@@ -31,6 +31,11 @@
  * 恒不漏出底下的 A-roll 口播。默认开，`--no-black-bed` 关。
  */
 import type { BrollPlan, PlanBeat, PlanResult } from "./matrix";
+// [fix-describe-window-coverage] 值导入（此前只有 import type）：射程判据的**唯一实现**在 matrix.ts
+// ——那是契约模块，`describe.at_sec` 的语义与缺省推定口径都写在它的头注里。
+// `matrix.ts` 不 import 本文件（本文件的 LOCAL_CLIP_PREFIX 在那边是独立声明的、注释里点名「避免环依赖」）
+// ⇒ 无环。MUST NOT 在本文件另写一份等价判定：两处各写一遍就会漂，而漂了没有任何测试会红。
+import { describeScopeOf, segInDescribeScope } from "./matrix";
 import {
 	BLACK_BED_HEX,
 	SOLID_MATERIAL_PREFIX,
@@ -306,8 +311,12 @@ export interface FillStats {
 	/** 落成槽位中取用了**高运动段**的数量（add-material-motion-signal）：降权只改排序不作排除，
 	 * 候选稀疏时仍会取高运动段——如实记录，让「为什么这颗抖」可追溯。 */
 	hotSlotsPlaced: number;
-	/** 落成槽位中取用了**模糊候选**的数量（fix-describe-cache-locality）：与 hotSlotsPlaced 同款——
-	 * 降权只改排序不作排除，候选稀疏时仍会取糊帧，如实记录让「为什么这颗糊」可追溯。 */
+	/** 落成槽位中取用了**模糊段**的数量（fix-describe-cache-locality）：与 hotSlotsPlaced 同款——
+	 * 降权只改排序不作排除，候选稀疏时仍会取糊帧，如实记录让「为什么这颗糊」可追溯。
+	 * ⚠️ [fix-describe-window-coverage] 分子口径随 `Pair.blurry` 一起收窄为**段级**：
+	 * 只有落在 describe 射程内、且那一帧被判糊的段才计数。射程外的段即使同属该候选也**不计**
+	 * ——它们的清晰与否从未被看过，记进来就是拿一帧的判决替 87.4% 没看过的画面背书。
+	 * 「有多少落位坑位压根没被看过」是另一本账，见 {@link measureDescribeScopeOverlap}。 */
 	blurrySlotsPlaced: number;
 	/** pinned 未能入选数（冲突后到让位/候选枯竭/被排除）——**按段计**（`segDiagKey`），
 	 * 与 `pinnedPlaced` 同分母。 */
@@ -539,7 +548,9 @@ interface Pair {
 	rank: number;
 	/** 该段是否判为高运动（p50 > MOTION_HOT_P50）——summary 计数与诊断用。 */
 	hot: boolean;
-	/** [fix-describe-cache-locality] 该候选是否被 describe 判为模糊（usable_flags.blurry）。 */
+	/** [fix-describe-cache-locality] 该**段**是否被 describe 判为模糊（usable_flags.blurry）。
+	 * [fix-describe-window-coverage] 语义已由「候选级」收窄为「段级」：flag 只在**射程内**的段上为 true
+	 * （射程 = 那一帧所属的段，判据 `segInDescribeScope`）；射程外恒 false = 中性，不是「判清晰」。 */
 	blurry: boolean;
 }
 
@@ -816,8 +827,24 @@ function buildQueryPools(
 				const p50 = (seg as { motion?: { p50?: number } }).motion?.p50;
 				const hot = typeof p50 === "number" && Number.isFinite(p50) && p50 > MOTION_HOT_P50;
 				// 模糊降权（fix-describe-cache-locality）：同款处置——降权不排除、不碰地板；
-				// 信号来自 describe 注入（未跑 matrix describe --plan 时恒 false ⇒ 排序零回归）
-				const blurry = (cand as { describe?: { usable_flags?: Record<string, unknown> } }).describe?.usable_flags?.blurry === true;
+				// 信号来自 describe 注入（未跑 matrix describe --plan 时恒 false ⇒ 排序零回归）。
+				//
+				// [fix-describe-window-coverage] 射程收窄：`usable_flags` 是**一帧**的判决
+				// （`matrix describe --plan` 每候选只抽 `segments[0].best` 一帧），此前被当成**候选级**的值
+				// 用在**全部段**上 ⇒ seg0 恰好糊，就把这个候选里清晰的段一起降权。
+				// 真机 260902（旅拍 Q1+Q2 两份 plan 实算）：32 个被理解候选共带 843 段、只有 32 段（3.8%）被看过；
+				// 95 个落轨坑位里只有 12 个（12.6%）含那一帧，最远一条相距约 680s ——
+				// 87.4% 的段是被一个跟自己无关的帧判的刑。
+				// 同一循环体 30 行之上的 mark/highlight 早就是**逐段**查、且受 15s 局部性护栏约束
+				// （`DESCRIBE_NEAREST_MAX_GAP_MS`，注释原文「太远 = 别的镜头」）——这一行是掉队的那个。
+				//
+				// 射程外恒走**中性**（不惩罚不加分）：`blurry=false` ⇒ rank 回落到 `fused` 本身，
+				// 与上面 mark/highlight「缺席维度的权重回吐给 sim」逐字同口径。
+				// ⚠️ 中性 ≠ 零分：MUST NOT 把「没看过」按最坏值计入（那是另一种误判）；
+				// 也 MUST NOT 因射程外而给任何段**加分**。降权照旧只减分不排除、不碰地板。
+				const blurry =
+					(cand as { describe?: { usable_flags?: Record<string, unknown> } }).describe?.usable_flags?.blurry === true &&
+					segInDescribeScope(cand, seg);
 				pool.push({
 					cand,
 					seg,
@@ -873,6 +900,10 @@ function buildQueryPools(
  * 天然不可能翻掉 0.4274 vs 0.2719 这种量级的语义差；而剔掉它换来的是一次无谓的零权重回归。
  * ⇒ 主键 `simRank = seg.score − hot降权 − blurry降权`，恰好使**零权重下主键与 `rank` 恒等**，
  *   零回归成为**恒等式**而不是「大概不会变」。spec delta 已同批订正为本口径。
+ *
+ * ⚠️ [fix-describe-window-coverage] `p.blurry` 的语义已由「候选级」收窄为「**段级**」
+ * （只在 describe 射程内的段上为 true），本函数逐字未改就自动跟着收窄了 —— 这正是把射程判定
+ * 落在 `Pair` 构造那一处的原因：三个消费点（`rank` / 本函数 / `blurrySlotsPlaced`）各写一遍必漂。
  */
 function anchorSimRank(p: Pair): number {
 	return p.seg.score - (p.hot ? MOTION_HOT_PENALTY : 0) - (p.blurry ? BLURRY_PENALTY : 0);
@@ -2344,6 +2375,115 @@ function fastFillBeatGaps(o: {
 		// ④ 残余中段（两端段界都到顶、且借无可借）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
 	}
 	slots.sort((a, b) => a.track_st - b.track_st);
+}
+
+// ── 落轨坑位 × 理解射程 重合度（fix-describe-window-coverage §1.8）──────────
+
+/** {@link measureDescribeScopeOverlap} 的产物：「真的铺上去的那一段，被 describe 看过吗」。 */
+export interface DescribeScopeOverlap {
+	/** 分母 = 本轮**真落位**的坑位数（全 beat 全轨；planBeatFills 的 fills 口径）。 */
+	slots: number;
+	/** 分子 = 其 `[clip_st, clip_ed]` **含被理解的那一帧**（`describe.at_sec`）的坑位数。
+	 * ★ 判据取「含那一帧」而不是「与锚点所在的那一段有交集」——后者宽得多，而 describe 真看过的
+	 * 只有那一帧。真机 12/95 = 12.6% 就是按「含那一帧」算出来的（proposal Why 二原话
+	 * 「95 个落轨坑位里只有 12 个的 `[clip_st, clip_ed]` 包含被理解的那一帧」），
+	 * 换成段级交集会把这个数抬上去，与被引用的真机证据对不上。
+	 * ⚠️ 与 `blurry` 降权的射程口径**刻意不同**且不矛盾：降权作用在候选池的单元（**段**）上，
+	 * 本账量的是落位产物的单元（**段内的那个子窗**）。两者各自都是自己那一层最紧的口径。 */
+	in_scope: number;
+	/** 分子里射程按 `segments[0]` **推定**（`describe.at_sec` 缺席，旧 plan / agent 手组）的坑位数。
+	 * 人读侧 SHALL 标注「推定射程」，MUST NOT 与写明锚点的条目混为一谈。 */
+	presumed: number;
+	/** 落位坑位里其候选**压根没有 describe** 的数量——「没看过」，不是「看过且判清晰」。
+	 * 它计入分母不计入分子：`slots − in_scope` 里既有这一类，也有「看过但看的是别处」。 */
+	no_describe: number;
+	/** `in_scope / slots`。**slots === 0 时为 null**（分母为 0 不可判）——
+	 * MUST NOT 写 0：「没铺任何坑位」与「铺了但一个都没被看过」是两件事，抹平了没法处置。 */
+	ratio: number | null;
+}
+
+/**
+ * 落轨坑位与理解射程的重合度（fix-describe-window-coverage §1.8，纯函数）。
+ *
+ * ## 它回答的问题，与 `signal_coverage` 不是同一个
+ *
+ * `add-signal-coverage-reporting` 的 `signal_coverage` 报的是「候选**段**有没有拿到 mark/highlight 分」
+ * （`hit/(hit+neutral)`，分母 = 进过候选池的段）；本函数报的是「**真的铺上去的那一段**有没有被
+ * describe 看过」（分母 = 落位坑位）。两个分母不同 ⇒ **MUST NOT 并键**，合并会把两件事抹平成一个数。
+ *
+ * ## 为什么要有这个数
+ *
+ * 真机 260902（旅拍 Q1+Q2）：**95 个落轨坑位里只有 12 个（12.6%）**含被理解的那一帧，
+ * 最远一条坑位 54.8–57.0s vs 理解帧 736.608s（相距约 680s）。
+ * 在这个数被报出来之前，读者看到 `usable_flags` 只会以为它说的是自己眼前这一段。
+ * 与 describe 侧的「32/843 = 3.8%」两头对上：那个说「候选带的段有多少被看过」，
+ * 这个说「最后铺上去的有多少被看过」，同一件事的两端。
+ *
+ * ## 候选定位口径（★ 不能只按 clip_id 找）
+ *
+ * 真机 B08 是现成反例：同一 clip `local-ce3f2dee555e70d9` 在两个 query 下 `seg0` 起止**逐字相同**、
+ * 只有 `best` 不同，`text_overlay` 一个 false 一个 true。只按 clip_id 反查会 50% 概率拿错那条 describe。
+ * ⇒ 先按 `(beat, query, clip_id)` 精确定位，跨 beat 借来的槽位（gap-fill）再退到全 plan 的
+ * `(query, clip_id)`；两级都落空才算未定位（计入分母、不计入分子，与「没看过」同向保守）。
+ *
+ * ## 它**不是**判据
+ *
+ * 只增可观测面：本函数零副作用、不参与任何排序与落位，比例再低也 MUST NOT 据此剔除/降权/拒铺
+ * （非致命 INFO 档）。槽位表在本函数前后逐字节不变——它只读 `fills`。
+ *
+ * ## ★ 为什么是独立纯函数、而**不是** `planBeatFills` 出参上的一个新键
+ *
+ * 试过，被闸当场拦下：`test/broll-arrange-apply.test.mjs` 有一条
+ * 「闭环产物与 planBeatFills 同形——下游不需要任何 if(来自云端) 分支」，
+ * 逐键比对 `applyArrangeResponse(...)` 与 `planBeatFills(...)` 的**顶层键集**。
+ * 往 `planBeatFills` 加键 ⇒ 云端闭环那条路少一个键 ⇒ 同形律破 ⇒ 下游被迫长分支。
+ * 而云端档根本没跑本地候选池，它也**算不出**这个数（它拿到的是结果不是过程）。
+ * ⇒ 正确位置是**调用方按需要自己量一次**（`planBeatFills` 之后、拿着同一份 `fills` 调本函数），
+ *   两条路的产物形态因此保持逐键一致。MUST NOT 为了少写一行调用把它塞回出参。
+ */
+export function measureDescribeScopeOverlap(
+	beats: readonly PlanBeat[],
+	fills: ReadonlyMap<string, FillSlot[][]>,
+): DescribeScopeOverlap {
+	const SEP = "\u0000"; // 分隔符取 NUL：query 是自由文本，任何可打印分隔符都可能被它自己包含
+	// 全 plan 的 (query, clip_id) 索引：跨 beat 借来的槽位靠它兜底。先到先得——
+	// 同一 (query, clip_id) 在不同 beat 下是同一次检索的同一条命中，describe 也是同一份。
+	const byQueryClip = new Map<string, PlanResult>();
+	const byBeatQueryClip = new Map<string, PlanResult>();
+	for (const b of beats) {
+		for (const q of b.queries ?? []) {
+			for (const r of q.results ?? []) {
+				const qk = `${q.query}${SEP}${r.clip_id}`;
+				if (!byQueryClip.has(qk)) byQueryClip.set(qk, r);
+				byBeatQueryClip.set(`${b.beat}${SEP}${qk}`, r);
+			}
+		}
+	}
+	let slots = 0;
+	let inScope = 0;
+	let presumed = 0;
+	let noDescribe = 0;
+	for (const b of beats) {
+		for (const track of fills.get(b.beat) ?? []) {
+			for (const s of track) {
+				slots++;
+				const qk = `${s.query}${SEP}${s.clip_id}`;
+				const cand = byBeatQueryClip.get(`${b.beat}${SEP}${qk}`) ?? byQueryClip.get(qk);
+				if (!cand) continue; // 未定位（solid 兜底 / 已不在 plan 里）：保守计入分母
+				const scope = describeScopeOf(cand);
+				if (!scope) {
+					noDescribe++;
+					continue;
+				}
+				// 图片候选与无 segments 的退化候选：射程 = 整条素材 ⇒ 这一坑位确实被看过
+				const hit = scope.wholeMaterial || (s.clip_st <= (scope.atSec as number) && (scope.atSec as number) <= s.clip_ed);
+				if (!hit) continue;
+				inScope++;
+				if (scope.presumed) presumed++;
+			}
+		}
+	}
+	return { slots, in_scope: inScope, presumed, no_describe: noDescribe, ratio: slots > 0 ? inScope / slots : null };
 }
 
 /** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。

@@ -260,7 +260,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 - `result.pinned: true`：**钉选**——是**落位保证**，不只是排序特权。它豁免四条自动护栏：①派单负词 `excluded_hint`、②`--score-floor` 分数地板、③不二用抢占（钉选段不会因为**别的候选**占了同一把消费键而落不上；但同一个「候选+段」对仍只落一次）、④紧邻跳剪避让（钉选相邻照落，也不计进 `dedup.adjacentWaived`）。
   **不豁免的三条**：`--no-image-broll`（零图片上云是硬承诺，图片候选连 pinned 也进不来）、同 beat 跨轨素材归属互斥（那条给的是备选面——钉选占满每条轨，`--lay N` 就退化成 N 条一样的轨）、主轨 gap 快速填充的兜底档。
   钉多了仍可能打架（供长不足/位置冲突），让位名单在结果 JSON `lay.pinned.yielded` 与告警里**逐段**明示。
-- beat 的 `anchors`：**关键词锚**（拆分稿圈定、plan 检索时内插 `at_sec`）——`[{keyword, utterance, at_sec, query}]`，lay 把锚 query 最高分命中钉在 `at_sec−0.5s`（时长 min(命中段, per_shot×2)），其余槽位在锚点分割的区间内序贯填充。可编辑：**挪 `at_sec`**（微调卡点时刻）、**换 `query`**（换锚画面）、**删锚**（整条删除）；`at_sec:null`=内插失败态，lay 按降级普通槽处置。锚 query 池内有 pinned 候选时**用户钉选优先占锚槽**。
+- beat 的 `anchors`：**关键词锚**（拆分稿圈定、plan 检索时内插 `at_sec`）——`[{keyword, utterance, at_sec, query}]`，lay 把锚 query **原始 sim 最高的合格命中**（原始检索相似度，**不是** mark/highlight 融合分——`--mark-weight`/`--highlight-weight` 在锚槽退为同 sim 时的 tie-break）钉在 `at_sec−0.5s`（时长 min(命中段, per_shot×2)），其余槽位在锚点分割的区间内序贯填充。**锚预留优先于普通序贯槽消费**：铺轨前先为每锚锁住其 sim 第一名（每锚至多 1 对，落位或降级后立即释放），前序 beat 的泛化普通槽拿不到它；取不到第一名时锚 outcome 会**如实报名次与去向**（落的是第几名、第一名被哪个 beat/query 取走），MUST NOT 静默当成钉准了。可编辑：**挪 `at_sec`**（微调卡点时刻）、**换 `query`**（换锚画面）、**删锚**（整条删除）；`at_sec:null`=内插失败态，lay 按降级普通槽处置。锚 query 池内有 pinned 候选时**用户钉选优先占锚槽**。
 - beat 的 `per_shot_sec`/`requested_shots`（节奏锚，影响槽长档位）。
 
 **不可编辑面**（动了会被 `matrix lay` 校验拒绝并指名字段）：

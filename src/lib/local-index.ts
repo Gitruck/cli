@@ -29,11 +29,11 @@
  * SQLite 运行时（tasks 1.2/2.1 注记）：Bun 下用内置 bun:sqlite；发布产物跑在 node（bin=dist/index.js，
  * engines>=20.6 实际需 22.5+）时退 node:sqlite（同为内置，零新依赖）——二者经统一 SqlDb 薄适配。
  */
-import { mkdirSync, existsSync, readdirSync, statSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { dirname, extname, join, resolve, basename } from "node:path";
+import { dirname, extname, join, resolve, basename, sep } from "node:path";
 import { createBLAKE3 } from "hash-wasm";
 import { log } from "./log";
 import { homeFile, tmpDir } from "./paths";
@@ -1281,6 +1281,13 @@ export interface IndexRunResult {
 	};
 	/** 计量会话账面：仅会话真开过时出现（豁免/零计划帧 = 无本键）。 */
 	billing?: IndexBillingOutcome;
+	/** 本轮枚举遇到的**断链**（目标不可达的链接自身路径）；无断链时无本键。
+	 * 命令层的零枚举诊断按 `string[]` duck-typing 消费（`matrix.ts readBrokenLinks`）——
+	 * ⚠️ 改形状（换成计数/对象）MUST 同批改那一头，否则诊断会静默退化成「没检出真因」，
+	 * 而那正是本 change 要治的病。 */
+	brokenLinks?: string[];
+	/** 经符号链接引入、真身落在 `--dirs` 域外的素材数；为 0 时无本键（照收不丢，只是告知）。 */
+	linkedOutsideDirs?: number;
 	elapsedMs: number;
 }
 
@@ -1305,21 +1312,114 @@ function realBasenamePath(abs: string): string {
 	return abs;
 }
 
+/** 枚举期的符号链接诊断（fix-material-intake-path-and-enumeration §2.8/§2.9）。 */
+export interface EnumDiagnostics {
+	/** 断链：目标不可达的**链接自身路径**（不是 target —— target 已经没了）。 */
+	brokenLinks: string[];
+	/** 经链接引入、真身落在 `--dirs` 域外的素材（link = 域内看到的路径，real = 真身）。 */
+	crossDomain: { link: string; real: string }[];
+}
+
+/**
+ * 诊断挂在**返回数组的身份**上，而不是塞进返回值或模块级全局。
+ *
+ * 为什么：枚举口的签名 `(dirs: string[]) => string[]` 同时是 `IndexRunOptions.listFiles`
+ * 的注入面，而命令层（`matrix.ts runIndexMode`）为了逐项计数**自己先枚举一次**、再把
+ * 同一份清单原样经 `listFiles: () => enumerated` 交回给 `indexLocalMaterials`
+ * （全轮只走一遍文件系统）。改返回类型会当场掐断那条注入面；模块级全局则会在
+ * 同一进程的多轮枚举之间串味（index 与 `--local` 检索各枚举一次）。
+ * 挂在数组身份上：谁拿着那份清单谁读得到，读不到就是「本轮无事发生」。
+ */
+const ENUM_DIAGNOSTICS = new WeakMap<readonly string[], EnumDiagnostics>();
+
+/** 读取某次枚举结果携带的符号链接诊断；本轮没有断链也没有跨域链接时返回 undefined。 */
+export function enumerationDiagnosticsOf(files: readonly string[]): EnumDiagnostics | undefined {
+	return ENUM_DIAGNOSTICS.get(files);
+}
+
+/** 路径比较键：win32 大小写不敏感（与 local-search.ts `pathInDirs` 同口径），posix 原样。 */
+function pathKey(p: string): string {
+	return process.platform === "win32" ? p.toLowerCase() : p;
+}
+
+/** 真身是否落在本轮检索域内（跨域告知用；与 `pathInDirs` 同判据，此处不跨模块引以免耦合）。 */
+function insideAnyDir(p: string, dirsResolved: string[]): boolean {
+	const k = pathKey(p);
+	return dirsResolved.some((d) => {
+		const base = pathKey(d.endsWith(sep) ? d.slice(0, -1) : d);
+		return k === base || k.startsWith(base + sep);
+	});
+}
+
 function listFilesMatching(dirs: string[], match: (name: string) => boolean): string[] {
 	const out: string[] = [];
-	const walk = (dir: string, depth: number): void => {
+	// 经符号链接收录的候选（link = 域内路径 / real = 真身）：**先攒着**，收口时按真身统一去重。
+	const linked: { link: string; real: string }[] = [];
+	const brokenLinks: string[] = [];
+	// visited-set：已走过的目录（词法路径，纯 Set 维护、零 syscall）+ 已进过的链接目标真身。
+	// 深度上限 4 只封死无限递归，自指链接仍会把同一棵树在 4 层内反复展开 —— 故必须显式查重。
+	const walkedDirs = new Set<string>();
+	const visitedReal = new Set<string>();
+	/** 本枝是经链接进来的时 realBase = 该链接目标的真身目录；否则 null（= 老路径，零额外 syscall）。 */
+	const walk = (dir: string, depth: number, realBase: string | null): void => {
 		if (depth > 4) return;
+		walkedDirs.add(pathKey(resolve(dir)));
 		let entries: ReturnType<typeof readdirSync>;
 		try {
 			entries = readdirSync(dir, { withFileTypes: true }) as never;
 		} catch {
 			return;
 		}
-		for (const e of entries as unknown as Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>) {
+		for (const e of entries as unknown as Array<{ name: string; isDirectory(): boolean; isFile(): boolean; isSymbolicLink(): boolean }>) {
 			if (e.name.startsWith(".")) continue;
 			const p = join(dir, e.name);
-			if (e.isDirectory()) walk(p, depth + 1);
-			else if (e.isFile() && match(e.name)) out.push(resolve(p));
+			if (e.isDirectory()) {
+				// 经链接进来的枝：子路径的真身按字符串推导（父目录的 realpath 已经拿到了，**不再 syscall**）
+				walk(p, depth + 1, realBase === null ? null : join(realBase, e.name));
+			} else if (e.isFile()) {
+				if (!match(e.name)) continue;
+				if (realBase === null) out.push(resolve(p));
+				else linked.push({ link: resolve(p), real: join(realBase, e.name) });
+			} else if (e.isSymbolicLink()) {
+				// ── 第三态（fix-material-intake-path-and-enumeration §2）────────────────
+				// 符号链接在 Dirent 上 `isFile() === false && isDirectory() === false`
+				// （Windows 的 junction / 重解析点同样落这一枝），此前两个 else-if 全落空 ⇒
+				// **无声丢弃**，目录型链接连递归都不做。这是疏漏不是立法：同一函数的顶层分支
+				// 走 `statSync`（按定义跟随链接）—— 点名一条链接文件时收录、同一条躺在被遍历的
+				// 目录里就丢弃，顶层跟随、递归不跟随的不一致本身即缺陷。
+				// 本机 49 条现成链接（skills 安装建的 junction）实测：Dirent 走法 69 个 .md，
+				// 跟随走法 588 个 —— **519 个被吞**。
+				// ⚠️ 性能红线：只有走到这一枝才落 syscall。普通文件/目录一次都不多花，
+				//    MUST NOT 用 statSync 无条件替换 Dirent 判型（上万文件的库会当场变慢）。
+				let st: ReturnType<typeof statSync>;
+				try {
+					st = statSync(p); // 跟随链接；断链在这里抛
+				} catch {
+					brokenLinks.push(resolve(p)); // 只跳不崩：路径上抛给零枚举诊断去点名
+					continue;
+				}
+				// ⚠️ 判型用**链接自身的 basename**（`e.name`），MUST NOT 用 target 的：
+				// `--dirs` 划的域是链接所在的那一侧，而 `matrix lay` 要按这个路径回写工程。
+				if (st.isFile() && !match(e.name)) continue; // 非素材链接：连 realpath 都不必花
+				let real: string;
+				try {
+					real = realpathSync.native(p);
+				} catch {
+					brokenLinks.push(resolve(p));
+					continue;
+				}
+				if (st.isFile()) {
+					// ⚠️ 收录的是**链接路径**，且 MUST NOT 套 realBasenamePath —— 它按父目录 listing
+					//    回填链接名的大小写，不解析 target；这里的名字本就来自 readdirSync（盘上真名）。
+					linked.push({ link: resolve(p), real });
+				} else if (st.isDirectory()) {
+					const k = pathKey(real);
+					if (visitedReal.has(k) || walkedDirs.has(k)) continue; // 防环：进目录前先查
+					visitedReal.add(k);
+					walk(p, depth + 1, real);
+				}
+				// 其余类型（socket/fifo/块设备）照旧不收
+			}
 		}
 	};
 	// 枚举分流（add-local-search-material-scope）：`--dirs` 的每一项既可以是**文件夹**，
@@ -1334,7 +1434,16 @@ function listFilesMatching(dirs: string[], match: (name: string) => boolean): st
 		try {
 			st = statSync(abs);
 		} catch {
-			continue; // 路径不存在/不可读：跳过该项，MUST NOT 中止整轮（其余项照枚举）
+			// 路径不存在/不可读：跳过该项，MUST NOT 中止整轮（其余项照枚举）。
+			// ⚠️ 只在**已经失败**的这条岔路上多探一次 lstat，分辨「压根没这个路径」与
+			//    「链接在、真身没了」—— 后者要被零枚举诊断点名（用户 `ls` 明明看得见那个名字）。
+			//    happy path 一次都不多花。
+			try {
+				if (lstatSync(abs).isSymbolicLink()) brokenLinks.push(abs);
+			} catch {
+				/* 真的没这个路径 */
+			}
+			continue;
 		}
 		// 显式传入的文件即使 basename 以 `.` 开头也**尊重**——`walk` 里那条跳过隐藏项的规则
 		// 是给「遍历目录时不要自作主张收录」用的，用户点名要的东西不适用。
@@ -1348,10 +1457,63 @@ function listFilesMatching(dirs: string[], match: (name: string) => boolean): st
 			out.push(realBasenamePath(abs));
 			continue;
 		}
-		if (st.isDirectory()) walk(abs, 0);
+		// 顶层显式点名的目录**不当链接枝处理**（realBase=null）：用户划的域就是这个名字，
+		// 域内路径一律按用户的写法回写工程。
+		if (st.isDirectory()) walk(abs, 0, null);
 	}
+	// ── 收口 ──────────────────────────────────────────────────────────────────
+	// 一整轮没遇到任何符号链接 ⇒ 走与本条落地前**逐字节等价**的老路：零 realpath、零额外 syscall。
 	// 去重：同时传「文件夹」与「其内部某文件」时不重复计数（否则素材总数会虚高）
-	return [...new Set(out)].sort();
+	if (linked.length === 0 && brokenLinks.length === 0) return [...new Set(out)].sort();
+	// 真身归一：按**目录**缓存 realpath（同一目录下 N 个文件只花 1 次 syscall），
+	// 这样 8.3 短名 / 大小写 / 上层还套着一层链接的路径都能与链接的 realpath 对上。
+	const realDirCache = new Map<string, string>();
+	const canonKey = (p: string): string => {
+		const dir = dirname(p);
+		const ck = pathKey(dir);
+		let realDir = realDirCache.get(ck);
+		if (realDir === undefined) {
+			try {
+				realDir = realpathSync.native(dir);
+			} catch {
+				realDir = dir; // 读不到就退回词法路径：宁可少去一次重，也 MUST NOT 因此丢文件
+			}
+			realDirCache.set(ck, realDir);
+		}
+		return pathKey(join(realDir, basename(p)));
+	};
+	const keys = new Set(out.map(canonKey));
+	const kept: { link: string; real: string }[] = [];
+	// 链接侧按真身去重，同一真身**保留真实路径那一条**（依据：`materials.path` UNIQUE 且增量按路径判，
+	// 而 `material_id` 是内容哈希 ⇒ 不去重就是「同一 material_id 两行 path」：增量失效、
+	// 检索侧吐重复候选、**重复烧 embed 积分**）。先按链接路径排序再去重 ⇒ 两条链接指同一真身时
+	// 留哪一条与遍历顺序无关（同一批素材跑两遍结果一致）。
+	for (const cand of [...linked].sort((a, b) => (pathKey(a.link) < pathKey(b.link) ? -1 : 1))) {
+		const k = pathKey(cand.real);
+		if (keys.has(k)) continue;
+		keys.add(k);
+		kept.push(cand);
+	}
+	const files = [...new Set([...out, ...kept.map((c) => c.link)])].sort();
+	// 跨域：真身在 `--dirs` 域外 —— **照收**（那正是用户建这条链接的意图），只是要说一声。
+	// ⚠️ 判据的两侧 MUST 都归一后再比：左边是 realpath（长名/真大小写），右边若原样用用户手打的
+	//    `--dirs`，一个 8.3 短名（本机 TEMP 就是 `C:\Users\ADMINI~1\…`）或上层套了一层链接的写法，
+	//    就会把**真身明明在域内**的链接报成跨域。实测：单测 `真身在域内的链接不报跨域` 第一次跑就
+	//    红在这上面（short vs long）。误报「已检出的真因」比不报更坏 —— 那正是本 change 要治的病。
+	const dirsResolved = dirs.flatMap((d) => {
+		const abs = resolve(d);
+		try {
+			const real = realpathSync.native(abs);
+			return pathKey(real) === pathKey(abs) ? [abs] : [abs, real];
+		} catch {
+			return [abs]; // 路径已经没了（如断链项）：拿词法路径顶上，不影响其余项
+		}
+	});
+	const crossDomain = kept.filter((c) => !insideAnyDir(c.real, dirsResolved));
+	if (brokenLinks.length || crossDomain.length) {
+		ENUM_DIAGNOSTICS.set(files, { brokenLinks: [...new Set(brokenLinks)].sort(), crossDomain });
+	}
+	return files;
 }
 
 /** 枚举视频文件。`dirs` 的每一项可以是**文件夹**（递归）或**单个素材文件**（见 listFilesMatching）。 */
@@ -1536,6 +1698,27 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	//    的靶位），也 MUST NOT 复用循环里的 `kinds[...].total++`（那是入库账面，混用即双计）。
 	const enumeratedVideo = files.filter((p) => (materialKindForPath(p) ?? "video") === "video").length;
 	progress(`枚举到 ${files.length} 个素材（视频 ${enumeratedVideo} · 图片 ${files.length - enumeratedVideo}）`);
+	// 符号链接账面（fix-material-intake-path-and-enumeration §2.8/§2.9）：诊断跟着**这份清单的
+	// 身份**走 —— 命令层为逐项计数先枚举一次、再把同一个数组经 `listFiles` 交回来，注入面上照样读得到。
+	const enumDiag = enumerationDiagnosticsOf(files);
+	if (enumDiag?.crossDomain.length) {
+		// 跨域是**正常用法**（把 X 盘那部片链进工作夹就是为了跨域），故走 info 不走 warn：
+		// 良性降级/越界只需要一句可读的交代，MUST NOT 抛错、更 MUST NOT 静默丢弃。
+		progress(
+			`${enumDiag.crossDomain.length} 个素材经符号链接引入、真身在检索域外（照收）：\n` +
+				enumDiag.crossDomain.slice(0, 3).map((c) => `     ${c.link} → ${c.real}`).join("\n") +
+				(enumDiag.crossDomain.length > 3 ? `\n     …（其余 ${enumDiag.crossDomain.length - 3} 条略）` : ""),
+		);
+	}
+	if (enumDiag?.brokenLinks.length) {
+		// 断链只跳不崩。这里说一声是因为：本轮**有产出**时零枚举诊断根本不会打，
+		// 不说的话「链接在、真身没了」这件事就只剩用户自己去 `ls -la` 发现。
+		progress(
+			`${enumDiag.brokenLinks.length} 条符号链接的目标不可达，已跳过：\n` +
+				enumDiag.brokenLinks.slice(0, 3).map((p) => `     ${p}`).join("\n") +
+				(enumDiag.brokenLinks.length > 3 ? `\n     …（其余 ${enumDiag.brokenLinks.length - 3} 条略）` : ""),
+		);
+	}
 	const db = await openLocalIndexDb(dbPath);
 	const stats = { total: files.length, indexed: 0, skipped: 0, rebuilt: 0, failed: 0 };
 	const kinds = { video: { total: 0, indexed: 0 }, image: { total: 0, indexed: 0 } };
@@ -1856,6 +2039,10 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 		},
 		stability,
 		...(billing ? { billing } : {}),
+		// 断链/跨域上抛给命令层诊断消费（§2.8）：**没有就不带这两个键**，
+		// 于是「本轮没遇到链接」在机读面上与本条落地前逐字节一致。
+		...(enumDiag?.brokenLinks.length ? { brokenLinks: enumDiag.brokenLinks } : {}),
+		...(enumDiag?.crossDomain.length ? { linkedOutsideDirs: enumDiag.crossDomain.length } : {}),
 		elapsedMs: Date.now() - t0,
 	};
 }
