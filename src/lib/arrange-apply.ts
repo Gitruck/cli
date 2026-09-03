@@ -54,6 +54,15 @@ export interface ArrangeResponse {
 	idempotent_replay?: boolean;
 	/** false = 幂等登记未写成，本次调用不受幂等保护（重发会重算并重新计费）。 */
 	idempotency_recorded?: boolean;
+	/** 服务端**实际跑的决策层版本**（`DECISION_ALGO_PIN`，如 `broll-arrange-decision@v4`）。
+	 *
+	 * ⚠️ 与请求体里的 `algo_pin` 是**两个口径，MUST NOT 混读**：那个是客户端上行的**计量**口径
+	 * （`METERING_ALGO_PIN`，管「这笔账按哪份价目算」），本字段管「这份产物是哪套算法算的」。
+	 *
+	 * **三态，缺席是合法的第三档**（与 `idempotent_replay` 有意不同）：
+	 * 缺席 = 服务端尚未升级到会回传它的版本，**或**命中的是本字段落地之前写下的幂等条目
+	 * ⇒ **无法核对**，MUST NOT 当成不一致（那会把每一个没升级的服务端都判成故障）。 */
+	decision_algo_pin?: string;
 }
 
 /** 与 `planBeatFills` 返回值同形。 */

@@ -44,7 +44,7 @@ import {
 	wouldRefuseLay,
 } from "../lib/matrix-lay";
 import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
-import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
+import { type ArrangeGateResult, type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
 import {
 	classifyCutsProbe,
 	emptyNotApplicable,
@@ -2661,6 +2661,55 @@ function anchorRankNote(d: AnchorOutcome): string | null {
 	);
 }
 
+/** 机读的云端编排归因（fix-arrange-selfcheck-json-surface）。
+ *
+ * ## 它治的病
+ *
+ * 2026-09-03 真机：凯奇坎那一轮**服务端已执行、已计费 40 编排量、产物被自校验判为
+ * 8 处不一致而整份丢弃**，CLI 回落本地编排。这件事**只出现在人读 stderr**——
+ * `ok` 恒 true（`refused === undefined && !declined`）、退出码 0、lay JSON 里
+ * 零个 arrange 键 ⇒ 对 agent 而言，这一轮与「云端顺利产出」**在机读面上无从分辨**。
+ * 更糟：日志里被「…另有 N 处」吞掉的差异明细，此前在任何地方都拿不到。
+ *
+ * ## 三条口径
+ *
+ * 1. **只在真发过请求时出现**（`called === true`）。判据 MUST NOT 靠 `source`/`fallback` 反推：
+ *    shadow 档返回 `source:"local"` 且无 `fallback`，与总闸压回本地完全同形，而前者真计费。
+ * 2. **`billed` 是三态**：`true` 真执行真计费 / `false` 命中幂等回放未新增计费 /
+ *    缺席=不适用（没发过请求）。缺席 ⟺ 真执行了这条契约在 gate 层，此处只做转述。
+ * 3. **逐轮累加**：`--arrange-qc` 下最多真调 3 次，units MUST 求和而不是取末轮。
+ */
+function summarizeArrangeRun(calls: ArrangeGateResult[]): Record<string, unknown> | undefined {
+	const cloudCalls = calls.filter((c) => c.called === true);
+	if (!cloudCalls.length) return undefined;
+	const last = cloudCalls[cloudCalls.length - 1]!;
+	// units 逐轮求和：每一轮都是一次独立的服务端执行，计费也是逐轮发生的
+	const unitsTotal = cloudCalls.reduce((a, c) => a + (typeof c.units === "number" ? c.units : 0), 0);
+	const anyBilled = cloudCalls.some((c) => c.idempotentReplay !== true);
+	const rounds = cloudCalls.map((c) => ({
+		mode: c.mode,
+		source: c.source,
+		...(c.fallback ? { fallback: c.fallback } : {}),
+		...(typeof c.units === "number" ? { units: c.units } : {}),
+		...(c.idempotentReplay === true ? { idempotent_replay: true } : {}),
+		...(c.idempotencyRecorded === false ? { idempotency_recorded: false } : {}),
+		diff_count: c.diffs?.length ?? 0,
+	}));
+	return {
+		calls: cloudCalls.length,
+		source: last.source,
+		mode: last.mode,
+		...(last.fallback ? { fallback: last.fallback } : {}),
+		units_total: unitsTotal,
+		billed: anyBilled,
+		diff_count: last.diffs?.length ?? 0,
+		// ★ 差异明细全量出（人读日志只打前 5 条 + 「…另有 N 处」，被吞掉的那几处此前无处可取）
+		...(last.diffs?.length ? { diffs: last.diffs } : {}),
+		// 多轮时才出 rounds（单轮时它与顶层逐字重复，白占体积）
+		...(cloudCalls.length > 1 ? { rounds } : {}),
+	};
+}
+
 /**
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
  * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
@@ -2882,14 +2931,22 @@ async function layIntoProject(
 		}
 	}
 	const gateLog = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };
-	const arrangeOnce = (p: BrollPlan) =>
-		runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, arrangeMode, {
+	// ★ 逐轮登记（fix-arrange-selfcheck-json-surface §1.4）：`--arrange-qc` 下 `arrangeOnce`
+	//   最多真调 **3 次**（`arrange-qc.ts` MAX_QC_ROUNDS=2），而下面只留最后一轮的 `arrangeRes`
+	//   ⇒ 前几轮的 units 与 fallback 整体蒸发。计费是**逐轮发生**的，只报最后一轮就是少报。
+	//   包一层采集，任何调用路径（含 QC 内部）都跑不掉，MUST NOT 改成在 QC 里各记一份。
+	const arrangeCalls: ArrangeGateResult[] = [];
+	const arrangeOnce = async (p: BrollPlan) => {
+		const r = await runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, arrangeMode, {
 			runLocal: () => planBeatFills(p, layN, scoreFloor, decisionOpts),
 			...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
 			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
 			...(strictCloud ? { strictCloud: true } : {}),
 			log: gateLog,
 		});
+		arrangeCalls.push(r);
+		return r;
+	};
 
 	// 编排期 QC（P3.2）：缺省关 ⇒ 与开工前逐字节一致。开启时把「铺完→渲→看→重铺→再渲」
 	// 那两轮收成落轨前的一个闭环，全程零渲染。它对本地档与云端档**一样成立**——
@@ -2906,6 +2963,9 @@ async function layIntoProject(
 	if (arrangeRes.source === "cloud") {
 		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
 	}
+	// 机读归因：**在早返回之前算好**——下面还有两条 post-arrange 早返回（图片运镜拒付 / 拒铺），
+	// 那两条也已经真发过请求真计费了，同样要带上归因，MUST NOT 只在正常出口出。
+	const arrangeRun = summarizeArrangeRun(arrangeCalls);
 	void qcResidual;
 
 	// ── L1 结构自检（P3.3）：闪帧风险前置声明。**零成本恒开**——只看已有数据，不抽帧不调模型。
@@ -3090,8 +3150,15 @@ async function layIntoProject(
 	});
 	if (prep.declined) {
 		log.err(
-			"已取消：图片运镜计费确认被拒绝——本轮铺轨中止，工程文件零改动、零云端调用（broll-plan.json 照常可用）。" +
-				"可用 --yes 跳过确认，或 --no-image-broll 排除图片候选后重跑。",
+			"已取消：图片运镜计费确认被拒绝——本轮铺轨中止，工程文件零改动。" +
+				// ⟲ 2026-09-03 订正（fix-arrange-selfcheck-json-surface §1.3）：
+				//   原文这里写「**零云端调用**」，那是**错误陈述**——本分支位于 arrangeOnce 之后，
+				//   云端编排早已执行并计费。把「图片运镜这一步零调用」说成「本轮零调用」，
+				//   会让用户以为这一轮没花钱。零调用的只有图片运镜那一项。
+				(arrangeRun
+					? `\n⚠️ 注意：本轮的 **B-roll 云端编排已经跑过并计费**（编排量 ${arrangeRun.units_total ?? "?"}），零调用的只是图片运镜这一步。`
+					: "零云端调用。") +
+				"（broll-plan.json 照常可用）可用 --yes 跳过确认，或 --no-image-broll 排除图片候选后重跑。",
 		);
 		return {
 			declined: true,
@@ -3105,6 +3172,8 @@ async function layIntoProject(
 				blackTrack: null,
 				blackBedHoleSec: 0,
 				blackBedHoles: [],
+				// post-arrange 早返回同样要带归因：这一路钱已经花了，机读面 MUST NOT 静默
+				...(arrangeRun ? { arrange_run: arrangeRun } : {}),
 			},
 		};
 	}
@@ -3226,6 +3295,8 @@ async function layIntoProject(
 				blackTrack: null,
 				blackBedHoleSec: 0,
 				blackBedHoles: [],
+				// 拒铺同样是 post-arrange：云端编排早已执行并计费，机读面 MUST NOT 静默
+				...(arrangeRun ? { arrange_run: arrangeRun } : {}),
 				downloads: dlStats,
 			},
 			// 拒铺前运镜可能已生成（产物留在 assets/broll-move/ 供下轮复用）——账面如实报
@@ -3525,6 +3596,11 @@ async function layIntoProject(
 			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。
 			blackBedHoleSec: summary.blackBedHoleSec,
 			blackBedHoles: summary.blackBedHoles,
+			// 云端编排归因（fix-arrange-selfcheck-json-surface）：**真发过请求才出现**。
+			// ⚠️ 键名是 `arrange_run` 不是 `arrange`——`arrange` 已被 `--arrange-estimate-only`
+			//    那条路占用且形态不同（`{applicable, units, scale}` 的预估形态）。两条路的语义
+			//    一个是「将要花多少」、一个是「实际发生了什么」，MUST NOT 合形、MUST NOT 互相顶替。
+			...(arrangeRun ? { arrange_run: arrangeRun } : {}),
 			downloads: dlStats,
 			// 运镜失败明细（D6 机读 summary）：仅图片候选参与本轮时出现；失败槽位已静态兜底
 			...(prep.hasImage ? { image_move_failures: prep.failures } : {}),

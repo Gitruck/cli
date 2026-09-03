@@ -83,7 +83,20 @@ export type FallbackReason =
 	| "unreachable" // ② 服务端熔断
 	| "rejected" // ③ 服务端业务拒绝（含 algo_pin 与双端复算不一致）
 	| "malformed" // 产物结构违约
+	| "decision_pin_mismatch" // 服务端跑的决策层版本与本机期望不符 ★ 已计费
 	| "self_check_failed"; // 本地复算自校验不一致 ★ 已计费
+
+/** 本机决策层与哪一版服务端决策层**互认**（`link-arrange-decision-pin-echo`）。
+ *
+ * ⚠️ **MUST 与 infra `broll_arrange/constants.py` 的 `DECISION_ALGO_PIN` 同批 bump。**
+ * 这条约束正是 `add-decision-layer-linkage-gate` 三件套里的第 ② 件（立 link- 件 /
+ * bump pin / 补能红的金样）——两侧各存一份是刻意的：**存一份就没有可比对的对象**，
+ * 而这里要的恰恰是「两侧各自声明、不一致就喊出来」。
+ *
+ * 判据是**相等**不是「≥」：决策层版本不是有序的兼容链，v3 与 v4 只是「不同」，
+ * 谁新谁旧不蕴含谁能替谁。
+ */
+export const EXPECTED_DECISION_ALGO_PIN = "broll-arrange-decision@v4";
 
 export interface ArrangeGateResult {
 	outcome: ArrangeOutcome;
@@ -97,6 +110,22 @@ export interface ArrangeGateResult {
 	units?: number;
 	/** false = 服务端幂等登记未写成，本次调用不受幂等保护。 */
 	idempotencyRecorded?: boolean;
+	/** `true` = 本轮**真的把请求发到了服务端并拿到了响应**（无论产物最终用没用）。
+	 *
+	 * ★ 存在的理由：机读面判「这一轮花没花钱」MUST NOT 靠 `source` / `fallback` 反推——
+	 * shadow 档返回的是 `source:"local"` 且**无 `fallback`**（`:283` 那一行），
+	 * 与「总闸压回本地」在那两个字段上完全同形，而前者真发过请求真计费、后者零调用。
+	 * 靠反推会让 shadow 档整键缺席，而那正是本字段要治的病。 */
+	called?: true;
+	/** `true` = 本次命中服务端**幂等回放**（未重新执行、未新增计费）。
+	 *
+	 * ⚠️ **缺席 ⟺ 真执行了**，这是服务端契约（回放时才置 true，其余情况整键缺席，见路由 swagger）。
+	 * MUST NOT 补 `false` 造出第三档「无法确定」——那会让每一次正常执行都被说成不确定，
+	 * 比 `link-arrange-replay-honesty` 修掉的那个无条件误报更没用（该件初版就这么写过，走查时判死）。
+	 *
+	 * ★ 2026-09-03 透传上来（fix-arrange-selfcheck-json-surface）：`arrange-gate` 内部早就在读它
+	 * （计费口径三分），但从不外传 ⇒ 机读面无从分辨「白花钱」与「没花钱」。 */
+	idempotentReplay?: boolean;
 }
 
 export interface ArrangeGateDeps {
@@ -177,6 +206,15 @@ export async function runArrangeWithFallback(
 	const mode = resolveArrangeMode(requestedMode);
 
 	if (mode === "local") {
+		// ★ 2026-09-03（fix-arrange-selfcheck-json-surface §1.5）：这条早返回原来**人读机读双静默**——
+		//   相邻的 out_of_scope 分支有 log.info，唯独总闸压回本地时一个字都不打。
+		//   `--arrange local` 已不受理之后，`GITRUCK_ARRANGE` 是**唯一**能把本地素材路压回本地引擎的开关，
+		//   而「悄悄换引擎」是最不该静默的一类事：用户拿到的是本地编排产物，却以为走的是云端。
+		//   ⚠️ 用 info 不用 warn —— 这是我们自己按下的阀，不是异常。
+		//   文案只说结论，MUST NOT 写 GITRUCK_ARRANGE 的设置方法（它不进用户文档）。
+		if (requestedMode !== "local") {
+			log.info("云端编排被总闸压回本地：本轮零云端调用、零计费，产物来自本地编排引擎。");
+		}
 		return { outcome: deps.runLocal(), source: "local", mode, ...(requestedMode !== "local" ? { fallback: "kill_switch" as const } : {}) };
 	}
 	if (!isLocalArrangeScope(plan)) {
@@ -234,6 +272,39 @@ export async function runArrangeWithFallback(
 			: `⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
 				"成片不受影响，但这笔账你花得不明不白——请把这条反馈给我们。";
 
+	// ── 决策层版本核对（link-arrange-decision-pin-echo）────────────────────────
+	//
+	// 放在**产物解析之前**：版本对不上时那份产物根本不可比，再去 diff 只会得到一堆
+	// 面目模糊的「自校验不一致 N 处」，把真正的原因（服务端跑的是另一版算法）埋掉。
+	//
+	// ⚠️ **缺席不算不一致**（合法的第三档）：服务端未升级到会回传它的版本，或命中的是
+	//    本字段落地之前写下的幂等条目。判成不一致会把每一个没升级的服务端都变成故障。
+	//    代价如实记：这一档下**核对没有发生**，与「核对通过」MUST NOT 在日志里说成一样。
+	const serverPin = resp.decision_algo_pin;
+	if (typeof serverPin === "string" && serverPin !== EXPECTED_DECISION_ALGO_PIN) {
+		log.warn(
+			`服务端跑的决策层是 ${serverPin}，本机期望 ${EXPECTED_DECISION_ALGO_PIN} —— 产物不可比，本轮弃用、改用本地编排。\n` +
+				"常见成因：① 服务端尚未部署到本机对应的版本（push≠部署）；② 命中了升级前写下的幂等条目。\n" +
+				`${billingNote}`,
+		);
+		// ⚠️ `common` 在下面才定义（它依赖 diffs，而 diffs 依赖已解析的 remote）——
+		//    本档**刻意不解析产物**，故这里逐字段自建，MUST NOT 为了少写几行把 common 提上来：
+		//    那会强迫本档先解析一份已知不可比的产物。
+		return {
+			outcome: local,
+			source: "local",
+			mode,
+			fallback: "decision_pin_mismatch",
+			called: true as const,
+			...(resp.units !== undefined ? { units: resp.units } : {}),
+			...(resp.idempotency_recorded !== undefined ? { idempotencyRecorded: resp.idempotency_recorded } : {}),
+			...(resp.idempotent_replay === true ? { idempotentReplay: true as const } : {}),
+		};
+	}
+	if (serverPin === undefined) {
+		log.info("服务端未回传决策层版本（旧版服务端或旧幂等条目）——本轮**未做**版本核对，产物按自校验结论处置。");
+	}
+
 	let remote: ArrangeOutcome;
 	try {
 		remote = applyArrangeResponse(resp, lay);
@@ -242,15 +313,28 @@ export async function runArrangeWithFallback(
 		const billed = `${billingNote}\n请把这条连同上面的违约明细反馈给我们。`;
 		if (strict) throw new ArrangeUnavailableError("malformed", `服务端编排产物结构违约：${(e as Error).message}\n${billed}`);
 		log.warn(`服务端编排产物结构违约，本轮弃用：${(e as Error).message}\n${billed}`);
-		return { outcome: local, source: "local", mode, fallback: "malformed", ...(resp.units !== undefined ? { units: resp.units } : {}) };
+		// 违约档同样**真发过请求真计费** ⇒ called 照带（它与 diffs 无关：这一路根本没比成）
+		return {
+			outcome: local,
+			source: "local",
+			mode,
+			fallback: "malformed",
+			called: true as const,
+			...(resp.units !== undefined ? { units: resp.units } : {}),
+			...(resp.idempotent_replay === true ? { idempotentReplay: true as const } : {}),
+		};
 	}
 
 	const diffs = diffArrangeOutcome(local, remote);
 	const common = {
 		mode,
+		called: true as const,
 		diffs,
 		...(resp.units !== undefined ? { units: resp.units } : {}),
 		...(resp.idempotency_recorded !== undefined ? { idempotencyRecorded: resp.idempotency_recorded } : {}),
+		// ⚠️ 缺席语义原样保留：`=== true` 才带上，MUST NOT 写成 `!== undefined`（那会把 false 也带出去、
+		//    造出第三档「无法确定」）。缺席 ⟺ 真执行了，见 `ArrangeGateResult.idempotentReplay` 的注。
+		...(resp.idempotent_replay === true ? { idempotentReplay: true as const } : {}),
 	};
 
 	if (resp.idempotency_recorded === false) {

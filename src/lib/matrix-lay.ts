@@ -999,7 +999,7 @@ function sourceWindowFor(p: Pair, d: number): { clipSt: number; clipEd: number }
  * 类型与校验**不在本 change 的文件射程内**（并行施工分工），由接手方同批补齐——见 handoff。
  * 形态坏（非数组/非有限数/顺序反）的条目**逐条丢弃**而不是整体拒：本函数是消费方，
  * 手改坏一个数不该让整轨铺不出来；真正的形态校验属于 `validatePlanForLay` 那一层。 */
-function blackSpansOf(seg: unknown): [number, number][] {
+export function blackSpansOf(seg: unknown): [number, number][] {
 	const raw = (seg as { black?: unknown }).black;
 	if (!Array.isArray(raw)) return [];
 	const out: [number, number][] = [];
