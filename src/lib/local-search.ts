@@ -15,6 +15,10 @@
  * fixtures/local-search/golden-aggregate.json 已由新实现重跑固化为新基线。
  * 段内切点明细（cuts）：素材切点全集（local-index cuts 表）中严格落在段开区间内的切点随段透出，
  * 供铺轨端点吸附消残片；旧库无数据（cuts_indexed NULL）时省略字段。
+ * 段内黑段明细（black，fix-index-gradual-transition-blindness）：与 cuts **并列**的正交信号——
+ * 素材黑段全集（black_spans 表）中与段区间有**交叠**者随段透出，供铺轨把窗口收缩到黑段一侧；
+ * 旧库无数据（black_indexed NULL）时整键省略。两者都遵同一条三态语义：
+ * 缺席=没扫过（不可判）/ `[]`=扫过且没有 / 有值=就是这些。
  */
 import { existsSync } from "node:fs";
 import { resolve, sep } from "node:path";
@@ -144,6 +148,10 @@ export interface LoadedMaterial {
 	/** 带运动信号的场景跨度（add-material-motion-signal）：按 st_ms 升序，只含 motion 可判的场景。
 	 * undefined/空 = 该素材无运动信号（旧库未重建），段不透出 motion。 */
 	motionScenes?: { st_ms: number; ed_ms: number; p50: number; p90: number; samples: number; effectiveFps: number | null }[];
+	/** 源片黑段全集（毫秒，升序；fix-index-gradual-transition-blindness）：仅 black_indexed=1 的素材携带
+	 * （`[]`=扫过且真无黑段）；undefined=旧库没扫过（检索段整键不透出 `black`）。
+	 * ⚠️ 与 cutsMs 同构的**三态**，MUST NOT 拿长度判「扫没扫过」。 */
+	blackMs?: [number, number][];
 }
 
 export interface LoadedIndex {
@@ -266,6 +274,25 @@ export function loadLocalIndex(
 				if (matIdx !== undefined) materials[matIdx]!.cutsMs?.push(c.t_ms);
 			}
 		}
+		// 黑段全集（fix-index-gradual-transition-blindness）：与 cuts 同款两小步，三态语义同构——
+		// 先按 black_indexed=1 给在场素材开空数组（`[]`=扫过且无黑），再按 (material_id, st_ms) 序回填。
+		// ⚠️ 两步 MUST 分开：合成一条 `SELECT … FROM black_spans` 就再也分不出
+		//    「这素材没扫过」与「这素材扫过但一个黑段都没有」——那正是 fix-cut-scan-warning-semantics 的坑。
+		let anyBlackIndexed = false;
+		for (const m of db.all<{ id: number }>("SELECT id FROM materials WHERE black_indexed = 1")) {
+			const matIdx = matIdxByKey.get(m.id);
+			if (matIdx === undefined) continue; // 不在检索域/文件已消失
+			materials[matIdx]!.blackMs = [];
+			anyBlackIndexed = true;
+		}
+		if (anyBlackIndexed) {
+			for (const b of db.all<{ material_id: number; st_ms: number; ed_ms: number }>(
+				"SELECT material_id, st_ms, ed_ms FROM black_spans ORDER BY material_id, st_ms",
+			)) {
+				const matIdx = matIdxByKey.get(b.material_id);
+				if (matIdx !== undefined) materials[matIdx]!.blackMs?.push([b.st_ms, b.ed_ms]);
+			}
+		}
 		// 运动信号（add-material-motion-signal）：**场景级**数据同样走素材级小查询——
 		// 挂到逐帧 JOIN 上会按帧重复 N 次（实测多一列即多约 11% 载入耗时）。只取可判的场景。
 		for (const s of db.all<{
@@ -350,6 +377,20 @@ export function segmentMotion(
 		...(fps !== null ? { effective_fps: fps } : {}),
 	};
 }
+
+/**
+ * 段级形态（本地）。
+ *
+ * ⚠️ `black` 键（fix-index-gradual-transition-blindness）目前只在这里表达：契约正本
+ * `matrix.ts` 的 `PlanResult["segments"]` 与 `validatePlanForLay` 的形态校验**不在本 change
+ * 的文件射程内**（并行施工分工），须由接手方同批补齐——见本 change 的 handoff。
+ * 写出的 JSON 形态即最终形态，接手方只需把类型与校验补上，无需改本文件。
+ *
+ * ⚠️ 给接手方的一条硬约束：`black` 的校验 **MUST NOT 照抄 `cuts` 的「严格落在 (start,end) 开区间内」**
+ * ——黑段中点已被注入成场景边界，而段边界恒落在场景边界上 ⇒ **黑段横跨段界是常态而非例外**
+ * （真机 424.083–424.367 的中点 424.225 就是段界，两侧段各含它一半）。照抄即把正常产物判成坏形态。
+ */
+type LocalPlanSegment = NonNullable<PlanResult["segments"]>[number] & { black?: [number, number][] };
 
 export interface LocalSearchOutcome {
 	/** 过滤（score 地板）前的真实召回段数（PlanQuery.recalled 口径）。 */
@@ -471,7 +512,7 @@ export function searchLoadedIndex(
 			...(mat.height != null ? { height: mat.height } : {}),
 			...(mat.fps != null ? { fps: r3(mat.fps) } : {}),
 			...(mat.width != null && mat.height != null ? { orientation: mat.width >= mat.height ? "landscape" : "portrait" } : {}),
-			segments: kept.map((s) => {
+			segments: kept.map((s): LocalPlanSegment => {
 				// 段内切点明细（fix-broll-flash-frames D5）：切点全集中严格落在段开区间内者随段透出
 				// （铺轨端点吸附消残片用）。
 				// ★ 字段在不在场 ⇔ **该素材扫没扫过切点**（fix-cut-scan-warning-semantics）：
@@ -480,6 +521,15 @@ export function searchLoadedIndex(
 				//   上一版拿 `cutsInSeg.length` 当判据，把后者也写成缺席，于是下游把
 				//   「这段没切点」误报成「这素材没扫过切点」，并开出「重跑索引」这条昂贵且无效的处方。
 				const cutsInSeg = mat.cutsMs?.filter((t) => t > s.start_ms && t < s.end_ms) ?? [];
+				// 段内黑段明细（fix-index-gradual-transition-blindness）：与 `cuts` **并列**的正交信号。
+				// ★ 三态语义与 cuts 逐条同构（缺席=没扫过 / `[]`=扫过且无黑 / 有值=这些）——
+				//   判据恒是 `mat.blackMs !== undefined`，**MUST NOT 拿 length 当判据**（那个坑踩过一次）。
+				// ★ 判交叠而非「严格落在段内」：黑段中点已被注入成场景边界，而段边界恒落在场景边界上
+				//   ⇒ 黑段**横跨段界是常态**（真机那条 424.083–424.367 就骑在段界 424.225 上）。
+				//   用开区间判据会让骑缝的黑段整条消失，而它恰恰是最该被消费方看见的那一类。
+				// ★ 值给**未裁剪的源坐标**（可能越出 [start,end] 一点）：消费方要吸附的是黑场的真边界，
+				//   给裁到段界的坐标等于把端点吸到黑段中点上——落一个正好包着半截黑的窗口。
+				const blackInSeg = mat.blackMs?.filter(([bs, be]) => bs < s.end_ms && be > s.start_ms) ?? [];
 				// 段级运动量（add-material-motion-signal）：无信号时省略字段（「不可判」≠「平稳」）
 				const motion = mat.motionScenes?.length ? segmentMotion(mat.motionScenes, s.start_ms, s.end_ms) : undefined;
 				return {
@@ -488,6 +538,9 @@ export function searchLoadedIndex(
 					best: r3(s.best_ts_ms / 1000),
 					score: s.score,
 					...(mat.cutsMs !== undefined ? { cuts: cutsInSeg.map((t) => r3(t / 1000)) } : {}),
+					...(mat.blackMs !== undefined
+						? { black: blackInSeg.map(([bs, be]) => [r3(bs / 1000), r3(be / 1000)] as [number, number]) }
+						: {}),
 					...(motion ? { motion } : {}),
 				};
 			}),

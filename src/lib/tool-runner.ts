@@ -61,7 +61,8 @@ export interface CloudToolDeps {
 	invalidateUpload: typeof invalidateUpload;
 	submitTask: typeof submitTask;
 	getTaskResult: typeof getTaskResult;
-	downloadStream: (url: string, dest: string) => Promise<void>;
+	/** opts.exclusive=true 时以 O_CREAT|O_EXCL 落地（已存在即 EEXIST，由调用方改名重试）。 */
+	downloadStream: (url: string, dest: string, opts?: { exclusive?: boolean }) => Promise<void>;
 	/** 视频硬上限探时长（秒）；默认走 ffprobe。 */
 	probeDurationSec?: (path: string, ffmpegPath?: string) => number;
 	pollIntervalMs?: number;
@@ -170,12 +171,22 @@ export function guardDuration(
 
 // ---------------------------------------------------------------- 流式下载
 
-/** 流式下载 URL → dest：fetch body pipe 到 createWriteStream，产物不整体进内存。 */
-export async function downloadStream(url: string, dest: string): Promise<void> {
+/**
+ * 流式下载 URL → dest：fetch body pipe 到 createWriteStream，产物不整体进内存。
+ *
+ * `exclusive: true` 走 flags `"wx"`（`O_CREAT|O_EXCL`）：目标已存在时内核抛 EEXIST，
+ * **原子**地把「谁占住这个文件名」这件事仲裁掉，调用方据此改名重试
+ * （fix-tool-outdir-collision 第二层；MUST NOT 换成 existsSync 先探后写，那是 TOCTOU）。
+ * 缺省仍是 `"w"`（截断），有输入文件的工具幂等重跑逐字节不变。
+ */
+export async function downloadStream(url: string, dest: string, opts?: { exclusive?: boolean }): Promise<void> {
 	const res = await fetch(url);
 	if (!res.ok || !res.body) throw new Error(`下载失败 HTTP ${res.status}：${url}`);
 	// node:stream/web 与 DOM lib 的 ReadableStream 声明打架；运行时同一实现（对齐 cloud.ts 的 toWeb 处理）
-	await pipeline(Readable.fromWeb(res.body as unknown as Parameters<typeof Readable.fromWeb>[0]), createWriteStream(dest));
+	await pipeline(
+		Readable.fromWeb(res.body as unknown as Parameters<typeof Readable.fromWeb>[0]),
+		createWriteStream(dest, opts?.exclusive ? { flags: "wx" } : undefined),
+	);
 }
 
 // ---------------------------------------------------------------- 轮询（自循环复用 getTaskResult，对齐 pollTask 语义）
@@ -375,6 +386,64 @@ export function resolveOutDir(descriptor: ToolDescriptor, inputAbs: string | und
 	return join(process.cwd(), `${descriptor.name}-${timestamp()}`);
 }
 
+/** 撞名消解的序号上界（撞满即报错；MUST NOT 无限重试）。 */
+const MAX_OUTDIR_CANDIDATES = 99;
+
+/** 取 fs 错误码（EEXIST/ENOENT…）；非 fs 错误返回 undefined。 */
+function fsErrCode(e: unknown): string | undefined {
+	const c = e && typeof e === "object" ? (e as { code?: unknown }).code : undefined;
+	return typeof c === "string" ? c : undefined;
+}
+
+/**
+ * 建产物目录，返回**真正建成**的绝对路径（fix-tool-outdir-collision 第一层）。
+ *
+ * `antiCollision=true`（= 无输入文件、无 `--out` 的时间戳候选名那一支）走**非 recursive** `mkdir` 探路：
+ * 目录已存在时内核抛 EEXIST，这是操作系统给的**原子**仲裁；捕获即把候选名换成
+ * `<候选名>-2`、`-3`… 依次重试，直到建成为止。
+ *
+ * ⚠️ MUST NOT 改成 `existsSync(dir)` 先探再建 —— 那是 TOCTOU：两个进程会同时判「不存在」
+ * 然后双双 mkdir 成功，正好还原 2026-09-02 那次真机事故（两条 audio_tts_clone 同秒起、
+ * 两份 --json 回执的 outDir 逐字符相同，先提交那条的 9,561,644 字节 wav 与它的 task.json
+ * 被后提交那条整体抹掉，回执却一切正常）。仲裁只能靠 mkdir 本身的失败。
+ *
+ * `antiCollision=false` 保持 `mkdir(recursive:true)`，两支行为逐字节不变：
+ * `<输入名>-<tool>/` 重跑同一输入本就该落回同一目录（幂等重跑是设计如此）；
+ * `--out` 是用户明示的落点，替他改名反而是惊吓（skill 里「落进工程目录」的用法全靠这条）。
+ */
+export async function createOutDir(candidate: string, antiCollision: boolean): Promise<string> {
+	if (!antiCollision) {
+		await mkdir(candidate, { recursive: true });
+		return candidate;
+	}
+	for (let n = 1; n <= MAX_OUTDIR_CANDIDATES; n++) {
+		const dir = n === 1 ? candidate : `${candidate}-${n}`;
+		try {
+			await mkdir(dir); // 非 recursive：已存在即 EEXIST（唯一仲裁点）
+			if (n > 1) {
+				emitWarn(`产物目录「${basename(candidate)}」已被占用，本次改落「${basename(dir)}」（既有目录原样保留）`);
+			}
+			return dir;
+		} catch (e) {
+			if (fsErrCode(e) !== "EEXIST") throw e; // 权限/父目录缺失等真错误照抛，不吞
+		}
+	}
+	throw new Error(
+		`产物目录「${candidate}」及其 -2…-${MAX_OUTDIR_CANDIDATES} 序号变体均已被占用，无法确定落点。` +
+			`请清理旧产物或用 --out 显式指定目录。`,
+	);
+}
+
+/**
+ * 产物撞名消解名：`<基名>-<taskId 后 6 位><扩展名>`。
+ * 用 taskId 而非随机后缀 —— 本仓对产物命名有确定性硬要求，taskId 天然唯一且可回溯到那次提交。
+ */
+export function collisionName(filename: string, taskId: string): string {
+	const ext = extname(filename);
+	const stem = filename.slice(0, filename.length - ext.length);
+	return `${stem}-${taskId.slice(-6) || "dup"}${ext}`; // taskId 恒非空（下载时早已赋值），"dup" 只是兜底
+}
+
 /** 输入指纹 size:mtime（best-effort，写进 task.json 供人工恢复对照）。 */
 async function safeFingerprint(inputAbs: string): Promise<string | undefined> {
 	try {
@@ -388,6 +457,16 @@ async function safeFingerprint(inputAbs: string): Promise<string | undefined> {
 /** 提交前计费提示：一律走 stderr（人读；--json 下不污染 stdout 机读契约）。 */
 function emitBilling(hint: string): void {
 	process.stderr.write(`\x1b[33m⚠️  计费提示：${hint}\x1b[0m\n`);
+}
+
+/**
+ * 落点告警（目录改名 / 产物改名 / 产物将被覆盖）：与计费提示同口径，**一律直写 stderr**。
+ * 不走 log.warn —— 那条非 --json 时落 stdout；这里的三条 WARN 必须在任何模式下都不污染
+ * `--json` 的 stdout 单行契约。「回执没变、路径没变、内容换人」是本 change 立案的真机形态，
+ * 所以改名与覆盖 MUST NOT 静默。
+ */
+function emitWarn(msg: string): void {
+	process.stderr.write(`\x1b[33m⚠️  ${msg}\x1b[0m\n`);
 }
 
 // ---------------------------------------------------------------- cloud 型编排
@@ -437,7 +516,12 @@ export async function runCloudTool(
 		extraParams,
 		warn: (m) => process.stderr.write(`\x1b[2m   ${m}\x1b[0m\n`),
 	};
-	const outDir = resolveOutDir(descriptor, inputAbs, opts.out);
+	// 落点：resolveOutDir 只产**候选名**（它在这一刻执行、真正建目录在 submit 之后的 writeBreadcrumb），
+	// 最终名由 createOutDir 在建目录那一刻回填（防撞可能追加 -2/-3…）。下游全部读回填后的 outDir。
+	const outDirCandidate = resolveOutDir(descriptor, inputAbs, opts.out);
+	let outDir = outDirCandidate;
+	// 防撞射程与 resolveOutDir 的三支一一对应：只有「无输入文件 + 无 --out」那支是秒级时间戳候选名。
+	const antiCollision = !opts.out && !inputAbs;
 
 	// ①b 多文件必填参数前置干跑：payload 纯函数跑一遍占位 id，缺参（如 --main-title）在上传前即报错
 	if (isMulti) descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
@@ -469,8 +553,19 @@ export async function runCloudTool(
 	let taskId = "";
 	let fileId: string | undefined;
 	let fileIds: string[] | undefined;
+	let outDirReady = false;
 	const writeBreadcrumb = async (): Promise<void> => {
-		await mkdir(outDir, { recursive: true });
+		if (!outDirReady) {
+			try {
+				outDir = await createOutDir(outDirCandidate, antiCollision);
+			} catch (e) {
+				// 走到这一步任务**已提交**（可能已计费）。别让它连个恢复凭据都没有：把 task_id 带进错误。
+				throw new Error(
+					`${e instanceof Error ? e.message : String(e)}（任务已提交，task_id=${taskId}，可凭其在云端取回产物）`,
+				);
+			}
+			outDirReady = true; // 一次运行只建一次目录：重入不会再派生 -2
+		}
 		const fingerprint = inputList
 			? await Promise.all(inputList.map((p) => safeFingerprint(p)))
 			: inputAbs
@@ -555,11 +650,31 @@ export async function runCloudTool(
 
 	// (a) 文件下载路径：mapOutputs 收敛下载清单，流式落地。
 	const items: DownloadItem[] = descriptor.mapOutputs ? descriptor.mapOutputs(outputResult, ctx) : [];
+	const isNoneInput = descriptor.input.kind === "none";
 	for (const it of items) {
-		const dest = join(outDir, it.filename);
+		let dest = join(outDir, it.filename);
 		try {
-			await deps.downloadStream(it.url, dest);
-			files.push(dest);
+			if (isNoneInput) {
+				// input=none 的产物名不携带任何输入身份（`tts-<speaker>` 只有音色、与被合成的文本无关）
+				// ⇒ 同一目录内的两次调用极可能是两份不同产物，静默截断就是数据丢失（解说装配兜底路
+				// 「多段 TTS 同 --speaker 落同一 --out」会逐段互相盖，全链无一处报错）。
+				// O_EXCL 原子占位，真撞上才改名一次；没撞则文件名逐字节不变。
+				try {
+					await deps.downloadStream(it.url, dest, { exclusive: true });
+				} catch (e) {
+					if (fsErrCode(e) !== "EEXIST") throw e;
+					dest = join(outDir, collisionName(it.filename, taskId));
+					emitWarn(`产物「${it.filename}」已存在，本次改落「${basename(dest)}」（既有文件原样保留）`);
+					await deps.downloadStream(it.url, dest, { exclusive: true }); // 再撞即记 errors，不无限重试
+				}
+			} else {
+				// 有输入文件的工具：目录名已携带输入身份 ⇒ 同目录内重跑必是同一输入，覆盖才是对的（幂等重跑）。
+				// 这里的 existsSync 只用来「说话」，不参与任何仲裁——竞态最多让 WARN 少打一条，
+				// 落哪份字节与它无关（TOCTOU 禁令针对的是防撞仲裁，不是提示）。
+				if (existsSync(dest)) emitWarn(`产物已存在，将被本次重跑覆盖：${dest}`);
+				await deps.downloadStream(it.url, dest);
+			}
+			files.push(dest); // 记改名后的真实落点
 		} catch (e) {
 			errors[it.filename] = e instanceof Error ? e.message : String(e);
 		}

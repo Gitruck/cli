@@ -1,14 +1,18 @@
 /**
  * 本地素材免切片索引（add-matrix-local-search · local-material-index spec）。
  *
- * 链路：ffmpeg 场景边界检测（select gte(scene,0)+metadata=print 单趟解码双产物——切点=score>θ
+ * 链路：ffmpeg 场景边界检测（select gte(scene,0)+metadata=print **+ blackdetect** 并联，
+ * 单趟解码三产物——切点=score>θ
  * 客户端判定，与旧 select gt(scene,θ)+showinfo 链切点逐字节一致（真机对拍 35/35）；每帧 scene score
- * 顺手供场景稳定性判定，add-index-stability-sampling；**只记时间戳不产生任何切片文件**）
+ * 顺手供场景稳定性判定，add-index-stability-sampling；黑段供渐变过黑检出
+ * （fix-index-gradual-transition-blindness——逐帧打分对匀速渐变结构性失明，见 detectCutsFromScores
+ * 头注）；**只记时间戳不产生任何切片文件**）
  * → 场景自适应抽帧（≤4s 场景中点 1 帧；>4s 每 2s 加密；**stable 场景收敛为中点 1 帧**；
  *   512px 最长边 jpg，抽到 ~/.gitruck/tmp）
  * → 自建 embed 端点向量化（批 ≤16，embed-client）→ SQLite 三表落库（帧图 embed 成功即删，即传即弃）。
  *
- * 存储（D1）：~/.gitruck/local-broll-index/index.db，materials/scenes/frames 三表，
+ * 存储（D1）：~/.gitruck/local-broll-index/index.db，materials/scenes/frames 三表
+ * （+ cuts 切点全集 / black_spans 黑段两张正交信号表），
  * vec = float32 **小端** BLOB。检索时全量载入内存点积（local-search.ts），不引向量库。
  *
  * 增量（D2）：素材粒度 (绝对路径, size, mtime) 指纹——未变跳过；变了级联删旧行重建；
@@ -41,10 +45,20 @@ import { cpus } from "node:os";
 import {
 	buildScenePassArgs, buildGpuProbeArgs, gpuLaneEligible, nextLane, explainIneligible,
 	GPU_FAIL_STREAK_LIMIT, PROXY_WIDTH_DEFAULT, PROXY_SCALER_DEFAULT, summarizeDowngrades,
+	createBlackSpanParser,
 	type DecodeLane,
 } from "./index-decode";
 
 // ── 参数基线（POC 标定值，design D4；θ 经 --scene-threshold 暴露）──────────
+/** 切点判定阈值。
+ *
+ * ⚠️ **调低它来接住渐变转场（叠化过黑）这条路已被实测判死**
+ * （fix-index-gradual-transition-blindness），后人 MUST NOT 重走：
+ * 真机那处叠化的**整段峰值**只有 0.028180，要接住得把 θ 压到 0.028；
+ * 而同素材 380–500s 共 7200 帧的分数直方图是 >0.3 有 32 个（真切点）、>0.1 有 50、
+ * >0.05 有 105、>0.028 有 **122（+281%，多出来的全是假切点）**。
+ * 且 0.0282 还只是这一条叠化的峰值——更慢的叠化只会更低，没有下界可言。
+ * 渐变过黑走**独立信号** blackdetect（见 index-decode.ts `BLACK_TAP`），与本阈值正交。 */
 export const SCENE_THRESHOLD_DEFAULT = 0.3;
 /** 场景稳定性判定阈值（--stability-threshold，add-index-stability-sampling）：场景内最大帧间
  * scene score 低于此值 → stable（固定机位）。默认取保守值 0.05——**待 2.2 验证批次标定**；
@@ -267,6 +281,24 @@ CREATE TABLE IF NOT EXISTS cuts (
   origin TEXT,
   PRIMARY KEY (material_id, t_ms)
 );
+-- 源片自带黑场区间（fix-index-gradual-transition-blindness）：索引场景检测同趟解码的
+-- blackdetect 产物，毫秒，按 st_ms 升序。
+--
+-- ★ **为什么不复用 cuts 表**（哪怕只是加一个 origin 值）——三条，缺一不可：
+--   ① cuts 的 spec 明文锁死「切点判定口径本身 MUST NOT 变更」（维持逐帧 score>θ 单帧判定），
+--      那条承诺的兑现方式就是「拿同样的 θ 重扫一遍，切点集合逐字节复现」。往里塞一类**不由 θ 判**
+--      的行，这条可复算性当场破产，而且破得**无声**——重扫者只会发现集合对不上，查不出为什么；
+--   ② 黑段是**正交信号**：切点是「画面换了」，黑段是「画面没了」。真机五处叠化过黑附近 ±4s 内
+--      cuts 全部无切点（最近的差 2.85–3.95s）⇒ 两者连位置都不重合，不是同一件事的两种来源；
+--   ③ cuts.origin 的 qc_confirmed 先例是「**同类**信号异来源」（成片像素上确认的切点仍是切点），
+--      黑段不属同类，援引不成立。
+-- 区间是**两点**而非一点：一次过黑有起止，塞进单点表会把「黑多长」这个铺轨要用的量丢掉。
+CREATE TABLE IF NOT EXISTS black_spans (
+  material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
+  st_ms INTEGER NOT NULL,
+  ed_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_black_spans_material ON black_spans(material_id);
 -- 编排期 QC 判定缓存（add-broll-arrange-atom P3.2）。
 --
 -- ★ 与 describes 分表，不是懒：describes 缓存的是**这一帧长什么样**（客观、与稿句无关），
@@ -358,6 +390,13 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		if (!cols.some((c) => c.name === "cuts_indexed")) {
 			db.exec("ALTER TABLE materials ADD COLUMN cuts_indexed INTEGER");
 		}
+		// materials.black_indexed 幂等迁移（fix-index-gradual-transition-blindness）：
+		// NULL=旧行**没扫过**黑段（检索侧整键不透出 `black`，消费方按「不可判」兜底）；
+		// 1=本素材已扫（空集=真无黑段）。与 cuts_indexed 同款先例——
+		// 「扫过且无黑」与「没扫过」MUST 可分辨，那正是 fix-cut-scan-warning-semantics 踩过的坑。
+		if (!cols.some((c) => c.name === "black_indexed")) {
+			db.exec("ALTER TABLE materials ADD COLUMN black_indexed INTEGER");
+		}
 		// materials.decode_lane 幂等迁移（speedup-matrix-index-proxy-decode）：NULL=旧行（当时只有全清一条路）。
 		// 溯源用，检索侧不读——增量索引下同库素材可能走了不同车道，其 motion 分位彼此不完全可比；
 		// 这一列只保证该差异**可见**，MUST NOT 因换车道强制全库重建（那等于「换机器 = 全库重扫」）。
@@ -391,11 +430,15 @@ export interface MaterialRow {
 	decode_lane?: string | null;
 }
 
-/** 级联删一个素材的全部行（frames → scenes → cuts → materials；显式删，不依赖外键 pragma）。 */
+/** 级联删一个素材的全部行（frames → scenes → cuts → black_spans → materials；显式删，不依赖外键 pragma）。 */
 export function deleteMaterialRows(db: SqlDb, materialRowId: number): void {
 	db.run("DELETE FROM frames WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM scenes WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM cuts WHERE material_id = ?", [materialRowId]);
+	// 漏了这一行就是重建后黑段翻倍（同一素材两次扫出的区间各存一份）：
+	// black_spans 无主键（一次过黑有起止两点，不适合拿 st_ms 当唯一键去 OR IGNORE），
+	// 去重完全靠这条级联删 ⇒ 它 MUST 与上面三张表同批。
+	db.run("DELETE FROM black_spans WHERE material_id = ?", [materialRowId]);
 	db.run("DELETE FROM materials WHERE id = ?", [materialRowId]);
 }
 
@@ -586,7 +629,14 @@ export function createSceneScoreParser(): {
  * ★ 帧率归一（滑窗和）判定曾在本 change 内实现，后按 2026-08-19 打样归因证据**撤出**：
  * 黄石 60fps 素材的 52 处真段内跳变里 49 处落在**已检出**的场景边界上（窗口越段，D1），
  * 3 处符合微切点特征（D4），无一处可归因于「高帧率软切漏检」；定向复扫（源 1185-1205s 等 7 段）
- * 新旧判定切点集合完全一致。无证据的检测阈值变更只会引入误检风险，故维持单帧判定。 */
+ * 新旧判定切点集合完全一致。无证据的检测阈值变更只会引入误检风险，故维持单帧判定。
+ *
+ * ★★ 2026-09-02 补证（fix-index-gradual-transition-blindness）：上面那次撤回在「高帧率软切」
+ * 这件事上**成立，本件不翻它**；但它 MUST NOT 被后人读成「渐变转场无需处理」——那是两回事。
+ * 实测匀速叠化过黑处 **1 秒滚动分数和峰值仅 0.1265**，而同素材 120s 内 7141 个滚动窗里有
+ * **3639 个（51%）**的和 >0.15 ⇒ 滑窗和对这一类**完全不可分离**：即当初没撤回，它也接不住。
+ * 换言之，渐变过黑不是「判据不够灵敏」，是**逐帧打分这条路本身对它失明**
+ * （score 取 min(mafd,|Δmafd|)，匀速渐变 Δmafd≈0 把分数压到零），只能换正交信号（blackdetect）。 */
 export function detectCutsFromScores(
 	frames: { ts: number; score: number }[],
 	threshold: number = SCENE_THRESHOLD_DEFAULT,
@@ -594,10 +644,33 @@ export function detectCutsFromScores(
 	return frames.filter((f) => f.score > threshold).map((f) => f.ts);
 }
 
-/** 切点 → 场景区间（秒）：<0.5s 的边界间隔并入前段（POC detect_scenes 逐行对齐）。 */
-export function buildScenes(cuts: number[], durationSec: number, minSceneSec: number = MIN_SCENE_SEC): { st: number; ed: number }[] {
+/** 切点 → 场景区间（秒）：<0.5s 的边界间隔并入前段（POC detect_scenes 逐行对齐）。
+ *
+ * `blackMidpoints`（fix-index-gradual-transition-blindness）：黑段**中点**作为额外的场景边界注入。
+ * 缺省 `[]` ⇒ 与本 change 之前逐字节同行为（旧调用/旧对拍一字不改）。
+ *
+ * ★ **这是本 change 杠杆最大的一刀——不改铺轨代码就治住主路径**：段界是下游取窗的硬钳位
+ * （`matrix-lay.ts sourceWindowFor` 的 `lo=seg.start` / `maxSt=seg.end-d`），
+ * 真机那条 414.633–432.667 的 18.034s 假场景（内含 424.083–424.367 的叠化过黑）一旦在 424.225
+ * 被劈开，「best 居中截 6s」得到的 420.65–426.65 就再也跨不过去。
+ *
+ * 取**中点**而不是起止两点：起止各注入一次会在两个边界之间留一条 0.28s 的「纯黑场景」，
+ * 它会被 0.5s 并段规则吞掉一半、剩下的那条还会真的进候选池（一段全黑的 B-roll 候选）。
+ * 中点一刀两断，黑段前后各归一侧，两侧都带着半截黑 ⇒ 由取窗侧的黑段收缩负责剔（见 matrix-lay）。
+ *
+ * 并段规则对注入点**一视同仁**：黑段中点距上一条边界 <minSceneSec 时同样被吞（不劈）。
+ * 那种情形下黑段仍与场景区间交叠 ⇒ `annotateSceneStability` 的 stable 否决照常生效，信号不丢。 */
+export function buildScenes(
+	cuts: number[],
+	durationSec: number,
+	minSceneSec: number = MIN_SCENE_SEC,
+	blackMidpoints: number[] = [],
+): { st: number; ed: number }[] {
+	// 归并成一条升序边界候选流。⚠️ MUST NOT 改动 `cuts` 本身——切点全集要按 θ 可复算，
+	// 黑段是**另一种**边界来源，只影响场景分段，不进 cuts 表、不进切点透出。
+	const marks = blackMidpoints.length ? [...cuts, ...blackMidpoints].sort((a, b) => a - b) : cuts;
 	const bounds = [0];
-	for (const t of cuts) {
+	for (const t of marks) {
 		if (t - bounds[bounds.length - 1]! >= minSceneSec) bounds.push(t);
 	}
 	if (durationSec - bounds[bounds.length - 1]! >= minSceneSec) bounds.push(durationSec);
@@ -611,6 +684,25 @@ export function buildScenes(cuts: number[], durationSec: number, minSceneSec: nu
  * `assertScenePassProductive` 只取过滤后的尾 3 行；留 40 是给「报错之后又被别的行刷了一片」留余量，
  * 再多也只是喂给一个 `.slice(-3)`。 */
 const STDERR_DIAG_TAIL_LINES = 40;
+
+/**
+ * 这一行是不是**逐帧噪声**（该被排除在诊断尾巴之外）。
+ *
+ * ⚠️ 本函数存在的唯一理由是**口径唯一**：`runFfmpegCaptureStderr` 的环形缓冲与
+ * `assertScenePassProductive` 的 `.slice(-3)` 必须过同一把筛子，否则前者留下的 40 行与后者
+ * 认可的行不是同一批，报错尾巴会缺斤少两。此前两处各写一份 `.filter(...)`，靠头注互相自陈
+ * 「逐字一致」维持——`black_start` 这次同批补排恰好证明那种约定不可靠（改一处即破约）。
+ *
+ * 三类噪声，量级都是 O(帧数)，混进诊断尾巴就会把真正的根因行**刷出窗口**：
+ *   · `lavfi.scene_score` —— metadata=print 的键值行；
+ *   · `pts_time:`        —— metadata=print 的帧头行；
+ *   · `black_start`      —— blackdetect 的黑段行（fix-index-gradual-transition-blindness）。
+ *     它虽然不是逐帧一条，但过黑频繁的素材（叠化转场片）一趟能刷出几十上百条，
+ *     而诊断尾巴只有 3 行的展示预算 ⇒ 不排就是把「ffmpeg 为什么挂了」换成「哪里黑过」。
+ */
+export function isScenePassNoiseLine(line: string): boolean {
+	return !line.trim() || line.includes("lavfi.scene_score") || line.includes("pts_time:") || line.includes("black_start");
+}
 
 /** 跑 ffmpeg **流式逐行**消费 stderr **并回退出码**（runFfmpeg 只留尾 4000 字会截断，故独立实现）。
  *
@@ -645,7 +737,7 @@ export function runFfmpegCaptureStderr(
 		let buf = "";
 		const feed = (line: string): void => {
 			onLine?.(line);
-			if (line.trim() && !line.includes("lavfi.scene_score") && !line.includes("pts_time:")) {
+			if (!isScenePassNoiseLine(line)) {
 				diag.push(line);
 				if (diag.length > STDERR_DIAG_TAIL_LINES) diag.shift();
 			}
@@ -697,8 +789,14 @@ export interface SceneSpan {
 	ed: number;
 	/** 场景内最大帧间 scene score（不含场景起点切帧本身——它量的是切入该场景的跳变；无内点=0）。 */
 	maxScore: number;
-	/** maxScore < stabilityThreshold ⇒ 固定机位类稳定场景（抽帧收敛为中点 1 帧）。 */
+	/** maxScore < stabilityThreshold ⇒ 固定机位类稳定场景（抽帧收敛为中点 1 帧）。
+	 * 含黑段者恒 false（见 blackVeto）。 */
 	stable: boolean;
+	/** 本场景是否**因含黑段被否决 stable**（fix-index-gradual-transition-blindness）：
+	 * 即「按 maxScore 本会判 stable、但区间内有黑段」。恒与 stable 互斥。
+	 * 只为**成本可见**而存在——这一否决直接进 embed 计费（抽帧由 1 帧涨到 ~⌈时长/2s⌉ 帧），
+	 * 账面 MUST 分列，MUST NOT 静默上涨。 */
+	blackVeto: boolean;
 	/** 运动量分级信号（add-material-motion-signal）：**去重后**帧间分的分位。
 	 * 为何不用 maxScore 当运动量：含真实切点的平稳场景其 max 反而更高（打样实测干净窗口
 	 * max=0.5262 > 高运动窗口 0.2903）——max 量的是「有没有切点」，不是「抖不抖」。
@@ -722,12 +820,23 @@ export interface SceneMotion {
 
 /** 场景区间 → 稳定性注记（双指针单趟；scenes 与 frameScores 均按时间升序）。
  * 每场景取 (st, ed) **开区间内**帧的最大 score：ts==st 是切入本场景的切帧（跳变分不算场内运动）、
- * ts==ed 是切入下一场景的切帧；<0.5s 并段丢弃的切点留在段内 ⇒ 其高分自然把该段判 unstable（正确语义）。 */
+ * ts==ed 是切入下一场景的切帧；<0.5s 并段丢弃的切点留在段内 ⇒ 其高分自然把该段判 unstable（正确语义）。
+ *
+ * `blackSpans`（fix-index-gradual-transition-blindness）：**与本场景区间有交叠的黑段一票否决 stable**。
+ * 缺省 `[]` ⇒ 与本 change 之前逐字节同行为。
+ *
+ * 为什么必须否决：现行判据把含**完整 fade-to-black** 的 18.034s 判成「固定机位」
+ * （真机五处所属场景 motion_p90 0.0104–0.0359 全在稳定阈 0.05 之下——渐变的帧间差本就极小），
+ * 然后 planFrames 把它收敛成中点单帧。**这一步把「代表整段的向量取自一张渐变中途的暗帧」
+ * 变成了必然事件**：实测五个代表帧 YAVG 82.4 / 123.0 / 70.8 / 130.9 / 103.3，三个明确落在渐变里；
+ * id=2647 那条的唯一代表帧 YAVG=130.9，而该镜头的平台亮度是 191（淡到 68%）。
+ * 检索拿这种帧当整段的语义，既召不回该召的、又召回了不该召的，且全程无任何异常信号。 */
 export function annotateSceneStability(
 	scenes: { st: number; ed: number }[],
 	frameScores: { ts: number; score: number }[],
 	stabilityThreshold: number = STABILITY_THRESHOLD_DEFAULT,
 	containerFps?: number,
+	blackSpans: { st: number; ed: number }[] = [],
 ): SceneSpan[] {
 	const buckets: number[][] = scenes.map(() => []);
 	const out: SceneSpan[] = scenes.map((s) => ({
@@ -735,6 +844,7 @@ export function annotateSceneStability(
 		ed: s.ed,
 		maxScore: 0,
 		stable: true,
+		blackVeto: false,
 		motion: { p50: null, p90: null, samples: 0, effectiveFps: null, doubled: false },
 	}));
 	let si = 0;
@@ -748,8 +858,14 @@ export function annotateSceneStability(
 		}
 	}
 	for (let i = 0; i < out.length; i++) {
-		out[i]!.stable = out[i]!.maxScore < stabilityThreshold;
-		out[i]!.motion = computeSceneMotion(buckets[i]!, containerFps);
+		const s = out[i]!;
+		const calm = s.maxScore < stabilityThreshold;
+		// 交叠判据用**闭区间相触即交**：黑段中点被注入成边界后，黑段的两半各落在相邻两个场景里，
+		// 两条都该被否决（那半截黑就在它们各自的区间内）。
+		const hasBlack = blackSpans.some((b) => b.st < s.ed && b.ed > s.st);
+		s.blackVeto = calm && hasBlack;
+		s.stable = calm && !hasBlack;
+		s.motion = computeSceneMotion(buckets[i]!, containerFps);
 	}
 	return out;
 }
@@ -807,6 +923,10 @@ export function computeSceneMotion(scores: number[], containerFps?: number): Sce
 export interface SceneDetection {
 	scenes: SceneSpan[];
 	cuts: number[];
+	/** 源片自带黑场区间（秒，升序；fix-index-gradual-transition-blindness）。
+	 * 与 `cuts` **并列而非合并**：切点是「画面换了」、黑段是「画面没了」，见 black_spans 表头注。
+	 * `[]` = 扫过且真无黑段；本字段在 SceneDetection 上恒在场（视频趟必扫）。 */
+	blackSpans: { st: number; ed: number }[];
 	/** 实际跑成的车道（降级后是降到的那一档）。落库供溯源：
 	 * 不同车道的 motion 分位彼此不完全可比，出问题时要能查出这条素材当时走的哪条路。 */
 	lane?: DecodeLane;
@@ -824,8 +944,9 @@ export function assertScenePassProductive(x: {
 	durationSec: number;
 	fps?: number;
 }): void {
-	// stderr 尾部才是根因所在（前面全是逐帧 metadata 刷屏），且要给可读长度不给天书全文
-	const tail = x.stderr.split(/\r?\n/).filter((l) => l.trim() && !l.includes("lavfi.scene_score") && !l.includes("pts_time:"))
+	// stderr 尾部才是根因所在（前面全是逐帧 metadata / 黑段刷屏），且要给可读长度不给天书全文。
+	// ⚠️ 过滤口径与 runFfmpegCaptureStderr 的环形缓冲**同一个函数**，见 isScenePassNoiseLine 头注。
+	const tail = x.stderr.split(/\r?\n/).filter((l) => !isScenePassNoiseLine(l))
 		.slice(-3).join(" | ").slice(0, 400);
 	if (x.exitCode !== 0) {
 		// Windows 上退出码回来是无符号 32 位（-40 会显示成 4294967256），归一成有符号才有可读性
@@ -860,11 +981,21 @@ export async function detectScenesAndCuts(
 	containerFps?: number,
 	laneOpts?: ScenePassLaneOpts,
 ): Promise<SceneDetection> {
-	const { frames, lane } = await runScenePassWithFallback(ffmpeg, path, durationSec, containerFps, laneOpts);
+	const { frames, lane, blackSpans } = await runScenePassWithFallback(ffmpeg, path, durationSec, containerFps, laneOpts);
 	const cuts = detectCutsFromScores(frames, threshold);
+	// 黑段中点注入场景边界 + 含黑段场景否决 stable（fix-index-gradual-transition-blindness）。
+	// ⚠️ 两者都只作用于**场景表**，`cuts` 一字未动——切点口径可复算是既有承诺。
+	const mids = blackSpans.map((b) => (b.st + b.ed) / 2);
 	return {
-		scenes: annotateSceneStability(buildScenes(cuts, durationSec), frames, stabilityThreshold, containerFps),
+		scenes: annotateSceneStability(
+			buildScenes(cuts, durationSec, MIN_SCENE_SEC, mids),
+			frames,
+			stabilityThreshold,
+			containerFps,
+			blackSpans,
+		),
 		cuts,
+		blackSpans,
 		lane,
 	};
 }
@@ -909,7 +1040,7 @@ export async function runScenePassWithFallback(
 	durationSec: number,
 	containerFps?: number,
 	opts?: ScenePassLaneOpts,
-): Promise<{ frames: { ts: number; score: number }[]; lane: DecodeLane }> {
+): Promise<{ frames: { ts: number; score: number }[]; lane: DecodeLane; blackSpans: { st: number; ed: number }[] }> {
 	const fallback = opts?.fallback !== false;
 	let lane: DecodeLane = opts?.lane ?? "cpu_full";
 	const onTick = opts?.onTick;
@@ -919,6 +1050,9 @@ export async function runScenePassWithFallback(
 		//    assertScenePassProductive 的三条判据、θ 判定、场景合并一字未动。
 		// ⚠️ 每一轮降级重跑都新建 parser ⇒ 读数天然从 0 重开；文案带 lane，否则用户会看到进度倒退且无解释。
 		const parser = createSceneScoreParser();
+		// 黑段解析与 score 解析共吃同一条 stderr 流（同一趟解码双滤镜并联；**MUST NOT** 另起一趟）。
+		// ⚠️ 每轮降级重跑都新建：降级前那半趟的黑段属于失败的那次，留着就是与新一趟的结果混账。
+		const blacks = createBlackSpanParser();
 		const { exitCode, stderr } = await runFfmpegCaptureStderr(
 			ffmpeg,
 			buildScenePassArgs({ src: path, lane, proxyWidth: opts?.proxyWidth, proxyScaler: opts?.proxyScaler }),
@@ -926,15 +1060,19 @@ export async function runScenePassWithFallback(
 				? (line): void => {
 						const before = parser.frames.length;
 						parser.push(line);
+						blacks.push(line);
 						// 只在真成了新帧才报：banner / 进度行 / 报错行不该让读数跳
 						if (parser.frames.length !== before) onTick(sceneTickLine(parser.maxTs, durationSec, lane));
 					}
-				: (line): void => parser.push(line),
+				: (line): void => {
+						parser.push(line);
+						blacks.push(line);
+					},
 		);
 		const frames = parser.frames;
 		try {
 			assertScenePassProductive({ exitCode, stderr, frameCount: frames.length, durationSec, fps: containerFps });
-			return { frames, lane };
+			return { frames, lane, blackSpans: blacks.spans };
 		} catch (e) {
 			const to = fallback ? nextLane(lane) : null;
 			// 无下一档（或用户钉死了车道）⇒ 原样上抛，让编排层记 failed。
@@ -1024,13 +1162,18 @@ export interface PlannedMaterial {
 	/** 场景区间（毫秒取整）；图片恒统一形态一行 0..0（无场景轴，D1）。
 	 * stable（add-index-stability-sampling）：缺省 undefined = unstable 语义（旧注入面零改动）；
 	 * 图片行不参与判定（本就单帧），恒不带该标记。 */
-	scenes: { st_ms: number; ed_ms: number; stable?: boolean; motion?: SceneMotion }[];
+	scenes: { st_ms: number; ed_ms: number; stable?: boolean; blackVeto?: boolean; motion?: SceneMotion }[];
 	/** 抽帧计划（sceneIdx 指向 scenes 下标）——计划总数即计量会话 planned_units；图片恒单帧 ts_ms=0。 */
 	framePlan: { sceneIdx: number; ts_ms: number }[];
 	/** 切点全集（毫秒，升序；fix-broll-flash-frames D4）：含被 0.5s 合并吞并的微切点。
 	 * 缺省 undefined = 无数据（旧注入面零改动）→ 落库 cuts_indexed=NULL、检索不透出 cuts；
 	 * `[]` = 真无切点（cuts_indexed=1）。图片素材恒缺省（无时间轴）。 */
 	cutsMs?: number[];
+	/** 源片黑段区间（毫秒，升序；fix-index-gradual-transition-blindness）。
+	 * 缺省 undefined = **没扫过**（旧注入面零改动）→ 落库 black_indexed=NULL、检索不透出 `black`；
+	 * `[]` = 扫过且真无黑段（black_indexed=1）。图片素材恒缺省（无时间轴）。
+	 * ⚠️ 三态与 `cutsMs` 同构，MUST NOT 拿长度判「扫没扫过」。 */
+	blackMs?: [number, number][];
 	/** 实际跑成的解码车道（溯源用；注入面缺省 undefined）。 */
 	decodeLane?: DecodeLane;
 }
@@ -1126,7 +1269,16 @@ export interface IndexRunResult {
 	};
 	/** 稳定性收敛账面（add-index-stability-sampling；只计本轮实际入库的视频素材，图片不参与）：
 	 * framesSaved = 同场景集不带 stable 标记的旧策略计划帧数 − 带标记的实际计划帧数（降本透明）。 */
-	stability: { stableScenes: number; unstableScenes: number; framesSaved: number };
+	stability: {
+		stableScenes: number;
+		unstableScenes: number;
+		framesSaved: number;
+		/** 因**含黑段**被否决 stable 的场景数（fix-index-gradual-transition-blindness）。 */
+		blackVetoScenes: number;
+		/** 该否决带来的**新增**抽帧数（直接进 embed 计费；与 framesSaved 分列不相抵——
+		 * 一笔是省、一笔是增，合并成净值会把「成本为什么涨了」这件事藏起来）。 */
+		blackVetoFrames: number;
+	};
 	/** 计量会话账面：仅会话真开过时出现（豁免/零计划帧 = 无本键）。 */
 	billing?: IndexBillingOutcome;
 	elapsedMs: number;
@@ -1278,10 +1430,12 @@ async function planMaterialDefault(
 			st_ms: Math.round(s.st * 1000),
 			ed_ms: Math.round(s.ed * 1000),
 			stable: s.stable,
+			blackVeto: s.blackVeto,
 			motion: s.motion,
 		})),
 		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: Math.round(p.ts * 1000) })),
 		cutsMs: det.cuts.map((t) => Math.round(t * 1000)),
+		blackMs: det.blackSpans.map((b) => [Math.round(b.st * 1000), Math.round(b.ed * 1000)] as [number, number]),
 		decodeLane: det.lane,
 	};
 }
@@ -1385,7 +1539,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	const db = await openLocalIndexDb(dbPath);
 	const stats = { total: files.length, indexed: 0, skipped: 0, rebuilt: 0, failed: 0 };
 	const kinds = { video: { total: 0, indexed: 0 }, image: { total: 0, indexed: 0 } };
-	const stability = { stableScenes: 0, unstableScenes: 0, framesSaved: 0 };
+	const stability = { stableScenes: 0, unstableScenes: 0, framesSaved: 0, blackVetoScenes: 0, blackVetoFrames: 0 };
 	let sceneCount = 0;
 	let frameCount = 0;
 	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）
@@ -1510,7 +1664,10 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 					(planned.kind ?? materialKindForPath(path) ?? "video") === "image"
 						? `[${seq}/${files.length}] ${name} · 图片 · 单帧计划`
 						: `[${seq}/${files.length}] ${name} · 时长 ${(planned.durationMs / 1000).toFixed(1)}s · ` +
-							`场景 ${planned.scenes.length} · 切点 ${planned.cutsMs?.length ?? "—"} · 车道 ${planned.decodeLane ?? "—"}`,
+							`场景 ${planned.scenes.length} · 切点 ${planned.cutsMs?.length ?? "—"} · ` +
+							// 黑段数同列（fix-index-gradual-transition-blindness）：黑段与切点是两路正交信号，
+							// 只报切点会让「这片有没有渐变过黑」在整条日志里查无实据。
+							`黑段 ${planned.blackMs?.length ?? "—"} · 车道 ${planned.decodeLane ?? "—"}`,
 				);
 				pending.push({ path, name, size, mtimeMs, prev, planned });
 			} catch (e) {
@@ -1559,7 +1716,7 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 					}
 				}
 				db.run(
-					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at, cuts_indexed, decode_lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+					"INSERT INTO materials(material_id, path, kind, size, mtime_ms, duration_ms, width, height, fps, indexed_at, cuts_indexed, black_indexed, decode_lane) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
 					[
 						p.planned.materialId,
 						p.path,
@@ -1574,6 +1731,9 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 						// cuts_indexed（fix-broll-flash-frames D4）：有切点全集数据=1（空集=真无切点）；
 						// 旧注入面/图片缺省 undefined → NULL（检索侧不透出 cuts）
 						p.planned.cutsMs !== undefined ? 1 : null,
+						// black_indexed（fix-index-gradual-transition-blindness）：同 cuts_indexed 三态口径——
+						// 扫过=1（空集=真无黑段）；旧注入面/图片缺省 undefined → NULL（检索侧不透出 black）
+						p.planned.blackMs !== undefined ? 1 : null,
 						p.planned.decodeLane ?? null,
 					],
 				);
@@ -1581,6 +1741,11 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				if (p.planned.cutsMs !== undefined) {
 					for (const t of p.planned.cutsMs) {
 						db.run("INSERT OR IGNORE INTO cuts(material_id, t_ms, origin) VALUES (?,?,'detected')", [matRowId, t]);
+					}
+				}
+				if (p.planned.blackMs !== undefined) {
+					for (const [st, ed] of p.planned.blackMs) {
+						db.run("INSERT INTO black_spans(material_id, st_ms, ed_ms) VALUES (?,?,?)", [matRowId, st, ed]);
 					}
 				}
 				const sceneIds: number[] = [];
@@ -1623,6 +1788,22 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				const saved = planFrames(secs.map(({ st, ed }) => ({ st, ed }))).length - planFrames(secs).length;
 				stability.framesSaved += saved;
 				if (saved > 0) stableNote = ` · stable 收敛省 ${saved} 帧`;
+				// 黑段否决 stable 的**增帧**账（fix-index-gradual-transition-blindness）：
+				// 这一条直接进 embed 计费（真机 5 个场景由 5 帧涨到约 33 帧），MUST NOT 静默上涨。
+				// 口径 = 同一场景集里把「因黑段被否决」的那些当作 stable 重算计划帧 → 与实际计划之差。
+				// 与 framesSaved 对称（都在 ms→秒 域重算，与取整漂移解耦），两笔各记各的、不相抵。
+				const vetoed = p.planned.scenes.filter((s) => s.blackVeto === true).length;
+				if (vetoed > 0) {
+					const asIfStable = p.planned.scenes.map((s) => ({
+						st: s.st_ms / 1000,
+						ed: s.ed_ms / 1000,
+						stable: s.blackVeto === true ? true : s.stable,
+					}));
+					const added = planFrames(secs).length - planFrames(asIfStable).length;
+					stability.blackVetoScenes += vetoed;
+					stability.blackVetoFrames += added;
+					stableNote += ` · 含黑段否决 stable ${vetoed} 段（增 ${added} 帧）`;
+				}
 			}
 			progress(
 				kind === "image"

@@ -45,7 +45,13 @@ export interface PlanResult {
 	 *   并开出「重跑索引」这条昂贵且无效的处方。与下面 `motion` 的「缺省=不可判」同构。
 	 * 云端形态 MUST NOT 出现该字段——那是**不适用**，不是「不可判」，MUST NOT 进不可判分母。
 	 * motion（add-material-motion-signal）：本地形态可选——该段去重后的帧间跳变分位与样本数，
-	 * 供铺轨择窗降权、agent 换段裁定；缺省=**不可判**（旧库/样本不足），MUST NOT 当「平稳」用。 */
+	 * 供铺轨择窗降权、agent 换段裁定；缺省=**不可判**（旧库/样本不足），MUST NOT 当「平稳」用。
+	 * black（fix-index-gradual-transition-blindness）：本地形态可选——与本段区间有**交叠**的黑段
+	 * `[st, ed]` 对（素材时基秒，按起点升序），铺轨据此把窗口收缩到黑段一侧消渐变过黑；
+	 * 三态语义与 `cuts` 同构（缺省=该素材未扫过黑段 / `[]`=扫过且本段无黑 / 有值=本段含黑）。
+	 * ⚠️ **与 `cuts` 的关键差别：黑段横跨段界是常态，MUST NOT 要求落在段内**——黑段中点已被注入
+	 * 成场景边界、而段边界恒落在场景边界上（真机 424.083–424.367 的中点 424.225 就是段界，
+	 * 两侧段各含它一半）。值给的是**未裁剪的源坐标**（裁到段界会让端点吸到黑段中点上）。 */
 	segments?: {
 		start: number;
 		end: number;
@@ -53,6 +59,7 @@ export interface PlanResult {
 		score: number;
 		cuts?: number[];
 		motion?: { p50: number; p90: number; samples: number; effective_fps?: number };
+		black?: [number, number][];
 	}[];
 	note?: string | null;
 	matched?: Record<string, unknown>;
@@ -90,7 +97,82 @@ export interface MaterialDescribeMeta {
 	tags?: string[];
 	mark?: number;
 	usable_flags?: Record<string, boolean>;
+	/**
+	 * 射程锚点（fix-describe-window-coverage · broll-plan-contract）：本条理解产物出自的**帧时刻**，
+	 * 素材时基秒，与 `segments[].best` 同时基同单位。
+	 *
+	 * 为什么必须有这个字段：`matrix describe --plan` 每个候选**只抽一帧**（恒取 `segments[0].best`，
+	 * 见 `src/commands/matrix.ts` 的 `collectPlanDescribeItems`），而这条判决此前被挂到**整个候选**上。
+	 * 真机 260902 实测：32 个被理解候选共带 **843 段，只有 32 段（3.8%）被理解过**；
+	 * 95 个落轨坑位里只有 12 个（12.6%）含那一帧 —— 87.4% 的落轨画面从未被 describe 看过，
+	 * 最远的一条相距约 680s。没有这个字段，下游拿到 `describe` 后**在数据上根本无从知道它出自哪一帧**，
+	 * 只能整条候选一视同仁。
+	 *
+	 * 缺省容错是硬要求：字段缺席时消费方 MUST NOT 报错、**MUST NOT 外推到全部段**，
+	 * SHALL 按 `segments[0]` 推定（既有产出口径恒取 `segments[0].best`，对 CLI 自产的存量 plan 该推定
+	 * 与事实一致），并在人读输出里标注为**推定**。判定走 {@link describeScopeOf} / {@link segInDescribeScope}。
+	 *
+	 * 图片候选（`kind === "image"`，缓存键 ts=0）**不写本字段**——图片没有时间轴，写 0 是误导性锚点；
+	 * 它的射程天然是整条素材。云端检索产出的 plan 不含 `describe`，故本字段对云端形态零影响。
+	 *
+	 * ⚠️ **同名不同轴，别读混**：同一份 `broll-plan.json` 里 `beats[].anchors[].at_sec` 是**工程轴**秒
+	 * （成片时间线上的卡点时刻，lay 据它钉锚槽），本字段是**素材时基**秒（源片内的帧时刻，与
+	 * `segments[].best` 同轴）。两者嵌套位置不同、语义不同，MUST NOT 互相换算或互相拷贝。
+	 * 名字沿用 proposal 的建议值（tasks 0.3 的推荐档），撞名这件事已如实记在 change 的 tasks 里。
+	 */
+	at_sec?: number;
 	[k: string]: unknown;
+}
+
+/** {@link describeScopeOf} 的产物：这条 describe 的有效射程。 */
+export interface DescribeScopeInfo {
+	/** 射程锚点（素材时基秒）。undefined = 该候选没有可用时间轴 ⇒ 射程为整条素材。 */
+	atSec?: number;
+	/** true = 锚点字段缺席、按 `segments[0].best` 推定（旧 plan / agent 手组 plan）。
+	 * 人读输出 MUST 标注为「推定射程」，MUST NOT 与写明锚点的条目混为一谈。 */
+	presumed: boolean;
+	/** true = 射程覆盖整条素材（图片候选 / 无 segments 的退化候选）——无「射程外」可言。 */
+	wholeMaterial: boolean;
+}
+
+/**
+ * 这条 `result.describe` 的有效射程（fix-describe-window-coverage）。
+ *
+ * 无 `describe` ⇒ undefined（没有理解产物就没有射程可言，消费方按「无理解」中性处置）。
+ *
+ * ⚠️ 本函数**只是射程标注**，MUST NOT 被当作剔除、降权或排序的判据来源——
+ * 它回答的是「这条判决说的是哪一段」，不回答「这一段好不好」。
+ */
+export function describeScopeOf(cand: PlanResult): DescribeScopeInfo | undefined {
+	const d = cand.describe;
+	if (!d || typeof d !== "object") return undefined;
+	// 图片：无时间轴（缓存键 ts=0 是缓存键不是时刻），射程 = 整条素材
+	if (cand.kind === "image") return { presumed: false, wholeMaterial: true };
+	const at = d.at_sec;
+	if (typeof at === "number" && Number.isFinite(at)) return { atSec: at, presumed: false, wholeMaterial: false };
+	// 缺省推定：既有产出口径恒取 segments[0].best（MUST NOT 外推到全部段）
+	const best = cand.segments?.[0]?.best;
+	if (typeof best === "number" && Number.isFinite(best)) return { atSec: best, presumed: true, wholeMaterial: false };
+	// 连 segments 都没有（退化候选，segmentsOf 会合成整片伪段）⇒ 只有一段，射程就是它
+	return { presumed: true, wholeMaterial: true };
+}
+
+/**
+ * 某个 segment 是否落在这条 describe 的射程内（fix-describe-window-coverage）。
+ *
+ * 无 `describe` 恒 false —— 消费方对「无理解」的处置是**中性**（不惩罚不加分），
+ * 与「射程外」同一档；两者在本函数的返回值上不必区分，区分留给调用方的语义。
+ *
+ * ⚠️ 端点**双闭**：锚点恰好落在段界上时两侧段都算射程内。这是刻意的保守选择——
+ * 收窄射程的目的是别让一帧的判决去替它没看过的画面说话，不是趁机把它没看过的画面也判死；
+ * 边界那一帧两段都看得见，两段都算「看过」不冤枉谁。
+ */
+export function segInDescribeScope(cand: PlanResult, seg: { start: number; end: number }): boolean {
+	const scope = describeScopeOf(cand);
+	if (!scope) return false;
+	if (scope.wholeMaterial) return true;
+	const at = scope.atSec as number;
+	return seg.start <= at && at <= seg.end;
 }
 
 /** 本地形态 clip_id 前缀（broll-plan-contract 2026-08-12 收口）：`local-<blake3-16>`。
@@ -213,6 +295,26 @@ function validatePlanResultForLay(r: PlanResult, where: string, errs: string[]):
 						break;
 					}
 				}
+				// black 可选字段（fix-index-gradual-transition-blindness）：agent 可整体删除，改坏即拒。
+				// ⚠️ 判据**刻意不照抄上面 cuts 的「严格落在 (start,end) 开区间内」**：黑段中点已被
+				// 索引侧注入成场景边界、而段边界恒落在场景边界上 ⇒ **黑段横跨段界是常态而非例外**
+				// （真机 424.083–424.367 的中点 424.225 就是段界，两侧段各含它一半，
+				// `test/matrix-lay-black-shrink.test.mjs` 末条把这个「骑缝」形态钉死）。照抄那条
+				// 就会把 CLI 自己刚产出的正常 plan 判成坏形态，全链路当场断在校验上。
+				// 故只校验**自洽性**：数对成形 / ed>st / 按起点升序，不校验与段区间的位置关系。
+				if (s.black !== undefined) {
+					const bad =
+						!Array.isArray(s.black) ||
+						!s.black.every(
+							(b: unknown) =>
+								Array.isArray(b) && b.length === 2 && b.every((n) => typeof n === "number" && Number.isFinite(n)) && (b[1] as number) > (b[0] as number),
+						) ||
+						s.black.some((b: [number, number], i: number) => i > 0 && b[0] < s.black![i - 1]![0]);
+					if (bad) {
+						errs.push(`${where}：segment black 须为 [st,ed](ed>st) 数对数组、按起点升序（可整体删除，不可改坏形态；黑段骑段界是常态，不校验是否落在段内）`);
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -233,6 +335,14 @@ function validatePlanResultForLay(r: PlanResult, where: string, errs: string[]):
 			}
 			if (d.usable_flags !== undefined && (!d.usable_flags || typeof d.usable_flags !== "object" || Array.isArray(d.usable_flags))) {
 				errs.push(`${where}：describe.usable_flags 须为对象`);
+			}
+			// at_sec（fix-describe-window-coverage）：射程锚点，存在即须为有限数。
+			// ⚠️ **刻意不校验「落在某个 segments[i] 内」**：agent 删段是白名单内的合法编辑
+			// （plan 可编辑面原文「segments 删段」），把被理解的那一段删掉之后锚点自然落在段外，
+			// 那是合法产物不是坏形态。落段外的后果由消费方承担——所有段一律判射程外走中性，
+			// 与「没跑过 describe」同档，安全方向正确。
+			if (d.at_sec !== undefined && !(typeof d.at_sec === "number" && Number.isFinite(d.at_sec))) {
+				errs.push(`${where}：describe.at_sec 须为有限数字（素材时基秒的射程锚点；可整体删除，删了按 segments[0] 推定）`);
 			}
 		}
 	}

@@ -51,6 +51,72 @@ export const GPU_H264_MAX_CORES = 8;
  * spec 有 MUST NOT 为判定新增解码 pass 的条款——改这里前先读那条。 */
 const SCENE_TAP = "select='gte(scene,0)',metadata=print";
 
+// ── 黑段抽头（fix-index-gradual-transition-blindness）──────────────────────────
+//
+// 为什么索引侧必须有它：匀速渐变（叠化过黑）的 scene score 被**结构性压到零**，不是临界差一点。
+// 真机 cpu_proxy 档逐帧复刻实测（旅拍素材 424s 那处 2.0s 叠化过黑，YAVG 191→16.011→148.7）：
+// 全黑平台期 score 恰为 0.000000、整段峰值仅 0.028180（θ=0.3 的 1/11）。
+// 与 ffmpeg scene score 取 `min(mafd, |Δmafd|)` 的实现一致——匀速渐变 Δmafd≈0，导数项把分数压没。
+// ⇒ 逐帧打分这条路对它**没有阈值可调**（见 local-index.ts SCENE_THRESHOLD_DEFAULT 头注的两条判死记录）。
+
+/** 索引侧最短黑段（秒）。**比成片 QC 侧（qc.ts `blackMinDurSec`=0.1）松一倍**，这是有意的：
+ * 两侧标定对象不同——QC 量的是**成片上用户能看见多久的黑**（0.1s 以下不值得报警），
+ * 索引量的是**源片里存不存在这一刀**（哪怕只有 0.2s，铺轨窗口一包进去就是一次黑闪）。
+ * 真机五处叠化过黑长 0.200–0.333s：d=0.1 也能接住，放到 0.05 是给更短的过黑留余量，
+ * 同素材实测零误检。⚠️ MUST NOT 直接 import qc 的阈值表——那会把「成片可见性」的标定
+ * 悄悄绑到「源片存在性」上，两边任何一次调参都会串到对面。 */
+export const BLACK_MIN_DUR_SEC = 0.05;
+/** 判黑的帧内黑像素占比门槛（与 qc.ts `blackPicTh` 同源取值 0.98）。 */
+export const BLACK_PIC_TH = 0.98;
+/** 单像素判黑的亮度门槛（与 qc.ts `blackPixTh` 同源取值 0.10）。 */
+export const BLACK_PIX_TH = 0.1;
+
+/** blackdetect 滤镜节。**MUST 挂在缩放之后**：挂在全清帧上等于白付一份全分辨率的 Y 面阈值计数，
+ * 而 320–384px 代理帧上这点开销可忽略（判黑是逐像素比大小，与内容无关）。 */
+const BLACK_TAP = `blackdetect=d=${BLACK_MIN_DUR_SEC}:pic_th=${BLACK_PIC_TH}:pix_th=${BLACK_PIX_TH}`;
+
+/**
+ * blackdetect stderr → 黑段区间（秒）。
+ *
+ * ⚠️ **正则与 `qc.ts` 的 `parseBlackDetect` 逐字一致**，这是本函数存在的全部约束：
+ * 同一个 ffmpeg 输出格式被两处解析，写歪一处就是「索引说没黑、QC 说有黑」的静默分叉。
+ * 现状是**两份实现 + 一条等价闸**（`test/black-detect-parse.test.mjs` 拿同一份语料对拍两边），
+ * 而不是一份实现——因为 `qc.ts` 反向 import 了 `local-index.ts`（`parseSceneScores`），
+ * 让本模块（零 I/O 纯函数层）去 import qc 会既成环、又把 spawn/ffmpeg 依赖拖进 CI 无卡路径。
+ * 正解是 qc 侧改为 import 本函数，那一步落在别人的文件里（见本 change 的 handoff）。
+ *
+ * 行形态（真机 ffmpeg n8.1 实测，含被 `\r` 进度行粘在前面的情形）：
+ * `frame=  247 ... [blackdetect @ 0000020c2fe9dec0] black_start:6.083333 black_end:6.366667 black_duration:0.283333`
+ */
+export function parseBlackSpans(text: string): { st: number; ed: number }[] {
+	const out: { st: number; ed: number }[] = [];
+	for (const m of text.matchAll(/black_start:([0-9.]+)\s+black_end:([0-9.]+)/g)) {
+		out.push({ st: Number(m[1]), ed: Number(m[2]) });
+	}
+	return out;
+}
+
+/**
+ * {@link parseBlackSpans} 的**增量**版：逐行喂入、边跑边收。
+ *
+ * 为什么必须是流式：场景检测那趟的 stderr **不再整串留存**（`runFfmpegCaptureStderr` 只留
+ * 过滤后的诊断尾 40 行，全量是 O(帧数)≈18MB/小时）。等跑完再 parse 整串等于永远解析不到黑段。
+ */
+export function createBlackSpanParser(): {
+	push(line: string): void;
+	readonly spans: { st: number; ed: number }[];
+} {
+	const spans: { st: number; ed: number }[] = [];
+	return {
+		spans,
+		push(line: string): void {
+			// 先用 includes 挡掉逐帧 metadata 噪声（热路径：1h@30fps 约 21.6 万行都要过这里）
+			if (!line.includes("black_start")) return;
+			for (const s of parseBlackSpans(line)) spans.push(s);
+		},
+	};
+}
+
 export interface ScenePassArgsOpts {
 	src: string;
 	lane: DecodeLane;
@@ -68,6 +134,14 @@ export interface ScenePassArgsOpts {
  *  ③ GPU 档 `scale_cuda` MUST 带 `:format=nv12` 且 `hwdownload` 后 MUST 紧跟 `format=nv12`——
  *     NVDEC 对 10bit 源输出 p010le，缺了前者 10bit 素材报 `Invalid output format nv12` 直接死；
  *     缺了后者连 8bit 都报 `Invalid output format gray`。
+ *
+ * ④（fix-index-gradual-transition-blindness）`BLACK_TAP` MUST 挂在缩放之后、**三档全挂**：
+ *    车道是**逐素材**择的（静态门 + 执行期降级），漏挂任一档 = 走那条车道的素材索引出的库
+ *    没有黑段信号，而这件事在下游与「这条素材真没有黑段」完全同形——不会红，只会静默漏。
+ *    位置取在 `SCENE_TAP` 之前：`select='gte(scene,0)'` 全帧通过，两者互不影响，
+ *    但放前面才能一眼看出「黑段判定吃的是缩放后的代理帧」这条成本约束。
+ *    **解码 pass 数不变**（同一趟 `-vf` 里并联一节滤镜）⇒ 不违「MUST NOT 为判定新增解码 pass」，
+ *    `planned_units` 计量口径一字未动。
  */
 export function buildScenePassArgs(opts: ScenePassArgsOpts): string[] {
 	const w = opts.proxyWidth ?? PROXY_WIDTH_DEFAULT;
@@ -77,13 +151,14 @@ export function buildScenePassArgs(opts: ScenePassArgsOpts): string[] {
 			return [
 				"-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
 				"-i", opts.src,
-				"-vf", `scale_cuda=${w}:-2:format=nv12,hwdownload,format=nv12,${SCENE_TAP}`,
+				"-vf", `scale_cuda=${w}:-2:format=nv12,hwdownload,format=nv12,${BLACK_TAP},${SCENE_TAP}`,
 				"-f", "null", "-",
 			];
 		case "cpu_proxy":
-			return ["-i", opts.src, "-vf", `scale=${w}:-2:flags=${scaler},${SCENE_TAP}`, "-f", "null", "-"];
+			return ["-i", opts.src, "-vf", `scale=${w}:-2:flags=${scaler},${BLACK_TAP},${SCENE_TAP}`, "-f", "null", "-"];
 		case "cpu_full":
-			return ["-i", opts.src, "-vf", SCENE_TAP, "-f", "null", "-"];
+			// 全清档无缩放 ⇒ 黑段抽头落在链首（「在缩放之后」对本档为空条件）
+			return ["-i", opts.src, "-vf", `${BLACK_TAP},${SCENE_TAP}`, "-f", "null", "-"];
 	}
 }
 

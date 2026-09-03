@@ -198,6 +198,39 @@ export function buildMaterialSearchBody(tier: Tier, p: MaterialSearchParams): Ma
 	return body;
 }
 
+// ── 版权位语义（align-copyright-semantics-cli）────────────────────────────
+//
+// **权威定义**（主理人 2026-09-02 拍板，后台文案与字段映射一律不动，只把 CLI 侧规范写准）：
+//   `is_copyright = 1` → **可商用**（自有 ∪ 已授权）；`is_copyright = 0` → **不可商用**。
+// 它**不是**「是否受他人版权保护」。决定性反证：概念素材（他人版权物）入库固定
+// `is_copyright=0`（`gitruck-infra/biz/media_matrix/services/concept_ingest_services.py:182`）
+// ——若字段意为「是否受版权保护」，它必须是 1。另三处互证：
+// `biz/gitruck_cloud/public/api/custom/custom_material_search.py:57`「is_copyright(是否可商用)」、
+// infra `openspec/specs/custom-search-alignment/spec.md:46`「`commercial`（仅可商用 is_copyright=1）」、
+// infra `openspec/specs/public-material-search/spec.md:30`「external 档……只检索 `is_copyright=True`」。
+//
+// ⚠️ **真机事故（2026-09-02，本节的立论）**：AI 执行方连续两轮**特意挑 `is_copyright=False`**，
+// 以为那是「无版权、可随便用」的安全选择，实际把**不可商用**素材铺进了 5 个工程；真正安全的
+// `true` 反而被主动避开。直接诱因是**语义标签只在人读面、机读面丢失**——人读会打「可商用/非商用」，
+// 而 `--json` 只给裸 `is_copyright: false`，图纸教 agent 用的正是 `--json`。
+// 故本节把那两个词**派生进机读出参**，让消费方不必从字段名去猜。
+
+/** 版权位的人面词表正本——全 CLI 只此一套词；MUST NOT 另起一套**字面方向与实义相反**的说法。 */
+export const COPYRIGHT_LABEL_COMMERCIAL = "可商用";
+export const COPYRIGHT_LABEL_NON_COMMERCIAL = "不可商用";
+
+/**
+ * 版权位 → 人面标签（纯函数）。**派生位，不是第二个真值位**：只由 `is_copyright` 推，
+ * 恒与它同向，MUST NOT 可被单独写入。
+ *
+ * 非布尔（含缺席——external 公开口本就没有这个字段）一律返回 `undefined`：
+ * 「不知道」MUST NOT 被谎报成「不可商用」（与 `normalizeMaterialResult` 的不补假值同一条纪律）。
+ */
+export function deriveCopyrightLabel(isCopyright: unknown): string | undefined {
+	if (typeof isCopyright !== "boolean") return undefined;
+	return isCopyright ? COPYRIGHT_LABEL_COMMERCIAL : COPYRIGHT_LABEL_NON_COMMERCIAL;
+}
+
 // ── 响应归一（有则透出、无则缺省，绝不造假值）────────────────────────────
 
 /** 下载向结果形态。两档通用键 + internal 独有键（`is_copyright` / clip 的 `material_class`）。 */
@@ -214,8 +247,20 @@ export interface MaterialResult {
 	cover_url?: string;
 	/** song 类现成伴奏直链——**两档通用**（公开口序列化本就吐出，custom 口继承之）。 */
 	accompaniment_url?: string;
-	/** **仅 internal 档**：是否可商用。external 档如实缺省，MUST NOT 补假值。 */
+	/**
+	 * **仅 internal 档**：是否**可商用**——`true` = 可商用（自有 ∪ 已授权），
+	 * `false` = **不可商用**。external 档如实缺省，MUST NOT 补假值。
+	 *
+	 * ⚠️ **反直觉警示**：`false` **MUST NOT 读作「无版权、可随便用」**。它恰恰相反——
+	 * 不可商用。真机上正是这一步读反了：AI 连续两轮特意挑 `false` 当「安全选择」，
+	 * 把不可商用素材铺进 5 个工程（2026-09-02）。语义只有一条：可商用 / 不可商用。
+	 */
 	is_copyright?: boolean;
+	/**
+	 * 版权位的人面标签（`可商用` / `不可商用`）——CLI **派生**出来的机读语义位，服务端不发。
+	 * 与 `is_copyright` 恒同向；`is_copyright` 缺席（external 档）时本键一并缺席。
+	 */
+	copyright_label?: string;
 	/** **仅 internal 档 clip scope**：real_shot / concept。 */
 	material_class?: string;
 	[k: string]: unknown;
@@ -230,8 +275,12 @@ export interface MaterialRespData {
 
 /**
  * 单条归一：服务端字段**原样透传**（title/author/preview_url/thumb_url/width/height… 各态字段随服务端演进），
- * 只做两件事——① `id` 归一为字符串；② `score` 归一为数字。缺席的键（如 external 档的 `is_copyright`）
- * **一律不补**：补 false/空串会把「不知道」谎报成「不可商用」。
+ * 只做三件事——① `id` 归一为字符串；② `score` 归一为数字；③ 由 `is_copyright` **派生** `copyright_label`。
+ * 缺席的键（如 external 档的 `is_copyright`）**一律不补**：补 false/空串会把「不知道」谎报成「不可商用」。
+ *
+ * ③ 是本文件唯一一处「无中生有」的键，理由写在上面那节：机读面丢了语义标签，agent 就会把
+ * `is_copyright:false` 读成「无版权可随便用」（2026-09-02 真机，5 个工程）。派生**恒后置覆盖**：
+ * 就算服务端将来自己吐 `copyright_label`，也以本地派生值为准——两处同值位的第一要务是**不许分歧**。
  */
 export function normalizeMaterialResult(raw: unknown): MaterialResult | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
@@ -241,6 +290,9 @@ export function normalizeMaterialResult(raw: unknown): MaterialResult | undefine
 	r.id = String(id);
 	const score = (raw as Record<string, unknown>).score;
 	if (typeof score === "string" && score.trim() !== "" && Number.isFinite(Number(score))) r.score = Number(score);
+	const label = deriveCopyrightLabel((raw as Record<string, unknown>).is_copyright);
+	if (label === undefined) delete r.copyright_label;
+	else r.copyright_label = label;
 	return r;
 }
 

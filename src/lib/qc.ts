@@ -14,6 +14,9 @@
 import { spawn } from "node:child_process";
 import { requireFfmpeg, ffprobeJson } from "./ffmpeg";
 import { parseSceneScores } from "./local-index";
+// 黑段解析**唯一实现**（见下方 parseBlackDetect 的头注）：index-decode 是零 I/O 纯函数层，
+// 单向 import 不成环；本文件内部（scanFinalCut）也用这一个绑定，MUST NOT 再写第二份正则。
+import { parseBlackSpans } from "./index-decode";
 
 // ── 阈值基线（v1 标定值；标定批次调参只改这一处）─────────────────────────
 export const QC_THRESHOLDS = {
@@ -88,14 +91,21 @@ function captureStderr(bin: string, args: string[]): Promise<string> {
 
 // ── 解析器（各滤镜 stderr → 结构化事实）──────────────────────────────────
 
-/** blackdetect：`black_start:12.5 black_end:13.1 black_duration:0.6`。 */
-export function parseBlackDetect(stderr: string): { st: number; ed: number }[] {
-	const out: { st: number; ed: number }[] = [];
-	for (const m of stderr.matchAll(/black_start:([0-9.]+)\s+black_end:([0-9.]+)/g)) {
-		out.push({ st: Number(m[1]), ed: Number(m[2]) });
-	}
-	return out;
-}
+/**
+ * blackdetect：`black_start:12.5 black_end:13.1 black_duration:0.6`。
+ *
+ * ⚠️ **本名现在只是 `index-decode.parseBlackSpans` 的别名，不再是第二份实现**
+ * （fix-index-gradual-transition-blindness 的 handoff①，2026-09-02 合流）。
+ * 合流前是「两份实现 + 一条等价闸」：同一个 ffmpeg 输出格式被 QC 侧与索引侧各解析一次，
+ * 写歪一处就是「索引说没黑、QC 说有黑」的**静默分叉**，而两份头注互相自陈「逐字一致」
+ * 这种约定已经被同一个 change 证伪过一次（`isScenePassNoiseLine` 那两处 filter）。
+ *
+ * 方向是安全的：`index-decode.ts` 是**零 I/O 纯函数层**、不 import 仓内任何模块，
+ * 故 `qc.ts → index-decode.ts` 单向依赖不成环；反向（让 index-decode 去 import qc）
+ * 才会成环，还会把 spawn/ffmpeg 依赖拖进无卡 CI —— 那正是当初被迫写两份的原因。
+ * 本名保留是为了不动 `qc-command` 的既有导出面（下游可能在 import 它）。
+ */
+export { parseBlackSpans as parseBlackDetect };
 
 /** freezedetect：`lavfi.freezedetect.freeze_start: 4.2` / `...freeze_duration` / `...freeze_end`。 */
 export function parseFreezeDetect(stderr: string): { st: number; ed: number }[] {
@@ -462,7 +472,8 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 
 	items.push(...shortShotItems(cuts, spliceCuts));
 
-	for (const b of parseBlackDetect(vErr)) {
+	// 用 import 进来的那个绑定（`parseBlackDetect` 只是它的导出别名，本模块内无同名局部绑定）
+	for (const b of parseBlackSpans(vErr)) {
 		const known = opts.gtrk ? isKnownBlackHole(opts.gtrk, b.st, b.ed) : false;
 		items.push({
 			type: "black",

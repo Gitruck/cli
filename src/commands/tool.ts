@@ -50,7 +50,10 @@ const collectParam = (v: string, acc: string[]): string[] => {
 export function configureToolCommand(cmd: Command, registry: ToolDescriptor[] = TOOL_REGISTRY): Command {
 	cmd
 		.description("单点工具族：`gtrk tool <name> [输入...]` 跑单个能力（多文件工具可传多个输入，顺序即拼装顺序）；`gtrk tool list` 查全部（含输入/产物/计费/状态）")
-		.option("-o, --out <dir>", "产物目录（缺省 = <输入名>-<tool>/；input=none 落 cwd 下 <tool>-<时间戳>/）")
+		.option(
+			"-o, --out <dir>",
+			"产物目录（缺省 = <输入名>-<tool>/；input=none 落 cwd 下 <tool>-<时间戳>/，该名撞上时自动带 -2/-3 序号后缀，最终落点以回执 outDir 为准）",
+		)
 		.option("--param <k=v>", "透传任意云端参数（标量、可重复；如 --param width=1080）", collectParam, [])
 		.option("--params-json <json>", "透传任意云端参数（JSON 对象）")
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统 PATH）")

@@ -846,6 +846,110 @@ function buildQueryPools(
 	return out;
 }
 
+// ── 锚槽取材序 · 预留账（fix-anchor-top-hit-guarantee）────────────────────
+
+/**
+ * 锚槽的排序主键 = **原始 sim − 两条降权**（`fused` 不参与，即 mark/highlight 融合被剔出主序）。
+ *
+ * ## 为什么锚槽不能用融合分（`rank`）
+ *
+ * 锚是**语义卡点**，判的是「对不对」：关键词说到「武汉市十二中」这一刻，画面必须是那所学校。
+ * mark/highlight 判的是「好不好看 / 有没有看点」，拿它压 sim 等于**用审美压语义**。
+ * 更要命的是这两维的分是**就近借**来的——describe 缓存按最近帧查（`DESCRIBE_NEAREST_MAX_GAP_MS`
+ * 15s 内即算命中），可以来自**另一个场景**的帧；sim 却是这一段**自己**的分。
+ *
+ * 真机实证（2026-09-02 旅拍 Q1 / B04，`--mark-weight 0.3 --highlight-weight 0.2`）：
+ * 一段 sim 0.2719（该 query 36 条命中里排第 **29**）的《三色绘恋》户外广告牌，从 6.55s 外、
+ * **跨过场景切点**的一帧借到 mark 80 / hl 65，融合分被抬到 0.5059 顶上池首，
+ * 把 sim 0.4274 的校门画面压在下面——解说在说校名、字卡写校名、画面是广告牌。
+ *
+ * ## 为什么 hot/blurry 两条降权**留在**主序里（与本件 delta 初稿的措辞有出入，见 tasks 1.1 记账）
+ *
+ * delta 初稿写的是「hot/blurry 降权也 MUST NOT 参与主序」。落地时发现那句与**同一条 Requirement**
+ * 自己的「零权重逐字节不变」冲突：两条降权与 mark/highlight 无关，`--mark-weight 0 --highlight-weight 0`
+ * 时 `fused === sim` 但 `rank === sim − 降权` 仍可能 ≠ sim，把降权剔出主序会让**零权重配置**下的
+ * 锚槽落位也变（真机 hot/blurry 信号本就与权重无关地存在）。
+ * 取舍：**降权留在主序**——它俩合计 ≤0.05，是「近乎同分时别选糊的/别选糊成一团的」的微调，
+ * 天然不可能翻掉 0.4274 vs 0.2719 这种量级的语义差；而剔掉它换来的是一次无谓的零权重回归。
+ * ⇒ 主键 `simRank = seg.score − hot降权 − blurry降权`，恰好使**零权重下主键与 `rank` 恒等**，
+ *   零回归成为**恒等式**而不是「大概不会变」。spec delta 已同批订正为本口径。
+ */
+function anchorSimRank(p: Pair): number {
+	return p.seg.score - (p.hot ? MOTION_HOT_PENALTY : 0) - (p.blurry ? BLURRY_PENALTY : 0);
+}
+
+/**
+ * 锚槽候选序：`pinned` 置顶 > 原始 sim（含降权）降序 > 融合分 tie-break > 视频优先。
+ *
+ * ⚠️ **另排一份，MUST NOT 改 `buildQueryPools` 的池序本体**——那口池是**序贯槽共用**的，
+ * 改它就把射程从「锚槽这一处」扩到全部普通槽（本件明令不动普通槽：spec「适用面 SHALL 严格限于锚槽」）。
+ *
+ * 零权重恒等（`--mark-weight 0 --highlight-weight 0`）：此时 `fused === seg.score`
+ * ⇒ `anchorSimRank === rank` ⇒ 主键与 `buildQueryPools` 的主键**逐值相等**，
+ * 后续 tie-break 键同集合，且 `Array.prototype.sort` 稳定 ⇒ 序**逐位相同**、产物逐字节不变。
+ */
+function anchorOrder(pool: Pair[]): Pair[] {
+	return [...pool].sort(
+		(a, b) =>
+			Number(b.pinned) - Number(a.pinned) ||
+			anchorSimRank(b) - anchorSimRank(a) ||
+			// 同 sim 才轮到融合分说话（spec「同 sim 时仍按融合分 tie-break」）
+			b.rank - a.rank ||
+			b.fused - a.fused ||
+			b.seg.score - a.seg.score ||
+			Number(isImagePair(a)) - Number(isImagePair(b)),
+	);
+}
+
+/**
+ * 锚预留账（第二刀）：`消费键 → 预留它的锚 id`。`planBeatFills` 铺轨前建一份、全程共享。
+ *
+ * 立账理由（判据一致性）：用户 `pinned` 已经能豁免 `consumed` 抢占——`fix-pinned-placement-guarantee`
+ * 把「钉选是**落位保证**而非仅排序特权」写死，四条豁免清单第 ③ 条正是 `consumed`。
+ * 而**系统锚承诺的同样是落位保证**（图纸与主规格白纸黑字：「把锚 query 的最高分命中钉在关键词
+ * 说出时刻」），今天却被任意一个前序 beat 的泛化普通槽以更低的分抢走：真机 B02 一条
+ * `"ordinary streets and apartment blocks in a Chinese city"`（分 0.3531）抢走了 B04 锚
+ * 以 0.4274 命中的校门段——**分低的普通槽赢了分高的锚**，纯粹因为 beat 是按序处理的。
+ *
+ * ⚠️ 预留面**每锚恒为 1 对**（MUST NOT top-N）：多预留就是把普通槽饿死到落黑，
+ * 与 `relax-gapfill-*` 一整条线刚治好的黑片直接对撞。
+ * ⚠️ 释放 MUST 在锚**落位或 degraded 之后立即**发生（见 `fillBeatTrackWithAnchors` 的 try/finally）
+ * ——漏释放 = 凭空制造黑片。
+ *
+ * ## 锚预留 vs 用户 pinned：豁免边界一眼可比（两者承诺的都是落位保证，故并排放）
+ *
+ * | 护栏 | 用户 `pinned` | 系统锚预留 |
+ * |---|---|---|
+ * | `consumed` 抢占 | **豁免**（只看自己落过没有） | **豁免**（铺轨前先锁，普通槽拿不到） |
+ * | `excluded_hint` 派单负词 | **豁免**（agent 显式裁定 > 自动护栏） | 不豁免（锚是系统选取，不是人点名） |
+ * | `scoreFloor` 分数地板 | **豁免**（强制入选语义） | **不豁免**——「无合格命中不硬锚」是既有条款，**不硬锚烂画面** |
+ * | jump-cut 紧邻避让 | **豁免**（连着出两颗是他要的画面） | 不适用（锚只钉一个点） |
+ * | `noImage`（`--no-image-broll`） | **不豁免**——「零图片上云」是用户级硬承诺 | **不豁免**（同款理由） |
+ * | `beatOwners` 同 beat 跨轨归属互斥 | **不豁免**——那条给的是**备选面** | **不豁免**（同款理由） |
+ *
+ * ⇒ 预留只多做一件事：**把「谁先消费」这一步的顺序改对**。它 MUST NOT 顺手放开上面任何一条
+ * 「不豁免」——那三条各有各的用户级承诺，与「锚该拿它的 top-1」是正交的两回事。
+ */
+type AnchorReservations = Map<string, string>;
+
+/** 锚 id：`beat 名 \0 该 beat 内 anchors 数组下标`。预留预扫与落位两处 MUST 用同一把算法算 id
+ * （beat 名在 plan 内唯一——`fills` 就是拿它当 Map 键的）。 */
+function anchorIdOf(beatName: string, idx: number): string {
+	return `${beatName}\u0000${idx}`; // NUL 分隔：beat 名可含任意可见字符（含 # / 空格），普通分隔符会被真机 beat 名撞上
+}
+
+/**
+ * 这一对是否被**别的锚**预留了。
+ *
+ * `pinned` 不受预留阻挡：「用户 pinned 优先于锚」是既有口径（锚槽被钉选候选占据时 status 报 `pinned`），
+ * 系统预留 MUST NOT 反过来压住用户的显式指令。
+ */
+function reservedByOther(res: AnchorReservations | undefined, p: Pair, self?: string): boolean {
+	if (!res || res.size === 0 || p.pinned) return false;
+	const owner = res.get(p.key);
+	return owner !== undefined && owner !== self;
+}
+
 /** 颗粒源窗（选取评估与落位共用，保证避让判定用的就是将落位的窗口）：
  * 图片=0..d（运镜分支）；视频=best 居中截 d **钳段界**（fix-broll-flash-frames D1——
  * 「有素材时长向段外扩」口径废止：段边界≈场景切点，外扩即把邻场景异景帧截进 clip，
@@ -858,12 +962,37 @@ function sourceWindowFor(p: Pair, d: number): { clipSt: number; clipEd: number }
 	return { clipSt, clipEd: Math.min(clipSt + d, p.seg.end) };
 }
 
+/** 段内黑段（fix-index-gradual-transition-blindness）：本地检索段可带的正交信号 `black`。
+ *
+ * ⚠️ 走类型断言读，而不是从 `PlanResult["segments"]` 上取：契约正本（`src/lib/matrix.ts`）的
+ * 类型与校验**不在本 change 的文件射程内**（并行施工分工），由接手方同批补齐——见 handoff。
+ * 形态坏（非数组/非有限数/顺序反）的条目**逐条丢弃**而不是整体拒：本函数是消费方，
+ * 手改坏一个数不该让整轨铺不出来；真正的形态校验属于 `validatePlanForLay` 那一层。 */
+function blackSpansOf(seg: unknown): [number, number][] {
+	const raw = (seg as { black?: unknown }).black;
+	if (!Array.isArray(raw)) return [];
+	const out: [number, number][] = [];
+	for (const b of raw) {
+		if (!Array.isArray(b) || b.length < 2) continue;
+		const [st, ed] = b as [unknown, unknown];
+		if (typeof st !== "number" || typeof ed !== "number" || !Number.isFinite(st) || !Number.isFinite(ed) || !(ed > st)) continue;
+		out.push([st, ed]);
+	}
+	return out.sort((a, b) => a[0] - b[0]);
+}
+
 /** 窗口精修（fix-broll-flash-frames D1）：①端点残片收缩（只收不移）——窗内切点（seg.cuts）距
  * 端点 <SLIVER_MIN_SEC 时端点吸附至切点（恰落切点=无残片不动）；②帧网格吸附——端点按素材帧率
  * （result.fps）就近吸附整帧边界（VFR/非常规 time_base 消除 ±1 帧边界抖动；fps 缺失跳过）。
  * 两步**只许缩短不许撑长**：吸附取整可能把槽长撑出 1 帧，`maxD`（剩余 beat 空间）与段界是硬上限
  * ——越界会顶掉下一 beat 的首槽造成时间线重叠（渲染器 normalizeTrack 直接硬拒）。
- * 精修后短于 MIN_SHOT_SEC 返回 null（该对不采纳，走既有换候选/留空路径）。图片候选原样返回。 */
+ * 精修后短于 MIN_SHOT_SEC 返回 null（该对不采纳，走既有换候选/留空路径）。图片候选原样返回。
+ *
+ * ★ ⓪ 黑段收缩（fix-index-gradual-transition-blindness）在①之前，见函数体内头注。
+ *
+ * ⚠️ **合流点提示（给 `fix-anchor-top-hit-guarantee`）**：本次**只加了 ⓪ 黑段收缩这一步**，
+ * 取窗的排序 / 选段 / 窗口起点算法（`sourceWindowFor`、候选池排序、锚点择对）**一字未动**。
+ * ⓪ 是纯收缩（只把端点向内移），不会改变「选了哪一对、窗口从哪儿起」这两件事。 */
 function refineWindow(
 	p: Pair,
 	win: { clipSt: number; clipEd: number },
@@ -885,12 +1014,50 @@ function refineWindow(
 	if (isImagePair(p)) return win;
 	const EPS = 1e-6;
 	let { clipSt, clipEd } = win;
-	// 端点是否由「吸附到切点」得来——若是，帧网格取整 MUST NOT 把它推回切点的另一侧：
+	// 端点是否由「吸附到切点 / 黑段边」得来——若是，帧网格取整 MUST NOT 把它推回那个点的另一侧：
 	// 切点时码 = 新场景**首帧**的时刻，起点就近取整可能落到切点前一帧（= 留 1 帧旧场景，
 	// 把刚做的收缩撤销了半帧；打样实测 618.469 在 60fps 上取整到 618.4667）。故起点向上取整、
-	// 终点向下取整，宁可少一帧也不越到切点另一侧。
-	let stOnCut = false;
-	let edOnCut = false;
+	// 终点向下取整，宁可少一帧也不越到另一侧。黑段边同理，且后果更硬：越回去就是把黑帧收进 clip。
+	let stSnapped = false;
+	let edSnapped = false;
+
+	// ── ⓪ 黑段收缩（fix-index-gradual-transition-blindness）────────────────────
+	//
+	// 病灶：源片自带的**叠化过黑**（画面淡到全黑再淡回）在逐帧 scene score 上分数被结构性压到零
+	// ⇒ 索引侧此前完全看不见它，铺轨侧也就没有任何避让判据。真机 Q1 的 50 颗 B-roll 里有 5 颗
+	// 把整段过黑包进了 clip（149.4s 成片平均每 30 秒黑一下，4 处还没有 MG 遮盖，裸黑压着口播）。
+	//
+	// 为什么这一步 MUST 独立于①的残片收缩、且**不受 SLIVER_MIN_SEC 约束**：
+	// 那 5 处黑段恰恰落在窗口**正中**（实测距两端 3.4s / 2.4s），任何残片阈值下都不触发
+	// ——「离端点太远」正是它今天漏网的原因，拿残片规则去接它等于没接。
+	//
+	// 为什么是**收缩到一侧**而不是整对弃用（与次地板档 `subFloorFill` 的「窗内有切点即弃用」
+	// 有意不同）：黑段两侧各有 8–9s 的好画面，整对弃用是白扔素材；而次地板档的槽只有 7–30 帧，
+	// 根本没有可收缩的余量，那里只能弃。
+	//
+	// 取**较长的一侧**（并列取前侧，保持确定性）；两侧都不够 MIN_SHOT_SEC 时本函数返回 null，
+	// 由调用方走既有的换候选/留空路径 —— MUST NOT 落一个仍包着黑段的窗口。
+	//
+	// ⚠️ 本步只**收缩**，不重新取窗：把窗口在较长那侧按原槽长重新摆一次（能保住整槽时长）
+	// 属于**取窗逻辑**的改动，那是 `fix-anchor-top-hit-guarantee` 的靶位，见 handoff。
+	const black = blackSpansOf(p.seg);
+	if (black.length) {
+		const hit = black.filter(([bs, be]) => bs < clipEd - EPS && be > clipSt + EPS);
+		if (hit.length) {
+			// 头侧 = [clipSt, 首个交叠黑段起点]、尾侧 = [末个交叠黑段终点, clipEd]：
+			// 按「首/末」取，两侧内部就恒无黑段（中间夹着的黑段全被切掉）。
+			const headEd = Math.min(Math.max(hit[0]![0], clipSt), clipEd);
+			const tailSt = Math.max(Math.min(hit[hit.length - 1]![1], clipEd), clipSt);
+			if (headEd - clipSt >= clipEd - tailSt) {
+				clipEd = headEd;
+				edSnapped = true;
+			} else {
+				clipSt = tailSt;
+				stSnapped = true;
+			}
+		}
+	}
+
 	const cuts = opts?.snapCuts === false ? undefined : p.seg.cuts;
 	if (Array.isArray(cuts) && cuts.length) {
 		const inWin = cuts.filter((c) => Number.isFinite(c) && c > clipSt + EPS && c < clipEd - EPS);
@@ -898,23 +1065,23 @@ function refineWindow(
 			const head = inWin[0]!;
 			if (head - clipSt < SLIVER_MIN_SEC) {
 				clipSt = head;
-				stOnCut = true;
+				stSnapped = true;
 			}
 			const tail = inWin[inWin.length - 1]!;
 			if (tail > clipSt + EPS && clipEd - tail < SLIVER_MIN_SEC) {
 				clipEd = tail;
-				edOnCut = true;
+				edSnapped = true;
 			}
 		}
 	}
 	const fps = p.cand.fps;
 	if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) {
 		const inward = opts?.gridInward === true;
-		// 起点：吸附到切点者（或 gridInward）向上取整（不含切点前那帧），否则就近；再钳回段内
-		const stGrid = stOnCut || inward ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
+		// 起点：吸附到切点/黑段边者（或 gridInward）向上取整（不含那个点之前的帧），否则就近；再钳回段内
+		const stGrid = stSnapped || inward ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
 		const st = Math.min(Math.max(stGrid, p.seg.start), clipEd);
-		// 终点：吸附到切点者（或 gridInward）向下取整（不含切点那帧，它属下一镜头），否则就近
-		let ed = Math.min(edOnCut || inward ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
+		// 终点：吸附到切点/黑段边者（或 gridInward）向下取整（不含那一帧：切点那帧属下一镜头、黑段起帧已经是黑的），否则就近
+		let ed = Math.min(edSnapped || inward ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
 		// 吸附撑长的硬上限：超出剩余空间即把终点**向下**取整到帧网格（宁短一帧不越界）
 		if (ed - st > maxD + EPS) ed = st + Math.floor((maxD + EPS) * fps) / fps;
 		if (ed - st > EPS) {
@@ -1017,6 +1184,13 @@ export function fillBeatTrack(opts: {
 	markStats?: MarkStatsSets;
 	/** 句界吸附（adjust-shot-cut-sentence-align）：缺席/ratio≤0 = 不激活（旧行为逐字节零回归）。 */
 	cutAlign?: CutAlignOpts;
+	/** 锚预留账（fix-anchor-top-hit-guarantee 第二刀）：`planBeatFills` 建一份共享。
+	 * 普通序贯槽 MUST NOT 消费被预留的对——缺席/空表时本函数逐字节零回归（无锚 plan 恒缺席）。 */
+	anchorReserved?: AnchorReservations;
+	/** 消费归属账（fix-anchor-top-hit-guarantee 第三刀）：`消费键 → <beat>|<query>`。
+	 * 只记**第一阶段**（逐 beat 常规填充）的消费——gap 填充是第二阶段、跑在全部锚之后，
+	 * 不可能抢在任何锚前面，故不入账也不影响锚的归因。缺席 = 不记账（纯诊断，零行为影响）。 */
+	consumedBy?: Map<string, string>;
 }): FillSlot[] {
 	const { beat, trackOrder, consumed, scoreFloor } = opts;
 	const span = beat.track_ed - beat.track_st;
@@ -1102,10 +1276,16 @@ export function fillBeatTrack(opts: {
 
 		const minLen = Math.min(MIN_SHOT_SEC, remaining);
 		const dFor = (p: Pair): number => Math.min(dTarget, pairAvail(p), remaining);
-		// 基础合格：未被全局消费 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
+		// 基础合格：未被全局消费 ∧ 未被别的锚预留 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
 		const eligible = (p: Pair): boolean => {
 			if (pairAvail(p) < minLen) return false;
 			if (taken(p)) return false;
+			// 锚预留（fix-anchor-top-hit-guarantee 第二刀）：**这一句就是「锚优先于普通序贯槽」的全部**。
+			// 少了它，前序 beat 的泛化普通槽会以更低的分先把后序 beat 锚的 sim top-1 吃掉
+			// （真机两次复现：2026-08-23 黄石锚落第 7 名、2026-09-02 武汉锚落第 29 名）。
+			// ★ 本函数**恒不是锚自己**（锚槽取对在 fillBeatTrackWithAnchors 里内联，不走这里；
+			//   锚点分割出的子区间跑到这儿时，本 beat 的锚早已落位/降级并释放）⇒ 不传 self，全拦。
+			if (reservedByOther(opts.anchorReserved, p)) return false;
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			return owner === undefined || owner === trackOrder;
 		};
@@ -1220,6 +1400,7 @@ export function fillBeatTrack(opts: {
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++; // 取用高运动段（降权未挡住=候选稀疏）
 		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++; // 同上：取用模糊候选如实记账
 		consumed.add(pick.key);
+		opts.consumedBy?.set(pick.key, `${beat.beat}|${pick.query}`);
 		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
 		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipEd };
 		lastPick = pick;
@@ -1270,6 +1451,37 @@ export interface AnchorOutcome {
 	status: "planned" | "pinned" | "degraded";
 	/** degraded 原因（人读告警与机读诊断共用）。 */
 	reason?: string;
+	/**
+	 * 实际落位段在**锚候选序**里的 1-based 名次（fix-anchor-top-hit-guarantee 第三刀）；
+	 * degraded（未落位）时整键缺席。
+	 *
+	 * ★ 立这个字段是因为**没有它就没法把「完美钉位」和「钉了个第 29 名」分开**：
+	 *   `status` 只有 planned/pinned/degraded 三态，真机那次 sim 排第 29 的错配报出来是
+	 *   `status:"planned"`，与钉准了逐字节同形——典型的静默失败。
+	 * ★ 刻意**不压成第四个 status 态**：名次是连续量，第 2 名与第 29 名不是同一件事，
+	 *   压成一个 `degraded` 又是一次信息丢失（tasks 0.3 记账）。
+	 */
+	sim_rank?: number;
+	/** 实际落位段的**原始 sim**（不含 mark/highlight 融合、不含降权）；degraded 时整键缺席。 */
+	sim?: number;
+	/** 该锚候选序**队首**的原始 sim（= 本该钉住的那一段的分）；degraded 时整键缺席。 */
+	top_sim?: number;
+	/**
+	 * 队首没被本锚取用时的如实归因（`sim_rank === 1` 或 degraded 时**整键缺席**——完美钉位不制造噪音）。
+	 *   · `consumed`——已被别处消费（是谁见 `top_by`）；
+	 *   · `reserved`——正被**另一个锚**的预留扣着（`at_sec` 更早者先得；只在 plan 的 beat 顺序
+	 *     与 `at_sec` 顺序不一致时可达，因为同序时先到的锚早已消费完并释放 ⇒ 报 `consumed`）；
+	 *   · `unfit`——供长不足 / 同 beat 跨轨归属互斥 / 精修后不足最小槽长。
+	 *
+	 * ★ 只给机读 `code`、不带人读 `reason`：同 `DirectOutcome.code` 的理由——人读文案里内嵌数值
+	 *   会在 JS/Python 之间产生 `"1"` vs `"1.0"` 这种纯格式差，进逐字节对拍面就是噪声。
+	 *   文案由消费侧按 code 现渲染。
+	 */
+	top_miss?: "consumed" | "reserved" | "unfit";
+	/** `top_miss === "consumed"` 时队首的**去向**：`<beat>|<query>`（消费它的那一槽）。
+	 * 其余情形整键缺席。真机那次的值会是 `B02|ordinary streets and apartment blocks in a Chinese city`
+	 * ——一句话说清「谁以什么名义把校门段拿走了」。 */
+	top_by?: string;
 }
 
 /**
@@ -1279,9 +1491,14 @@ export interface AnchorOutcome {
  * 口径：
  *   - 锚只钉**首轨**（trackOrder 0，默认可见的主候选轨）；备选轨保持既有序贯填充——N 轨 × 锚
  *     重复钉位会把不二用消费池抽干，备选轨要给用户的是整套差异化方案，同一锚的次优命中撑不起这个价值。
- *   - 每锚取其 query 池的首个合格对（池序 = pinned 置顶 > 等效分降序——**用户 pinned 优先于锚**
- *     的系统选取，取到 pinned 对时 status="pinned"）；片段钉 `max(beat.track_st, at_sec − 提前量)`，
- *     时长 = min(命中段可用长, per_shot_sec×2)，出界钳回 beat 窗口。
+ *   - 每锚取其 query 池的首个合格对，池序走 **`anchorOrder`**（pinned 置顶 > **原始 sim** 降序 >
+ *     融合分 tie-break）而**不是** `buildQueryPools` 的融合分序（fix-anchor-top-hit-guarantee 第一刀，
+ *     理由见 `anchorSimRank` 头注：锚判「对不对」，mark/highlight 判「好不好看」且是**就近借**来的分）。
+ *     **用户 pinned 仍优先于锚**的系统选取，取到 pinned 对时 status="pinned"；
+ *     片段钉 `max(beat.track_st, at_sec − 提前量)`，时长 = min(命中段可用长, per_shot_sec×2)，出界钳回 beat 窗口。
+ *   - 每锚的候选序队首在**全 plan 铺轨之前**已被预留（第二刀，见 `AnchorReservations` 头注），
+ *     普通序贯槽与 gap 填充拿不到它；本锚**落位或 degraded 后立即释放**（下方 try/finally，
+ *     漏释放 = 凭空制造黑片）。锚 × 锚争同一对按 at_sec 升序先到先得，后到者取次优。
  *   - 锚间时间重叠：按 at_sec 先到先钉，后锚只后移不重叠；挤到不足最小槽长即 degraded（不硬锚）。
  *   - 锚 query 无 ≥score 地板命中 / at_sec 缺失（内插失败）→ 该锚 degraded 退化普通槽 + summary 明示；
  *     锚池为空时 reason 按 anchorPoolEmptyReason 如实归因（检索失败/零命中/被旧版 plan 去重折叠分案，
@@ -1325,6 +1542,11 @@ export function fillBeatTrackWithAnchors(opts: {
 	highlightLookup?: MarkLookup;
 	/** 句界吸附（adjust-shot-cut-sentence-align）：锚槽窗口零改动（锚 > 句吸附），锚点分割区间内透传照常吸附。 */
 	cutAlign?: CutAlignOpts;
+	/** 锚预留账（fix-anchor-top-hit-guarantee 第二刀）：`planBeatFills` 铺轨前建好，本函数**逐锚消账**。
+	 * 缺席 = 不启用预留（单测直调 `fillBeatTrackWithAnchors` 的旧路径逐字节零回归）。 */
+	anchorReserved?: AnchorReservations;
+	/** 消费归属账（第三刀，见 `fillBeatTrack` 同名字段）。 */
+	consumedBy?: Map<string, string>;
 }): { slots: FillSlot[]; anchors: AnchorOutcome[] } {
 	const { beat } = opts;
 	const anchorsIn = Array.isArray(beat.anchors) ? beat.anchors : [];
@@ -1337,8 +1559,18 @@ export function fillBeatTrackWithAnchors(opts: {
 	const degraded = (a: { keyword: string; at_sec: number | null }, reason: string): void => {
 		outcomes.push({ beat: beat.beat, keyword: a.keyword, at_sec: a.at_sec ?? null, track_st: null, clip_id: null, status: "degraded", reason });
 	};
+	/** 销掉某个锚名下的全部预留（fix-anchor-top-hit-guarantee 第二刀）。 */
+	const release = (id: string): void => {
+		if (opts.anchorReserved) for (const [k, v] of opts.anchorReserved) if (v === id) opts.anchorReserved.delete(k);
+	};
 	if (!(span > 0)) {
-		for (const a of anchorsIn) degraded({ keyword: a.keyword, at_sec: a.at_sec ?? null }, "beat 窗口无长度");
+		// ⚠️ 这条早退路**也必须释放**：它绕过了下面那个带 finally 的循环。
+		// 漏在这里的预留会一直扣到全部 beat 铺完（gap 填充前的兜底 clear 才收），
+		// 中间所有 beat 的普通槽都拿不到那一对 ⇒ 凭空造黑，且症状远离病灶。
+		for (let i = 0; i < anchorsIn.length; i++) {
+			degraded({ keyword: anchorsIn[i].keyword, at_sec: anchorsIn[i].at_sec ?? null }, "beat 窗口无长度");
+			release(anchorIdOf(beat.beat, i));
+		}
 		return { slots: [], anchors: outcomes };
 	}
 
@@ -1363,66 +1595,99 @@ export function fillBeatTrackWithAnchors(opts: {
 		.sort((x, y) => (x.a.at_sec ?? Number.POSITIVE_INFINITY) - (y.a.at_sec ?? Number.POSITIVE_INFINITY) || x.i - y.i);
 	let cursorMin = beat.track_st; // 前锚已占用的推进线（锚间只后移不重叠）
 
-	for (const { a } of sorted) {
-		if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) {
-			degraded(a, "at_sec 缺失（plan 内插失败：文本漂移/句被剪/重投影降级）");
-			continue;
+	for (const { a, i } of sorted) {
+		const selfId = anchorIdOf(beat.beat, i);
+		try {
+			if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) {
+				degraded(a, "at_sec 缺失（plan 内插失败：文本漂移/句被剪/重投影降级）");
+				continue;
+			}
+			// 钉位：at_sec − 提前量，出界钳回 beat 窗口（尾部至少容一个最小槽）
+			let st = Math.max(beat.track_st, a.at_sec - ANCHOR_LEAD_SEC);
+			st = Math.min(st, beat.track_ed - MIN_SHOT_SEC);
+			st = Math.max(st, beat.track_st, cursorMin);
+			const room = beat.track_ed - st;
+			if (room < MIN_SHOT_SEC - 1e-6) {
+				degraded(a, "锚点窗口不足（与前锚重叠或过近 beat 末端）");
+				continue;
+			}
+			const pool = poolByQuery.get(a.query);
+			if (!pool?.length) {
+				degraded(a, anchorPoolEmptyReason(beat, a.query));
+				continue;
+			}
+			// 锚候选序（第一刀）：**原始 sim 主序**，MUST NOT 用 buildQueryPools 的融合分序。
+			// 另排一份而不是改池本体——那口池是序贯槽共用的（见 anchorOrder 头注）。
+			const order = anchorOrder(pool);
+			// 取该序首个合格对：不二用/同 beat 归属/精修口径与序贯填充完全同一套
+			let pick: Pair | null = null;
+			let pickWin: { clipSt: number; clipEd: number } | null = null;
+			let pickIdx = -1;
+			for (let k = 0; k < order.length; k++) {
+				const p = order[k];
+				// 与序贯填充同一判据（钉选只看自己落过没有，见 takenBy 头注）
+				if (taken(p)) continue;
+				// 别的锚预留的对不许抢（第二刀「双锚争同一对」：at_sec 先到先得，后到者取次优）
+				if (reservedByOther(opts.anchorReserved, p, selfId)) continue;
+				if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
+				const owner = opts.beatOwners?.get(p.cand.clip_id);
+				if (owner !== undefined && owner !== opts.trackOrder) continue;
+				const win = refineWindow(p, sourceWindowFor(p, Math.min(maxAnchorLen, pairAvail(p), room)), room);
+				if (!win) continue;
+				pick = p;
+				pickWin = win;
+				pickIdx = k;
+				break;
+			}
+			if (!pick || !pickWin) {
+				degraded(a, `锚 query「${a.query}」候选耗尽或精修后不足最小槽长`);
+				continue;
+			}
+			// 第三刀：名次如实报出。归因 MUST 在下面那几行**记账之前**算——
+			// `material` 去重档下同一 clip 的两个段共用一把消费键，先 `consumed.add(pick.key)`
+			// 再判 `taken(top)` 会把「精修不容」谎报成「被别处消费」。
+			const top = order[0];
+			const topMiss: AnchorOutcome["top_miss"] = taken(top)
+				? "consumed"
+				: reservedByOther(opts.anchorReserved, top, selfId)
+					? "reserved"
+					: "unfit";
+			const topBy = topMiss === "consumed" ? opts.consumedBy?.get(top.key) : undefined;
+			const d = pickWin.clipEd - pickWin.clipSt;
+			anchorSlots.push({
+				clip_id: pick.cand.clip_id,
+				query: a.query,
+				score: pick.seg.score,
+				...slotTimes(pickWin.clipSt, st, d),
+			});
+			opts.consumed.add(pick.key);
+			opts.consumedBy?.set(pick.key, `${beat.beat}|${a.query}`);
+			opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
+			if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
+			if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
+			if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++;
+			cursorMin = st + d;
+			outcomes.push({
+				beat: beat.beat,
+				keyword: a.keyword,
+				at_sec: a.at_sec,
+				track_st: r3(st),
+				clip_id: pick.cand.clip_id,
+				// 用户 pinned 优先于锚：锚槽被用户钉选候选占据时如实标 pinned（系统选取让位）
+				status: pick.pinned ? "pinned" : "planned",
+				sim_rank: pickIdx + 1,
+				sim: pick.seg.score,
+				top_sim: top.seg.score,
+				// 完美钉位不制造噪音：取到队首时整键缺席
+				...(pickIdx > 0 ? { top_miss: topMiss } : {}),
+				...(pickIdx > 0 && topBy !== undefined ? { top_by: topBy } : {}),
+			});
+		} finally {
+			// 预留释放：**落位与 degraded 的每一条出路都经过这里**（`continue` 也触发 finally）。
+			// 写成 try/finally 而不是在每个 continue 前手动 delete——上面有 5 条 degraded 出口，
+			// 漏掉任何一条就是「那一对永久不可用」⇒ 凭空制造黑片，且症状出现在别的 beat 上极难归因。
+			release(selfId);
 		}
-		// 钉位：at_sec − 提前量，出界钳回 beat 窗口（尾部至少容一个最小槽）
-		let st = Math.max(beat.track_st, a.at_sec - ANCHOR_LEAD_SEC);
-		st = Math.min(st, beat.track_ed - MIN_SHOT_SEC);
-		st = Math.max(st, beat.track_st, cursorMin);
-		const room = beat.track_ed - st;
-		if (room < MIN_SHOT_SEC - 1e-6) {
-			degraded(a, "锚点窗口不足（与前锚重叠或过近 beat 末端）");
-			continue;
-		}
-		const pool = poolByQuery.get(a.query);
-		if (!pool?.length) {
-			degraded(a, anchorPoolEmptyReason(beat, a.query));
-			continue;
-		}
-		// 取该 query 池首个合格对：不二用/同 beat 归属/精修口径与序贯填充完全同一套
-		let pick: Pair | null = null;
-		let pickWin: { clipSt: number; clipEd: number } | null = null;
-		for (const p of pool) {
-			// 与序贯填充同一判据（钉选只看自己落过没有，见 takenBy 头注）
-			if (taken(p)) continue;
-			if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
-			const owner = opts.beatOwners?.get(p.cand.clip_id);
-			if (owner !== undefined && owner !== opts.trackOrder) continue;
-			const win = refineWindow(p, sourceWindowFor(p, Math.min(maxAnchorLen, pairAvail(p), room)), room);
-			if (!win) continue;
-			pick = p;
-			pickWin = win;
-			break;
-		}
-		if (!pick || !pickWin) {
-			degraded(a, `锚 query「${a.query}」候选耗尽或精修后不足最小槽长`);
-			continue;
-		}
-		const d = pickWin.clipEd - pickWin.clipSt;
-		anchorSlots.push({
-			clip_id: pick.cand.clip_id,
-			query: a.query,
-			score: pick.seg.score,
-			...slotTimes(pickWin.clipSt, st, d),
-		});
-		opts.consumed.add(pick.key);
-		opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
-		if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
-		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
-		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++;
-		cursorMin = st + d;
-		outcomes.push({
-			beat: beat.beat,
-			keyword: a.keyword,
-			at_sec: a.at_sec,
-			track_st: r3(st),
-			clip_id: pick.cand.clip_id,
-			// 用户 pinned 优先于锚：锚槽被用户钉选候选占据时如实标 pinned（系统选取让位）
-			status: pick.pinned ? "pinned" : "planned",
-		});
 	}
 
 	// 锚点分割区间：各区间内按既有序贯逻辑铺（复用 fillBeatTrack；子区间以 sub-beat 形态传入——
@@ -2172,6 +2437,64 @@ export function planBeatFills(
 		}
 	}
 	const fpsOf = (clipId: string): number | undefined => fpsByClip.get(clipId);
+	/**
+	 * 锚预留预扫（fix-anchor-top-hit-guarantee 第二刀 · 形态 A「锚预留集」）。
+	 *
+	 * 铺轨**开始之前**扫一遍全 plan 的 anchors，为每锚把它候选序的队首锁进预留账；
+	 * 序贯填充与 gap 填充据此跳过（`fillBeatTrack.eligible`），锚落位/degraded 后立即释放。
+	 *
+	 * 选形态 A 而不是形态 B「两阶段（先全片钉锚、再逐 beat 填间隔）」的理由：
+	 * A 完全不动 `fillBeatTrackWithAnchors` 的调用结构与 beat 的消费顺序，
+	 * **无 anchors 的 plan 连这段都不进**（下面第一行就返回）⇒ 零回归是结构性的、不用另证；
+	 * B 要重排整个填充时序，零回归面得额外拿证据。（tasks 0.2，待主理人追认）
+	 *
+	 * ⚠️ 三条边界：
+	 *   · **每锚至多 1 对**（MUST NOT top-N）——多预留就是把普通槽饿死到落黑；
+	 *   · **at_sec 缺失的锚不占预留**——它恒 degraded，占了就是白扣一段；
+	 *   · **首轨被高档直排占走的 beat 不占预留**——那种 beat 的 `beat.anchors` 根本跑不到
+	 *     （落位处 `arrange_mode==="direct"` 分支优先），预留下去就永远没人来释放。
+	 * ⚠️ 这里 **MUST NOT 传 `markStats`**：预扫只覆盖有锚的 beat，把它的命中/中性计进去会让
+	 *   `lay=0` 之类根本没铺轨的路径也长出统计数——诊断口径当场漂移。
+	 */
+	const anchorReserved: AnchorReservations = new Map();
+	/** 消费归属账（第三刀）：`消费键 → <beat>|<query>`。纯诊断，**不参与任何判定**
+	 * ——去掉它除了 `top_by` 缺席之外不改变一个字节。锚点分割出的子区间会记成
+	 * `<beat>~a<N>`（内部子 beat 名，节奏种子用），如实反映是「锚两侧的序贯槽」拿走的。 */
+	const consumedBy = new Map<string, string>();
+	if (Math.max(0, lay) > 0) {
+		const claims: { id: string; at: number; bi: number; ai: number; beat: PlanBeat; query: string }[] = [];
+		plan.beats.forEach((b, bi) => {
+			if (b.arrange_mode === "direct" && Array.isArray(b.direct_slots) && b.direct_slots.length) return;
+			(Array.isArray(b.anchors) ? b.anchors : []).forEach((a, ai) => {
+				if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) return;
+				claims.push({ id: anchorIdOf(b.beat, ai), at: a.at_sec, bi, ai, beat: b, query: a.query });
+			});
+		});
+		if (claims.length) {
+			// 锚 × 锚争同一对：**at_sec 升序先到先得**（与落位处的锚间排序同一把口径），
+			// 后到者顺位取次优；同刻按 plan 序稳定分胜负（确定性纯函数，不留迭代序漂移）
+			claims.sort((x, y) => x.at - y.at || x.bi - y.bi || x.ai - y.ai);
+			const orderCache = new Map<string, Map<string, Pair[]>>();
+			for (const c of claims) {
+				let byQuery = orderCache.get(c.beat.beat);
+				if (!byQuery) {
+					byQuery = new Map(
+						buildQueryPools(c.beat, scoreFloor, {
+							noImage: opts.noImage,
+							dedupScope: opts.dedupScope,
+							markWeight: opts.markWeight,
+							markLookup: opts.markLookup,
+							highlightWeight: opts.highlightWeight,
+							highlightLookup: opts.highlightLookup,
+						}).map((p) => [p.query, anchorOrder(p.pool)] as [string, Pair[]]),
+					);
+					orderCache.set(c.beat.beat, byQuery);
+				}
+				const head = byQuery.get(c.query)?.find((p) => !anchorReserved.has(p.key));
+				if (head) anchorReserved.set(head.key, c.id);
+			}
+		}
+	}
 	// 同槽候选组互斥（同 beat 跨轨同素材互斥）；按 beat 留存——gap 填充规划段（两阶段在后）要接着记账
 	const ownersByBeat = new Map<string, Map<string, number>>();
 	for (const beat of plan.beats) {
@@ -2196,6 +2519,10 @@ export function planBeatFills(
 				pinnedPlaced: pinnedPlacedKeys,
 				cutAlign: cutAlignFor(k),
 				fpsOf,
+				// 锚预留账（第二刀）：**每条轨都要拿到**——备选轨（k>0）走的是纯序贯填充，
+				// 它同样会把后序 beat 锚的 top-1 吃掉（不二用是跨轨共享的）。
+				anchorReserved,
+				consumedBy,
 			};
 			// 优先布局（锚点 / 高档直排）**只作用于首轨**——备选轨要给的是「另一套方案」，
 			// 钉死同样的位置就失去了备选的意义（口径注记见各自函数头注）。
@@ -2219,6 +2546,13 @@ export function planBeatFills(
 		}
 		fills.set(beat.beat, perTrack);
 	}
+	// 锚预留兜底释放（fix-anchor-top-hit-guarantee 第二刀）：常规填充跑完，预留账**必须清空**。
+	// 正常路径上每锚都在 `fillBeatTrackWithAnchors` 的 try/finally 里销过账，这里恒是空操作；
+	// 留这一手是防「锚根本没被处理过」的形态（lay≤0 已在预扫处挡掉，直排档 beat 也已跳过，
+	// 但调用面会演化）——**漏释放 = 那一对永久不可用 = 凭空制造黑片**，代价远大于一次冗余清空。
+	// ⇒ 也正因为清在这里，下面的 gap 填充（第二阶段，在全部 beat 之后）与预留**时间上不可能共存**，
+	//   故 `fastFillBeatGaps` 侧不需要再加一层过滤（加了就是恒不触发的死代码）。
+	anchorReserved.clear();
 	// pinned 结算（fix-arrange-diagnostics-granularity）：requested = plan 内全部钉选候选的
 	// **全部段**（段键去重）；yielded = 未落成任何槽位的段。
 	// ★ 枚举 MUST 走 `segmentsOf`——与候选池同一口径（含无命中段时的整片伪段）。

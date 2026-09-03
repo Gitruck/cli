@@ -11,7 +11,7 @@
  * 检索域用户可见、本地与云端结果绝不静默混合；与仅云端语义的参数（--column/--material-class）互斥。
  */
 import type { Command } from "commander";
-import { resolve, join, dirname, basename } from "node:path";
+import { resolve, join, dirname, basename, isAbsolute } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
@@ -108,6 +108,7 @@ import {
 	buildMaterialSearchBody,
 	decideLayUpsell,
 	decideMaterialUpsell,
+	deriveCopyrightLabel,
 	filterMaterialsByDuration,
 	materialEndpointFor,
 	parseMaterialDurationBounds,
@@ -126,6 +127,9 @@ import {
 	resolveDescribeUrl,
 	runDescribeItems,
 	summarizeFlagDescMismatch,
+	summarizeDescribeCoverage,
+	describeCoverageNote,
+	type DescribeCoverage,
 	type DescribeEndpoint,
 	toDescribeMeta,
 	type DescribeWorkItem,
@@ -156,6 +160,7 @@ import {
 	extractFrameJpg,
 	getCachedQueryVec,
 	indexLocalMaterials,
+	listMaterialFiles,
 	localIndexDbPath,
 	materialKindForPath,
 	openLocalIndexDb,
@@ -163,7 +168,7 @@ import {
 	type IndexRunResult,
 	type IndexSessionHooks,
 } from "../lib/local-index";
-import { loadLocalIndex, searchLoadedIndex, type LoadedIndex } from "../lib/local-search";
+import { loadLocalIndex, pathInDirs, searchLoadedIndex, type LoadedIndex } from "../lib/local-search";
 import { requireFfmpeg, resolveFfmpeg } from "../lib/ffmpeg";
 import { EXCLUDE_RECENT_DEFAULT, filterRecentlyUsed, recentBgmKeys } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
@@ -190,8 +195,13 @@ interface MatrixOpts {
 	/** `--local`：本地索引检索模式（显式开关，跳过身份探针，不触任何云端检索端点）。 */
 	local?: boolean;
 	/** `--dirs a,b`：本地素材**文件夹或单个素材文件**（index 的索引范围 / --local 的检索域）。
-	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。 */
-	dirs?: string;
+	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。
+	 *
+	 *  ⚠️ 类型是 `string | string[]`：commander 挂了 `collectPathArg`，**重复传即累加**，
+	 *  于是真实运行时恒为数组；单串形态保留是为了内部调用与既有测试（`{ dirs: "D:/x" }`）逐字兼容。
+	 *  MUST NOT 拿 `!!opts.dirs` 判「有没有传」——collect 无默认值，未传时仍是 `undefined`，
+	 *  但一旦有默认值 `[]` 就会恒真（本仓统一用 `parseDirsOption(...).length` 判，见 assertModeOptions）。 */
+	dirs?: string | string[];
 	/** `--scene-threshold`：matrix index 场景检测阈值（默认 0.3）。 */
 	sceneThreshold?: string;
 	/** `--stability-threshold`：matrix index 场景稳定性判定阈值（默认 0.05，保守值待标定）。 */
@@ -209,8 +219,9 @@ interface MatrixOpts {
 	// ── describe / 时间窗 / plan 编辑通路（add-matrix-describe-and-window）──
 	/** `--plan <path>`：matrix describe 的注入目标 plan / matrix lay 显式指定要消费的 plan 文件。 */
 	plan?: string;
-	/** `--materials <a,b,...>`：matrix describe 直接理解素材文件（视频按场景抽帧、图片直传）。 */
-	materials?: string;
+	/** `--materials <a,b,...>`：matrix describe 直接理解素材文件（视频按场景抽帧、图片直传）。
+	 *  与 `--dirs` 同口径（同一个 `collectPathArg` + `parseDirsOption`），可重复传累加。 */
+	materials?: string | string[];
 	/** `--source-window <start,end>`：--local 检索源时间窗过滤（秒；段级交集）。 */
 	sourceWindow?: string;
 	// ── 美观度权重（add-audio-project-atoms，仅 matrix lay）──
@@ -262,6 +273,11 @@ export interface MatrixRunDeps {
 	videoSceneFrames?: (path: string) => Promise<{ materialId: string; frameTsSec: number[] }>;
 	/** matrix fetch 注入面（add-matrix-raw-fetch）：resign/下载替身透传给 lib 层（缺省 = 真实云链）。 */
 	matrixFetch?: MatrixFetchDeps;
+	/** matrix index 整轮替身（缺省 = 真实 indexLocalMaterials）。
+	 *  ⚠️ 只替换「索引这一轮」，命令层的域解析/枚举分项/诊断/退出码判定照常真跑 ——
+	 *  没有它，零枚举以外的结局（部分为空、断链上报）在单测里根本走不到：
+	 *  真索引一个素材必然要 ffprobe + 云端 embed，而单测两样都不许有。 */
+	indexRun?: typeof indexLocalMaterials;
 }
 
 export function registerMatrix(program: Command): void {
@@ -278,7 +294,9 @@ export function registerMatrix(program: Command): void {
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
 		.option(
 			"--dirs <a,b,...>",
-			"本地素材文件夹**或单个素材文件**（逗号分隔）——matrix index 的索引范围 / --local 的检索域；传文件即把检索域收窄到该素材",
+			"本地素材文件夹**或单个素材文件**（逗号分隔，或**重复传** --dirs 累加）——matrix index 的索引范围 / --local 的检索域；" +
+				"传文件即把检索域收窄到该素材。**路径里有英文半角逗号时用重复传**（整串在盘上存在时也会自动不拆；中文全角「，」从不参与拆分）",
+			collectPathArg,
 		)
 		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
 		.option(
@@ -299,7 +317,12 @@ export function registerMatrix(program: Command): void {
 			"--plan <path>",
 			"matrix describe：理解该 plan 的 top 候选并把产物写回 result.describe；matrix lay：显式指定要消费的 plan 文件（缺省 <project>/split/broll-plan.json）",
 		)
-		.option("--materials <a,b,...>", "matrix describe：直接理解素材文件（逗号分隔；视频按场景抽帧、图片直传）")
+		.option(
+			"--materials <a,b,...>",
+			"matrix describe：直接理解素材文件（逗号分隔，或**重复传** --materials 累加；视频按场景抽帧、图片直传）。" +
+				"**路径里有英文半角逗号时用重复传**（与 --dirs 共用同一解析口径）",
+			collectPathArg,
+		)
 		.option(
 			"--source-window <start,end>",
 			"--local 检索：只返回与源时间窗（秒）有交集的命中段（段边界不裁剪；图片候选不参与；窗口无命中返回空结果非错误）",
@@ -447,13 +470,108 @@ export function parseMatrixPositional(words: string[] | undefined): MatrixPositi
 	return { kind: "search", query };
 }
 
-/** `--dirs a,b` 解析（去空、resolve 绝对化）。 */
-export function parseDirsOption(raw: string | undefined): string[] {
-	return (raw ?? "")
-		.split(",")
-		.map((s) => s.trim())
-		.filter(Boolean)
-		.map((s) => resolve(s));
+/**
+ * 路径类参数的 commander 累加器（`--dirs` / `--materials`）。
+ *
+ * ⚠️ **无初值**：`prev` 首次为 `undefined`，未传时 `opts.dirs` 保持 `undefined`。
+ * MUST NOT 给它挂 `[]` 默认值——`assertModeOptions` 里 `!!opts.materials` 那几条互斥判据
+ * 会因为空数组恒真而全线误报（`--materials` 明明没传，describe 的 xor 却判「两个都给了」）。
+ *
+ * 修的另一个独立小坑：此前重复传 `--dirs "A" --dirs "B"` 是**后者静默覆盖前者**，
+ * A 无声消失。静默丢弃用户显式传入的参数值在任何情况下都不该发生。
+ */
+export function collectPathArg(v: string, prev: string[] | undefined): string[] {
+	return prev === undefined ? [v] : [...prev, v];
+}
+
+/** 一段 `--dirs` 原串的切分诊断（供零枚举时点名真因，见 runIndexMode）。 */
+export interface DirsArgSegment {
+	/** 切出来的原文（已 trim）。 */
+	text: string;
+	/** resolve 后的绝对路径（不存在的那些正是被凭空捏造出来的）。 */
+	abs: string;
+	exists: boolean;
+	/** 原文不是绝对路径 ⇒ 它被按 cwd 拼成了一条根本没人传过的路径。 */
+	relativeToCwd: boolean;
+}
+
+/** `--dirs` / `--materials` 的解析结果 + 切分诊断。 */
+export interface DirsArgAnalysis {
+	/** 原样收到的参数串（重复传即多条）。 */
+	raws: string[];
+	/** 解析后的绝对路径项（`parseDirsOption` 的返回值即此字段）。 */
+	dirs: string[];
+	/**
+	 * 可疑切分：原串含英文半角逗号、拆出 ≥2 段、且**至少一段不存在**。
+	 * 三个条件缺一不可——「检测到才说、说就点名」，MUST NOT 见逗号就喊
+	 * （`--dirs "X:/夹A,X:/夹B"` 两段都在盘上时是完全正常的旧写法）。
+	 */
+	commaSplits: { raw: string; segments: DirsArgSegment[] }[];
+}
+
+/**
+ * `--dirs a,b` / 重复传 解析（去空、resolve 绝对化）+ 切分诊断。
+ *
+ * ## 为什么要有「整串存在就不拆」这条前置短路
+ *
+ * 真机（2026-09-02 旅拍解说批）：一条 YouTube 下载的 B-roll 文件名带英文半角逗号
+ * （`Visit Ketchikan Alaska - Bears, Salmon and Adventure….mp4`），裸 `split(",")`
+ * 把它劈成两半、后半按 cwd resolve 成一条凭空捏造的相对路径，两半都不存在 ⇒
+ * `listFilesMatching` 逐项软失败跳过 ⇒ 枚举 0 个 ⇒ 打「✅ 索引完成 0/0」⇒ **退出码 0**
+ * （求证者单条命令、无管道、`rc=$?` 独立取值实测 `EXIT_CODE_IS=0`）。
+ * 同一轮里另一条片的文件名带的是**全角**「，」(U+FF0C)，`split(",")` 打不中、索引成功
+ * —— 用户凭直觉会觉得「逗号没事，我上一条就带逗号」，这条不对称对中文优先的工具尤其阴。
+ *
+ * 判据是「**一个真实存在的路径 > 一个假想的分隔语义**」。同仓已有先例：
+ * `local-index.ts` 的 `realBasenamePath` 就是「宁可多做一次 readdir 也不丢掉这个文件」。
+ *
+ * ## 兼容性（逐条钉死）
+ *
+ * - `--dirs a,b` 旧写法逐字兼容（整串 `a,b` 不存在 ⇒ 照旧拆）；
+ * - `--dirs "<夹>,<夹>/A.mp4"`（add-local-search-material-scope 立的用法）行为不变；
+ * - 唯一的行为变化是「整串恰为一个真实存在的路径」——该情形在本条落地前**必然**产出
+ *   零素材，没有可回归的正确行为。
+ *
+ * ## MUST NOT（proposal 已逐条判死，别复活）
+ *
+ * - MUST NOT 引入 `\,` 转义（Windows 优先的工具，`\` 就是路径分隔符，`C:\dir\,name` 是新歧义）；
+ * - MUST NOT 换分隔符为 `;` / `|`（前者在 Windows 路径里同样合法，后者要额外引用）；
+ * - MUST NOT 做「拆开后把不存在的相邻片段拼回去试」的贪心重组（可重复传已是无歧义解，
+ *   重组只会制造第二套隐式语义）。
+ */
+export function analyzeDirsOption(raw: string | string[] | undefined): DirsArgAnalysis {
+	const raws = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+	const dirs: string[] = [];
+	const commaSplits: DirsArgAnalysis["commaSplits"] = [];
+	for (const one of raws) {
+		const whole = one.trim();
+		// ① 自愈短路：整串原样就是盘上一条真实路径 ⇒ 不拆
+		if (whole && existsSync(whole)) {
+			dirs.push(resolve(whole));
+			continue;
+		}
+		// ② 旧口径：逗号拆分（去空、trim、resolve）
+		const texts = one
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean);
+		const segments: DirsArgSegment[] = texts.map((text) => ({
+			text,
+			abs: resolve(text),
+			exists: existsSync(text),
+			relativeToCwd: !isAbsolute(text),
+		}));
+		if (one.includes(",") && segments.length >= 2 && segments.some((s) => !s.exists)) {
+			commaSplits.push({ raw: one, segments });
+		}
+		for (const s of segments) dirs.push(s.abs);
+	}
+	return { raws, dirs, commaSplits };
+}
+
+/** `--dirs a,b` / 重复传 解析（去空、resolve 绝对化）。诊断面见 `analyzeDirsOption`。 */
+export function parseDirsOption(raw: string | string[] | undefined): string[] {
+	return analyzeDirsOption(raw).dirs;
 }
 
 /**
@@ -626,9 +744,18 @@ export interface MatrixIndexBilling {
 }
 
 export interface MatrixIndexResult {
+	/**
+	 * ⚠️ **机读契约变更**（fix-material-intake-path-and-enumeration §3）：
+	 * 此前恒为硬编码 `true`，现在**全域零枚举**（`materials.total === 0`）时为 `false`，
+	 * 退出码随之非 0。凡用 `--json` 的 `ok` 或退出码消费 `matrix index` 的脚本/skill 都看得见差别；
+	 * 但此前为 `true` 的那些场景全部是「什么都没索引到」，没有正确行为被打破。
+	 * 触发面 MUST 收窄到「全域」——多项 `--dirs` 里只有部分为空时仍为 `true`（那一轮确实干了活）。
+	 */
 	ok: boolean;
 	mode: "index";
 	dirs: string[];
+	/** 逐项交代（同上）：`--dirs` 每一项各自枚举到的素材数，供 agent 判「哪一句祈使句没兑现」。 */
+	per_dir: { dir: string; materials: number }[];
 	dbPath: string;
 	materials: { total: number; indexed: number; skipped: number; rebuilt: number; failed: number };
 	/** kind 分列计数（add-matrix-local-image-broll：图片/视频各自 total/indexed）。 */
@@ -636,8 +763,11 @@ export interface MatrixIndexResult {
 	scenes: number;
 	frames: number;
 	/** 稳定性收敛账面（add-index-stability-sampling：分列 stable/unstable 场景数与收敛省帧数；
-	 * 图片不参与，只计本轮实际入库的视频素材）。 */
-	stability: { stable_scenes: number; unstable_scenes: number; frames_saved: number };
+	 * 图片不参与，只计本轮实际入库的视频素材）。
+	 * `black_veto_*`（fix-index-gradual-transition-blindness）：因**含黑段**被否决 stable 的场景数，
+	 * 与该否决带来的**新增**抽帧数。⚠️ 与 `frames_saved` **分列不相抵**——一笔是省、一笔是增，
+	 * 合并成净值会把「成本为什么涨了」藏起来。旧库/未扫黑段的素材两键恒为 0（不是缺席）。 */
+	stability: { stable_scenes: number; unstable_scenes: number; frames_saved: number; black_veto_scenes: number; black_veto_frames: number };
 	billing: MatrixIndexBilling;
 	elapsedSec: number;
 	[k: string]: unknown;
@@ -665,7 +795,7 @@ export async function runMatrix(
 	const cfg = loadConfig();
 
 	// ── 本地索引模式（matrix index）──
-	if (pos.kind === "index") return withEmbedJsonGuard("index", opts, () => runIndexMode(cfg, opts));
+	if (pos.kind === "index") return withEmbedJsonGuard("index", opts, () => runIndexMode(cfg, opts, deps));
 
 	// ── 理解零件（matrix describe：--plan 注入 / --materials 直接理解）──
 	if (pos.kind === "describe") return withEmbedJsonGuard("describe", opts, () => runDescribeMode(cfg, opts, deps));
@@ -710,10 +840,10 @@ export async function runMatrix(
 	if (tier === "external") {
 		// 死角要明示，绝不静默吞：显式要 concept = 报错退出；real_shot = 警告继续
 		if (opts.materialClass === "concept") {
-			throw new Error("external 档位服务端固定 real_shot+有版权素材，concept 不可用（--material-class concept 无法满足）");
+			throw new Error("external 档位服务端固定 real_shot + 可商用素材，concept 不可用（--material-class concept 无法满足）");
 		}
 		if (opts.materialClass) {
-			log.warn("external 档位服务端固定 real_shot+有版权素材，--material-class 参数不适用（已忽略）");
+			log.warn("external 档位服务端固定 real_shot + 可商用素材，--material-class 参数不适用（已忽略）");
 		}
 		if (broll && (broll.column_tag_ids?.length || broll.material_class_policy || broll.facet_defaults)) {
 			log.warn("当前身份为 external，栏目检索偏好（column_tag_ids/material_class/facets）不适用");
@@ -822,13 +952,15 @@ export function composeIndexBilling(exempt: boolean, run: Pick<IndexRunResult, "
 }
 
 /** matrix index：本地素材免切片索引（进度行 + 计量会话 + --json 机读 summary）。 */
-async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts): Promise<MatrixIndexResult> {
-	const dirs = parseDirsOption(opts.dirs);
+async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts, deps: MatrixRunDeps = {}): Promise<MatrixIndexResult> {
+	const indexRun = deps.indexRun ?? indexLocalMaterials;
+	const analysis = analyzeDirsOption(opts.dirs);
+	const dirs = analysis.dirs;
 	const threshold = parseSceneThreshold(opts.sceneThreshold);
 	const stabilityThreshold = parseStabilityThreshold(opts.stabilityThreshold);
 	const endpoint = embedEndpointFor(cfg);
 	log.step(
-		`▶ 本地素材索引：${dirs.join("、")}（场景阈值 ${threshold} · 稳定阈值 ${stabilityThreshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`,
+		`▶ 本地素材索引：${formatDirsEcho(dirs)}（场景阈值 ${threshold} · 稳定阈值 ${stabilityThreshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`,
 	);
 	log.info("免切片：只记场景时间戳，不产生任何切片文件；抽帧图 embed 后即删（素材本体不上云）。");
 	// 同合云内部成员（gc_member_type=internal）豁免：无 token 也放行图像且零计费 → 直接不开会话
@@ -839,8 +971,33 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	if (proxyWidth !== undefined && (!Number.isFinite(proxyWidth) || proxyWidth < 64)) {
 		throw new Error("--proxy-width 需为 ≥64 的数字");
 	}
-	const run = await indexLocalMaterials({
+	// 逐项交代（§3）：枚举一次、按项归属，再把这份清单**原样**交给 indexLocalMaterials
+	// （`listFiles` 注入面），全程只走一遍文件系统 —— MUST NOT 为了分项计数再枚举 N 遍，
+	// X 盘素材大本营那种上万文件的库会当场变慢 N 倍。
+	// ⚠️ 这里钉的是 `listMaterialFiles`（= indexLocalMaterials 的缺省枚举口，local-index.ts
+	//    `(opts.listFiles ?? listMaterialFiles)(opts.dirs)`）。两边 MUST 保持同一个函数：
+	//    枚举语义（单文件收窄 / 白名单 / 符号链接跟随）的任何演进都在它内部，命令层不复刻。
+	const enumerated = listMaterialFiles(dirs);
+	const perDir = dirs.map((dir) => ({ dir, materials: enumerated.filter((f) => pathInDirs(f, [dir])).length }));
+	const emptyDirs = perDir.filter((p) => p.materials === 0);
+	// 逐项报数**在开跑之前**说：这是枚举阶段的事实，用户不该等完一轮长跑才知道有一项是空的。
+	if (perDir.length > 1) {
+		log.info(`枚举分项：\n${perDir.map((p) => `     ${String(p.materials).padStart(5)} 个 · ${p.dir}`).join("\n")}`);
+	}
+	// 部分静默：今天只要 total>0 就一声不吭 ——`A.mp4` 成功 + 含逗号的 `B` 被劈丢时输出毫无异样。
+	// 用户显式传入的每一项都是一句祈使句，其中任何一句没兑现都要说出来。
+	// ⚠️ **只告警、MUST NOT 动退出码**：本轮确实干了活。硬失败的触发面 MUST 收窄到「全域零枚举」，
+	// 扩到「任何一项为空」会把「传一个空素材夹」这类正当场景一起判死（proposal §五已定夺）。
+	if (emptyDirs.length && emptyDirs.length < perDir.length) {
+		log.warn(
+			`以下 ${emptyDirs.length} 项一个素材都没枚举到（本轮其余项有产出，退出码仍 0）：\n` +
+				emptyDirs.map((p) => `  ${p.dir}`).join("\n") +
+				commaCulpritLines(analysis),
+		);
+	}
+	const run = await indexRun({
 		dirs,
+		listFiles: () => enumerated,
 		sceneThreshold: threshold,
 		stabilityThreshold,
 		rebuild: opts.rebuild === true,
@@ -870,41 +1027,157 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 					: "";
 	const kindNote = run.kinds.image.total > 0 ? `（视频 ${run.kinds.video.indexed}/${run.kinds.video.total} · 图片 ${run.kinds.image.indexed}/${run.kinds.image.total}）` : "";
 	const stab = run.stability;
+	// 黑段否决 stable 的账（fix-index-gradual-transition-blindness）：库侧早就分好了两笔，
+	// 这里是它们第一次出现在人读行与 --json 上。
+	// ⚠️ **两笔 MUST 分列、MUST NOT 相抵**：`framesSaved` 是**省**（stable 收敛少抽的帧），
+	// `blackVetoFrames` 是**增**（因含黑段被否决 stable 而多抽的帧，直接进 embed 计费，
+	// 真机那条 18.034s 场景由 1 帧 → 9 帧）。合成一个净值就把「成本为什么涨了」这件事藏起来了——
+	// 净值恰好为 0 的那一轮读者会以为「本轮没有任何成本变化」，而实际是省的和增的各发生了一批。
+	const blackNote = stab.blackVetoScenes > 0 ? `（含黑段否决 stable ${stab.blackVetoScenes} 段 · 增 ${stab.blackVetoFrames} 帧）` : "";
 	const stabNote =
 		stab.stableScenes + stab.unstableScenes > 0
-			? ` · stable 场景 ${stab.stableScenes} / unstable ${stab.unstableScenes}${stab.framesSaved ? `（收敛省 ${stab.framesSaved} 帧）` : ""}`
+			? ` · stable 场景 ${stab.stableScenes} / unstable ${stab.unstableScenes}${stab.framesSaved ? `（收敛省 ${stab.framesSaved} 帧）` : ""}${blackNote}`
 			: "";
-	// 零枚举告警（add-local-search-material-scope §2）：ok:true / 退出码 0 维持不变
-	// ——「没找到素材」不是失败，但**静默的成功**会让用户以为索引好了、然后在检索侧撞空。
-	if (run.materials.total === 0) {
-		log.warn(
-			`一个素材都没枚举到（域：${run.dirs.join("、")}）。三种可能，逐条排查：\n` +
-				"  ① `--dirs` 指的路径不存在或拼错了；\n" +
-				"  ② 传的是文件，但扩展名不在素材白名单里（图片/视频之外的一律不收）；\n" +
-				"  ③ 传的是文件夹，但里面（含 4 层子目录内）没有素材文件。\n" +
-				"索引本身没失败，只是这一轮无事可做。",
-		);
-	}
-	log.ok(
-		`索引完成：${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
-			`场景 ${run.scenes} · 帧 ${run.frames}${stabNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
-	);
+	// ── 全域零枚举硬失败（fix-material-intake-path-and-enumeration §3）──
+	//
+	// 此前：零枚举只 log.warn，`ok` 硬编码 true、退出码 0 —— 一条「什么都没索引到」的命令
+	// 报成功。真机 2026-09-02 的失败链条正断在这里：index「成功」⇒ agent 接着往下跑 ⇒
+	// 空候选一路流到成片，用户看到的第一个异常离病灶隔了三四步。
+	// **告警不是契约，退出码才是**：本命令的主要驱动者是 agent 与 `index … && describe …`
+	// 这样的 shell 串（skills/gtrk-travel-recap:211 就是这么写的），它们读退出码与 `ok`，
+	// 不读 stderr 上的中文段落。改成硬失败，那个 `&&` 会在正确的地方停住。
+	// MUST NOT 加 `--allow-empty` 之类让零枚举重新变成成功的逃生门。
+	const zeroAll = run.materials.total === 0;
+	if (zeroAll) log.warn(zeroEnumerationDiagnosis(analysis, dirs, readBrokenLinks(run)));
+	const summary =
+		`${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
+		`场景 ${run.scenes} · 帧 ${run.frames}${stabNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`;
+	// MUST NOT 打出与正常完成无差别的成功行（真机就是被那句「✅ 索引完成：0/0」骗过去的）
+	if (zeroAll) log.err(`索引未产出任何素材：${summary}\n   判失败（退出码 1 · --json 的 ok=false）——「让这批素材可检索」这句祈使句没兑现。`);
+	else log.ok(`索引完成：${summary}`);
 	log.info(`索引落点：${run.dbPath}（绝对路径为键，跨机不可移植；属本机缓存，可随时重建）`);
 	const result: MatrixIndexResult = {
-		ok: true,
+		ok: !zeroAll,
 		mode: "index",
 		dirs: run.dirs,
+		per_dir: perDir,
 		dbPath: run.dbPath,
 		materials: run.materials,
 		kinds: run.kinds,
 		scenes: run.scenes,
 		frames: run.frames,
-		stability: { stable_scenes: stab.stableScenes, unstable_scenes: stab.unstableScenes, frames_saved: stab.framesSaved },
+		stability: {
+			stable_scenes: stab.stableScenes,
+			unstable_scenes: stab.unstableScenes,
+			frames_saved: stab.framesSaved,
+			// 与 frames_saved **并列独立成键**（见上方 blackNote 处的理由）：机读面同样不许相抵。
+			black_veto_scenes: stab.blackVetoScenes,
+			black_veto_frames: stab.blackVetoFrames,
+		},
 		billing,
 		elapsedSec: Math.round(run.elapsedMs / 100) / 10,
 	};
+	// 退出码对齐本仓既有写法（fetch / runPlanMode / runLayMode 三处同款）：ok:false ⇒ 非 0。
+	// 放在 result 构造之后、--json 打印之前，机读面与退出码 MUST NOT 互相矛盾。
+	if (!result.ok) process.exitCode = 1;
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
+}
+
+/**
+ * 域回显：多项时每项独占一行。
+ *
+ * MUST NOT 用「、」拼接 —— 真机那一行 `域：X:\…Bears、D:\file\tmp\…\Salmon and…` 里，
+ * 被英文逗号劈开的后半段长得像一条正常路径，**肉眼极难认出是同一个文件被切开**。
+ * 那是当时唯一的线索，而它实际不可读。
+ */
+function formatDirsEcho(dirs: string[]): string {
+	if (dirs.length === 0) return "(空)";
+	if (dirs.length === 1) return dirs[0]!;
+	return `${dirs.length} 项\n${dirs.map((d, i) => `   [${i + 1}] ${d}`).join("\n")}`;
+}
+
+/**
+ * 把检索域回抄成一条**可直接粘贴**的命令片段：每项各一次 `--dirs`。
+ *
+ * 此前是 `--dirs "a","b"`（JSON.stringify 后用逗号拼），两处都错：
+ *   · 逗号拼 —— 那形态在 shell 里会被并成一个参数值 `a,b` 再被逗号拆回来，纯属巧合可用；
+ *     一旦路径本身含英文逗号就当场错。重复传才是「路径里可能有任何字符」的唯一无歧义解；
+ *   · `JSON.stringify` —— Windows 路径会被转义成 `"C:\\Users\\x"`，**cmd.exe 里粘贴即错**
+ *     （它不认 `\\` 转义，会当成两个分隔符）。回抄的是给人粘的命令，用裸双引号即可
+ *     （Windows 文件名本就不允许 `"`）。
+ */
+function dirsAsRepeatedFlag(dirs: string[]): string {
+	if (dirs.length === 0) return "--dirs <素材夹或素材文件>";
+	return dirs.map((d) => `--dirs "${d}"`).join(" ");
+}
+
+/**
+ * 定向检测①：英文半角逗号切分。**检测到才说、说就点名**；没命中返回空串。
+ *
+ * MUST NOT 退化成「泛泛补一条『会不会是逗号』」——罗列可能原因不能代替检测。
+ */
+function commaCulpritLines(analysis: DirsArgAnalysis): string {
+	if (analysis.commaSplits.length === 0) return "";
+	const out: string[] = [];
+	for (const { raw, segments } of analysis.commaSplits) {
+		// ⚠️ 用「」包而不是 JSON.stringify：后者会把 Windows 路径的 `\` 全转义成 `\\`，
+		// 一条本来就难读的路径变成两倍难读——而这段文字的唯一职责就是让人**一眼看懂被切在哪**。
+		out.push(`  ❗ 这一串被英文半角逗号「,」切成了 ${segments.length} 段：「${raw}」`);
+		segments.forEach((s, i) => {
+			const rel = s.relativeToCwd ? `（不是绝对路径 ⇒ 被当成相对路径拼到了当前目录下：${s.abs}）` : "";
+			out.push(`     第 ${i + 1} 段「${s.text}」→ ${s.exists ? "存在" : "不存在"}${rel}`);
+		});
+	}
+	out.push("  若它本来就是**一条**含逗号的路径：改用重复传，每条各一次 —— 例如");
+	out.push('     gtrk matrix index --dirs "<路径一>" --dirs "<路径二>"');
+	out.push("  （中文全角「，」U+FF0C 从不参与拆分：同一轮里全角那条片索引成功、半角这条 0/0，就是这个不对称。）");
+	return `\n${out.join("\n")}`;
+}
+
+/**
+ * 断链上报的读取口（seam）。
+ *
+ * 跟随符号链接与 `brokenLinks` 计数在 `src/lib/local-index.ts` 落地（本 change §2），
+ * 由它把**断链的链接路径**上抛到 `IndexRunResult.brokenLinks`。这里按 duck-typing 读、
+ * 形状不符即退化为空数组：诊断段宁可少说一句，也 MUST NOT 因为上游形状变了就把整条命令带崩。
+ */
+function readBrokenLinks(run: IndexRunResult): string[] {
+	const v = (run as { brokenLinks?: unknown }).brokenLinks;
+	return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * 零枚举诊断：**先报已检出的真因，再报未能检出时的可能原因**。
+ *
+ * 此前只有后者，且被自称穷举成「三种可能」。真机两次零枚举命中的都不在那三条里：
+ * 逗号场景下路径没拼错、扩展名 `.mp4` 在白名单、传的不是文件夹 —— 三条全为假，
+ * 且会把人往错误方向带；symlink 场景下用户读到「里面没有素材文件」，而 `ls -la` 明明列着一个 .mp4。
+ * 所以措辞里 MUST NOT 再出现「三种可能」这类穷举自称（本轮命中的是第四、第五种）。
+ */
+function zeroEnumerationDiagnosis(analysis: DirsArgAnalysis, dirs: string[], brokenLinks: string[]): string {
+	const parts: string[] = [`一个素材都没枚举到（域：${formatDirsEcho(dirs)}）。`];
+	const comma = commaCulpritLines(analysis);
+	if (comma) parts.push(`已检出的真因：${comma}`);
+	// 定向检测②：断链符号链接 —— 遍历已跟随链接之后，断链仍会导致零枚举
+	if (brokenLinks.length) {
+		const head = comma ? "另一条已检出的真因：" : "已检出的真因：";
+		parts.push(
+			`${head}\n  ❗ ${brokenLinks.length} 条符号链接的目标不可达（链接在、真身没了）：\n` +
+				brokenLinks.slice(0, 10).map((p) => `     ${p}`).join("\n") +
+				(brokenLinks.length > 10 ? `\n     …（其余 ${brokenLinks.length - 10} 条略）` : ""),
+		);
+	}
+	if (!comma && brokenLinks.length === 0) {
+		parts.push(
+			"没检出确定的真因。以下是常见原因，逐条排查：\n" +
+				"  · `--dirs` 指的路径不存在或拼错了；\n" +
+				"  · 传的是文件，但扩展名不在素材白名单里（图片/视频之外的一律不收）；\n" +
+				"  · 传的是文件夹，但里面（含 4 层子目录内）没有素材文件；\n" +
+				"  · 素材在可移动盘/网络盘上，而那个盘当前没挂上。",
+		);
+	}
+	return parts.join("\n");
 }
 
 /** --scene-threshold 解析：(0,1) 浮点，非法值按默认（告警）。 */
@@ -959,6 +1232,11 @@ export interface MatrixDescribeResult {
 		by_dim: Partial<Record<OverlayFlagDim, number>>;
 		items: { material_id: string; ts_ms: number; dims: OverlayFlagDim[]; desc_excerpt: string }[];
 	};
+	/** [fix-describe-window-coverage] 段覆盖率（仅 `--plan` 形态）：`frames` 是**理解帧数**、
+	 * `segments` 是被理解候选携带的**段总数**——分母不是候选数。真机 260902 实测 32/843 = 3.8%。
+	 * ⚠️ 与 `injected`（候选数）是两个数：只读 `injected` 会以为「这些候选都被看过了」。
+	 * 图片候选无时间轴、射程即整条素材，单列 `image_candidates`，不进分子也不进分母。 */
+	describe_coverage?: { frames: number; segments: number; ratio: number; image_candidates: number };
 	/** 计费确认被拒：零服务端调用中止（ok:false + 非 0 退出码）。 */
 	reason?: string;
 	/** --materials 模式明细（--plan 模式产物在 plan 文件里）。 */
@@ -1202,18 +1480,33 @@ async function runDescribeMode(
 
 	// ── --plan 注入回写（result.describe 字段随 plan 流转；MUST NOT 依据 flags 剔除任何候选）──
 	let injected = 0;
+	let coverage: DescribeCoverage | undefined;
 	if (planObj && planPath && targets) {
+		// 射程锚点（fix-describe-window-coverage）：写出这一条 describe 出自的**帧时刻**。
+		// 取值来源恒是 `items[i]` 本身——那是这一轮真的送去理解的那一帧，不是重算出来的猜测
+		// （`items` / `targets` / `run.results` 三条数组由 collectPlanDescribeItems 逐条同序推入）。
+		// ⚠️ 抽帧口径**一字未动**：仍是每候选一帧、仍取 `segments[0].best`，服务端调用张数与计费零变化。
+		// 图片候选走 `direct`（缓存键 ts=0 是缓存键不是时刻）⇒ anchor 恒 undefined，不写误导性锚点。
+		const covRows: { image: boolean; segments: number }[] = [];
 		targets.forEach((r, i) => {
 			const d = run.results[i];
 			if (d) {
-				r.describe = toDescribeMeta(d);
+				const src = items[i]?.source;
+				r.describe = toDescribeMeta(d, src && src.kind === "frame" ? src.tsSec : undefined);
 				injected++;
+				covRows.push({ image: r.kind === "image", segments: r.segments?.length ?? 0 });
 			}
 		});
+		coverage = summarizeDescribeCoverage(covRows);
 		await writeFile(planPath, JSON.stringify(planObj, null, 2));
 		log.ok(
 			`理解完成并回写 plan：注入 ${injected} 条 result.describe（缓存命中 ${run.cached} · 实际调用 ${run.called} 张${run.failed ? ` · 取帧失败 ${run.failed}` : ""}${skipped ? ` · 无源跳过 ${skipped}` : ""}）→ ${planPath}`,
 		);
+		// ⚠️ 覆盖率必须紧跟在上面那句「注入 N 条」后面：N 是**候选数**，单独出现会被读成
+		// 「这 N 条候选都被看过了」。真机 260902 两份 plan 的真值是 32 帧 / 843 段 = 3.8%。
+		// 非致命 INFO 档：这是「信号只覆盖了这么点」的告知，MUST NOT 抛 warn/error，也 MUST NOT
+		// 因此跳过或改变回写。
+		log.info(describeCoverageNote(coverage));
 		log.info("usable_flags 只是给你的信号：剔除与否由你编辑 plan 裁定（删 result 条目后 gtrk matrix lay），CLI 不会替你剔。");
 		// [add-broll-plan-summary-honesty] 把裁定权交出去的同时得给判据：候选数 ≤1 的 beat 逐个点名。
 		// 真机 260902 P3 八个 beat 里七个全 beat 只有 1 条候选——按 text_overlay 信号删掉那一条，
@@ -1283,6 +1576,16 @@ async function runDescribeMode(
 		credits_would_be: run.creditsWouldBe,
 		...(run.exempt !== undefined ? { exempt: run.exempt } : {}),
 		...(probeFailed ? { exempt_probe: "failed" as const } : {}),
+		...(coverage
+			? {
+					describe_coverage: {
+						frames: coverage.frames,
+						segments: coverage.segments,
+						ratio: Math.round(coverage.ratio * 10000) / 10000,
+						image_candidates: coverage.imageCandidates,
+					},
+				}
+			: {}),
 		...(mismatch
 			? {
 					flag_desc_mismatch: {
@@ -1522,11 +1825,11 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 		// 点名用户实际传的路径：MUST NOT 给出一条会枚举到零素材的命令形态
 		// （`--dirs` 现在既吃文件夹也吃单个素材文件，照抄回去至少是可跑的那一条）
 		throw new Error(
-			`本地索引不存在（${dbPath}）——先建索引：gtrk matrix index --dirs ${dirs.map((d) => JSON.stringify(d)).join(",")}\n` +
+			`本地索引不存在（${dbPath}）——先建索引：gtrk matrix index ${dirsAsRepeatedFlag(dirs)}\n` +
 				"（--dirs 可传素材文件夹，也可直接传单个素材文件——一稿对一片时钉到那一部片，邻片候选就抢不走了）",
 		);
 	}
-	log.step(`▶ 本地检索模式：载入索引（域：${dirs.join("、")}）…`);
+	log.step(`▶ 本地检索模式：载入索引（域：${formatDirsEcho(dirs)}）…`);
 	const db = await openLocalIndexDb(dbPath);
 	let index: LoadedIndex;
 	try {
@@ -1536,8 +1839,8 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	}
 	if (index.frames.length === 0) {
 		throw new Error(
-			`索引里没有该检索域的素材帧（域：${dirs.join("、")}）——这些路径未索引过。\n` +
-				`对它们本身、或它们所在的文件夹跑：gtrk matrix index --dirs ${dirs.map((d) => JSON.stringify(d)).join(",")}\n` +
+			`索引里没有该检索域的素材帧（域：${formatDirsEcho(dirs)}）——这些路径未索引过。\n` +
+				`对它们本身、或它们所在的文件夹跑：gtrk matrix index ${dirsAsRepeatedFlag(dirs)}\n` +
 				"（文件消失 / 扩展名不在素材白名单 / 从没索引过，三者都会走到这里）",
 		);
 	}
@@ -3265,7 +3568,9 @@ function materialLines(r: MaterialResult, idx: number, scope: MaterialScope): st
 	if (r.audio_type) bits.push(r.audio_type === "song" ? "song（歌曲）" : r.audio_type === "pure" ? "pure（纯音乐）" : String(r.audio_type));
 	if (typeof r.score === "number") bits.push(`score ${r.score}`);
 	// external 档没有 is_copyright 字段——如实不显示（MUST NOT 补假值当「不可商用」讲）
-	if (typeof r.is_copyright === "boolean") bits.push(r.is_copyright ? "可商用" : "非商用");
+	// [align-copyright-semantics-cli handoff 4.1] 复用词表正本常量：同一个位此前有两套词
+	// （人读「非商用」/ 机读 `copyright_label` 的「不可商用」），转述的人会以为是两件事。
+	if (typeof r.is_copyright === "boolean") bits.push(deriveCopyrightLabel(r.is_copyright) ?? "");
 	if (typeof r.material_class === "string") bits.push(r.material_class);
 	const lines = [`${bits.join(" · ")}（id ${r.id}）`];
 	if (typeof r.download_url === "string" && r.download_url) lines.push(`   ${scope === "audio" ? "试听/下载" : "下载"}：${r.download_url}`);

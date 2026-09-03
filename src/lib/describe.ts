@@ -624,8 +624,15 @@ export function flagDescMismatchNote(s: FlagDescMismatchSummary): string {
 	);
 }
 
-/** 注入 plan result 的裁剪形态（describe 字段随 plan 流转，broll-plan-contract delta）。 */
-export function toDescribeMeta(d: MaterialDescribe): MaterialDescribeMeta {
+/**
+ * 注入 plan result 的裁剪形态（describe 字段随 plan 流转，broll-plan-contract delta）。
+ *
+ * `atSec`（fix-describe-window-coverage）：本条产物出自的帧时刻（素材时基秒），写成 `at_sec`。
+ * ⚠️ **图片候选 MUST 不传**（缓存键 ts=0 是缓存键、不是时刻，写 0 就是误导性锚点：
+ * 会让下游以为「这条判决只代表第 0 秒那一段」，而图片的射程本就是整条素材）。
+ * 缺省时下游按 `segments[0]` 推定并标注为「推定」——见 `matrix.ts` 的 `describeScopeOf`。
+ */
+export function toDescribeMeta(d: MaterialDescribe, atSec?: number): MaterialDescribeMeta {
 	return {
 		desc: d.desc,
 		tags: d.tags,
@@ -635,7 +642,59 @@ export function toDescribeMeta(d: MaterialDescribe): MaterialDescribeMeta {
 		...(d.action ? { action: d.action } : {}),
 		...(d.shot_size ? { shot_size: d.shot_size } : {}),
 		...(d.highlight !== null && d.highlight !== undefined ? { highlight: d.highlight } : {}),
+		...(typeof atSec === "number" && Number.isFinite(atSec) ? { at_sec: atSec } : {}),
 	};
+}
+
+// ── 理解覆盖率（fix-describe-window-coverage：一帧的判决能代表多长的时间）─────────────
+
+/** 一轮 `--plan` 理解的**段覆盖率**账面。 */
+export interface DescribeCoverage {
+	/** 被理解的帧数（当前口径每候选恰一帧，恒 = 被注入的视频候选数）。 */
+	frames: number;
+	/** 这些候选携带的 segment 总数 —— 分母。**不是候选数**。 */
+	segments: number;
+	/** frames / segments；分母为 0 时为 1（没有段可覆盖 ⇒ 不报 0% 吓人）。 */
+	ratio: number;
+	/** 图片候选数：无时间轴、射程天然是整条素材 ⇒ **不进分子也不进分母**（matrix-describe spec）。 */
+	imageCandidates: number;
+}
+
+/**
+ * 段覆盖率统计（纯函数，零 IO）。
+ *
+ * 为什么这个数必须报出来：此前回写摘要只说「注入 N 条 result.describe」，**N 是候选数不是段数**，
+ * 读者（人与 agent）会读成「这 N 条候选都被看过了」。真机 260902 两份 plan 的真值是
+ * **32 帧 / 843 段 = 3.8%** —— 96.2% 的段一眼都没被看过。
+ * 走**非致命 INFO** 档（良性降级打可读 INFO）：它是「信号只覆盖了这么点」的告知，不是失败。
+ */
+export function summarizeDescribeCoverage(rows: Array<{ image: boolean; segments: number }>): DescribeCoverage {
+	let frames = 0;
+	let segments = 0;
+	let imageCandidates = 0;
+	for (const r of rows) {
+		if (r.image) {
+			imageCandidates++;
+			continue;
+		}
+		frames++;
+		// 无 segments 的退化候选按 1 段计：铺轨侧 segmentsOf 会给它合成一个整片伪段，
+		// 那一段确实被这一帧代表了 ⇒ 计 1/1，MUST NOT 计 0（0 会把分母做小、把覆盖率吹高）。
+		segments += Math.max(1, r.segments);
+	}
+	return { frames, segments, ratio: segments > 0 ? frames / segments : 1, imageCandidates };
+}
+
+/** 覆盖率人读文案（INFO 档）。措辞 MUST NOT 把 flags 说成候选级 / 素材级结论。 */
+export function describeCoverageNote(c: DescribeCoverage): string {
+	const pct = (c.ratio * 100).toFixed(1);
+	const img = c.imageCandidates > 0 ? `（另有 ${c.imageCandidates} 个图片候选：无时间轴，射程即整条素材，不进本比值）` : "";
+	return (
+		`理解覆盖率：${c.frames} 帧 / ${c.segments} 段 = ${pct}%${img}。\n` +
+		`   --plan 每个候选只抽 segments[0] 的 best **一帧** ⇒ 本条 describe（desc/tags/mark/usable_flags）` +
+		`只代表**该帧所属的那一段**，MUST NOT 读成候选级或素材级结论；其余段一眼都没被看过。\n` +
+		`   射程锚点已写进 result.describe.at_sec（素材时基秒），铺轨据此把 flags 收窄到射程内的段。`
+	);
 }
 
 // ── 理解编排（三输入形态共用：缓存短路 → 确认护栏 → 抽帧/直读 → 批调用 → 写缓存）──

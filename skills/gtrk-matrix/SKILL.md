@@ -183,6 +183,31 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 
 出参逐条：`{id, note, duration, audio_type, tags, score, download_url, cover_url}`；`audio_type`（`pure` 纯音乐 / `song` 歌曲）与 `accompaniment_url`（song 类现成伴奏直链，零处理成本）**两档通用**；**只有 `is_copyright`（及 clip 的 `material_class`）是成员口独有**——公开口**没有**这个字段，零件如实缺省不伪造，你也别把「没有该字段」读成「不可商用」。`download_url` 带 24h 签名（过期重跑即重签）。
 
+> ⚠️ **`is_copyright` = 能不能商用，不是「有没有被版权保护」**
+>
+> ```
+> is_copyright: true   → 可商用（自有 ∪ 已授权）      ← 挑 BGM 就挑这种
+> is_copyright: false  → 不可商用                      ← 别碰
+> ```
+>
+> **`false` MUST NOT 读作「无版权、可以随便用」——它恰恰相反。** 决定性反证：概念素材（他人版权物）
+> 入库时固定写 `is_copyright=0`；字段若真是「是否受版权保护」，那批必须是 1。
+>
+> **真机事故（2026-09-02，这条警示的由来）**：AI 执行方连续两轮**特意去挑 `is_copyright:false`**，
+> 以为那是「没版权、随便用」的安全选项，结果把**不可商用**素材铺进了 5 个工程；唯一安全的
+> `true` 反倒被主动避开。
+>
+> **所以选 BGM（以及任何要进成片的整条素材）MUST 按可商用口径判**：
+>
+> - **MUST 只从 `is_copyright: true` 的候选里挑**；`false` 的一律不推荐给用户、不落轨——
+>   除非用户在对话里明确说了这条片子只自用/不发布，且你把「这条不可商用」原话告诉他；
+> - 嫌手动挑麻烦就让服务端筛：成员口加 **`--commercial-only`**（传 `copyright_scope=commercial`），
+>   出参逐条 `is_copyright:true`；
+> - **公开口（external 档）没有这个字段**——那不是「不可商用」，而是「服务端已经在源头只放可商用素材」，
+>   缺席即无需判；
+> - `--json` 出参里 CLI 会**逐条派生一个人话标签 `copyright_label`**（`"可商用"` / `"不可商用"`），
+>   与 `is_copyright` 恒同向、缺席同缺席。**判读以这两个键中的任一为准，MUST NOT 靠字段名去猜。**
+
 **upsell 口径**：`--json` 出参可能带一个**独立顶层字段** `upsell`（人读模式则是末尾一行提示）——**当且仅当**公开口档位且结果不足（0 条或少于请求量一半）时才有，内容是「加入同和新媒体矩阵可免费搜全库」+ 链接。它**不在 `results` 里、不改写任何候选**：原样转述给用户，别把它当成一条素材。成员档恒无此字段。
 
 **本地素材零件**（`matrix index` / `--local`）：
@@ -208,7 +233,12 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 直接理解素材文件 | `--materials <a,b,...>` | 逗号分隔文件 · — | 视频按**场景中点**逐帧理解；图片文件直传；结果在 stdout JSON `items` |
 | 跳过确认 | `--yes` | 开关 · 关 | 将实际调用 >20 张才触发确认（预估积分明示）；internal 豁免免确认仅提示 |
 
-理解产物形态：`{desc(≤200字中文描述), tags[], mark(0-100 质量分), usable_flags{watermark, text_overlay, black_border, blurry}}`。**缓存即钱**：产物按（素材, 帧时刻）落本地索引库，同帧重复 describe 零调用零计费；素材内容变了（size:mtime 指纹变）该素材缓存自动作废。
+理解产物形态：`{desc(≤200字中文描述), tags[], mark(0-100 质量分), usable_flags{watermark, text_overlay, black_border, blurry}, at_sec(射程锚点)}`。**缓存即钱**：产物按（素材, 帧时刻）落本地索引库，同帧重复 describe 零调用零计费；素材内容变了（size:mtime 指纹变）该素材缓存自动作废。
+
+**⚠️ 一条 describe 只代表一段，不代表整条候选**（`--plan` 形态）：每个候选**只抽一帧**（`segments[0]` 的 `best`），这条判决的有效射程就是**那一帧所属的那一个 segment**。`at_sec` 就是那一帧的时刻（**素材时基**秒，与 `segments[].best` 同轴——注意与 `beats[].anchors[].at_sec` 的**工程轴**秒同名不同轴，别换算）。缺这个字段的旧 plan 按 `segments[0]` 推定，**不外推到全部段**。
+
+- 真机 260902 量级：32 个被理解候选共带 **843 段，只有 32 段（3.8%）被看过**；95 个落轨坑位里只有 12 个（12.6%）含那一帧。命令跑完会打一行「理解覆盖率：N 帧 / M 段 = X%」（`--json` 读 `describe_coverage`），**M 是段数不是候选数**——别把「注入 N 条 result.describe」读成「这 N 条候选都看过了」。
+- 转述给用户时 MUST 按段说：「这条候选的 X–Y 秒那一段有字幕」，MUST NOT 说成「这条素材有字幕」。要判更多段就得多抽帧 = 多花钱（1 积分/张），是否加抽由用户拍板，CLI 不替他加。
 
 **plan 消费零件**（`gtrk matrix lay`）：
 
@@ -266,7 +296,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 
 **前置**：需要跑过 `gtrk split` 的产物目录（`split/dispatch.json`）。`film_broll` 空 = 本片没有影视/本地素材腿 → 跳过本步，看 AI 情景片段腿（`dispatch.ai_drama` 非空则交棒 `/gtrk-ai-drama`），两腿都空才直接进 ⑤。`gtrk` 找不到 → `npm i -g @gitruck/cli@latest`。用户先在 opencut 手调过切点也不怕——命令每次都现场重投影 beat 窗口，微调口播轨不用重跑 `gtrk split`，只有拆分稿本身变了才要。
 
-**业务分离**：本框架 skill 不硬编任何栏目审美。B-roll 的 `queries` 在 ② 拆分时已写进派单（不触发生产 skill）；栏目只供检索偏好（`--column`，internal 口生效）。档位由命令自己探（结果 JSON `memberType`），external 口固定 real_shot+有版权素材。
+**业务分离**：本框架 skill 不硬编任何栏目审美。B-roll 的 `queries` 在 ② 拆分时已写进派单（不触发生产 skill）；栏目只供检索偏好（`--column`，internal 口生效）。档位由命令自己探（结果 JSON `memberType`），external 口固定 real_shot + 可商用素材。
 
 ## 本地素材检索模式要点（`--local` / `matrix index`）
 
@@ -316,7 +346,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 
 - `--json`：人读日志走 stderr，成功时 stdout 只有一行结果 JSON：
   `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
-  （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/items? }`）
+  （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/injected?, describe_coverage?:{frames,segments,ratio,image_candidates}, items? }`）
 - **拒铺结局**（候选轨已被用户编辑）：stdout 出 `{ ok:false, refused:[…], reason:"tracks_edited", planReusable:true, … }` 且非 0 退出——不是命令失败，plan 已产出，处置见下表。
 - **命令失败**（缺派单、鉴权失败、全部 query 失败、参数越界、坏 plan 被 lay 拒）→ 非 0 退出、报错在 stderr、stdout 无 JSON。先看退出码，把 stderr 报错如实回给用户。
 - 检索分钟级，耐心等返回。
@@ -326,7 +356,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 读 stdout 那行 JSON（字段按需读、读前判空），别只回「铺好了」：
 
 - `counts`：几个 beat、几条检索（几条失败）、几条候选——一句话概括盘子大小。
-- `memberType`：internal=矩阵成员口（栏目偏好/concept 生效）；external=通用口（固定 real_shot 有版权）。
+- `memberType`：internal=矩阵成员口（栏目偏好/concept 生效）；external=通用口（固定 real_shot + 可商用）。
 - `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、几个颗粒（不含黑底轨）。
 - `lay.blackTrack`：黑底垫轨轨号（未铺时 null）。
 - `lay.blackBedHoleSec` / `lay.blackBedHoles`：**黑底空洞**（纯黑压口播时段），恒全量不按阈值过滤——非零就主动报（哪个 beat、几秒、在哪），这是粗剪期既定取舍不是故障。
@@ -374,7 +404,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | 预览看不了 / 想「重签」 | 别为此重跑铺轨：`preview_url`/`cover_url` 不带签名不过期；带签名 24h 过期的是原片 `url`——工程内走客户端「确认原片」重签；**脱离工程要原片落本地走 `gtrk matrix fetch <clip_id...>`（免费重签+下载，见「精剪补素材」节）** |
 | raw 原片回落 / 体积大 | 提示用户；服务端 backfill 后重跑可换回轻量代理 |
 | `reprojection.degraded:true` | 不是故障：命令算不出当刻窗口退回快照。`transcript_missing` → 补回 transcript.json 或新版 oralcut 重出；`no_project`/`gtrk_unreadable` → 工程放回位或 `--project` 指对 |
-| 期望 concept 却报 external 限制 | 如实说明当前身份只出 real_shot 有版权素材，concept 需矩阵成员口 |
+| 期望 concept 却报 external 限制 | 如实说明当前身份只出 real_shot 可商用素材，concept 需矩阵成员口 |
 | describe 报 `describe_endpoint_unreachable` | 服务端未上线/网络/配置指错：查 `describeUrl` / `GITRUCK_DESCRIBE_URL`；缓存与 plan 都在，修好重跑。describe 走异步任务（提交后轮询取结果）：任务提交成功后即便中途断网结果也不丢（服务端照跑），可重新轮询/稍后重跑取回；上游失败服务端自动退款，只需重跑 |
 
 > **搜词规范**（ad-hoc `search` 与理解派单 queries 通用）：英文长句场景描述（5–12 词，谁+在哪+做什么），一条只装一个场景意象，避多义/字面强的动词（"pointing"/"hunting" 会召回特写/猎人，改用 "giving suggestions in a meeting" 这类场景语义）。

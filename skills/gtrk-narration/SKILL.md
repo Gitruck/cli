@@ -39,10 +39,22 @@ description: 通用解说视频创作图纸（解说链正本）——把「一�
 > ②③④⑤⑦ MUST 问用户、MUST NOT 代猜；一张表一次问完，不碎问。
 >
 > ⟲ **2026-09-02 六问补为七问（新增 ⑦ 语种）**：260902 真机一条**粤语对白**的片子按缺省 `zh-CN`
-> 静默转写跑完，整条链上无一处问过语种。`zh-CN` 与 `zh-HK` 在后端是**两个不同的识别语种**
-> （Whisper `zh` vs `yue`），不是同一条路上的松紧问题。⑦ MUST 早于 ① 的转写发起：
-> 转写是计费动作且在检查点①**之前**，语种传错时用户在检查点①拿到的稿子已经是坏的，
-> 重来要再付一次 ASR ——**MUST NOT 以缺省 `zh-CN` 静默开跑**，检查点①对语种只做过目复核。
+> 静默转写跑完，整条链上无一处问过语种。⑦ MUST 早于 ① 的转写发起：转写是计费动作且在检查点①**之前**，
+> **非中文素材**（`en-US` / `ja-JP`…）语种传错，用户在检查点①拿到的稿子就是坏的、重来要再付一次 ASR
+> （真机 `--lang en-US` 出英文稿即实证）；且豆包 14 项白名单外的语种码在 `word_level=true` 下会裸
+> `KeyError` 炸任务。**MUST NOT 以缺省 `zh-CN` 静默开跑**，检查点①对语种只做过目复核。
+>
+> ⟲ **2026-09-02 同日订正（这一问的原粤语论证段已被求证推翻，问本身照旧成立）**：原文写
+> 「`zh-CN` 与 `zh-HK` 在后端是两个不同的识别语种（Whisper `zh` vs `yue`）」——**该因果论断错**。
+> `gtrk transcript` 写死 `word_level: true`（`src/commands/transcript.ts:178`）⇒ 链路钉在豆包、
+> 到不了 Whisper（infra `utils/process/media/audio/asr.py:44-49` 在 `AsrFunc.Whisper` 分支里
+> 仍把 `word_level_handler` 钉成豆包）；而豆包字典里 `zh-CN` 与 `zh-HK` **都映射空串**
+> （`utils/partner/volcengine/doubao_llm_asr.py:36-37`）⇒ 两种写法发出的请求**逐字段相同**。
+> 粤语能识别对，靠的是豆包空串模式自己的方言自适应，与这个参数无关；`zh-HK→yue` 那条映射真实存在
+> （`utils/partner/openai/__init__.py:18`）但只在 `word_level=false` 走 Whisper 时生效，CLI 今天走不到。
+> ⇒ 粤语 **SHOULD** 如实填 `zh-HK`（元数据诚实 + 备将来链路切换），但 **MUST NOT 以「粤语语种传错」
+> 为由重跑转写**：`la` 进 ASR 缓存键（`asr_result_cache.py:71-75`），换码必然 cache miss，
+> 白扣一次时长换回同一份结果。
 
 ## 三、时序铺排三档（本图纸的技术正本）
 
@@ -184,6 +196,7 @@ QC 反算重铺）；② 段带 `cuts`，端点残片收缩生效；③ 段带 `
 - **引用点在写稿时定**：稿件里显式留引用窗口（出处 = 甲档对照表里的区间），MUST NOT 铺轨时临时起意。
 - **切取用流拷贝**（`ffmpeg -c copy`，零重编码）；想让 AI 帮你海选可引用的高光，可先跑一遍 `gtrk long2short` 拿选段清单当候选（可选辅助，明示计费）。
 - **装配**：逐段 TTS + 引用段原声按稿序拼成总音频 → 合成 transcript（各段句级时码换算到拼接轴）→ `gtrk project init --audio <总音频> --transcript <合成转写>` 建工程（自备配音兜底路）；引用段画面 = 该源区间直排上轨。无引用段时装配退化为单条 TTS + `--tts-task` 主路（与旅拍同款）。
+  **产物文件名别硬拼（fix-tool-outdir-collision）**：多段 TTS 落**同一个 `--out`** 时，第二段起的产物会带 taskId 后 6 位后缀（`tts-narrator-a1b2c3.wav`），基名只有第一份是干净的。拼接清单 MUST 按每次回执的 `files` 取路径，MUST NOT 按 `tts-<speaker>.wav` 猜——猜出来的名字会一路指向第一段，拼出来的总音频会把某一段重复多遍而不报错。
   **主轨无缝铁则（260828 主理人挑刺定案）**：合成 transcript 里引用段 utterance 的 st/ed **MUST 写物理拼接位**（拼接轴上的真实起止），MUST NOT 加 ±0.1s 字幕 pad——dispatch 的 beat 轨窗派生自转写时刻，pad 会在主轨上留 0.1s 缝（三片实测各 4 处）。已有 pad 的存量工程修法：改转写引用句时刻→重导视图→重落拆分（hash 只随文本不失效）→重铺（plan 引用窗随之外扩，Δ=0 不破）→字幕重出。
 - **克制丑话**：引用段是佐料——时长占比失衡会让片子变成搬运，平台判定风险归用户（§八 一并告知）。
 
@@ -194,10 +207,17 @@ QC 反算重铺）；② 段带 `cuts`，端点残片收缩生效；③ 段带 `
 #    4K 长片索引慢，未提速期**与写稿/TTS/检查点①并行跑**，别串行干等
 gtrk matrix index --dirs "<这一部片的绝对路径>" &     # 后台起，写稿同时跑（索引侧同口径：也钉单片）
 gtrk transcript "<长片>" --lang <开工⑦所答语种> --json   # 影视/游戏类：台词与时码双锚（可选）
-#   ↑ 粤语 MUST 写 zh-HK（Whisper yue）；缺省 zh-CN 是普通话，别拿它顶方言片
+#   ↑ 语种取开工⑦所答，MUST NOT 拿缺省顶上去 —— 但「传错就白花钱」只在**非中文**这一档成立；
+#     粤语 SHOULD 如实填 zh-HK（元数据诚实 + 备链路切换），当前链路下对粤语无差别：
+#     CLI 写死 word_level: true ⇒ 钉在豆包，豆包字典里 zh-CN 与 zh-HK 都映射空串 ⇒ 请求逐字段相同。
+#     MUST NOT 以「粤语传错」为由重跑（la 进 ASR 缓存键，换码必 cache miss、白扣一次时长）。详见 §二 ⑦ 注
 
 # ②③ 写稿（甲档出处共生 / 乙路对照表对齐）→ 检查点①拍板（§六）
-gtrk matrix material "<情绪 题材 检索词>" --scope audio --top-k 5 --json   # BGM 候选附试听
+gtrk matrix material "<情绪 题材 检索词>" --scope audio --top-k 5 --commercial-only --json   # BGM 候选附试听
+#   ⚠️ 版权判断不在零件手里，在你手里：零件缺省 copyright_scope=all（**不筛**）。
+#   is_copyright 的权威语义是 1/true=可商用、0/false=**不可商用**——反直觉，MUST NOT 把 false
+#   读成「无版权、可随便用」。带 --commercial-only 就把不可商用的挡在候选之外；不带就 MUST
+#   逐条按 copyright_label（派生位，中文标签）自己判，别默认候选都能用。
 
 # ④ 声音基座（按开工④路由）
 gtrk tool audio_tts_clone --text-file <稿段.txt> --speaker <voice_id> --json   # TTS 路

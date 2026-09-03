@@ -504,8 +504,18 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - **图片一视同仁**：图片可检索可铺轨；被选中时经云端 `image_move` 转 5 秒运镜视频入轨——**图片本体会上云**（2 积分/张，铺轨前汇总确认；同图同参恒复用不重复扣费）。零图片上云 → `--no-image-broll`。
 - **同素材不二用**：单轮铺轨一个素材单元全局只用一次（本地视频按场景、图片按文件），候选枯竭宁空不重复；`--dedup-scope material` 收严到文件级。
 - **含本地素材的工程不能云渲**：提交会被拒（`local_broll_cloud_render_rejected`）——走客户端本地出片或 `gtrk render`。
-- **可选零件**：`matrix describe --plan <path> [--top-k N]` / `--materials <a,b>` 按需理解候选（VLM 描述/标签/质量分/水印·字幕·黑边·模糊信号，1 积分/张（**异步任务计费**：提交预扣→完成结算，失败自动退款；同合云内部成员豁免，跑时自动探测，`--json` 的 `credits_estimated` 即实耗、`credits_would_be` 为原价）、产物注入 plan 并本地缓存、缓存命中零计费、>20 张确认护栏）；`--source-window <start,end>` 源时间窗过滤（仅 `--local`，影视解说式「第 N 段解说配影片第 N 段邻域画面」）；`matrix lay --mark-weight <0..1>` 把 describe 的质量分融进候选排序（融合分 = sim×(1-w)+(mark/100)×w，只重排序不改准入，无缓存候选按中性处理）。
+- **可选零件**：`matrix describe --plan <path> [--top-k N]` / `--materials <a,b>` 按需理解候选（VLM 描述/标签/质量分/水印·字幕·黑边·模糊信号，1 积分/张（**异步任务计费**：提交预扣→完成结算，失败自动退款；同合云内部成员豁免，跑时自动探测，`--json` 的 `credits_estimated` 即实耗、`credits_would_be` 为原价）、产物注入 plan 并本地缓存、缓存命中零计费、>20 张确认护栏）。**一条 describe 只代表一段**：`--plan` 形态每个候选只抽 `segments[0]` 的 best 一帧，产物带射程锚点 `describe.at_sec`（素材时基秒），跑完报「理解覆盖率 = 理解帧数 / 被理解候选携带的**段总数**」（`--json` 读 `describe_coverage`）——注入 N 条 ≠ 这 N 条候选都被看过；`--source-window <start,end>` 源时间窗过滤（仅 `--local`，影视解说式「第 N 段解说配影片第 N 段邻域画面」）；`matrix lay --mark-weight <0..1>` 把 describe 的质量分融进候选排序（融合分 = sim×(1-w)+(mark/100)×w，只重排序不改准入，无缓存候选按中性处理）。
 - **索引参数与量纲**：`--scene-threshold` 调场景切分粒度、`--stability-threshold` 固定机位判稳收敛抽帧、`--rebuild` 强制重建（理解缓存不清）；索引跨机不可移植（键=绝对路径，换机重跑 index 即可）。本地 score 量纲与云端不同（完美命中可低至 ~0.25），`--score-floor` 别按云端直觉调高。
+
+**`gtrk matrix material "<词>"`（通用三态素材检索）**：与上面的 B-roll 检索并列的第二条线，出**整条素材**的下载直链（不是段落）——`--scope clip|image|audio`（缺省 `audio`，BGM 主场）、`--commercial-only` 只搜可商用、`--min-duration/--max-duration` 按成片时长挑、`--top-k`（缺省 5，服务端上限 50）、`--diversity` 去同质、`--json` 机读、`--out` 落盘。
+
+> ⚠️ **`is_copyright` 读作「能不能商用」，不是「有没有被版权保护」**：`true` = **可商用**（自有 ∪ 已授权），`false` = **不可商用**。
+>
+> **`false` 不要读成「无版权、可以随便用」——它恰恰相反。** 决定性反证：他人版权的概念素材入库固定写 `is_copyright=0`；这个字段若真是「是否受版权保护」，那批必须是 1。
+>
+> 这条警示是真机踩出来的：2026-09-02 有 AI 执行方连着两轮**特意去挑 `false`** 当「安全选择」，把不可商用素材铺进了 5 个工程，而唯一安全的 `true` 反倒被主动避开。所以 `--json` 里 CLI 会逐条**派生一个人话标签 `copyright_label`**（`"可商用"` / `"不可商用"`）——它由 `is_copyright` 推出、与之恒同向、缺席同缺席，判读认这两个键之一即可，别靠字段名去猜。
+>
+> 该字段**只有矩阵成员口才有**：公开口没有它不是「不可商用」，而是服务端在源头就只放可商用素材（缺席即无需判，CLI 如实缺省、绝不补假值）。
 
 编排配方（纯匹配 / 先理解后铺 / 时间窗 / 素材先行编剧 / 三层层叠）与 plan 编辑口径见随包 skill `/gtrk-matrix`。
 
@@ -565,6 +575,8 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 ### `gtrk tool <name> [输入...]` — 单点工具族
 
 单发单收的独立能力，与成片管线的车道命令（`oralcut`/`split`/`matrix`/`mg`）分家。**顶层命令 + 首个 positional 词分派**（不用父子命令）：`gtrk tool <name> [输入...]` 跑工具（多文件图片工具可传多个路径，顺序即拼装顺序），`gtrk tool list` 查全部。一个工具 = 一个薄 descriptor（输入类别 / payload 拼装 / 产物映射 / 计费 / 可用门），共享 runner 跑「校验 → 上传（指纹缓存、≥256MiB 自动分片）→ 提交 → 轮询 → 流式下载落地 → `task.json`/`result.json` 面包屑」——接新工具只加一个 descriptor、不写编排。
+
+**产物目录口径**：有输入文件的工具缺省落**输入同目录**下 `<输入名>-<工具名>/`；`input=none` 的工具（如 `audio_tts_clone`）缺省落**当前目录**下 `<工具名>-<时间戳>/`。两者都可用 `--out <dir>` 覆盖。缺省名撞上已有目录时自动带 `-2`/`-3` 序号后缀，同一目录内产物文件撞名时带 taskId 后 6 位后缀——**一律以回执的 `outDir` / `files` 为准，别按名字硬拼**（`--out` 显式落点不派生序号，重跑同一输入是幂等覆盖）。
 
 | 工具 | 输入 | 产物 | 计费 | 状态 |
 |---|---|---|---|---|

@@ -41,7 +41,7 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 |---|---|
 | 稿从哪来 | **AI 代写**（缺省，§三 规约写）/ **用户自备稿**——跳过写稿，稿直接进检查点①过目（文风铁律不强加于用户手稿，只提示明显硬伤） |
 | 声音怎么来 | **TTS 配音**（缺省，检查点①挑音色）/ **用户自己念**——拿念稿毛片先走 `gtrk oralcut` 粗剪（带稿最准；外录收音先 `gtrk audio align` 对轨），产出的粗剪工程即时间基座，§五 的「配音④→建工程⑤」两步跳过，从拆分⑥接入，后续铺排/字卡/BGM/字幕照旧 |
-| **源片语种 / 方言** | 取证=**听一段 / 看片内有无内嵌字幕 / 看素材出处**；答案定 §五 ① 的 `gtrk transcript --lang`（`zh-CN` 普通话 / **`zh-HK` 粤语** / `en-US` / `ja-JP`…）。**MUST 问用户、MUST NOT 代猜、MUST NOT 以缺省 `zh-CN` 静默开跑转写**——转写是计费动作**且早于检查点①**，语种传错时用户在检查点①拿到的稿子已经是坏的，重来要再付一次 ASR。粤语 MUST 写 `zh-HK`（后端映射 Whisper `yue`；写 `zh-CN` 会按普通话识别，是另一个语种）。素材无对白：答「无对白 / 不转写」即闭合 |
+| **源片语种 / 方言** | 取证=**听一段 / 看片内有无内嵌字幕 / 看素材出处**；答案定 §五 ① 的 `gtrk transcript --lang`（`zh-CN` 普通话 / **`zh-HK` 粤语** / `en-US` / `ja-JP`…）。**MUST 问用户、MUST NOT 代猜、MUST NOT 以缺省 `zh-CN` 静默开跑转写**——转写是计费动作**且早于检查点①**：**非中文素材**（`en-US` / `ja-JP`…）语种传错，用户在检查点①拿到的稿子就是坏的、重来要再付一次 ASR（真机实证）。**中文这一档（`zh-CN` ↔ `zh-HK`）不在此列**：粤语 **SHOULD** 如实填 `zh-HK`（元数据诚实 + 备将来链路切换），但当前实现下该参数**对粤语无影响**——两种写法发出的请求逐字段相同，详见 §五 ① 注。素材无对白：答「无对白 / 不转写」即闭合 |
 
 ## 一′、素材适配闸（写稿前必过 · ★ 2026-09-02 真机事故立）
 
@@ -188,7 +188,7 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
    - 用户有本地音乐 → 询问是否 `gtrk tool audio_separation` 伴奏分离后取伴奏（缺省建议分离——TTS 配音不与歌曲人声打架）；
    - 用户未提供 → **搜同和素材矩阵**：`gtrk matrix material "<按稿件情绪+地理文化写的检索词>" --scope audio --top-k 5 --diversity --json`
      （检索词口径见公约 §三′：**内容驱动、禁通用词、至少含一个只有这一片才成立的词**；候选
-     MUST 给用户挑不许默认 top1；跨片避让由 `audio lay` 记账 + 检索缺省 `--exclude-recent` 自动完成）（按成片时长挑可加 `--min-duration <秒>`）。身份路由（矩阵成员搜全库 / 非成员搜公开库）、版权范围、计费口径全由零件持有，你只管写好检索词并从结果里挑；出参 `results[]` 直接用，`upsell` 是独立顶层字段（非成员且没搜够时才有，原样转述给用户即可，**不要**把它当候选）。
+     MUST 给用户挑不许默认 top1；跨片避让由 `audio lay` 记账 + 检索缺省 `--exclude-recent` 自动完成）（按成片时长挑可加 `--min-duration <秒>`）。身份路由（矩阵成员搜全库 / 非成员搜公开库）与计费口径由零件持有；**版权判断不在零件手里，在你手里**——零件缺省 `copyright_scope=all`，**不筛**。挑 BGM MUST 按**可商用**口径判：出参 `is_copyright` 的权威语义是 `1/true` = **可商用**、`0/false` = **不可商用**（反直觉：`is_copyright:false` MUST NOT 读成「无版权、可随便用」，它恰恰是不可用的那一档；概念素材固定 `is_copyright=0` 即此意）。派生位 `copyright_label` 直接给了中文标签，照它转述即可。省事路是检索时就带 `--commercial-only`，把不可商用的挡在候选之外；出参 `results[]` 直接用，`upsell` 是独立顶层字段（非成员且没搜够时才有，原样转述给用户即可，**不要**把它当候选）。
      推荐 3-5 首、**每首附试听链接**（结果的 `download_url`）；`audio_type:"pure"` 纯音乐直接用，`"song"` 直接取 `accompaniment_url` 现成伴奏（零处理成本，两档都有）；注意曲长 vs 成片时长（`duration` 字段）：`audio lay` **缺省循环叠满至工程末尾、尾段裁齐**（多 clip 首尾相接，命令会打 INFO 报段数），短曲只是**接缝多一些**、不会铺一半就静音（想少几道接缝，挑曲时加 `--min-duration <秒>`）；要单次铺请显式传 `--no-loop`；
    - **试听链接义务（MUST）**：音色与 BGM 的推荐没有试听链接=未完成推荐。
    - **BGM 落地一步（MUST，别留悬空 · ⟲ 2026-09-02 补）**：检索出参只给**签名 URL**，而 §五 ⑩ 的 `gtrk audio lay --file` **只收本地路径**（传 URL 必炸）——拍板之后、上轨之前，agent MUST 把选中曲**落成本地文件**。口径照解说链正本 `gtrk-narration` §五 原文对齐：`audio_type:"song"` **MUST 取 `accompaniment_url` 伴奏版上轨**、**MUST NOT 用 `download_url` 原曲**（人声与配音打架，260827 美食批踩坑）；`"pure"` 取 `download_url`。文件名按 **`bgm-<曲名>[-伴奏].<扩展名>`** 约定——跨片避让记账按**标题归一化键**匹配（剥 `bgm-` 前缀与 伴奏 / instrumental / off-vocal 后缀），命名不合规会让下一轮 `--exclude-recent` 避让失准。这一步不违反 §一 的下载禁令：那条禁令的射程只到二创源片 / 主体素材，平台授权素材的签名直链不在其内。
@@ -203,11 +203,31 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 
 ## 五、快速成片编排（打样验证过的真实命令）
 
+> **产物落点纪律（MUST · 全文见随包 `AGENT.md` 同名一节）**：
+> 文本产物只落 CLI 返回的路径或**用户显式指定的 `-o, --out`**；`transcript` / `oralcut` / `long2short`
+> 的缺省落点都是**源文件同目录**，这是在案设计、不是 bug（`skills/gtrk-transcript/SKILL.md:21`、
+> `README.md:343`·`:351`、`test/transcript-cmd.test.mjs:63` 三处独立在案）。
+> 但二创的源片通常躺在**用户自己的素材库**里，落进去每跑一条污染一次
+> （260902 真机在 `旅拍素材原片/` 下留了 4 个裸产物）⇒ 本图纸 §五 ① **SHOULD 带 `-o`
+> 把文本产物挪进工程 / 文稿目录**；用户明说就要放源片旁，不传即可——那是缺省，不算违纪。
+> **MUST NOT** 把原片或任何大媒体复制进 agent 自有工作目录（会话工作区 / agent 家目录缓存）——
+> 需要引用媒体时**用原路径引用**，不做副本；临时文件一律放系统 temp 且**用完即删**（含中断 / 失败路径）。
+
 ```bash
 # ① 理解（二创：转写原片，--json 顺产 transcript.json 备用）
-gtrk transcript "<原片>" --lang <zh-CN 普通话 | zh-HK 粤语 | en-US | ja-JP …> --json
-#   ↑ 语种取开工三问的答案，MUST NOT 拿缺省 zh-CN 顶上去：**粤语 MUST 写 zh-HK**
-#     （后端映射 Whisper yue；写 zh-CN 会按普通话识别 —— 260902 真机就是这么静默跑坏一条的）
+gtrk transcript "<原片>" --lang <zh-CN 普通话 | zh-HK 粤语 | en-US | ja-JP …> --json -o "<工程目录>/transcript/<片名>-transcript.md"
+#   ↑ 产物落点：不带 -o 时两个产物都落**源片同目录**（`<名>-transcript.md`；--json 另产 `<名>-transcript.json`，
+#     .json 跟随 .md）。缺省本身是在案设计，但二创素材多在用户素材库里 ⇒ SHOULD 用 -o 挪进工程目录（见本节顶部纪律块）
+#   ↑ 语种取开工三问的答案，MUST NOT 拿缺省 zh-CN 顶上去 —— **但这条对「非中文」素材才有钱可省**：
+#     粤语 SHOULD 如实填 zh-HK（元数据诚实 + 备将来链路切换），当前链路下它与 zh-CN **对粤语无差别** ——
+#     CLI 写死 word_level: true（src/commands/transcript.ts:178）⇒ 链路钉在豆包、到不了 Whisper
+#     （infra utils/process/media/audio/asr.py:44-49 在 AsrFunc.Whisper 分支里仍把 word_level_handler 钉成豆包）；
+#     而豆包字典里 zh-CN 与 zh-HK **都映射空串**（utils/partner/volcengine/doubao_llm_asr.py:36-37）
+#     ⇒ 两种写法发出的请求逐字段相同。粤语能识别对，靠的是豆包空串模式自己的方言自适应，与这个参数无关。
+#     "zh-HK": "yue" 那条映射真实存在（utils/partner/openai/__init__.py:18），但只在 word_level=false
+#     走 Whisper 时生效，CLI 今天走不到那条路。
+#   ↑ **MUST NOT 以「粤语语种传错」为由重跑转写**：la 进 ASR 缓存键（asr_result_cache.py:71-75），
+#     换码必然 cache miss，白扣一次时长换回逐字段相同的请求与同一份结果。
 # 原创场景改跑：gtrk matrix index --dirs "<素材夹>" && gtrk matrix describe --materials ...
 #   ↑ 原创（自拍素材集）这一档**整夹即该片素材域，传夹正确**，不受 ⑦ 那条「钉单片」铁则约束——
 #     那条治的是二创：一个夹里躺着几条互不相干的片，才会互相抢候选
