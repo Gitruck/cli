@@ -76,5 +76,5 @@ gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
 ## 六、计费与排错
 
 - 计费大头 = TTS 按字数（跑前实时价格原样转述）；平台库检索/理解按矩阵成员口径，运行时打印为准。
-- 素材夹索引、拆分、铺排、字幕纯本地零计费。
+- 素材夹索引、拆分、铺排纯本地零计费；字幕上轨零计费（拆行走云端 subtitle_line_split，0 积分留痕；离线可加 `--offline`）。
 - 排错回各零件 skill（`gtrk-matrix` / `gtrk-mg` / `gtrk-transcript` / `gtrk project --help`），本图纸不搬；文风与写稿症状按 `gtrk-travel-recap` §三 通用框架层自校验清单处理。

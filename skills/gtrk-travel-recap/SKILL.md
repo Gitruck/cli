@@ -294,7 +294,7 @@ gtrk mg --project "<工程目录>" --json
 # 文件名 bgm-<曲名>[-伴奏].<扩展名>：跨片避让按**标题归一化键**记账（剥 bgm- 前缀与伴奏/instrumental/off-vocal 后缀），乱命名=下一轮 --exclude-recent 失准
 gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-align --json
 
-# ⑪ 字幕（样式/颜色 = 检查点①拍板值；用户没选用 default/雅黑；纯本地零计费、重跑幂等替换）
+# ⑪ 字幕（样式/颜色 = 检查点①拍板值；用户没选用 default/雅黑；零计费——拆行走云端 subtitle_line_split 0 积分留痕，离线可加 --offline 用本地拆窗、重跑幂等替换）
 gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --json
 ```
 
