@@ -517,7 +517,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - **可选零件**：`matrix describe --plan <path> [--top-k N]` / `--materials <a,b>` 按需理解候选（VLM 描述/标签/质量分/水印·字幕·黑边·模糊信号，1 积分/张（**异步任务计费**：提交预扣→完成结算，失败自动退款；同合云内部成员豁免，跑时自动探测，`--json` 的 `credits_estimated` 即实耗、`credits_would_be` 为原价）、产物注入 plan 并本地缓存、缓存命中零计费、>20 张确认护栏）。**一条 describe 只代表一段**：`--plan` 形态每个候选只抽 `segments[0]` 的 best 一帧，产物带射程锚点 `describe.at_sec`（素材时基秒），跑完报「理解覆盖率 = 理解帧数 / 被理解候选携带的**段总数**」（`--json` 读 `describe_coverage`）——注入 N 条 ≠ 这 N 条候选都被看过；`--source-window <start,end>` 源时间窗过滤（仅 `--local`，影视解说式「第 N 段解说配影片第 N 段邻域画面」）；`matrix lay --mark-weight <0..1>` 把 describe 的质量分融进候选排序（融合分 = sim×(1-w)+(mark/100)×w，只重排序不改准入，无缓存候选按中性处理）。
 - **索引参数与量纲**：`--scene-threshold` 调场景切分粒度、`--stability-threshold` 固定机位判稳收敛抽帧、`--rebuild` 强制重建（理解缓存不清）；索引跨机不可移植（键=绝对路径，换机重跑 index 即可）。本地 score 量纲与云端不同（完美命中可低至 ~0.25），`--score-floor` 别按云端直觉调高。
 
-**`gtrk matrix material "<词>"`（通用三态素材检索）**：与上面的 B-roll 检索并列的第二条线，出**整条素材**的下载直链（不是段落）——`--scope clip|image|audio`（缺省 `audio`，BGM 主场）、`--commercial-only` 只搜可商用、`--min-duration/--max-duration` 按成片时长挑、`--top-k`（缺省 5，服务端上限 50）、`--diversity` 去同质、`--json` 机读、`--out` 落盘。
+**`gtrk matrix material "<词>"`（通用三态素材检索）**：与上面的 B-roll 检索并列的第二条线，出**整条素材**的下载直链（不是段落）——`--scope clip|image|audio`（缺省 `audio`，BGM 主场）、`--commercial-only` 只搜可商用（**按需收紧的显式开关，缺省不带**）、`--min-duration/--max-duration` 按成片时长挑、`--top-k`（缺省 5，服务端上限 50）、`--diversity` 去同质、`--json` 机读、`--out` 落盘。
 
 > ⚠️ **`is_copyright` 读作「能不能商用」，不是「有没有被版权保护」**：`true` = **可商用**（自有 ∪ 已授权），`false` = **不可商用**。
 >
@@ -526,6 +526,8 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 > 这条警示是真机踩出来的：2026-09-02 有 AI 执行方连着两轮**特意去挑 `false`** 当「安全选择」，把不可商用素材铺进了 5 个工程，而唯一安全的 `true` 反倒被主动避开。所以 `--json` 里 CLI 会逐条**派生一个人话标签 `copyright_label`**（`"可商用"` / `"不可商用"`）——它由 `is_copyright` 推出、与之恒同向、缺席同缺席，判读认这两个键之一即可，别靠字段名去猜。
 >
 > 该字段**只有矩阵成员口才有**：公开口没有它不是「不可商用」，而是服务端在源头就只放可商用素材（缺席即无需判，CLI 如实缺省、绝不补假值）。
+>
+> **缺省口径（⟲ 2026-09-06）**：矩阵成员档**缺省搜全库**（`copyright_scope=all`，含非商用/概念素材）——那正是成员身份买到的东西，命令不会替你收紧，随包 skill 也不许「保险起见」自行剔掉 `is_copyright:false` 的候选（但会**逐条如实标注**版权状态）。只要可商用时，自己加 `--commercial-only`。
 
 编排配方（纯匹配 / 先理解后铺 / 时间窗 / 素材先行编剧 / 三层层叠）与 plan 编辑口径见随包 skill `/gtrk-matrix`。
 
