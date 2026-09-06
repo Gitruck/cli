@@ -1,13 +1,13 @@
 ---
 name: gtrk-ai-drama
-description: AI 再现分镜稿生成器——把成片 SOP 第③步（B-roll 底轨阶段）分到 AI_DRAMA 车道的 beat，逐个产**四段朴素描述（故事背景 / 角色 / 分镜 / 原文文稿）+ 独立视觉基调段 + 时长预算**，中英双版；Markdown 外壳默认严格兼容 gitruck-ai-drama-desk 解析器，可直接导入工作台，也可拿去任意外部 AI 漫剧管线（可灵 / 即梦 / Vidu / Veo / Runway / LTX / 本地开源，或 LibTV / OiiOii / TapNow 这类成片 agent 平台）上手用。这是**纯创作 skill、无 gtrk 命令**（产物即描述文本、出片在外部平台、用户手动拼回，同 /gtrk-style-maker）。当用户想「上 AI 再现 / 做 AI 分镜 / AI 动画描述 / 把这段做成 AI 视频 / 给这段配 AI 再现 / 弗洛伊德这段怎么做视频」时使用本 skill。通用拆镜 craft（蒙太奇段分层 / 四段描述结构 / 中英双语 / 时长预算）由本 skill 自持；栏目视觉 DNA（Style Lock）从栏目配置 style.skills 里 produces==AI_DRAMA 的条目解析注入，绝不硬编某栏目风格。凡把口播派单里 AI_DRAMA 段落转成可出片的描述稿，优先用本 skill，别手搓。
+description: AI 再现分镜稿生成器——把成片 SOP 第③步（B-roll 底轨阶段）分到 AI_DRAMA 车道的 beat，逐个产**四段朴素描述（故事背景 / 角色 / 分镜 / 原文文稿）+ 独立视觉基调段 + 时长预算**，中英双版；Markdown 外壳默认严格兼容 gitruck-ai-drama-desk 解析器，可直接导入工作台，也可拿去任意外部 AI 漫剧管线（可灵 / 即梦 / Vidu / Veo / Runway / LTX / 本地开源，或 LibTV / OiiOii / TapNow 这类成片 agent 平台）上手用。创作与出片仍在 skill / 外部工作台；工作台导出的 return-v1 包用 `gtrk ai-drama lay` 确定性回填独立 AI 轨。当用户想「上 AI 再现 / 做 AI 分镜 / AI 动画描述 / 把这段做成 AI 视频 / 给这段配 AI 再现 / 弗洛伊德这段怎么做视频」时使用本 skill。通用拆镜 craft（蒙太奇段分层 / 四段描述结构 / 中英双语 / 时长预算）由本 skill 自持；栏目视觉 DNA（Style Lock）从栏目配置 style.skills 里 produces==AI_DRAMA 的条目解析注入，绝不硬编某栏目风格。凡把口播派单里 AI_DRAMA 段落转成可出片的描述稿，优先用本 skill，别手搓。
 ---
 
 # AI 再现分镜稿生成器（gtrk-ai-drama）
 
-把口播派单里分到 **`AI_DRAMA` 车道**的 beat，逐个拆成分镜、为每个 beat 产 **四段朴素描述 + 独立视觉基调 + 时长预算**（中英双版），落到 `<project>/ai-drama/<beat_id>.md`，再交棒用户拿去任意外部平台出片、手动拼回时间线。
+把口播派单里分到 **`AI_DRAMA` 车道**的 beat，逐个拆成分镜、为每个 beat 产 **四段朴素描述 + 独立视觉基调 + 时长预算**（中英双版），落到 `<project>/ai-drama/<beat_id>.md`，再交棒 AI Drama Desk 或任意外部平台出片；标准工作台导出包由 CLI 自动回填时间线。
 
-> **这是纯创作 skill、没有 gtrk 命令**——AI_DRAMA 车道的产物就是**描述文本本身**，出片在外部生成平台、拼回时间线由用户手动做，没有确定性机械尾巴可下沉成 CLI 命令（性质同 `/gtrk-style-maker`）。所以「脑」是你（拆镜 + 注入栏目风格 + 管用户交互），「手」在外部平台和用户手里，不是 gtrk。别去找 `gtrk ai-drama` 这条命令，它不存在也不该存在。
+> **脑手分工**：本 skill 负责创作（拆镜 + 注入栏目风格 + 管用户交互），外部工作台负责生成；`gtrk ai-drama lay` 只消费 AI Drama Desk 的 return-v1 导出包，把已经生成好的片段复制进工程并铺到一条独立 AI 视频轨。该命令不生成内容、不调用模型、不计费，也不改既有 A-roll / BGM / 三条 B-roll 候选轨。
 
 ## 为什么是「四段朴素描述」而不是「平台优化提示词」
 
@@ -17,7 +17,7 @@ description: AI 再现分镜稿生成器——把成片 SOP 第③步（B-roll �
 
 成片是**有序 SOP + 用户检查点**，不是并行一把铺。次序：
 
-> ① oralcut 剪口播 → ② split 视觉拆分派单 → ③ **B-roll 底轨全铺齐**（`matrix` 铺影视/本地素材 + **本 skill 产稿→外部出片→用户手动回铺**，**两条腿同一阶段**）→ ④ **全局抽帧检查画面构图**（用户确认）→ ⑤ **mg 铺 MG（含 ov，最后叠上）** → `gtrk subtitle lay` 上字幕（快速成片模式必做）→ `gtrk render` 收口
+> ① oralcut 剪口播 → ② split 视觉拆分派单 → ③ **B-roll 底轨全铺齐**（`matrix` 铺影视/本地素材 + **本 skill 产稿→外部出片→`gtrk ai-drama lay` 回填**，**两条腿同一阶段**）→ ④ **全局抽帧检查画面构图**（用户确认）→ ⑤ **mg 铺 MG（含 ov，最后叠上）** → `gtrk subtitle lay` 上字幕（快速成片模式必做）→ `gtrk render` 收口
 
 **你与 `matrix` 同属第 ③ 步，MUST 在 MG 之前落位。** 理由：**AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**——整条管线里唯一的叠加层是 MG（含 ov）。MG 的排版决策是「因势象形避主体」、**依赖底轨的最终画面构图**；若你的片段在 MG 之后才回铺，底轨构图就变了，先产的 MG 是对着「还没有 AI 画面的底轨」做的避让，你的片段落位后必然被避让错位、甚至被 MG 盖住画面主体。
 
@@ -25,7 +25,7 @@ description: AI 再现分镜稿生成器——把成片 SOP 第③步（B-roll �
 
 **异步等待的口子（你造成的那个）**：你产完描述后，用户要去外部平台出片、抽卡可能数天。严格串行会把 ④⑤ 无限期卡住，故约定：进 ⑤ 的硬门是「**AI 片段已回铺 ∨ 用户明示先跳过**」。走「明示跳过」时，下游 `/gtrk-mg` MUST 把与你的 beat 相邻/重叠区间的 MG 颗粒标记为「AI 回铺后待复查构图」并在收口时复述——**你在交代进度时也要把这个代价说清**，让用户知道跳过意味着将来可能返工那几颗。
 
-**你的下一步**：产完描述 → 用户拿去外部平台出片 → 手动回铺进工程 → 三源齐了进 **④ 全局抽帧检查构图**（对最终底轨抽帧、用户确认）→ 过了才交棒 ⑤ `/gtrk-mg`。**MUST NOT 直接从你这里跳到 `render`** ——后面还有构图检查与 MG 两步。
+**你的下一步**：产完描述 → 用户拿去外部平台出片 → 若拿到 AI Drama Desk return-v1 导出目录，立即用 `gtrk ai-drama lay` 回填；其他平台没有标准包时才降级为用户手动回铺 → 三源齐了进 **④ 全局抽帧检查画面构图**（对最终底轨抽帧、用户确认）→ 过了才交棒 ⑤ `/gtrk-mg`。**MUST NOT 直接从你这里跳到 `render`** ——后面还有构图检查与 MG 两步。
 
 ## 四条铁律（先记死）
 
@@ -124,6 +124,8 @@ description: AI 再现分镜稿生成器——把成片 SOP 第③步（B-roll �
 - 中文与英文块标题分别以 `## 一、中文稿`、`## 二、English Storyboard` 开头；不要简写。否则英文 ①–④ 会被当成中文段并覆盖前面的中文段。
 - ③ 内每个角色都用 `#### <角色名>（<备注>）` 开头，描述写在下一段；不要把角色写成 `- 男性：……` 项目符号。
 - ④ 中文镜头头必须匹配 `#### 分镜 <数字> · <标题> ｜建议 ≈<秒数>s ｜段：… ｜场景：… ｜角色：… ｜对应原文：…`；英文镜头头必须匹配 `#### Shot <数字> · <title> ｜≈<seconds>s ｜segment: … ｜scene: … ｜cast: … ｜source lines: …`。必须用 Markdown 四级标题，中文关键词是「分镜」而不是「镜头」。
+- 每镜标题后的首个非空正文必须以 `〔本镜视觉基调〕` 开头，解析器据此填 `stylePrefix`；不要写成 `- 视觉基调前缀：……` 普通项目符号。① 的负面词必须单独使用 `> 禁忌：…`，英文用 `> Avoid: …`，否则会被吞进 Style Lock 正文而不是负面字段。
+- 蒙太奇分段只写进镜头头的 `｜段：…` / `｜segment: …` 字段；④ 内不要另插 `#### 蒙太奇段…` / `#### Montage…` 标题，解析器会把它吞进前一镜描述。
 - 中英文镜头序号一一对应；至少一镜；每镜建议秒数写在头部字段，不要藏在正文项目符号里。
 
 校验命令（从本 `SKILL.md` 所在目录解析相对路径）：
@@ -235,8 +237,10 @@ face / hair / eyes / wardrobe / signature prop + do-not-change + one line on how
 描述稿落盘后**别收工**，把接力讲清（但这一步的「手」在外部平台和用户手里、必须停下等用户）：
 
 1. **交代出片**：让用户拿 `<project>/ai-drama/<beat_id>.md` 里的描述，去任意外部平台出片——中文版喂可灵 / 即梦 / Vidu；英文版喂 Veo / Runway / LTX / Luma；本地开源（Wan / Hunyuan 等）或成片 agent 平台（LibTV / OiiOii / TapNow）皆可，按下游平台的角色资产机制上传角色描述保一致。
-2. **回铺时间线**：出好的 AI 片段**由用户手动**拖回 opencut 的 **AI_DRAMA 车道**，对齐该 beat 的 `track_st→track_ed`（**它属底轨 B-roll 画面家族，与影视/本地素材同层级；唯一在它之上的叠加层是 MG，而 MG 要等它落位后才产**），按区间总时长裁齐。
-3. **停下等用户**：AI 出片与拼回是**外部异步、用户驱动**的——本 skill 在此停，等所有 AI_DRAMA beat 的片段都回铺齐。这是 SOP 里的用户检查点，别替他假装出片 / 回轨完成。
+2. **优先标准包回填**：AI Drama Desk 出片后，找到每个项目的 `exports/aidrama/manifest.json`，执行：
+   `gtrk ai-drama lay --project "<工程目录>" --package "<B03 exports/aidrama>" --package "<B05 exports/aidrama>" --json`。
+   命令会先按当刻口播工程重投影 beat 窗口，再把所有镜头复制到 `<gtrk目录>/assets/ai-drama/<slug>/`，共用一条新的 `video_track`；每个 beat 从起点顺排，最后一镜吸收到 beat 终点。既有 A-roll、BGM 与 B-roll 轨零改动。若已铺 AI 轨被用户手调过，缺省拒绝覆盖；只有用户明确同意丢弃手调时才加 `--replace-all`。
+3. **非标准平台才手动回铺**：外部平台没有 return-v1 清单时，才由用户把片段拖回 opencut 的 **AI_DRAMA 车道**，对齐该 beat 的 `track_st→track_ed`。AI 出片仍是外部异步、用户驱动；未拿到完整片段前要停下等用户，别替他假装出片 / 回轨完成。
 4. **回铺齐 ≠ 收口，还有两步**：你的片段回铺齐只意味着 **③ B-roll 底轨阶段**完成。接着 MUST 走 **④ 全局抽帧检查画面构图**（对三源合并后的最终底轨抽帧，看主体位置 / 安全区 / 画面朝向 / 明暗，**停下等用户确认**）→ 过了才交棒 **⑤ `/gtrk-mg`** 把 MG（含 ov）叠上 → 最后才 `gtrk render` 收口。
    ⚠️ **MUST NOT 从你这里直接跳到 `render`**（旧文档曾这么写，那是错的——它把 AI 再现当成了最后一层）。
 

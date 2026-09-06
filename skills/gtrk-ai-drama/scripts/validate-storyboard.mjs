@@ -36,6 +36,8 @@ function validate(md, file) {
   for (const n of ["①", "②", "③", "④"]) {
     if (!new RegExp(`^#{1,6}\\s*${n}`, "m").test(en)) errors.push(`English Storyboard 缺少 ${n} 区块`);
   }
+  if (!/^>\s*禁忌\s*[:：]/m.test(cn)) errors.push("① 视觉基调缺少独立的「> 禁忌：…」行");
+  if (!/^>\s*Avoid\s*[:：]/mi.test(en)) errors.push("English ① Style Lock 缺少独立的「> Avoid: …」行");
 
   const cnCharBlock = cn.match(/^#{1,6}\s*③[^\n]*\n([\s\S]*?)(?=^#{1,6}\s*④)/m)?.[1] ?? "";
   const enCharBlock = en.match(/^#{1,6}\s*③[^\n]*\n([\s\S]*?)(?=^#{1,6}\s*④)/m)?.[1] ?? "";
@@ -53,6 +55,28 @@ function validate(md, file) {
   if (cnShots.length > 0 && enShots.length > 0 && JSON.stringify(cnShots) !== JSON.stringify(enShots)) {
     errors.push(`中英文镜头序号不一致：CN=${cnShots.join(",")}，EN=${enShots.join(",")}`);
   }
+
+  const cnShotBlock = cn.match(/^#{1,6}\s*④[^\n]*\n([\s\S]*?)(?=^#{1,6}\s*⑤)/m)?.[1] ?? "";
+  const enShotBlock = en.match(/^#{1,6}\s*④[^\n]*\n([\s\S]*)/m)?.[1] ?? "";
+  const cnHeads = [...cnShotBlock.matchAll(/^####\s+(.+?)\s*$/gm)];
+  const enHeads = [...enShotBlock.matchAll(/^####\s+(.+?)\s*$/gm)];
+  const extraCnHeads = cnHeads.filter((m) => !/^分镜\s*\d+/i.test(m[1]));
+  const extraEnHeads = enHeads.filter((m) => !/^Shot\s*\d+/i.test(m[1]));
+  if (extraCnHeads.length > 0) errors.push(`④ 内存在非分镜四级标题：${extraCnHeads.map((m) => m[1]).join("、")}；请把蒙太奇名放进「段」字段`);
+  if (extraEnHeads.length > 0) errors.push(`English ④ 内存在非 Shot 四级标题：${extraEnHeads.map((m) => m[1]).join("、")}；请把 montage 名放进 segment 字段`);
+
+  function checkPrefixes(block, heads, label) {
+    for (let i = 0; i < heads.length; i += 1) {
+      const start = (heads[i].index ?? 0) + heads[i][0].length;
+      const end = i + 1 < heads.length ? heads[i + 1].index : block.length;
+      const firstBodyLine = block.slice(start, end).split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+      if (!firstBodyLine.startsWith("〔") || !firstBodyLine.includes("〕")) {
+        errors.push(`${label} ${heads[i][1].match(/\d+/)?.[0] ?? "?"} 的首个正文不是「〔视觉基调〕」前缀`);
+      }
+    }
+  }
+  checkPrefixes(cnShotBlock, cnHeads.filter((m) => /^分镜\s*\d+/i.test(m[1])), "中文分镜");
+  checkPrefixes(enShotBlock, enHeads.filter((m) => /^Shot\s*\d+/i.test(m[1])), "English Shot");
 
   if (/^\s*[-*]\s*(男性|女性|男主|女主|父亲|母亲|角色)\s*[:：]/m.test(cnCharBlock)) {
     errors.push("③ 角色仍使用项目符号；请改成四级标题并把描述另起段落");
