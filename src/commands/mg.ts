@@ -285,7 +285,10 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 			reprojection: reproj.summary,
 		});
 	}
-	const { gtrk, revision } = project;
+	// 工程读取①（计算用）：剥离面判据（laidBefore / orphans）与重投影按这份算。
+	// ⚠️ `revision` **不作写回 expected**——下方重投影与资产落地（mkdir/copyFile 批）是秒级动作，
+	// 持有跨越它们的 revision 会让「客户端自动保存了一次」直接作废整轮。见工程读取②。
+	const { gtrk, revision: planningRevision } = project;
 	const gtrkDir = dirname(gtrkPath);
 
 	// ── 剥离面（fix-mg-lay-strip-scope 阶段 A · 真增量合并）───────────────────────────
@@ -348,7 +351,24 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		await copyFile(srcByComp.get(it.composition_id)!, join(gtrkDir, ...it.html_rel.split("/")));
 	}
 
-	const { next, summary, mg } = layMgTracks({ gtrk, items, generatedAt: new Date().toISOString(), keep });
+	// ── 工程读取②（写回用）：耗时动作（重投影 + 资产落地）全部完成后才取 revision ──────────
+	// 客户端 `.gtrk` 每 60s 自动保存一次（与用户有没有未保存改动无关），持有跨越资产落地的
+	// revision 会让本轮铺轨整体白跑。此刻重读后冲突窗口 = 重读到 rename 的毫秒级，且
+	// writeGtrkAtomic 的 rename 前重检照旧兜底（那条 MUST NOT 删）。
+	//
+	// ★ MUST 整体迁移基底：`layMgTracks` 的入参 `gtrk` 若还是读①那份，写出的整文件就不含用户
+	// 那次保存，且因 revision 相符而通过全部校验、无任何告警——gtrk-writeback-contract
+	// 「只换 revision 不换基底 = 静默覆盖」。故**入参与写回一律用 freshGtrk**。
+	const { gtrk: freshGtrk, revision } = readGtrk(gtrkPath);
+	assertGtrkV1(freshGtrk);
+	if (revision !== planningRevision) {
+		log.warn(
+			"工程在本轮铺轨期间被改动过（颗粒资产落地进行中，你在客户端保存了工程）：已按**改后**的工程" +
+				"铺轨写回，你那次保存不会被覆盖；但本轮的槽位包络与剥离面是按改动前的 beat 窗口算的——" +
+				"若你改的正是时间线或 beat 派单，颗粒时码可能与新窗口对不齐，重跑一次本命令即可（纯本地、不计费）。",
+		);
+	}
+	const { next, summary, mg } = layMgTracks({ gtrk: freshGtrk, items, generatedAt: new Date().toISOString(), keep });
 	// 时码来源登记（add-consume-side-reprojection 7.1，纯追加可选字段）：
 	// 让「这批已铺产物是照哪条时间线、哪种模式铺的」可被后续体检读取。本 change 只**登记**，不据此判失效。
 	// 注意它描述的是**本次铺的那些**——保留条目带的是上一轮时码（混排形态，见 spec 同名 Scenario）。

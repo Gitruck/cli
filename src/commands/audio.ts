@@ -636,7 +636,10 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	const noLoop = noLoopOf(opts);
 
 	const gtrkPath = locateGtrk(resolve(opts.project));
-	const { gtrk, revision } = readGtrk(gtrkPath);
+	// 工程读取①（计算用）：锚点判据链（成片高潮点 / 工程末尾 / 循环铺满段数）按这份算。
+	// ⚠️ 它的 revision **不作写回 expected**——下方云端节拍分析是分钟级动作，持有跨越它的
+	// revision 会让「客户端自动保存了一次」直接作废整轮（含已计费的云端分析）。见工程读取②。
+	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 
 	const probeDur = deps.probeDur ?? ((p: string) => probeDuration(p));
@@ -771,9 +774,32 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 		}
 	}
 
+	// ── 工程读取②（写回用）：耗时动作全部完成后才取 revision ─────────────────────────────
+	// 云端 audio_music_analyze 是**分钟级且计费**的动作；持有跨越它的 revision，用户在此期间
+	// 在客户端存一次工程（自动保存每 60s 一次，与他有没有未保存改动无关），本轮就整体白跑——
+	// 而那次云端分析的钱**已经花了**。此刻重读后冲突窗口 = 重读到 rename 的毫秒级，且
+	// writeGtrkAtomic 的 rename 前重检照旧兜底（那条 MUST NOT 删）。
+	//
+	// ★ MUST 整体迁移基底，MUST NOT 只换 revision：下方 materials / audioTracks / stillReferenced /
+	// next 的展开若还从**读①**那份 `gtrk` 出发，就会写出一份不含用户那次保存的整文件——
+	// 且因 revision 相符而通过全部校验、无任何告警。那比报冲突坏得多（gtrk-writeback-contract
+	// 「只换 revision 不换基底 = 静默覆盖」）。本行以下**一律用 `freshGtrk`**。
+	const { gtrk: freshGtrk, revision } = readGtrk(gtrkPath);
+	assertGtrkV1(freshGtrk);
+	// 基底漂移 MUST NOT 静默：窗口内工程真被改过时，本轮锚点算的是读①那份工程，却要落到读②这份上。
+	// 文案贴 BGM 语义（MUST NOT 照抄 matrix 那句——它讲的是 B-roll 槽位对不齐，与节拍锚点不是一回事）。
+	if (revision !== planningRevision) {
+		log.warn(
+			"工程在本轮 BGM 上轨期间被改动过（云端节拍分析进行中，你在客户端保存了工程）：已按**改后**的" +
+				"工程落轨写回，你那次保存不会被覆盖；但本轮的成片高潮点、工程末尾与循环铺满段数都是按改动前的" +
+				"时间线算的——若你改的正是时间线长度或 split 派单，BGM 锚点可能与新时间线对不齐。" +
+				"觉得不对就重跑一次本命令（⚠️ 会重新调用云端节拍分析，**再计费一次**；音频文件本身不会重传）。",
+		);
+	}
+
 	// ── 同源幂等替换：同绝对路径素材所在的既有音轨全部剥除（含旧素材，零引用保护后）──
-	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
-	const audioTracks = [...((gtrk.audio_track as LooseTrack[] | undefined) ?? [])];
+	const materials = [...((freshGtrk.materials as LooseMaterial[] | undefined) ?? [])];
+	const audioTracks = [...((freshGtrk.audio_track as LooseTrack[] | undefined) ?? [])];
 	const materialId = audioLayMaterialId(audioAbs);
 	const sameSourceIds = new Set<string>(
 		materials.filter((m) => typeof m.id === "string" && m.path === audioAbs).map((m) => m.id as string),
@@ -788,8 +814,8 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	// 零引用保护：被剥素材若仍被其他轨（video/beat/保留音轨）引用则不删登记
 	const stillReferenced = new Set<string>();
 	for (const group of [
-		(gtrk.video_track as LooseTrack[] | undefined) ?? [],
-		(gtrk.beat_track as LooseTrack[] | undefined) ?? [],
+		(freshGtrk.video_track as LooseTrack[] | undefined) ?? [],
+		(freshGtrk.beat_track as LooseTrack[] | undefined) ?? [],
 		keptTracks,
 	]) {
 		for (const t of group) {
@@ -855,7 +881,7 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 	};
 
 	const next: Record<string, unknown> = {
-		...gtrk,
+		...freshGtrk,
 		materials: [...keptMaterials.filter((m) => m.id !== materialId), newMaterial],
 		audio_track: [...keptTracks, newTrack].sort(
 			(a, b) => ((a.track_index as number) ?? 0) - ((b.track_index as number) ?? 0),
@@ -1076,7 +1102,10 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	const minSilence = numOpt(opts.minSilence, "--min-silence", TIGHTEN_MIN_SILENCE_DEFAULT);
 	const boundaryTol = numOpt(opts.boundaryTol, "--boundary-tol", TIGHTEN_BOUNDARY_TOL_DEFAULT);
 
-	const { gtrk, revision } = readGtrk(gtrkPath);
+	// 工程读取①（计算用）：配音素材定位与刀点判据按这份算。
+	// ⚠️ revision **不作写回 expected**——下方 ffmpeg 转码是秒~分钟级动作，持有跨越它的 revision
+	// 会让「客户端自动保存了一次」直接作废整轮。见下方工程读取②。
+	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 	const transcript = JSON.parse(readFileSync(trPath, "utf8")) as {
 		material_id?: string | number;
@@ -1092,11 +1121,6 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	if (!voiceMat) throw new Error(`工程里找不到文字稿指向的配音素材（material_id=${transcript.material_id}）`);
 	const voicePath = String(voiceMat.path);
 	if (!existsSync(voicePath)) throw new Error(`配音素材文件不存在：${voicePath}`);
-
-	// 已铺过画面就提醒：beat 窗口会变，跑完必须重铺
-	const laid = ((gtrk.video_track as { track_timeline?: unknown[] }[]) ?? []).some(
-		(t) => (t.track_timeline ?? []).length > 0,
-	);
 
 	// ── 静音检测：相对 RMS（MUST NOT 用 silencedetect，见 audio-tighten.ts 头注 ②）──
 	const { ffmpeg } = requireFfmpeg(opts.ffmpegPath);
@@ -1161,9 +1185,31 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 		return result;
 	}
 
-	applyTightenToProject(gtrk, plan, m, newDur, keeps, String(voiceMat.id), oldDur);
-	result.captions = countCaptions(gtrk);
-	writeGtrkAtomic(gtrkPath, gtrk, revision, "audio tighten");
+	// ── 工程读取②（写回用）：耗时动作全部完成后才取 revision ─────────────────────────────
+	// ffmpeg 转码是秒~分钟级；持有跨越它的 revision，用户在此期间在客户端存一次工程（自动保存
+	// 每 60s 一次），本轮就整体白跑。此刻重读后冲突窗口 = 重读到 rename 的毫秒级，且
+	// writeGtrkAtomic 的 rename 前重检照旧兜底（那条 MUST NOT 删）。
+	//
+	// ★ MUST 整体迁移基底：`applyTightenToProject` 是**原地改写**，把它作用到读①那份 `gtrk` 上
+	// 再写出，就会覆盖掉用户那次保存且不触发任何校验（revision 是对的）——
+	// gtrk-writeback-contract「只换 revision 不换基底 = 静默覆盖」。故改写与写回**一律用 freshGtrk**。
+	// 该变换全程按素材 id 定位（voiceMatId / material 引用），作用到新基底上语义正确。
+	const { gtrk: freshGtrk, revision } = readGtrk(gtrkPath);
+	assertGtrkV1(freshGtrk);
+	if (revision !== planningRevision) {
+		log.warn(
+			"工程在本轮收紧期间被改动过（ffmpeg 转码进行中，你在客户端保存了工程）：已按**改后**的工程" +
+				"改写写回，你那次保存不会被覆盖；但刀点与新时长是按改动前的配音轨算的——" +
+				"若你改的正是配音轨或时间线，收紧结果可能与新工程对不上，重跑一次本命令即可（纯本地、不计费）。",
+		);
+	}
+	// 已铺过画面就提醒：beat 窗口会变，跑完必须重铺。按**当刻**工程判（读②）才准。
+	const laid = ((freshGtrk.video_track as { track_timeline?: unknown[] }[]) ?? []).some(
+		(t) => (t.track_timeline ?? []).length > 0,
+	);
+	applyTightenToProject(freshGtrk, plan, m, newDur, keeps, String(voiceMat.id), oldDur);
+	result.captions = countCaptions(freshGtrk);
+	writeGtrkAtomic(gtrkPath, freshGtrk, revision, "audio tighten");
 	if (plan) writeFileSync(planPath, `${JSON.stringify(plan, null, 1)}\n`, "utf8");
 
 	log.info(`已写回：${gtrkPath}${plan ? ` · ${planPath}` : ""}`);
