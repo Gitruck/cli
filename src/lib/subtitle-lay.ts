@@ -426,6 +426,12 @@ export function buildCaptionElement({
 
 /** 投影视图句条（lib/projection.ts ViewUtterance 的消费面子集）。 */
 export interface ProjectedUtterance {
+	/**
+	 * 源 utterance id（`ViewUtterance.id` 一路透传）。同一句被智能剪辑切成多个存活实例时，
+	 * 这些实例的 id 相同——⓪ 同句回缝就以它为唯一判据。
+	 * **可选**：不传时回缝恒不触发，存量调用行为逐字不变（fix-subtitle-lay-duplicate-instances 回归闸）。
+	 */
+	id?: string;
 	text: string;
 	track_st: number | null;
 	track_ed: number | null;
@@ -675,11 +681,71 @@ export interface CaptionShapingOpts {
 }
 
 /**
- * 投影视图 → 字幕窗口序列：存活实例按 track_st 序（projectTranscript 已排）逐条转窗口；
- * 短于 MIN_CAPTION_SEC（轨上时长）的实例丢弃并计数（客户端 droppedShortCount 同口径）。
+ * ⓪ 同句回缝阈值（秒）。相邻两个**同 id** 投影实例的 gap ≤ 此值即认定「本来就是一句话被剪成了两片」，
+ * 合并成一条上轨（时间取包络、文本仍是整句）。
+ *
+ * 取值 0.5（2026-09-04 拍板）：真机样本里同句相邻实例的实际 gap 为 0.07~0.13s，
+ * 而该剪没剪的真实句间停顿通常 > 0.5s，两个分布之间有一个数量级的空档。
+ *
+ * **MUST NOT 与 `shaping.maxGapSec` 共用**：`--max-gap` 管「视觉上要不要拉长前条以消灭闪烁」，
+ * 回缝管「这两片本来是同一句话」——是两个问题。`--max-gap 0`（关桥接）时回缝仍须生效，
+ * 否则重复字幕会随手一个 flag 就回来。也不开 CLI 旋钮（多一个开关多一份误用）。
+ */
+export const CAPTION_RESEW_GAP_SEC = 0.5;
+
+/** ⓪ 回缝后的单元（同 id 多实例已并成一条，时间为包络）。 */
+interface SewnUnit {
+	id?: string;
+	text: string;
+	startSec: number;
+	endSec: number;
+}
+
+/**
+ * ⓪ 同句回缝：把「同一 utterance 被切成的多个投影实例」并回一条。
+ *
+ * 背景（2026-09-04 真机）：投影器对同一句的每个存活实例都吐**整句**文本，逐实例上轨就是
+ * 同一句在时间线上重复 N 遍（样本工程 151 条字幕里 39 种文本重复、共 89 个实例）。
+ *
+ * 判据：**相邻**且 **id 相同** 且 **gap ≤ CAPTION_RESEW_GAP_SEC**。
+ * gap 用 `<=` 且**不设下界**——负 gap（完全重叠：同一素材被摆在两条 audio 轨上时投影器会吐出
+ * 时码全等的两个实例）正是重复字幕最刺眼的形态，重叠时取包络即可。
+ * 文本恒取整句（不拼接），故乱序实例天然不会被拼出语序颠倒的句子。
+ */
+function sewSameUtterance(utterances: ProjectedUtterance[]): { units: SewnUnit[]; mergedCount: number } {
+	const units: SewnUnit[] = [];
+	let mergedCount = 0;
+	for (const u of utterances) {
+		if (u.dropped || u.track_st === null || u.track_ed === null) continue;
+		const prev = units[units.length - 1];
+		if (
+			prev &&
+			prev.id !== undefined &&
+			u.id !== undefined &&
+			prev.id === u.id &&
+			u.track_st - prev.endSec <= CAPTION_RESEW_GAP_SEC
+		) {
+			prev.startSec = Math.min(prev.startSec, u.track_st);
+			prev.endSec = Math.max(prev.endSec, u.track_ed);
+			mergedCount += 1;
+			continue;
+		}
+		units.push({ id: u.id, text: u.text, startSec: u.track_st, endSec: u.track_ed });
+	}
+	return { units, mergedCount };
+}
+
+/**
+ * 投影视图 → 字幕窗口序列：存活实例按 track_st 序（projectTranscript 已排）先 ⓪ 同句回缝，
+ * 再逐条转窗口；短于 MIN_CAPTION_SEC（轨上时长）的**回缝后单元**丢弃并计数
+ * （客户端 droppedShortCount 同口径）。
  * 可选整形（fix-subtitle-lay-split-and-gap，真机挑刺 2026-08-27）：
  *   maxUnits —— 超宽句拆窗（整句上轨会溢出画布）；
  *   maxGapSec —— 小 gap 桥接（几百 ms 的字幕消失-再现在播放时闪得难受）。
+ *
+ * 步序 MUST 是 ⓪回缝 → MIN_CAPTION_SEC 过滤 → ①拆窗 → ②桥接
+ * （fix-subtitle-lay-duplicate-instances）：回缝若排在过滤之后，同句的两个短实例会各自先被丢掉，
+ * 明明合起来够长却丢了字；排在拆窗之后则每片都已按整句拆过一遍，重复已经落地、缝不回来了。
  */
 export function captionsFromProjection(
 	utterances: ProjectedUtterance[],
@@ -691,17 +757,20 @@ export function captionsFromProjection(
 	/** 拆窗时第 ③ 级退化（无词边界可用、退回字宽均分）命中次数——词表够不够用的唯一可观测信号。 */
 	splitFallbackCount: number;
 	bridgedCount: number;
+	/** ⓪ 同句回缝并掉的实例数（= 存活实例数 − 回缝后单元数）。0 = 本次没有一句被剪成多片。 */
+	mergedCount: number;
 } {
+	// ⓪ 同句回缝（MUST 在 MIN_CAPTION_SEC 过滤与拆窗/桥接之前）
+	const { units, mergedCount } = sewSameUtterance(utterances);
 	const raw: CaptionWindow[] = [];
 	let droppedShort = 0;
-	for (const u of utterances) {
-		if (u.dropped || u.track_st === null || u.track_ed === null) continue;
-		const durationSec = u.track_ed - u.track_st;
+	for (const u of units) {
+		const durationSec = u.endSec - u.startSec;
 		if (durationSec < MIN_CAPTION_SEC) {
 			droppedShort += 1;
 			continue;
 		}
-		raw.push({ text: u.text, startSec: u.track_st, durationSec });
+		raw.push({ text: u.text, startSec: u.startSec, durationSec });
 	}
 	// ① 拆窗（拆出的子窗 MUST NOT 二次复检 MIN_CAPTION_SEC——丢一个子窗 = 丢一段文本，比一个短窗更糟）
 	let splitCount = 0;
@@ -725,7 +794,14 @@ export function captionsFromProjection(
 			}
 		}
 	}
-	return { captions, droppedShort, splitCount, splitFallbackCount: splitStats.fallbackCount, bridgedCount };
+	return {
+		captions,
+		droppedShort,
+		splitCount,
+		splitFallbackCount: splitStats.fallbackCount,
+		bridgedCount,
+		mergedCount,
+	};
 }
 
 // ── cve 幂等替换 ─────────────────────────────────────────────────────────

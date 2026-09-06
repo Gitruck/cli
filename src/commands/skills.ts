@@ -12,6 +12,14 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { packageRoot } from "../lib/paths";
 import { log } from "../lib/log";
+import { currentVersion } from "../lib/version";
+import {
+	buildSkillManifest,
+	detectStoreMode,
+	listPackagedSkills,
+	unifiedSkillStore,
+	writeSkillManifest,
+} from "../lib/skill-freshness";
 
 // 仓库内打包分发的 skill 名（各含 SKILL.md；部分另带 references/ 或 agents/）
 export const SKILL_NAMES = [
@@ -259,9 +267,35 @@ function validateBundledSkills(source: string): boolean {
 	return allOk;
 }
 
+/**
+ * 给一个已装存储写「一致性戳」（manifest：包版本 + 逐 skill 内容指纹/形状签名 + 安装时间）。
+ *
+ * 本轮只做 spec 的 ③ 过期检测：安装形态没动，统一存储仍是快照，
+ * 戳的作用就是让**后续命令**能廉价判出「这份快照比包内正本旧了」。
+ * 装了几个就戳几个（`names` 传实际落地的那一组），别把没装的写进去。
+ * 写不进去 ⇒ 静默返回 false：那只意味着「日后核对判不出、静默跳过」，MUST NOT 打扰用户。
+ */
+function stampSkillStore(storeDir: string, source: string, names: readonly string[]): boolean {
+	if (names.length === 0) return false;
+	try {
+		return writeSkillManifest(
+			storeDir,
+			buildSkillManifest({
+				source,
+				names,
+				cliVersion: currentVersion(),
+				mode: detectStoreMode(storeDir, source, names),
+			}),
+		);
+	} catch {
+		return false;
+	}
+}
+
 function copySkillsToTarget(dir: string, source: string, targetLabel?: string): boolean {
 	const destRoot = resolve(dir);
 	let allOk = validateBundledSkills(source);
+	const copied: string[] = [];
 	for (const name of SKILL_NAMES) {
 		const src = join(source, name);
 		if (!existsSync(join(src, "SKILL.md"))) continue;
@@ -269,6 +303,7 @@ function copySkillsToTarget(dir: string, source: string, targetLabel?: string): 
 		try {
 			mkdirSync(dest, { recursive: true });
 			cpSync(src, dest, { recursive: true });
+			copied.push(name);
 			log.ok(`已安装 ${name}${targetLabel ? ` → ${targetLabel}` : ""}：${join(dest, "SKILL.md")}`);
 		} catch (error) {
 			allOk = false;
@@ -277,6 +312,9 @@ function copySkillsToTarget(dir: string, source: string, targetLabel?: string): 
 			);
 		}
 	}
+	// 一致性戳：这一段是 cpSync 快照，装完即冻结；不留戳就没人能判断它有没有过期
+	// （change fix-skill-install-staleness · 2026-09-04 真机事故）。写失败是良性降级，不打扰用户。
+	stampSkillStore(destRoot, source, copied);
 	if (targetLabel) {
 		log.info(`已写入 ${targetLabel}；若当前会话未出现新 Skill，请重启或刷新该 Agent。`);
 	} else {
@@ -344,6 +382,13 @@ export function installSkill(opts: InstallSkillOptions = {}): boolean {
 			adapterOk = false;
 			log.warn(`skills 适配器安装失败（退出码 ${result.status ?? "未知"}）。`);
 			log.info(`可查看支持的 Agent ID：npx -y skills add "${source}" --list`);
+		}
+
+		// 一致性戳：适配器把整个 source 目录交给它自己的发现器（凡带 SKILL.md 的目录都装），
+		// 所以这里按**包里实际有什么**戳，而不是按 SKILL_NAMES —— 两者不一定同步
+		// （在飞 change 新加的 skill 会先落磁盘、后进分发清单）。
+		if (adapterOk) {
+			stampSkillStore(unifiedSkillStore(opts.home ?? homedir()), source, listPackagedSkills(source));
 		}
 	}
 

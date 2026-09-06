@@ -379,7 +379,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 				`——轨上内容 = 本次 ${summary.laidParticles} 颗 + 上轮 ${keptIds.length} 颗，与本次派单不完全对应（要全部刷新就去掉 --only 全量重铺）。`,
 		);
 	}
-	log.info("opencut 打开工程即见 MG overlay 轨（预览需 add-particle-project-folder-preview 上线）；出片时客户端云渲。");
+	log.info("opencut 打开工程即见 MG 轨；出片走客户端云渲。");
 	if (integrity) reportMaterialIntegrity(integrity, log);
 	return done(opts, {
 		ok,

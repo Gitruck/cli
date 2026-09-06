@@ -6,6 +6,12 @@
  * -c:a aac -b:a 192k -movflags +faststart）。material 输入取 gtrk materials[].path（= source_path，
  * 客户端原片本地绝对路径）；云端不产成片，成片在此本地出。
  *
+ * 音源覆盖面（★ fix-render-bundled-clip-audio，2026-09-04 真机事故修）：混音取**两类** lane——
+ * lane A = 全部 `video_track` 的 clip 内嵌音轨（口播人声正是跟着视频素材走的；此前从不遍历，
+ * 成片实测 −70.0 LUFS 数字静音），lane B = 既有 `audio_track`。lane A 的取用判据
+ * （`track.muted` / `clip.muted` / `element_state.isSourceAudioEnabled`）与客户端同一套，
+ * 收口母带与客户端同口径。
+ *
  * 验收口径：观感等价（时长/切点/画布/音画同步/编码参数一致），不承诺与云端逐字节一致（libx264 跨版本/平台）。
  * filter_complex 生成须与后端黄金用例对拍（change tasks §8.4，待后端导出向量）。
  */
@@ -13,13 +19,19 @@ import { writeFile, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
+import { requireFfmpeg, runFfmpeg, ffprobeJson } from "./ffmpeg";
+import { log } from "./log";
 
 const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_LAYOUT = "stereo";
 const DEFAULT_CRF = 18;
 const DEFAULT_AUDIO_CROSSFADE_MS = 8;
 const MAX_CLIPS = 500;
+/** 母带收口（★ fix-render-bundled-clip-audio；口径原样取自客户端
+ *  `gitruck-opencut-rewrite/.../audio-mastering.ts:1-6`——CLI 与客户端出同一工程须同响度，
+ *  两套母带口径会让同一工程出两种听感）：−1 dBFS 限幅 + 2% 余量的总音量。
+ *  施加在 `amix` **之后**；`amix` 的 `normalize=0`（fix-render-audio-volume 成果）MUST 保持。 */
+const MASTER_CHAIN = "alimiter=limit=0.891:attack=1:release=120,volume=0.98";
 /** 帧对齐补齐余量（帧，fix-render-frame-drift）：截到裁定帧数前先备出的富余帧数。
  * 2 帧足够覆盖 `fps` 出帧数随 trim 起点相位的 ±1 摆动；富余帧够用时被 end_frame 原样截掉。 */
 const PAD_FRAMES = 2;
@@ -36,12 +48,22 @@ interface Clip {
 	duration: number;
 	/** clip 级音量（契约双层语义：覆盖轨级；★ fix-render-audio-volume——此前渲染混音全然不消费）。 */
 	volume?: number;
+	/** clip 级静音（契约既有字段，`gtrk patch set --muted` 写的就是它；
+	 *  ★ fix-render-bundled-clip-audio——CLI 首次消费）。 */
+	muted?: boolean;
+	/** 客户端元素状态。`isSourceAudioEnabled === false` = 用户在客户端关掉了这条 clip 的**源声**
+	 *  （与 `muted` 是两个开关，任一为关即不发声）。缺省（缺键/undefined）视为「开」。 */
+	element_state?: { isSourceAudioEnabled?: boolean };
 }
 interface Track {
 	track_index?: number;
 	track_timeline: Clip[];
 	/** 轨级默认音量（契约：clip 级缺省时生效）。 */
 	volume?: number;
+	/** 轨级静音（客户端喇叭图标；`gtrk matrix` / `gtrk mg` 落 B-roll、颗粒、黑底垫轨时恒写 true）。
+	 *  ★ fix-render-bundled-clip-audio——CLI 首次消费；渲染器**只认这个字段**，
+	 *  MUST NOT 按轨序/车道名自行猜某条轨该不该发声。 */
+	muted?: boolean;
 }
 interface GtrkMaterial {
 	id: string | number;
@@ -129,10 +151,81 @@ function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[]
 	return [elements, cursor];
 }
 
+/**
+ * ★ fix-render-bundled-clip-audio —— lane A（视频 clip 内嵌音轨）的取用判据。
+ *
+ * 某 clip 的内嵌音轨进混音，**当且仅当**三个开关全开：
+ * `track.muted !== true` 且 `clip.muted !== true` 且 `element_state.isSourceAudioEnabled !== false`。
+ * 三者任一为「关」即跳过（该时段由静音源补齐，MUST NOT 塌缩时间轴）。
+ *
+ * 判据与客户端逐字一致，MUST NOT 引入 CLI 独有的第二套缺省口径：
+ * 轨级 `muted` 是主开关（NLE 通例，clip 级不能反向撬开），故三者取**与**而非「clip 覆盖轨」。
+ * 「B-roll / AI 再现轨默认不发声」由铺轨方落轨时写 `track.muted = true` 表达（现状即如此），
+ * 「解说链特意保留原片原声」由铺轨方置 `false` 表达——渲染器只忠实读字段。
+ */
+function clipSourceAudioOn(track: Track, clip: Clip): boolean {
+	if (track.muted === true) return false;
+	if (clip.muted === true) return false;
+	if (clip.element_state?.isSourceAudioEnabled === false) return false;
+	return true;
+}
+
+/** lane A 会取用的素材 id 集合（遍历**全部** `video_track` × 判据过关的 clip）。
+ *  供素材校验面（materialPathsFromGtrk）与内嵌音轨探测（probeEmbeddedAudio）共用同一口径。 */
+function audioSourceMaterialIds(gtrk: GtrkV1): Set<string> {
+	const out = new Set<string>();
+	for (const t of gtrk.video_track || []) {
+		for (const c of t.track_timeline || []) {
+			if (isGap(c)) continue;
+			if (!clipSourceAudioOn(t, c)) continue;
+			out.add(String(c.material));
+		}
+	}
+	return out;
+}
+
+/** 视频轨 → lane A 的输入时间线：判据不过、或素材本身不带音轨的 clip **就地降级为等长 gap**
+ *  （静音补齐，时间轴不塌缩）。返回降级后的时间线与其中真正可发声的 clip 段数。 */
+function laneATimeline(
+	track: Track,
+	hasAudio: (materialId: string | number) => boolean,
+): { timeline: Clip[]; audible: number } {
+	let audible = 0;
+	const timeline = (track.track_timeline || []).map((clip) => {
+		if (isGap(clip)) return clip;
+		if (!clipSourceAudioOn(track, clip) || !hasAudio(clip.material as string | number)) {
+			return { ...clip, material: null };
+		}
+		audible++;
+		return clip;
+	});
+	return { timeline, audible };
+}
+
 export interface RenderParams {
 	crf?: number;
 	codec?: string;
 	audio_crossfade_ms?: number;
+	/**
+	 * 素材是否带**内嵌音轨**（★ fix-render-bundled-clip-audio）。
+	 * `[i:a]` 打在无音轨输入上会让整条 filter graph 直接失败，故 lane A 必须先知道这件事——
+	 * 由 `renderGtrk` 用 ffprobe 探测后注入（纯函数本身不碰磁盘，保持可单测/可与后端对拍）。
+	 * 缺省（不注入）视为「都带音轨」：只影响直接调 `buildFilterGraph` 的调用方（单测/对拍向量），
+	 * 生产路径恒经 `renderGtrk` 注入真值。
+	 */
+	materialHasAudio?: (materialId: string | number) => boolean;
+}
+
+/** 成片音源覆盖面的实况（★ fix-render-bundled-clip-audio：零音源 MUST NOT 静默）。 */
+export interface RenderAudioInfo {
+	/** 进 amix 的发声 lane 数（视频内嵌音轨 lane + audio_track lane）。 */
+	lanes: number;
+	/** 视频内嵌音轨（lane A）贡献的可发声 clip 段数。 */
+	embeddedClips: number;
+	/** audio_track 贡献的 clip 段数。 */
+	audioTrackClips: number;
+	/** 工程零音源 ⇒ 成片无声。命令层 SHALL 打 INFO 并在 `--json` 标明。 */
+	silent: boolean;
 }
 
 /**
@@ -160,24 +253,37 @@ export function allocateFrames(elements: { duration: number }[], rate: number): 
 	return out;
 }
 
-/** gtrk v1 → (输入文件列表, filter_complex 文本, 总时长)。纯函数，供黄金用例对拍。 */
+/** gtrk v1 → (输入文件列表, filter_complex 文本, 总时长, 音源实况)。纯函数，供黄金用例对拍。 */
 export function buildFilterGraph(
 	gtrk: GtrkV1,
 	materialPaths: Record<string, string>,
 	params: RenderParams = {},
-): { inputs: string[]; graph: string; total: number } {
+): { inputs: string[]; graph: string; total: number; audio: RenderAudioInfo } {
 	const fadeMs = Math.trunc(params.audio_crossfade_ms ?? DEFAULT_AUDIO_CROSSFADE_MS);
 	const fade = Math.max(fadeMs, 0) / 1000;
+	const hasAudio = params.materialHasAudio ?? ((): boolean => true);
 
 	const sortedV = sortedTracks(gtrk.video_track || []);
 	if (sortedV.length === 0) throw new Error("gtrk v1 缺少 video_track");
 	const mainVideoTrack = pickPreviewMainTrack(gtrk, sortedV);
 	const audioTracks = sortedTracks(gtrk.audio_track || []);
 
-	const totalClips = [mainVideoTrack, ...audioTracks].reduce(
-		(n, t) => n + (t.track_timeline?.length || 0),
-		0,
-	);
+	// ★ fix-render-bundled-clip-audio：lane A 的输入时间线（遍历**全部** video_track，不只投影主轨——
+	// pickPreviewMainTrack 是**视觉**主轨选择器，与音源覆盖面无关）。判据不过 / 素材无音轨 /
+	// 素材本地缺席的 clip 已在 laneATimeline 里降级成等长 gap；整轨一段都不发声
+	// （如 muted 的 B-roll、颗粒、黑底垫轨）则**不建 lane**。
+	// ⚠️ 素材缺席只降级不抛：`local-ffmpeg-render` 既有条款「overlay-only 素材缺失不阻断渲染」
+	// （add-matrix-lay-tracks）在本件里 MUST 保持——主轨素材缺席仍由视频链照旧硬拒。
+	const usableSource = (id: string | number): boolean =>
+		materialPaths[String(id)] !== undefined && hasAudio(id);
+	const laneAInputs = sortedV
+		.map((t, i) => ({ t, i, ...laneATimeline(t, usableSource) }))
+		.filter((x) => x.audible > 0);
+
+	const totalClips =
+		[mainVideoTrack, ...audioTracks].reduce((n, t) => n + (t.track_timeline?.length || 0), 0) +
+		// lane A 里**非主轨**那部分是新增的图规模（主轨的 clip 已在上面数过一遍）
+		laneAInputs.reduce((n, x) => n + (x.t === mainVideoTrack ? 0 : x.audible), 0);
 	if (totalClips > MAX_CLIPS) throw new Error(`clip 总数 ${totalClips} 超过上限 ${MAX_CLIPS}`);
 
 	const width = Math.trunc(gtrk.video_size[0]);
@@ -209,7 +315,19 @@ export function buildFilterGraph(
 		normTracks.push(els);
 		aLens.push(end);
 	}
-	const total = aLens.length ? Math.max(vEnd, ...aLens) : vEnd;
+	// lane A 归一（音量走契约双层折叠 clip.volume ?? track.volume + 取值域启发式，与 audio_track 同一套零件）
+	const laneA: { els: Element[]; end: number; clips: number }[] = [];
+	for (const x of laneAInputs) {
+		let els: Element[];
+		let end: number;
+		try {
+			[els, end] = normalizeTrack(x.timeline, typeof x.t.volume === "number" ? x.t.volume : undefined);
+		} catch (e) {
+			throw new Error(`video_track[${x.t.track_index ?? x.i}] 内嵌音轨 lane 构建失败：${(e as Error).message}`);
+		}
+		laneA.push({ els, end, clips: x.audible });
+	}
+	const total = Math.max(vEnd, ...aLens, ...laneA.map((l) => l.end));
 	if (total <= 0) throw new Error("时间线总时长为 0");
 	if (total > vEnd + 1e-6) vElements.push({ kind: "gap", duration: total - vEnd });
 
@@ -249,11 +367,10 @@ export function buildFilterGraph(
 	});
 	chains.push(vLabels.map((x) => `[${x}]`).join("") + `concat=n=${vLabels.length}:v=1:a=0[vout]`);
 
-	// 音频轨（0..N）
-	const trackLabels: string[] = [];
-	for (let ti = 0; ti < normTracks.length; ti++) {
-		const els = normTracks[ti];
-		const end = aLens[ti];
+	/** 一条音频 lane：逐元素 atrim/asetpts/aresample/aformat/[volume]/afade（空档 anullsrc），
+	 *  尾部补齐到 total 后 concat 成与时间线等长的连续 lane。lane A 与 audio_track 共用**同一套**
+	 *  滤镜语义（主规格钉死的音频链，本件逐字不改，只是把输入从哪来这一面补上）。 */
+	const emitLane = (els: Element[], end: number): string => {
 		if (total > end + 1e-6) els.push({ kind: "gap", duration: total - end });
 		const segLabels: string[] = [];
 		for (const el of els) {
@@ -285,32 +402,53 @@ export function buildFilterGraph(
 		}
 		const lab = label();
 		chains.push(segLabels.map((x) => `[${x}]`).join("") + `concat=n=${segLabels.length}:v=0:a=1[${lab}]`);
-		trackLabels.push(lab);
-	}
+		return lab;
+	};
+
+	// lane A（视频 clip 内嵌音轨，按 track_index 序）→ 再接既有 audio_track lanes（0..N），并列进 amix
+	const trackLabels: string[] = [];
+	for (const l of laneA) trackLabels.push(emitLane(l.els, l.end));
+	for (let ti = 0; ti < normTracks.length; ti++) trackLabels.push(emitLane(normTracks[ti], aLens[ti]));
+
+	const audio: RenderAudioInfo = {
+		lanes: trackLabels.length,
+		embeddedClips: laneA.reduce((n, l) => n + l.clips, 0),
+		audioTrackClips: normTracks.reduce((n, els) => n + els.filter((e) => e.kind === "clip").length, 0),
+		silent: trackLabels.length === 0,
+	};
 
 	if (trackLabels.length === 0) {
+		// 零音源：出真静音轨（没有可收的东西，不施母带）。诚实告知由 renderGtrk / 命令层负责，
+		// MUST NOT 静默出无声片——2026-09-04 事故的行为形态就是这个。
 		chains.push(`anullsrc=r=${AUDIO_SAMPLE_RATE}:cl=${AUDIO_LAYOUT},atrim=end=${f6(total)}[aout]`);
 	} else if (trackLabels.length === 1) {
-		chains.push(`[${trackLabels[0]}]anull[aout]`);
+		// 单 lane 也走母带（口径与客户端一致：单人声无 BGM 的工程不能出另一种听感）
+		chains.push(`[${trackLabels[0]}]${MASTER_CHAIN}[aout]`);
 	} else {
 		chains.push(
 			trackLabels.map((x) => `[${x}]`).join("") +
-				`amix=inputs=${trackLabels.length}:duration=longest:normalize=0[aout]`,
+				`amix=inputs=${trackLabels.length}:duration=longest:normalize=0,${MASTER_CHAIN}[aout]`,
 		);
 	}
 
-	return { inputs, graph: chains.join(";"), total };
+	return { inputs, graph: chains.join(";"), total, audio };
 }
 
 /** 从 gtrk.materials 建 {id: 本地绝对路径}。
  * 校验范围收窄为**被渲染实际消费的素材**（主视频轨 + 全部音频轨引用；add-matrix-lay-tracks）：
  * 本地渲染不合成 overlay，未被消费的素材（如 B-roll 候选代理）缺失不应阻断与它无关的渲染。
- * 被消费素材缺 path/文件缺失仍硬拒（行为不变）。导出供单测。 */
+ * 被消费素材缺 path/文件缺失仍硬拒（行为不变）。
+ *
+ * ★ fix-render-bundled-clip-audio 追加**软消费**一档：未静音的非主轨 `video_track`，其 clip 的
+ * 内嵌音轨会进混音（lane A），故素材同样要落进本表——但缺席时**只降级 + WARN 不硬拒**：
+ * 上面那条既有条款（overlay-only 素材缺失不阻断渲染）在本件里 MUST 保持，
+ * 而「拿不到可读诊断」的洞由这条 WARN 补上（不再等到 ffmpeg 层才炸）。导出供单测。 */
 export function materialPathsFromGtrk(
 	gtrk: GtrkV1,
 	opts: { gtrkDir?: string } = {},
 ): Record<string, string> {
-	const used = new Set<string>();
+	/** 硬消费：视觉主轨 + 全部音频轨 —— 缺席即硬拒（行为不变）。 */
+	const hard = new Set<string>();
 	const sortedV = sortedTracks(gtrk.video_track || []);
 	// 与快照渲染同一主轨口径（跳过黑底垫轨——fix-broll-zorder-contract-drift 连锁）
 	const consumers = sortedV.length ? [pickPreviewMainTrack(gtrk, sortedV), ...(gtrk.audio_track || [])] : [...(gtrk.audio_track || [])];
@@ -318,23 +456,75 @@ export function materialPathsFromGtrk(
 		if (!t) continue;
 		for (const c of t.track_timeline || []) {
 			const m = (c as { material?: unknown }).material;
-			if (m != null) used.add(String(m));
+			if (m != null) hard.add(String(m));
 		}
 	}
+	/** 软消费：只被 lane A 用到的叠加轨素材 —— 缺席只降级（该轨原声不进混音）。 */
+	const soft = new Set<string>();
+	for (const id of audioSourceMaterialIds(gtrk)) if (!hard.has(id)) soft.add(id);
+
 	const map: Record<string, string> = {};
 	for (const m of gtrk.materials || []) {
-		if (!used.has(String(m.id))) continue; // 未被主轨/音轨消费：不校验不入表
-		if (!m.path) throw new Error(`gtrk 素材 ${m.id} 缺 path（source_path），无法本地渲染`);
+		const id = String(m.id);
+		const isHard = hard.has(id);
+		if (!isHard && !soft.has(id)) continue; // 谁都没消费：不校验不入表
+		if (!m.path) {
+			if (isHard) throw new Error(`gtrk 素材 ${m.id} 缺 path（source_path），无法本地渲染`);
+			log.warn(`叠加轨素材 ${id} 缺 path，其原声不进混音（画面本就不合成，渲染继续）`);
+			continue;
+		}
 		// 相对路径恒以 .gtrk 所在目录为基准（与 material-integrity 同一口径；按 CWD 裸测是历史坑，
 		// 黑片 assets/builtin/ 等相对素材在任意 CWD 下渲染都会被误判缺失）
 		const abs = !isAbsolute(m.path) && opts.gtrkDir ? resolve(opts.gtrkDir, m.path) : m.path;
-		if (!existsSync(abs)) throw new Error(`gtrk 素材文件不存在：${m.path}`);
-		map[String(m.id)] = abs;
+		if (!existsSync(abs)) {
+			if (isHard) throw new Error(`gtrk 素材文件不存在：${m.path}`);
+			log.warn(`叠加轨素材 ${id} 的文件不存在（${m.path}），其原声不进混音（渲染继续）`);
+			continue;
+		}
+		map[id] = abs;
 	}
 	return map;
 }
 
-/** 渲染 gtrk 工程为成片 mp4。返回 {outputPath, duration}。 */
+/** 探测 lane A 候选素材是否真的带内嵌音轨。
+ *
+ * 必要性：`[i:a]` 打在无音轨输入（黑底 png、静音空镜…）上会让**整条** filter graph 直接失败。
+ * 探不动时按「无音轨」降级 + 打 WARN——宁可这一段静音，也不让整片渲染硬炸（良性降级要可读）。
+ * 按**路径**缓存，同一素材多 clip 只探一次。 */
+function probeEmbeddedAudio(
+	ffprobe: string,
+	gtrk: GtrkV1,
+	materialPaths: Record<string, string>,
+): (materialId: string | number) => boolean {
+	const byId = new Map<string, boolean>();
+	const byPath = new Map<string, boolean>();
+	for (const id of audioSourceMaterialIds(gtrk)) {
+		const path = materialPaths[id];
+		if (path === undefined) {
+			byId.set(id, false);
+			continue;
+		}
+		if (!byPath.has(path)) {
+			try {
+				const j = ffprobeJson(ffprobe, [
+					"-v", "error",
+					"-select_streams", "a",
+					"-show_entries", "stream=index",
+					"-of", "json",
+					path,
+				]) as { streams?: unknown[] };
+				byPath.set(path, Array.isArray(j.streams) && j.streams.length > 0);
+			} catch (e) {
+				log.warn(`素材 ${id} 的音轨探测失败，按「无内嵌音轨」处理（该段成片将静音）：${(e as Error).message}`);
+				byPath.set(path, false);
+			}
+		}
+		byId.set(id, byPath.get(path) === true);
+	}
+	return (id) => byId.get(String(id)) === true;
+}
+
+/** 渲染 gtrk 工程为成片 mp4。返回 {outputPath, duration, audio}。 */
 export async function renderGtrk(
 	gtrk: GtrkV1,
 	outputPath: string,
@@ -345,14 +535,28 @@ export async function renderGtrk(
 		gtrkDir?: string;
 		onLine?: (l: string) => void;
 	} = {},
-): Promise<{ outputPath: string; duration: number }> {
+): Promise<{ outputPath: string; duration: number; audio: RenderAudioInfo }> {
 	const codec = opts.codec ?? "h264";
 	if (codec !== "h264") throw new Error(`v1 仅支持 h264，实际 ${codec}`);
 	const crf = opts.crf ?? DEFAULT_CRF;
 
-	const { ffmpeg } = requireFfmpeg(opts.ffmpegPath);
+	const { ffmpeg, ffprobe } = requireFfmpeg(opts.ffmpegPath);
 	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });
-	const { inputs, graph, total } = buildFilterGraph(gtrk, materialPaths, { crf });
+	const materialHasAudio = probeEmbeddedAudio(ffprobe, gtrk, materialPaths);
+	const { inputs, graph, total, audio } = buildFilterGraph(gtrk, materialPaths, { crf, materialHasAudio });
+
+	// ★ fix-render-bundled-clip-audio：音源覆盖面**开口说话**——2026-09-04 事故正是
+	// 「人声整条没进混音，却一声不吭出了 −70 LUFS 的数字静音成片」。
+	if (audio.silent) {
+		log.info(
+			"本片无音源（既无带音轨的视频 clip、也无 audio_track），将出**无声成片**——" +
+				"若这不是你要的，检查轨/clip 的 muted 开关与音频轨是否铺上。",
+		);
+	} else {
+		log.info(
+			`音源：${audio.lanes} 条发声轨（视频内嵌音轨 ${audio.embeddedClips} 段 / 音频轨 ${audio.audioTrackClips} 段）`,
+		);
+	}
 
 	const filterFile = join(tmpdir(), `gtrk-filter-${process.pid}-${inputs.length}.txt`);
 	await writeFile(filterFile, graph, "utf8");
@@ -368,7 +572,8 @@ export async function renderGtrk(
 			outputPath,
 		);
 		await runFfmpeg(ffmpeg, args, opts.onLine);
-		return { outputPath, duration: total };
+		// 零音源同样照常产出、退出码 0（成片不因无声而失败）——诚实体现在上面的 INFO 与 audio.silent 上
+		return { outputPath, duration: total, audio };
 	} finally {
 		await unlink(filterFile).catch(() => {});
 	}

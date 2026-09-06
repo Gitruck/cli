@@ -39,8 +39,32 @@ export const QC_THRESHOLDS = {
 	/** silencedetect：静音判据（dB）与最短静音时长。 */
 	silenceNoiseDb: -50,
 	silenceMinDurSec: 2,
-	/** true peak 上限（dBTP，ebur128）——超过即判削波风险。 */
+	/** 整片无声阈值（LUFS，ebur128 integrated loudness）——低于此值即判**整片没有声音**（error）。
+	 * 判据取整片响度而非静音覆盖比例：比例要先逐段检测再聚合、且整条链受 silenceNoiseDb 门限影响，
+	 * 而 integrated loudness 是单一测量值，直接表达「这条片子没声音」。
+	 * 实测标尺（2026-09-04 真机事故）：完全无音源残片 −70.0 / 只有轻 BGM 约 −34 / 正常人声+BGM −14.0。
+	 * −50 落在「完全没声」与「声音很轻」之间，两侧各留 16~20 dB 余量（取 −60 太脆会漏判带底噪的无声片，
+	 * 取 −40 逼近轻 BGM 下沿有误伤风险）。 */
+	fullFilmSilenceLufs: -50,
+	/** true peak **告警线**（dBTP，ebur128）——超过即提示「已越 EBU R128 交付上限」。
+	 * ⚠️ 这条**不是缺陷线**（fix-qc-truepeak-parse §0.1 拍板）：−1 dBTP 是 R128 的**广播交付**天花板，
+	 * 其前提是内容已按 −23/−14 LUFS 做过响度归一；而 gtrk 成片实测 I 值在 −10…−16 LUFS、根本没归一，
+	 * 只搬天花板不搬地板属口径混用。实测 11 条真语料 **8 条（73%）越过 −1**（上限 +0.6）——
+	 * 在本产品语料上它是**常态线**。判 error 会让缺省 `--fail-on error` 恒红、真问题淹进噪音
+	 * （本仓已栽过同形跟头：零 delta 恒红积到 23 条）。故降级为 warn，缺陷线另立 truePeakErrorDbtp。 */
 	truePeakDbtp: -1,
+	/** true peak **严重线**（dBTP）——超过即判真爆音（error）。
+	 * 实测标尺（2026-09-04）：真语料上限 **+0.6** / 真·硬削波重编码后 **+1.6** / 合成过载 **+6.9**。
+	 * 取 +1.0 使分界线两侧各留 0.4 与 0.6 dB。 */
+	truePeakErrorDbtp: 1.0,
+	/** 样本域削波比例上限（`Abs Peak count / Number of samples`，**s16 支路下测**）——超过即判 error。
+	 * 存在理由：true peak 单腿有**实证盲区**——硬削波在 0 dBFS 处被削平时 TP 仅 +0.1 dBTP，
+	 * 与正常成片（−1.5…+0.6）同区间，TP 看不见它。两条腿分工，不冗余。
+	 * 实测标尺（2026-09-04）：真·硬削波 s16 原件 77500/220500 = **0.35**；
+	 * 正常成片（案例7 重渲）1/13254656 = **7.5e-8**。1e-5 两侧各留约四个数量级。
+	 * ⚠️ `Flat factor` **实证否决、MUST NOT 当判据**：真语料 TP+0.6 那条 flat=14.47、
+	 * 真·硬削波 13.70，几乎同值——它测的是「s16 钳位发生过」不是「源头被削过」，只可作 evidence 佐证。 */
+	clipSampleRatio: 1e-5,
 	/** 视频/音频流时长差上限（秒）——超过即判音画不同步（渲染帧数漂移的机读证据）。 */
 	avDurationDiffSec: 0.1,
 } as const;
@@ -54,7 +78,10 @@ export type QcType =
 	| "clip"
 	| "silence"
 	| "av_drift"
-	| "vfr";
+	| "vfr"
+	/** 某检测项本次**未能生效**（测量值解析不到）——不是「该项通过」。
+	 * 独立成型而非复用 `clip`：把解析失败报成 `clip` 会被读成「测出了削波」，正好是本件要根治的歧义。 */
+	| "measure_unavailable";
 
 export interface QcItem {
 	type: QcType;
@@ -145,20 +172,198 @@ export function parseSilenceDetect(stderr: string): { st: number; ed: number }[]
 	return out;
 }
 
-/** astats/ebur128：全片削波样本数与 true peak（dBTP）。 */
-export function parseAudioStats(stderr: string): { clipCount: number; truePeakDbtp: number | null } {
-	let clipCount = 0;
-	for (const m of stderr.matchAll(/Number of clipped samples:\s*(\d+)/g)) clipCount += Number(m[1]);
+/**
+ * astats/ebur128：全片削波样本数、true peak（dBTP）与 **integrated loudness（I 值，LUFS）**。
+ *
+ * I 值取 stderr 里**最后一处** `I: <n> LUFS`——ebur128 逐帧行与 Summary 段用同一种写法，
+ * Summary 必然在最后，故末次即全片整合值（fix-qc-fullfilm-silence-severity）。
+ * ⚠️ 完全数字静音时 ffmpeg 可能打 `I: -inf LUFS`（也可能打到 EBU 绝对门限 −70.0）：
+ * `-inf` SHALL 解析成 `Number.NEGATIVE_INFINITY`（= 远低于任何阈值），
+ * MUST NOT 因「不是有限数字」退回 null —— 那会让最严重的形态（整片一点声都没有）反而漏判。
+ * 本函数**不新增解码趟次**：消费的就是 scanFinalCut 音频那一趟已在跑的 ebur128 滤镜输出。
+ */
+export function parseAudioStats(stderr: string): {
+	/** 样本域削波比例 `Abs Peak count / Number of samples`（s16 支路）；测不到为 null。 */
+	clipSampleRatio: number | null;
+	absPeakCount: number | null;
+	sampleCount: number | null;
+	/** 仅作 evidence 佐证，MUST NOT 参与判定（见 QC_THRESHOLDS.clipSampleRatio 的实证否决）。 */
+	flatFactor: number | null;
+	truePeakDbtp: number | null;
+	integratedLufs: number | null;
+} {
+	// ── true peak：**跨行**取值（fix-qc-truepeak-parse）───────────────────────
+	// ebur128 Summary 由三个标题行各领若干缩进子行构成，数值在标题行**之后**：
+	//     True peak:
+	//       Peak:      -11.7 dBFS
+	// 旧写法 /True peak:\s*(-?[0-9.]+|-inf)/ 按同行匹配 ⇒ 紧跟的实际字符是 `P`(Peak:) ⇒ **永不命中**
+	// ⇒ truePeakDbtp 恒 null ⇒ 消费方的 `!== null` 防呆把整个削波检测静默吞掉，潜伏了一整个生命周期。
+	// ⚠️ 锚点 MUST 保持在 `True peak:` 标题行上、只在其后续子行里找 `Peak:`：同一份 stderr 里近邻键名
+	// 密集（astats 的 `Peak level dB:` / `Peak count:` / `Abs Peak count:`、逐帧行的 `TPK:` / `FTPK:`），
+	// 放宽成裸 `Peak:` 会吃错值。
 	let truePeak: number | null = null;
-	// ebur128 summary 段：`Peak:` 之后的 `True peak: -0.3 dBFS`；逐个取最大
-	for (const m of stderr.matchAll(/True peak:\s*(-?[0-9.]+|-inf)/g)) {
-		const v = m[1] === "-inf" ? Number.NEGATIVE_INFINITY : Number(m[1]);
+	const takePeak = (raw: string): void => {
+		const v = /^-?inf$/i.test(raw) ? (raw.startsWith("-") ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY) : Number(raw);
+		if (Number.isNaN(v)) return;
 		if (truePeak === null || v > truePeak) truePeak = v;
+	};
+	// 主判据：跨行（实测格式）。数值三形态：负数 / **无符号正数**（超 0 dBFS 时无正号）/ `-inf`。
+	for (const m of stderr.matchAll(/True peak:[^\n]*\r?\n\s*Peak:\s*(-?inf|-?[0-9.]+)\s*dBFS/gi)) takePeak(m[1] as string);
+	// 兜底：同行写法。异版 ffmpeg 若把数值写回同一行不至于哑；有下面「解析失败可见」那条闸兜着，
+	// 容错在这里是纯收益（认得出照常判、认不出照样喊），不会掩盖格式漂移。
+	for (const m of stderr.matchAll(/True peak:[ \t]*(-?inf|-?[0-9.]+)\s*dBFS/gi)) takePeak(m[1] as string);
+
+	// ── 样本域削波：取 astats **Overall** 段（该段在最后，故取末次命中）────────
+	// ⚠️ 旧写法匹配 `Number of clipped samples:` —— **astats 根本没有这个指标**
+	// （`-h filter=astats` 的 measure_overall/measure_perchannel 枚举表里无任何 clipped 项），该行永不出现。
+	const last = (re: RegExp): number | null => {
+		let v: number | null = null;
+		for (const m of stderr.matchAll(re)) v = Number(m[1]);
+		return v !== null && Number.isFinite(v) ? v : null;
+	};
+	const absPeakCount = last(/Abs Peak count:\s*([0-9.]+)/g);
+	const sampleCount = last(/Number of samples:\s*([0-9.]+)/g);
+	const flatFactor = last(/Flat factor:\s*([0-9.]+)/g);
+	// 分母取**每声道**样本数、分子在多声道时可能是跨声道聚合 ⇒ 比值最多虚高约声道数倍。
+	// 判据两侧有约四个数量级余量，这点系统偏差不影响分级（实测：硬削 0.35 vs 正常 7.5e-8）。
+	const clipSampleRatio = absPeakCount !== null && sampleCount !== null && sampleCount > 0 ? absPeakCount / sampleCount : null;
+
+	let integrated: number | null = null;
+	for (const m of stderr.matchAll(/\bI:\s*(-?[0-9.]+|-inf)\s*LUFS/g)) {
+		integrated = m[1] === "-inf" ? Number.NEGATIVE_INFINITY : Number(m[1]);
 	}
-	return { clipCount, truePeakDbtp: truePeak };
+	if (integrated !== null && Number.isNaN(integrated)) integrated = null;
+	return { clipSampleRatio, absPeakCount, sampleCount, flatFactor, truePeakDbtp: truePeak, integratedLufs: integrated };
 }
 
 // ── 判定（纯函数，供单测直调）────────────────────────────────────────────
+
+/**
+ * **整片无声**判定（fix-qc-fullfilm-silence-severity · qc-command「整片无声」条款）。
+ *
+ * 2026-09-04 真机事故：一条整片数字静音（−70.0 LUFS）的成片，QC 报「严重 0 · 提示 1」，
+ * agent 据此报告「渲染完成、质检严重 0」，差点被当成品收下。根因是逐段 silence 一律 `warn`，
+ * 不区分「片中一小段留白」与「整片都没声音」——前者常见且多半无害，后者是交付级缺陷。
+ *
+ * 判据是**整片 integrated loudness**，而非静音段覆盖比例：比例要先逐段检测再聚合、
+ * 且整条链受 `silenceNoiseDb` 门限影响；I 值是单一测量值，直接表达「这片子没声音」。
+ * 覆盖比例只作 evidence 佐证（让人一眼分清「一段留白」与「整片没声」），MUST NOT 反过来当判据。
+ *
+ * ⚠️ `-inf`（完全数字静音）经 parseAudioStats 解析成 `NEGATIVE_INFINITY`，在此照常小于阈值 ⇒ 判 error，
+ * MUST NOT 因「不是有限数字」跳过判定。evidence 里落成字符串 `"-inf"`（JSON 无 Infinity 字面量）。
+ *
+ * 逐段 silence 条目的 `warn` 不受本判定影响（两者并存，见 scanFinalCut）。
+ */
+export function fullFilmSilenceItem(
+	integratedLufs: number | null,
+	silences: { st: number; ed: number }[],
+	durationSec: number,
+	thresholdLufs: number = QC_THRESHOLDS.fullFilmSilenceLufs,
+): QcItem | null {
+	if (integratedLufs === null || !(integratedLufs < thresholdLufs)) return null;
+	const silentSec = silences.reduce((n, s) => n + Math.max(0, s.ed - s.st), 0);
+	const dur = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+	return {
+		type: "silence",
+		severity: "error",
+		st: 0,
+		ed: r3(dur),
+		evidence: {
+			full_film_silence: true,
+			integrated_lufs: Number.isFinite(integratedLufs) ? r3(integratedLufs) : "-inf",
+			threshold_lufs: thresholdLufs,
+			// 佐证（非判据）：静音总时长与覆盖比例
+			silent_sec: r3(silentSec),
+			silent_ratio: dur > 0 ? r3(Math.min(1, silentSec / dur)) : null,
+			note: "整片无声：全片响度（integrated loudness）低于阈值，成片没有声音——不是片中留白，是交付级缺陷；静音时长/覆盖比例仅作佐证",
+		},
+	};
+}
+
+/**
+ * **爆音/削波**判定（fix-qc-truepeak-parse · qc-command「解析实证对齐」条款）。
+ *
+ * 两条腿、两条线（§0.1/§0.2 拍板）：
+ *  - **样本域**：`Abs Peak count / Number of samples`（s16 支路）> `clipSampleRatio` ⇒ **error**。
+ *    专治 true peak 的盲区——硬削波在 0 dBFS 被削平时 TP 只有 +0.1，与正常成片同区间。
+ *  - **true peak**：> `truePeakErrorDbtp`（+1.0）⇒ **error**；> `truePeakDbtp`（−1）⇒ **warn**。
+ *    warn 那条报的是「已越 R128 交付上限、平台二压可能削」，是可行动信号但不是缺陷。
+ *
+ * 本函数**只在两条腿都拿到读数时才下结论**；解析不到由 {@link audioParseFailureItem} 单独喊，
+ * MUST NOT 在这里用 `!== null` 悄悄跳过——那正是本件要根治的病。
+ */
+export function clipItem(
+	truePeakDbtp: number | null,
+	clipSampleRatio: number | null,
+	durationSec: number,
+	flatFactor: number | null = null,
+	th: { warnDbtp?: number; errorDbtp?: number; ratio?: number } = {},
+): QcItem | null {
+	const warnLine = th.warnDbtp ?? QC_THRESHOLDS.truePeakDbtp;
+	const errLine = th.errorDbtp ?? QC_THRESHOLDS.truePeakErrorDbtp;
+	const ratioLine = th.ratio ?? QC_THRESHOLDS.clipSampleRatio;
+	const overRatio = clipSampleRatio !== null && clipSampleRatio > ratioLine;
+	const overErr = truePeakDbtp !== null && truePeakDbtp > errLine;
+	const overWarn = truePeakDbtp !== null && truePeakDbtp > warnLine;
+	if (!overRatio && !overErr && !overWarn) return null;
+	const severity: QcSeverity = overRatio || overErr ? "error" : "warn";
+	return {
+		type: "clip",
+		severity,
+		st: 0,
+		ed: r3(durationSec),
+		evidence: {
+			// −inf/+inf 无 JSON 字面量，落字符串（同姊妹件 integrated_lufs 的处置）
+			true_peak_dbtp: truePeakDbtp === null ? null : Number.isFinite(truePeakDbtp) ? r3(truePeakDbtp) : truePeakDbtp > 0 ? "inf" : "-inf",
+			true_peak_warn_dbtp: warnLine,
+			true_peak_error_dbtp: errLine,
+			clip_sample_ratio: clipSampleRatio === null ? null : Number(clipSampleRatio.toPrecision(3)),
+			clip_sample_ratio_threshold: ratioLine,
+			// 佐证（非判据）：flat factor 对「源头被削」无判别力，只说明 s16 钳位发生过
+			flat_factor: flatFactor === null ? null : r3(flatFactor),
+			note:
+				severity === "error"
+					? "音频爆音：样本域削波比例越限或 true peak 越过严重线，成片过响已失真"
+					: "true peak 已越 EBU R128 交付上限（−1 dBTP）——不是缺陷，但平台二压时可能被削，需要更大余量就压低母带",
+		},
+	};
+}
+
+/**
+ * **测量项未生效**自陈（qc-command「解析失败 SHALL 可见」条款）。
+ *
+ * ★ 这条是本件的**根本闸**，比病灶本身更要紧：true peak 恒 `null` 之所以能潜伏一整个产品生命周期，
+ * 正是因为消费方 `truePeakDbtp !== null` 的防呆让「解析失败」与「测出来没超限」在下游完全同形
+ * ——不会红、只会静默放行。凡以 `x !== null` 保护的测量判定，`null` 分支 SHALL 是**可见分支**。
+ *
+ * 取 `warn` 而非 `info`（§0.4）：`gtrk render` 收口那条路（`runPostRenderQc`）**只打印 error 条目**，
+ * `info` 等于没说；但工具链问题也不该阻断出片、不该让缺省 `--fail-on error` 变红。
+ * 无音频流时不适用（那由既有音画规整条款处理），MUST NOT 误报。
+ */
+export function audioParseFailureItem(
+	hasAudioStream: boolean,
+	missing: { truePeak: boolean; clipSampleRatio: boolean },
+	durationSec: number,
+	ffmpegPath?: string,
+): QcItem | null {
+	if (!hasAudioStream) return null;
+	const lost: string[] = [];
+	if (missing.truePeak) lost.push("true_peak_dbtp");
+	if (missing.clipSampleRatio) lost.push("clip_sample_ratio");
+	if (lost.length === 0) return null;
+	return {
+		type: "measure_unavailable",
+		severity: "warn",
+		st: 0,
+		ed: r3(durationSec),
+		evidence: {
+			measure: "clip",
+			missing: lost,
+			ffmpeg: ffmpegPath ?? null,
+			note: "削波判定本次未生效：上列测量值未能从 ffmpeg 输出解析到（可能是 ffmpeg 换了输出格式）——这不等于「爆音检测已通过」，请勿据此判定成片无爆音",
+		},
+	};
+}
 
 /** 过短镜头：相邻跳变间隔 ≤ flashMaxSec 者（区间 = 两跳变之间）。纯阈值，**不判严重级**——
  * 定级要看端点来源（拼接切 vs 段内跳切），那是 scanFinalCut 在工程对表之后做的事。 */
@@ -490,29 +695,43 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 	// ── 音频趟：silencedetect + astats + ebur128 并联（一次解码）──
 	if (a) {
 		opts.onProgress?.("音频趟：静音 + 削波 + true peak 检测…");
+		// ⚠️ **顺序是硬约束**（fix-qc-truepeak-parse §0.2 实证）：
+		//   `aformat=sample_fmts=s16` MUST 排在 `ebur128` **之后**、`astats` **之前**。
+		//   · 放在 astats 之前：float 解码下 astats 的削波指标会塌成常量（Flat factor 0 / Abs Peak count 1），
+		//     样本域这条腿丧失判别力（实测：插了 s16 后同一 AAC 恢复成 flat 13.70 / Abs Peak 79）。
+		//   · 放在 ebur128 之前会打死另一条腿：s16 在 0 dBFS 处硬钳，会把同一条硬削波语料的
+		//     true peak 从 +1.6 压回 +0.1。
+		//   `ebur128` 透传音频 ⇒ 仍是**一趟解码**，MUST NOT 新增趟次。
 		const aFilter = [
 			`silencedetect=n=${T.silenceNoiseDb}dB:d=${T.silenceMinDurSec}`,
-			"astats=metadata=1",
 			"ebur128=peak=true",
+			"aformat=sample_fmts=s16",
+			"astats=metadata=1",
 		].join(",");
 		const aErr = await captureStderr(ff.ffmpeg, ["-i", input, "-af", aFilter, "-f", "null", "-"]);
-		for (const s of parseSilenceDetect(aErr)) {
+		const silences = parseSilenceDetect(aErr);
+		for (const s of silences) {
 			items.push({ type: "silence", severity: "warn", st: r3(s.st), ed: r3(s.ed), evidence: { sec: r3(s.ed - s.st) } });
 		}
-		const { clipCount, truePeakDbtp } = parseAudioStats(aErr);
-		const overPeak = truePeakDbtp !== null && truePeakDbtp > T.truePeakDbtp;
-		if (clipCount > 0 || overPeak) {
-			items.push({
-				type: "clip",
-				severity: "error",
-				st: 0,
-				ed: r3(aDur ?? 0),
-				evidence: {
-					clipped_samples: clipCount,
-					true_peak_dbtp: truePeakDbtp,
-					note: "音频触顶（削波样本 / true peak 越限），成片过响易爆音",
-				},
-			});
+		const { clipSampleRatio, absPeakCount, sampleCount, flatFactor, truePeakDbtp, integratedLufs } = parseAudioStats(aErr);
+		// 整片无声（error）：与上面的逐段 warn 条目**并存**——逐段 warn 是片中留白，本条是「整片没声音」。
+		// 复用同一趟已跑的 ebur128，零新增解码。
+		const fullSilence = fullFilmSilenceItem(integratedLufs, silences, aDur ?? vDur ?? 0);
+		if (fullSilence) items.push(fullSilence);
+		// 爆音/削波（fix-qc-truepeak-parse）：两条腿两条线，判据与阈值全在 clipItem / QC_THRESHOLDS。
+		const clip = clipItem(truePeakDbtp, clipSampleRatio, aDur ?? 0, flatFactor);
+		if (clip) items.push(clip);
+		// 解析失败必须可见：有音频流却没拿到读数 ⇒ 明说「本次未生效」，MUST NOT 静默当作通过。
+		const unavailable = audioParseFailureItem(
+			true, // 本分支的前提就是 ffprobe 见到了 audio stream（`if (a)`）
+			{ truePeak: truePeakDbtp === null, clipSampleRatio: clipSampleRatio === null },
+			aDur ?? 0,
+			ff.ffmpeg,
+		);
+		if (unavailable) {
+			(unavailable.evidence as Record<string, unknown>).abs_peak_count = absPeakCount;
+			(unavailable.evidence as Record<string, unknown>).sample_count = sampleCount;
+			items.push(unavailable);
 		}
 	}
 

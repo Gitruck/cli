@@ -9,6 +9,7 @@ import { readUserConfig, configPath, DEFAULT_API_BASE } from "../lib/user-config
 import { columnsDir } from "../lib/column-config";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
+import { skillFreshnessDoctorRow } from "../lib/skill-freshness";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 
 export function registerDoctor(program: Command): void {
@@ -107,6 +108,10 @@ export async function runDoctor(): Promise<boolean> {
 			? `${col}${colFile && existsSync(colFile) ? `（${colFile}）` : `（⚠ 配置文件缺失：${colFile}，将回落内置默认）`}`
 			: "内置默认 —— 想建自己栏目的风格体系，跑 /gtrk-style-maker（不建也能直接用默认）",
 	});
+
+	// skill 新鲜度（fix-skill-install-staleness）：已装 skill 与包内正本是否同步。
+	// 恒 ok/warn 不挡路；未装过（无 manifest）时判不出，如实说而不是装作没事。
+	rows.push(skillFreshnessDoctorRow());
 
 	// 本地渲染工具（ffmpeg）：判 warn 不判 fail —— 只出工程文件、不本地渲染的用户不受阻
 	const ff = resolveFfmpeg();

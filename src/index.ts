@@ -66,6 +66,7 @@ const { version } = JSON.parse(readFileSync(join(packageRoot(), "package.json"),
 };
 
 import { firstRunTutorialOnce } from "./lib/first-run-tutorial";
+import { skillFreshnessNoticeOnce } from "./lib/skill-freshness";
 
 const program = new Command();
 
@@ -80,6 +81,19 @@ program
 // MUST NOT 阻断命令、MUST NOT 要交互输入 —— 详见 src/lib/first-run-tutorial.ts 文件头。
 program.hook("preAction", () => {
 	firstRunTutorialOnce();
+});
+
+// ── skill 过期检测（fix-skill-install-staleness · ③ 层）──
+// 已装 skill 是「装完即冻结的快照」，npm 升级只换包、不刷它；2026-09-04 主理人机器上
+// 五个 skill 停在 43 天前，而全链没有任何一处会告诉他。这里挂一次**廉价**核对：
+// 只 readdir+stat 比形状签名（MUST NOT 读 skill 正文、MUST NOT 联网），
+// 一致时零输出，不一致才提示一次并给出准确修复命令。异常一律吞掉，MUST NOT 拦路。
+// 只对**需要 skill 的命令**做（白名单在 src/lib/skill-freshness.ts）——doctor/tool/deps 不提示。
+program.hook("preAction", (_thisCommand, actionCommand) => {
+	// 取顶层命令名：`gtrk matrix search` ⇒ matrix（白名单按顶层命令登记）
+	let top: Command = actionCommand;
+	while (top.parent && top.parent !== program) top = top.parent;
+	skillFreshnessNoticeOnce({ command: top.name() });
 });
 
 // ── 注册子命令（后续新增命令在此加一行）──

@@ -34,6 +34,7 @@ import {
 	parsePresetId,
 	orientationOf,
 	replaceSubtitleLane,
+	CAPTION_RESEW_GAP_SEC,
 	MIN_CAPTION_SEC,
 	SUBTITLE_FONT_FAMILY,
 	type SubtitleOrientation,
@@ -74,8 +75,13 @@ export interface SubtitleLayResult {
 	laneElements: number;
 	/** 幂等替换掉的既有字幕 lane 条数。 */
 	replacedLanes: number;
-	/** 短于最小可读时长（0.8s，客户端同标尺）被丢弃的投影实例数。 */
+	/** 短于最小可读时长（0.8s，客户端同标尺）被丢弃的**回缝后**字幕单元数。 */
 	droppedShort: number;
+	/**
+	 * 同句回缝（fix-subtitle-lay-duplicate-instances）并掉的投影实例数：智能剪辑把一句切成多片时，
+	 * 投影器对每片都吐整句文本，不回缝就是同一句在时间线上重复 N 遍。0 = 本次无一句被剪成多片。
+	 */
+	mergedCount: number;
 	/**
 	 * 拆窗切点退化次数（fix-caption-split-word-boundary）：浮动窗内既无标点/空白、又无合规词边界，
 	 * 只能退回字宽均分锚点的处数。>0 = 这几处仍可能切在词中；持续偏高说明内置词表的蒸馏语料不够。
@@ -190,12 +196,17 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 	const defaultUnits = orientation === "portrait" ? 13 : 20;
 	const maxUnits = opts.maxUnits != null ? Math.max(0, Number(opts.maxUnits) || 0) : defaultUnits;
 	const maxGapSec = opts.maxGap != null ? Math.max(0, Number(opts.maxGap) || 0) : 0.5;
-	const { captions, droppedShort, splitCount, splitFallbackCount, bridgedCount } = captionsFromProjection(
-		view.utterances,
-		{ maxUnits, maxGapSec },
-	);
+	// 同句回缝（fix-subtitle-lay-duplicate-instances）：`view.utterances` 的每条自带 `id`
+	// （ViewUtterance.id），`ProjectedUtterance.id` 是它的可选消费面 —— 结构化透传，无需另行组装。
+	// 回缝阈值是 lib 侧常量、**不接** --max-gap：--max-gap 0 关掉桥接时回缝仍生效。
+	const { captions, droppedShort, splitCount, splitFallbackCount, bridgedCount, mergedCount } =
+		captionsFromProjection(view.utterances, { maxUnits, maxGapSec });
+	if (mergedCount > 0)
+		log.info(
+			`同句回缝：${mergedCount} 个投影实例并回原句（阈值 ${CAPTION_RESEW_GAP_SEC}s，智能剪辑把一句切成多片，不并会出重复字幕）`,
+		);
 	if (droppedShort > 0) {
-		log.warn(`丢弃 ${droppedShort} 条短于最小可读时长（${MIN_CAPTION_SEC}s）的投影实例`);
+		log.warn(`丢弃 ${droppedShort} 条短于最小可读时长（${MIN_CAPTION_SEC}s）的字幕单元`);
 	}
 	// 退化 MUST NOT 静默（本仓「良性降级打可读 INFO」口径）：K=0 时不打后半句，别拿零值刷屏。
 	if (splitCount > 0)
@@ -248,6 +259,7 @@ export function runSubtitleLay(opts: SubtitleLayOpts): SubtitleLayResult {
 		laneElements: elements.length,
 		replacedLanes,
 		droppedShort,
+		mergedCount,
 		splitFallbackCount,
 		style: presetId,
 		color: colorId,

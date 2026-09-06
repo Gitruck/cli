@@ -38,6 +38,7 @@ const TYPE_LABEL: Record<string, string> = {
 	black: "黑帧/黑段",
 	freeze: "冻结画面",
 	clip: "音频削波",
+	measure_unavailable: "检测项未生效",
 	silence: "静音段",
 	av_drift: "音画时长不一致",
 	vfr: "成片非固定帧率",

@@ -63,6 +63,9 @@ export function registerRender(program: Command): void {
 						ok: true,
 						output: outMp4,
 						duration: result.duration,
+						// 音源盘点（fix-render-bundled-clip-audio）：lanes/embeddedClips/audioTrackClips/silent。
+						// 「零音源不静默」的机读通路——无声成片 MUST NOT 只在 stderr 留一行 INFO。
+						audio: result.audio,
 						...(qc ? { qc: qc.summary } : {}),
 					}),
 				);

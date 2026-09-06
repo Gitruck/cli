@@ -213,11 +213,14 @@ gtrk transcript "<长片>" --lang <开工⑦所答语种> --json   # 影视/游�
 #     MUST NOT 以「粤语传错」为由重跑（la 进 ASR 缓存键，换码必 cache miss、白扣一次时长）。详见 §二 ⑦ 注
 
 # ②③ 写稿（甲档出处共生 / 乙路对照表对齐）→ 检查点①拍板（§六）
-gtrk matrix material "<情绪 题材 检索词>" --scope audio --top-k 5 --commercial-only --json   # BGM 候选附试听
-#   ⚠️ 版权判断不在零件手里，在你手里：零件缺省 copyright_scope=all（**不筛**）。
-#   is_copyright 的权威语义是 1/true=可商用、0/false=**不可商用**——反直觉，MUST NOT 把 false
-#   读成「无版权、可随便用」。带 --commercial-only 就把不可商用的挡在候选之外；不带就 MUST
-#   逐条按 copyright_label（派生位，中文标签）自己判，别默认候选都能用。
+gtrk matrix material "<情绪 题材 检索词>" --scope audio --top-k 5 --json   # BGM 候选附试听
+#   ⚠️ is_copyright 的权威语义是 1/true=可商用、0/false=**不可商用**——反直觉，MUST NOT 把 false
+#   读成「无版权、可随便用」（真机上正是这一步读反，把不可商用素材铺进了 5 个工程）。
+#   ⟲ 260906 拍板 · 选材口径：矩阵成员档**缺省搜全库**，MUST NOT 默认加 --commercial-only、
+#   也 MUST NOT 以「保险起见」为由剔掉 is_copyright:false 的候选（全库正是成员身份买到的东西）。
+#   对价是**如实标注**：推荐时 MUST 逐条带上 copyright_label（派生位，中文标签），不可商用的照直说，
+#   但 MUST NOT 升级成追问或阻塞。用户**特意说明**只要可商用 / 要商用发布 / 客户商单时才加
+#   --commercial-only 收紧；「用户没说」MUST NOT 当成「用户要求收紧」。
 
 # ④ 声音基座（按开工④路由）
 gtrk tool audio_tts_clone --text-file <稿段.txt> --speaker <voice_id> --json   # TTS 路

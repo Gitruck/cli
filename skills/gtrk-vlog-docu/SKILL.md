@@ -188,7 +188,7 @@ HKRR 四维（缺哪补哪）：
 3. **旁白稿 + 标题**：正文全文贴给用户（不是给路径），标注每段旁白挂在哪个位置；标题候选列出；
 4. **画幅**：横屏 B 站/西瓜=1920x1080，竖屏抖音=1080x1920。**素材几何与画幅不一致时明确提示**；
 5. **TTS 音色**：拉 catalog（`GET {apiBase}/task/tts/voices`，免鉴权）挑 2–4 个候选，**每个附试听链接**（`audition_url`）。⚠️ 纪实类的旁白与现场同期声会交替出现，**音色应贴近用户本人音色或明显区分**（避免观众困惑「这是谁在说」）——如用户本人出镜说话，优先建议同性别接近音色；
-6. **BGM 处置（双来源）**：用户自带 → 询问是否 `audio_separation` 取伴奏；未提供 → `gtrk matrix material "<按内容情绪写的检索词>" --scope audio --top-k 5 --diversity --json`，推荐 3–5 首**每首附试听链接**（`download_url`），`audio_type:"song"` 取 `accompaniment_url`。⚠️ 纪实类 BGM 要给同期声让路，音量口径同旅拍（-20dB）；
+6. **BGM 处置（双来源）**：用户自带 → 询问是否 `audio_separation` 取伴奏；未提供 → `gtrk matrix material "<按内容情绪写的检索词>" --scope audio --top-k 5 --diversity --json`，推荐 3–5 首**每首附试听链接**（`download_url`），`audio_type:"song"` 取 `accompaniment_url`。⚠️ **版权状态如实转述**：`is_copyright` 的语义是 `1/true`=**可商用**、`0/false`=**不可商用**（反直觉，MUST NOT 把 `false` 读成「无版权、可随便用」）；矩阵成员档**缺省搜全库**，MUST NOT 默认加 `--commercial-only`、也 MUST NOT 擅自剔掉 `false` 的候选，但推荐时 MUST 逐条带上派生位 `copyright_label` 的中文标签（不追问不阻塞）——用户特意说明只要可商用 / 要商用发布时才加 `--commercial-only` 收紧。⚠️ 纪实类 BGM 要给同期声让路，音量口径同旅拍（-20dB）；
 7. **字幕样式**：7 样式 × 11 色；用户没选用 default+雅黑（不追问不阻塞）。
 
 **试听链接义务（MUST）**：音色与 BGM 的推荐没有试听链接=未完成推荐。
