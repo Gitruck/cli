@@ -3639,13 +3639,25 @@ async function layIntoProject(
 		//    漏一个取值 tsc 会红（本次新增 `borrowed` 即由它抓到），别改成 Record<string, number> 绕过去
 		const cnt: Record<GapFillEntry["kind"], number> = { candidate: 0, extend: 0, solid: 0, borrowed: 0, subfloor: 0 };
 		for (const f of gf.fills) cnt[f.kind]++;
+		// 「主轨零 gap」不再无条件陈述（fix-gapfill-eps-boundary-residue D6）：由决策层对填充后主轨产物的
+		// 整毫秒格实扫（summary.gapFill.residual_gaps，条件键）得出——有 ≥ 1ms 缝即如实报数，判据与实现同一份。
+		const rg = gf.residual_gaps;
+		const verdict = rg
+			? `主轨仍有 ${rg.count} 处缝共 ${rg.sec}s（整毫秒格实扫：${rg.items.slice(0, 5).map((h) => `${h.beat}=${h.sec}s`).join("、")}${rg.count > 5 ? ` 等 ${rg.count} 处` : ""}）`
+			: "主轨零 gap（整毫秒格实扫），客户端主轨磁吸安全";
 		log.info(
 			gf.fills.length
 				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend}` +
 						`${cnt.borrowed ? ` · 跨 beat 借 ${cnt.borrowed}` : ""}${cnt.subfloor ? ` · 次地板补画面 ${cnt.subfloor}` : ""}` +
-						` · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
-				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填（主轨本就零 gap）`,
+						` · 黑片 ${cnt.solid}）——${verdict}`
+				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填——${verdict}`,
 		);
+		if (rg) {
+			log.warn(
+				`主轨 gap 填充后仍有 ${rg.count} 处 ≥ 1ms 的缝（合计 ${rg.sec}s，逐条明细见 lay.gap_fill.residual_gaps）。\n` +
+					"客户端若开主轨磁吸，这些缝会被吸除、其后画面整体前移并与配音错位——请在客户端核对这几处，或补素材后重跑 `gtrk matrix`。",
+			);
+		}
 		// 跨 beat 借候选如实告知（relax-gapfill-cross-beat-borrow）：MUST NOT 静默——
 		// 借来的画面取自**别的 beat 的检索词**，与本段稿子的相关性天然弱于本 beat 自己的候选，
 		// 那是本件的真实代价，用户有权知道并据此决定要不要去补素材。
@@ -3875,6 +3887,8 @@ async function layIntoProject(
 							fills: summary.gapFill.fills,
 							// 过短黑片账面（add-short-black-fill-warning）：条件键，无则整键缺席
 							...(summary.gapFill.short_solid ? { short_solid: summary.gapFill.short_solid } : {}),
+							// 主轨残缝账面（fix-gapfill-eps-boundary-residue D6）：条件键，零缝整键缺席；有则 count / sec / items 全量
+							...(summary.gapFill.residual_gaps ? { residual_gaps: summary.gapFill.residual_gaps } : {}),
 						},
 					}
 				: {}),

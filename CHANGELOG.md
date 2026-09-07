@@ -2,6 +2,22 @@
 
 ## 未发布
 
+### gap 填充：恰等 1ms 的残量并入前一颗、合并容差统一到整毫秒格（决策 pin v5）
+
+`matrix lay` 主轨 gap 填充的合并容差从秒域浮点 `BLACK_BED_MERGE_EPS = 0.001` 改为整毫秒格具名常量 `BLACK_BED_MERGE_TOL_MS = 1`（`sec2ms` 整数差比较）。
+此前同一行 `x > 0.001` 在不同时间线位置上因浮点相位给出两种答案（0–300s 毫秒格上 `r3(t + 0.001) − r3(t)` 65.08% 的位置 `> 1e-3`、34.92% 的位置 `≤ 1e-3`），
+真机三条片里恰等 1ms 的残洞一处排出 0.001s 黑片、一处留 0.001s 裸缝。现在恰等 1ms 的残量恒判「有量」、恒进既有 ②a / ②a′ 延长链由前一颗吸收
+（前一颗 `track_ed` 与源窗终点同延 1ms、`track_st` 不动、`kind: "extend"`，不新增分支不新增 kind；源窗为此越出检索段界 ≤ 1ms 是具名例外，既有 `MICRO_SLOP` 松弛档覆盖）。
+同批改整毫秒格的判据（A 档）：`beatGaps` / `computeBlackBedHoles` / `mergeBlackBedSegments`、`fastFillBeatGaps` 全部容差消费点、高档直排的落位重叠与越 beat、碎尾吸收、锚槽 room、段界包含
+（52 份金样 + 3 份真机 plan 的 2182 段段界实测全在毫秒格上，逐值同解）。只改名不改值（B 档）：`CUT_ALIGN_EPS → CUT_ALIGN_WINDOW_SEC`（业务阈值 0.1s）。
+明确不改（C 档，登记转出）：吸附率比例 `1e-9`、`refineWindow` 帧号域与秒域 ε、`1/fps` 亏空、句界吸附带。
+「主轨零 gap」不再无条件打印：由整毫秒格对填充后主轨产物（含 solid 与 gap 填充槽位）的实扫得出，仍有 ≥ 1ms 缝即如实报数并 WARN；
+lay JSON `gap_fill` 新增**条件键** `residual_gaps { count, sec, items[] }`（零缝整键缺席）。
+决策产物字节：既有 52 项金样逐字节不变，新增 `cases/43-gapfill-eps-exact-residue`（同一 1ms 残量两相位同解）⇒ `LOCAL_DECISION_ALGO_PIN` v4 → v5、金样清单 52 → 53
+（`PIN_TO_MANIFEST_SHA[v5] = 3bcc7aef…`，infra `link-gapfill-eps-boundary-residue` 同批镜像、逐字相同；`METERING_ALGO_PIN` 不动，metering.json 只多一条派生 entry）。
+**发版序**：infra `add-arrange-decision-pin-echo` 回传先上线 → infra 决策层 v5 上线 → 本包发版；顺序错则 ≥ 1.1.3 客户端在读到 `server_ahead` 之前整轮退回自校验、
+`self_check_failed` 回落本地并白付一次编排费（服务端不按决策 pin 拒绝客户端；真会前置拒绝的是 `METERING_ALGO_PIN`）。
+
 ### 时间消费侧统一：`gtrk render` 接缝判据与 `gtrk patch` 校验器同源（整毫秒格）、匿名 ε 清退、`qc` 阈值具名
 
 `gtrk render` 的同轨重叠 / 缝 / 尾补判据从 `±1e-6` 浮点秒改为**整毫秒格**（`sec2ms`），与 `gtrk patch` 的 E9 `same_track_overlap` 同一判据：

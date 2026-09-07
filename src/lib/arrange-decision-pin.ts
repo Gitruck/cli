@@ -54,8 +54,19 @@
  *   v4 —— 2026-09-03 **同批两刀**：① `link-describe-window-coverage`（`blurry` 降权射程
  *          由候选级收窄为段级）；② `link-arrange-wire-decision-signal-dropped`
  *          （`black` 纳入上行白名单 + 黑段收缩）。金样清单条数 49 → 52。
+ *   v5 —— `fix-gapfill-eps-boundary-residue`（2026-09-07）三条：① 恰等 1ms 的 gap 残量**并入前一颗**
+ *          （恒进既有 ②a / ②a′ 延长链、`kind: "extend"`，不新增分支不新增 kind）；② A 档：gap 填充 / 黑底合并 /
+ *          空洞检测 / 落位重叠 / 越 beat / 碎尾吸收 / 锚槽 room / 段界包含的判据改**整毫秒格**
+ *          （`sec2ms` 整数差 ≥ `BLACK_BED_MERGE_TOL_MS = 1`，消灭浮点相位下同一行代码的「两个真相」）；
+ *          ③ B 档改名零字节（`CUT_ALIGN_EPS → CUT_ALIGN_WINDOW_SEC`、`BLACK_BED_MERGE_EPS → BLACK_BED_MERGE_TOL_MS`）。
+ *          金样清单条数 52 → 53（新增 `cases/43-gapfill-eps-exact-residue`，既有 52 项逐字节未变）。
+ *          ⚠️ 版本差的**真实后果**（design D5 纠偏，MUST NOT 再写成「≤1.1.2 被服务端前置拒绝并直接报错」）：
+ *          服务端只把决策 pin 混进幂等键并回传，**不按它拒绝客户端**；≥ 1.1.3 客户端读到 v5 走 `server_ahead`
+ *          采纳服务端产物；≤ 1.1.2 客户端不比对 ⇒ 退回自校验 → `self_check_failed` 回落本地并白付一次编排费。
+ *          真会前置拒绝的是 `METERING_ALGO_PIN`（`broll_arrange_services.py`）。发版序：`add-arrange-decision-pin-echo`
+ *          回传先上线 → infra 决策层 v5 上线 → cli 发版（push ≠ 部署）。
  */
-export const LOCAL_DECISION_ALGO_PIN = "broll-arrange-decision@v4";
+export const LOCAL_DECISION_ALGO_PIN = "broll-arrange-decision@v5";
 
 /** 四态判别结果。
  *
