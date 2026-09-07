@@ -108,6 +108,15 @@ import { r3 } from "./frame-domain";
  * MUST NOT 两端各自 `r3`——非整毫秒相位下那会让 `track_ed − track_st ≠ r3(len)`，正是 fix-trim-identity-constructive
  * 在写方禁掉的形状（批 0 T2）。投影产物**留在整毫秒域**：消费者是字幕文本 lane 与 beat 包络（T1 例外），
  * 帧格化只在各 lay 写出时发生（`matrix lay` / `mg lay` / `ai-drama lay`），MUST NOT 在这里吸帧。
+ *
+ * 时钟对声明（add-cross-clock-adapter D7，T5 点名的具名适配器之一）：`asr_extract → timeline`——
+ *   · 误差来源：`s / e` 是转写时码，所在钟是上传前抽出的 16k 音频 / 720p 代理（`asr_extract`），与原片容器
+ *     （`source_container`）的时长差由 `media.ts assertDurationConsistent` 在上传前守（那 1.0s 是计费护栏、不是时基容差）；
+ *     clip 的 `clip_st / track_st` 在原片钟与轨道钟上。两钟同起点、同速率，视为恒等，偏差只来自抽取物容器的 ±1 帧头尾；
+ *   · 钳位对象：`[s, e)` 先与 clip 源区间 `[clip_st, clip_ed)` 求交（调用方 `clipSpanOf` / `surviving` 的夹逼），越出 clip 的
+ *     部分不投影——投影值天然落在 `[clip.track_st, clip.track_ed]` 内，无需第二道上界；
+ *   · 越界处置：整词 / 整句落在所有 clip 之外 ⇒ 丢词 / `dropped`，由既有 `kept_words / total_words / dropped` 报告，
+ *     MUST NOT 静默吞。
  */
 function projectSpan(clipTrackSt: number, clipSt: number, s: number, e: number): { track_st: number; track_ed: number } {
 	const track_st = r3(clipTrackSt + (s - clipSt));

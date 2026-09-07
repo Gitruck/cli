@@ -21,6 +21,9 @@ import {
 	compress720p,
 	assertDurationConsistent,
 	assertWithinMediaDurationLimit,
+	assertSourceFrameRate,
+	vfrNotice,
+	sourceRateInfo,
 } from "../lib/media";
 import { materializeResult } from "../lib/materialize";
 import { log, routeLogsToStderr } from "../lib/log";
@@ -193,6 +196,12 @@ export async function runOralCut(
 	log.step("① 本地预处理（探几何 + 抽音频/720p）…");
 	const geo = deps.probe(inputAbs, opts.ffmpegPath);
 	log.info(`原片几何 ${geo.width}x${geo.height} @ ${geo.fps.toFixed(2)}fps · ${geo.duration.toFixed(1)}s`);
+	// ①0 帧率门 + VFR 可见（add-frame-rate-table-vfr-detect D4/D5）——与时长硬闸同属零成本前置区：
+	//   帧率解析不到 ⇒ 报错退出（零抽取、零上传；outDir 此刻尚未建，不留空壳）；VFR ⇒ 只 WARN 一行不阻断，
+	//   几何仍按真实 r_frame_rate 回传（下方 payload 的 video_rate 不吸附），机读对应物是 --json source.vfr。
+	assertSourceFrameRate(geo);
+	const vfrWarn = vfrNotice(geo);
+	if (vfrWarn) log.warn(vfrWarn);
 
 	// ①a 上传前时长硬闸（add-pre-upload-duration-gate）——MUST 排在抽取之前：
 	//   本任务类型 `video_oral_cut_for_cli` 在服务端是按时长计费的（gc_task_type id 43，
@@ -287,6 +296,10 @@ export async function runOralCut(
 		projName,
 		json: opts.json,
 		open: opts.open,
+		// 落地复核之墙（add-cross-clock-adapter D5）：上传前探得的原片实测时长（source_container 钟），只报告不改产物
+		landingWall: { sourcePath: inputAbs, durationSec: geo.duration },
+		// 源片帧率账面（add-frame-rate-table-vfr-detect D4）：r / avg / vfr 三值进 --json source 与 result.json
+		source: sourceRateInfo(inputAbs, geo),
 	});
 
 	log.ok(`闭环完成。产物目录：${outDir}`);

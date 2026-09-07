@@ -8,6 +8,8 @@
  * ★ 本文件在两仓**逐字节同源**：gitruck-opencut-rewrite `apps/web/src/subtitles/caption-align.ts` 与
  *   cli `src/lib/caption-align.ts`（两仓各以同一份黄金样本 `caption-align.golden.json` 对拍）；
  *   改任一处 MUST 同批改另一处。同步基线：2026-09-06。
+ *   ⚠️ 2026-09-07 cli 侧先行（add-cross-clock-adapter D4：`attributeAndAlign` 兜底分支钳进父句包络 + `stats` 出参），
+ *   客户端仓待同步（该 change 转出项）；黄金样本 `aligned / bridged` 逐字节未变（样本里无越出父句的行）。
  */
 
 /** 轨上时基的字（秒）。 */
@@ -223,18 +225,31 @@ function contentChars(text: string): string[] {
 	return out;
 }
 
+/** `attributeAndAlign` 的可选统计出参（调用方给一个对象进来，函数只自增）。 */
+export interface AlignStats {
+	/** 兜底分支（服务端时码）被钳进父句包络的行数（add-cross-clock-adapter D4）。 */
+	clampedLines: number;
+}
+
 /**
  * 云端拆行结果 → 字幕：先按时间把每行归属到父句，再按内容字符对齐到父句的字、行时间取字级包络
  * （design D5）。对不齐 / 父句无字级时码 ⇒ 该行用服务端时码（按字数摊分）。显示文本恒取服务端返回行。
  *
  * 归属只依赖服务端契约「子行首尾相接、首行 st = 父 st、顺序保持」；与文本形态无关。
+ *
+ * 兜底分支的上界（add-cross-clock-adapter D4，spec `subtitle-lay-command`「云端整形行时码 SHALL 钳进父句包络」）：
+ * 服务端行与父句同在轨道时基（不跨钟）但此前**无上界**——整形结果越出父句区间会原样落 `client_visual_elements`。
+ * 现在服务端时码 MUST 钳进 `[unit.startTime, unit.endTime]`；钳后 `ed ≤ st`（整行落在父句之外）⇒ 走既有
+ * 「对不齐」处理（沿服务端时码），计数进 `stats.clampedLines`。字级回贴路天然在父句内，不经钳位。
  */
 export function attributeAndAlign({
 	units,
 	lines,
+	stats,
 }: {
 	units: ProjectedUnit[];
 	lines: SplitLine[];
+	stats?: AlignStats;
 }): ShapedCaption[] {
 	const out: ShapedCaption[] = [];
 	if (units.length === 0) return out;
@@ -263,6 +278,7 @@ export function attributeAndAlign({
 		const unit = units[ui];
 		let startTime = line.st;
 		let endTime = line.ed;
+		let fromWords = false;
 		if (cursor >= 0 && unit.words) {
 			const want = contentChars(line.text);
 			let ok = want.length > 0 && cursor + want.length <= charMap.length;
@@ -275,6 +291,7 @@ export function attributeAndAlign({
 				if (last.ed > first.st) {
 					startTime = first.st;
 					endTime = last.ed;
+					fromWords = true;
 				}
 				cursor += want.length;
 			} else {
@@ -285,6 +302,17 @@ export function attributeAndAlign({
 		if (!(endTime > startTime)) {
 			startTime = line.st;
 			endTime = line.ed;
+			fromWords = false;
+		}
+		if (!fromWords) {
+			// 兜底分支（服务端时码）钳进父句包络（D4）：钳后仍有正时长才采信；否则整行在父句外 ⇒ 沿服务端时码（既有对不齐路径）
+			const st = Math.max(startTime, unit.startTime);
+			const ed = Math.min(endTime, unit.endTime);
+			if (ed > st && (st !== startTime || ed !== endTime)) {
+				startTime = st;
+				endTime = ed;
+				if (stats) stats.clampedLines += 1;
+			}
 		}
 		out.push({ text: line.text, startTime, duration: endTime - startTime });
 	}

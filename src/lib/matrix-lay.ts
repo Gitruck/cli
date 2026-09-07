@@ -47,6 +47,7 @@ import {
 // MUST NOT 在本文件复刻第二份取整。决策层（slotTimes / 实数游标 / 毫秒黑底合并）一字未动、仍在毫秒域；
 // 帧格化只在 layBrollTracks 的**写出侧**发生（projectSlotsToFrameGrid，见下）。
 import { f2ms, r3, sec2frame, sec2ms } from "./frame-domain";
+import { compareWalls, wallFromDeclared, type SourceWall } from "./clock-adapter";
 import { videoRateOf } from "./gtrk-patch";
 import { assertGtrkWriteInvariants, assertTrackContinuity, assertTrimIdentity } from "./gtrk-invariants";
 
@@ -667,6 +668,30 @@ export interface FrameGridSummary {
 	black_bed: number;
 	shifted: number;
 }
+
+/**
+ * 代理落盘即实测（add-cross-clock-adapter D2）：命令层在下载落地处（含缓存命中）对代理文件 ffprobe **一次**的结果，
+ * 以 clip_id 为键交给纯函数。`wall` 的钟由命令层定（preview 代理 = `preview_proxy`；回落原片 = `source_container`）；
+ * `error` = 探测失败（无 ffprobe / 文件损坏 / 时长为 0），写方回退云端自述并计 `unverified`，MUST NOT 让 lay 失败。
+ */
+export type ProxyProbe = { wall: SourceWall; width: number; height: number; fps: number } | { error: string };
+
+/** 时钟账面（summary.clock / --json 的 lay.clock）：代理实测覆盖 / 回退自述 / 本地恒等 三档计数 + 两类不一致明细。 */
+export interface ClockSummary {
+	/** 代理文件实测成功、`materials[]` 条目按文件真值写出的 material 数。 */
+	proxy_probed: number;
+	/** 回退云端自述写出的 material 数（探测失败或纯函数调用方未探测）。 */
+	unverified: number;
+	/** 本地素材路（`source: local`）声明 `source_container` 恒等的 material 数（索引期 ffprobe 值，免代理免重探）。 */
+	local_source_container: number;
+	/** 代理实测时长 vs 云端自述差 > 1 帧（按云端 fps；fps 缺席退 1ms）的明细——真机证据，交 infra 核查代理生成。 */
+	proxy_mismatch: Array<{ clip_id: string; declared_ms: number; probed_ms: number; frames: number | null }>;
+	/** 代理实测帧率 ≠ 云端自述：`refineWindow` 仍按云端 fps 吸附（云本平价），这里只把事实记下来。 */
+	proxy_fps_mismatch: Array<{ clip_id: string; declared_fps: number; probed_fps: number }>;
+}
+
+/** 帧率相等判据（代理 vs 自述）：`29.97` 与 `30000/1001` 同一口径下差 3e-5，1% 以内视为同一帧率。 */
+const PROXY_FPS_EPS = 0.01;
 
 export interface FrameGridProjection<T> {
 	/** 变换后的槽位（保持入参原序；被弃的槽位不在内）。 */
@@ -2927,6 +2952,8 @@ export interface LayResult {
 		/** 写出侧帧格统计（fix-matrix-lay-frame-grid 2.4）：rate = 顶层 video_rate；slots / black_bed = 落在网格上的
 		 * 候选轨 clip 数（含 gap 黑片）/ 黑底 clip 数；shifted = 越段界 / 越素材上界前移次数。拒铺时缺席。 */
 		frameGrid?: FrameGridSummary;
+		/** 时钟账面（add-cross-clock-adapter D2）：代理实测 / 回退自述 / 本地恒等计数与不一致明细。拒铺时缺席。 */
+		clock?: ClockSummary;
 	};
 	broll: StructMetaBroll;
 	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
@@ -3316,8 +3343,15 @@ export function layBrollTracks(opts: {
 	 * 应用与否由本函数以剥离后终态权威判定（音频驱动形态 ∧ 目标层首轨=最低号内容轨）；
 	 * 不适用时规划槽位（gap_fill 标记）被滤出落轨。缺席/mode none = 现状零回归。 */
 	gapFill?: { mode: GapFillMode; planned: GapFillEntry[] };
+	/** 代理落盘即实测（add-cross-clock-adapter D2）：clip_id → 命令层对落盘代理 ffprobe 一次的结果。
+	 * 有实测 ⇒ 该 clip 的 `materials[]` 条目 `duration / video_size / video_rate` 取文件真值，云端自述只进比对（`summary.clock`）；
+	 * 探测失败 / 缺席 ⇒ 回退自述（与本件落地前逐字节相同）+ `unverified`。**决策层不消费它**（`refineWindow` 仍用 `cand.fps`）。 */
+	proxyProbes?: ReadonlyMap<string, ProxyProbe>;
 }): LayResult {
 	const { gtrk, plan, lay, fills, downloads } = opts;
+	/** 时钟账面（D2）；探测失败样本只进一条汇总 WARN。 */
+	const clock: ClockSummary = { proxy_probed: 0, unverified: 0, local_source_container: 0, proxy_mismatch: [], proxy_fps_mismatch: [] };
+	const unverifiedSamples: string[] = [];
 	const blackBedOn = opts.blackBed !== false;
 	const forceRelay = opts.forceRelay === true;
 	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : "common");
@@ -3557,7 +3591,10 @@ export function layBrollTracks(opts: {
 			const projected = projectSlotsToFrameGrid(decided, videoRate, (s) => {
 				const segEnd = slotSegmentEnd(plan, beat, s);
 				const injected = s.material_id !== undefined ? opts.injectedMaterials?.get(s.material_id) : undefined;
-				const matDur = injected ? injected.duration : candById.get(s.clip_id)?.duration;
+				// 素材上界的真相源（add-cross-clock-adapter D1）：代理有实测就用文件本身的墙——否则 materials[] 写实测、
+				// 上界却按自述，代理比原片短时 assertSourceBound 会在写回前把本轮整个抛掉。判据（min / +1ms）一字未改。
+				const probed = s.material_id === undefined ? opts.proxyProbes?.get(s.clip_id) : undefined;
+				const matDur = injected ? injected.duration : probed && "wall" in probed ? probed.wall.durationSec : candById.get(s.clip_id)?.duration;
 				const segMs = segEnd === undefined ? undefined : sec2ms(segEnd);
 				const matMs = typeof matDur === "number" && Number.isFinite(matDur) && matDur > 0 ? sec2ms(matDur) + 1 : undefined;
 				return segMs === undefined ? matMs : matMs === undefined ? segMs : Math.min(segMs, matMs);
@@ -3578,15 +3615,45 @@ export function layBrollTracks(opts: {
 						const cand = candById.get(s.clip_id);
 						const dl = downloads.get(s.clip_id)!;
 						const mat: LooseMaterial = { id: materialId, path: dl.rel };
-						if (typeof cand?.duration === "number") mat.duration = cand.duration;
-						if (dl.source === "local") {
-							// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）
-							if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
-						} else {
-							const dims = previewDims(cand?.width, cand?.height);
+						const probed = dl.source === "local" ? undefined : opts.proxyProbes?.get(s.clip_id);
+						if (probed && "wall" in probed) {
+							// 代理落盘即实测（add-cross-clock-adapter D2，契约 §2「materials[] 描述文件本身」）：文件是代理，
+							// 条目就写代理的实测——duration / video_size / video_rate 三件取 ffprobe；云端自述（原片值）只进比对。
+							// 键序与自述路一致（id / path / duration / video_size / video_rate），两条路的产物只差值不差形。
+							mat.duration = probed.wall.durationSec;
+							const dims = probed.width > 0 && probed.height > 0 ? [probed.width, probed.height] : previewDims(cand?.width, cand?.height);
 							if (dims) mat.video_size = dims;
+							if (probed.fps > 0) mat.video_rate = r3(probed.fps);
+							else if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
+							clock.proxy_probed++;
+							const declared = wallFromDeclared(cand?.duration, "cloud_declared", "plan");
+							if (declared) {
+								const cmp = compareWalls(declared, probed.wall, cand?.fps);
+								if (cmp.exceeds) clock.proxy_mismatch.push({ clip_id: s.clip_id, declared_ms: cmp.declaredMs, probed_ms: cmp.measuredMs, frames: cmp.frames });
+							}
+							if (typeof cand?.fps === "number" && probed.fps > 0 && Math.abs(cand.fps - probed.fps) > PROXY_FPS_EPS) {
+								clock.proxy_fps_mismatch.push({ clip_id: s.clip_id, declared_fps: cand.fps, probed_fps: r3(probed.fps) });
+							}
+						} else {
+							// 自述路（探测失败 / 未探测 / 本地素材）：与本件落地前逐字节相同。云端自述经 wallFromDeclared 供值
+							// （秒字面原样）；非正 / 非有限的 number 仍原样登记（既有行为：材料无有效时长 ⇒ 上界跳过）。
+							const declared = wallFromDeclared(cand?.duration, dl.source === "local" ? "source_container" : "cloud_declared", dl.source === "local" ? "local-index ffprobe" : "plan");
+							if (declared) mat.duration = declared.durationSec;
+							else if (typeof cand?.duration === "number") mat.duration = cand.duration;
+							if (dl.source === "local") {
+								// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）——source_container 恒等
+								if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
+							} else {
+								const dims = previewDims(cand?.width, cand?.height);
+								if (dims) mat.video_size = dims;
+							}
+							if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
+							if (dl.source === "local") clock.local_source_container++;
+							else {
+								clock.unverified++;
+								if (probed) unverifiedSamples.push(`${s.clip_id}（${probed.error}）`);
+							}
 						}
-						if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
 						newMaterialsById.set(materialId, mat);
 					}
 				}
@@ -4021,6 +4088,35 @@ export function layBrollTracks(opts: {
 		video_track: [...keptOtherTracks, ...bandTracksSorted, ...(blackTrackObj ? [blackTrackObj] : [])],
 		struct_meta: { ...structMeta, broll },
 	};
+	// ── 时钟账面告警（add-cross-clock-adapter D2）：三类各汇总成一行，明细全量走 summary.clock（--json lay.clock）。
+	//    MUST NOT 阻断、MUST NOT 反向影响决策层——这里只是把「文件真值 vs 云端自述」的事实说出来。
+	if (unverifiedSamples.length) {
+		warnings.push(
+			`代理实测失败 ${unverifiedSamples.length} 颗：materials[] 沿用云端自述的时长 / 尺寸 / 帧率（unverified）——` +
+				`${unverifiedSamples.slice(0, 3).join("、")}${unverifiedSamples.length > 3 ? " 等" : ""}。` +
+				"源出点上界因此对着自述值而非落盘文件；ffmpeg 就位后重跑本命令即可实测（代理已落盘，重跑很快）。",
+		);
+	}
+	if (clock.proxy_mismatch.length) {
+		const sample = clock.proxy_mismatch
+			.slice(0, 3)
+			.map((m) => `${m.clip_id}（自述 ${m.declared_ms}ms / 实测 ${m.probed_ms}ms，差 ${m.frames ?? "?"} 帧）`)
+			.join("、");
+		warnings.push(
+			`代理实测时长与云端自述差 > 1 帧：${clock.proxy_mismatch.length} 颗——${sample}${clock.proxy_mismatch.length > 3 ? " 等" : ""}。` +
+				"materials[] 已按落盘文件实测写出（源出点上界随之）；槽位选段与吸附网格未动（决策层不消费实测值）。全量明细见 --json lay.clock.proxy_mismatch。",
+		);
+	}
+	if (clock.proxy_fps_mismatch.length) {
+		const sample = clock.proxy_fps_mismatch
+			.slice(0, 3)
+			.map((m) => `${m.clip_id}（云端 ${m.declared_fps} / 代理实测 ${m.probed_fps}）`)
+			.join("、");
+		warnings.push(
+			`源帧吸附按云端 fps、代理实测帧率不同：${clock.proxy_fps_mismatch.length} 颗——${sample}${clock.proxy_fps_mismatch.length > 3 ? " 等" : ""}。` +
+				"refineWindow 仍按云端 fps 吸附（云本平价：决策输入不变）；代理不保帧率的根治在服务端代理生成保源帧率，本地不改吸附网格。全量明细见 --json lay.clock.proxy_fps_mismatch。",
+		);
+	}
 	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：上面逐槽 assertTrimIdentity / 逐轨 assertTrackContinuity
 	// 之外补**素材上界**（T5：B-roll 素材带 ffprobe / plan duration，代理与原片不同也只认 materials[] 登记的那条；
 	// 黑底与黑片 material 无 duration ⇒ 跳过）。射程 = 本次落的候选轨 + 黑底轨（D2′）；他层保留轨 / 用户轨的
@@ -4059,6 +4155,7 @@ export function layBrollTracks(opts: {
 				black_bed: blackTrackObj ? (blackTrackObj.track_timeline as unknown[]).length : 0,
 				shifted: shiftedTotal,
 			},
+			clock,
 		},
 		broll,
 		warnings,

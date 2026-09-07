@@ -10,7 +10,8 @@
  *   - `assertTrimIdentity`      裁剪恒等式（`gtrk-patch.ts` E1 / E2 镜像，整毫秒域零容差）——原 `matrix-lay.ts` 搬入，判据一字未改；
  *   - `assertTrackContinuity`   同轨零重叠（E9 镜像，整毫秒域零容差）——原 `matrix-lay.ts` 搬入，判据一字未改；
  *   - `assertSourceBound`       素材上界（E5 上界镜像，`+1ms` 是唯一容差；material 无 `duration` 跳过）——本 change 新增；
- *   - `assertGtrkWriteInvariants` 整份 gtrk：`video_track` 三件都查，`beat_track` 只查 track 半边恒等式 + 重叠。
+ *   - `assertGtrkWriteInvariants` 整份 gtrk：`video_track` / `audio_track` 三件都查，`beat_track` 只查 track 半边恒等式 + 重叠
+ *     （`audio_track` 自 add-cross-clock-adapter D6 纳入；`audio lay` 同批接线，存量违例 WARN）。
  *
  * 判据与 `gtrk-patch.ts` E1 / E2 / E5 / E9 及 infra `video_project/gtrk_check.py` **逐字同源**：
  * 整毫秒域（`sec2ms` 半上入）、恒等式与重叠零容差、上界 `+1ms`、beat / gap 只查 track 半边、无 `duration` 跳过上界。
@@ -162,8 +163,9 @@ export function materialsByIdOf(materials: unknown): Map<string, MaterialDuratio
  *
  * 跳过（design D3）：material 无 `duration`（黑底 / 纯色 / html 颗粒 / 静图——`matrix-lay.ts`「黑片 material
  * MUST NOT 带 duration」既有铁律相容）、clip 无 `clip_ed`（gap / beat 颗粒）、material 不在表里（那是 E4 的事，
- * 不在本条射程）。B-roll 代理与原片时长可能不同（`local-index` 代理解码）：判据用 `materials[]` 里登记的那条
- * ——写方写的就是它——不另探测。
+ * 不在本条射程）。B-roll 代理与原片时长可能不同：判据用 `materials[]` 里登记的那条——写方写的就是它——本条不另探测；
+ * 「登记的那条是不是文件本身的真值」归 `clock-adapter.ts`（add-cross-clock-adapter：preview 代理落盘即实测、
+ * `materials[]` 写文件真值，自述只作比对），墙的真相源换了，本条判据一个字没改。
  */
 export function assertSourceBound(
 	clips: { clip_id?: string; material?: unknown; clip_ed?: number }[],
@@ -193,9 +195,15 @@ export function assertSourceBound(
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null;
 
-/** 三件套在一份 gtrk 上的射程：`video_track` 三件都查；`beat_track` 颗粒无源裁剪，只查 track 半边恒等式 + 重叠。 */
-const WRITE_SCOPES: ReadonlyArray<{ key: "video_track" | "beat_track"; withSource: boolean }> = [
+/**
+ * 三件套在一份 gtrk 上的射程：`video_track` / `audio_track` 三件都查（音频 clip 同样有源裁剪与素材上界：
+ * BGM 越素材 = 客户端播到素材尾巴后静音，与视频越素材同一形状）；`beat_track` 颗粒无源裁剪，只查 track 半边恒等式 + 重叠。
+ * `audio_track` 由 add-cross-clock-adapter D6 纳入（T5 末句「任何写出 `clip_ed` 的模块 SHALL 自证上界」此前对音频轨落空）；
+ * 扩射程前已在夹具与真机工程上量化存量违例（见该 change tasks 1.2）。
+ */
+const WRITE_SCOPES: ReadonlyArray<{ key: "video_track" | "audio_track" | "beat_track"; withSource: boolean }> = [
 	{ key: "video_track", withSource: true },
+	{ key: "audio_track", withSource: true },
 	{ key: "beat_track", withSource: false },
 ];
 

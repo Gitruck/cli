@@ -783,6 +783,8 @@ export interface CloudShapingReport {
 	degradeMessage: string | null;
 	inputLines: number;
 	outputLines: number;
+	/** 兜底分支（服务端时码）被钳进父句包络的行数（add-cross-clock-adapter D4）；云端不可用 / 全部字级回贴时恒 0。 */
+	clampedLines: number;
 }
 
 /**
@@ -814,6 +816,7 @@ export async function shapeCaptionsCloud(
 		degradeMessage: null,
 		inputLines: units.length,
 		outputLines: 0,
+		clampedLines: 0,
 	};
 	let shaped: ShapedCaption[];
 	if (units.length === 0) {
@@ -821,7 +824,9 @@ export async function shapeCaptionsCloud(
 	} else {
 		try {
 			const r = await splitLines(units.map((u) => ({ text: u.text, st: u.startTime, ed: u.endTime })));
-			shaped = attributeAndAlign({ units, lines: r.lines });
+			const stats = { clampedLines: 0 };
+			shaped = attributeAndAlign({ units, lines: r.lines, stats });
+			cloud.clampedLines = stats.clampedLines;
 			cloud.degraded = r.degraded;
 			cloud.degradeMessage = r.degradeMessage;
 		} catch (e) {

@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg, ffprobeJson } from "./ffmpeg";
+import { videoRateOf } from "./gtrk-patch";
 import { log } from "./log";
 
 const AUDIO_SAMPLE_RATE = 48000;
@@ -288,7 +289,10 @@ export function buildFilterGraph(
 
 	const width = Math.trunc(gtrk.video_size[0]);
 	const height = Math.trunc(gtrk.video_size[1]);
-	const rate = Number(gtrk.video_rate);
+	// 帧率判据与 `matrix lay` / `gtrk patch` 同源（add-frame-rate-table-vfr-detect D3）：顶层 `video_rate` 缺席 / 非正 / 非整数
+	// ⇒ 同一条话术报错（含修复指引）。此前 `Number(gtrk.video_rate)` 裸取——同一份 29.97 工程 `matrix lay` 拒、`render` 收，
+	// 且 29.97 直接进 `allocateFrames` 与 `fps=` 滤镜。MUST NOT 静默吸附后渲染：按 29.97 与按 30 分配的帧数不同，吸附即第二个权威。
+	const rate = videoRateOf(gtrk as unknown as Record<string, unknown>);
 
 	const inputs: string[] = [];
 	const inputIdx: Record<string, number> = {};
@@ -539,6 +543,9 @@ export async function renderGtrk(
 	const codec = opts.codec ?? "h264";
 	if (codec !== "h264") throw new Error(`v1 仅支持 h264，实际 ${codec}`);
 	const crf = opts.crf ?? DEFAULT_CRF;
+	// 帧率门前置到任何进程 / 文件系统动作之前（D3「报错退出零副作用」）：`buildFilterGraph` 里那次是取值处的同源判据，
+	// 这里再判一次是为了不先解析 ffmpeg、不先 ffprobe 素材、不先写临时滤镜文件——非法工程在此即止。
+	videoRateOf(gtrk as unknown as Record<string, unknown>);
 
 	const { ffmpeg, ffprobe } = requireFfmpeg(opts.ffmpegPath);
 	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });

@@ -119,6 +119,8 @@ export interface SubtitleLayResult {
 	/** 云端路：服务端 fail-open 降级（行照用、消息透传）。 */
 	cloudDegraded: boolean;
 	cloudDegradeMessage: string | null;
+	/** 云端路：服务端整形行时码被钳进父句包络的行数（add-cross-clock-adapter D4，spec 字段名 `clamped_lines`）。offline 恒 0。 */
+	clamped_lines: number;
 	style: string;
 	color: string;
 	canvas: [number, number];
@@ -252,6 +254,7 @@ export async function runSubtitleLay(opts: SubtitleLayOpts, deps: SubtitleLayDep
 	let cloudUnavailable: string | null = null;
 	let cloudDegraded = false;
 	let cloudDegradeMessage: string | null = null;
+	let clampedLines = 0;
 
 	if (splitter === "cloud") {
 		if (opts.maxUnits != null) log.info("--max-units 仅离线拆窗生效；云端拆行按所选样式模板与真实画布实算宽度预算");
@@ -273,6 +276,7 @@ export async function runSubtitleLay(opts: SubtitleLayOpts, deps: SubtitleLayDep
 		cloudUnavailable = r.cloud.unavailable;
 		cloudDegraded = r.cloud.degraded;
 		cloudDegradeMessage = r.cloud.degradeMessage;
+		clampedLines = r.cloud.clampedLines;
 		if (cloudUnavailable !== null) {
 			// 良性降级打可读 WARN：用户可感知的产物差异（长句未拆），且给出当下就能执行的下一步
 			log.warn(
@@ -281,6 +285,8 @@ export async function runSubtitleLay(opts: SubtitleLayOpts, deps: SubtitleLayDep
 		} else {
 			log.info(`云端拆行：${r.cloud.inputLines} 句 → ${r.cloud.outputLines} 行（subtitle_line_split，0 积分留痕）`);
 			if (cloudDegraded) log.warn(`云端拆行部分降级：${cloudDegradeMessage ?? "服务端未给原因"}——重跑本命令即可（0 积分）`);
+			// 良性、根因已知（服务端整形行越出父句区间）⇒ INFO 不升告警（add-cross-clock-adapter D4）
+			if (clampedLines > 0) log.info(`父句包络钳位：${clampedLines} 行服务端时码越出父句区间，已钳回 [父句起, 父句止]（字级回贴路不经此）`);
 		}
 	} else {
 		// 【冻结】离线拆窗（fix-subtitle-lay-split-and-gap / fix-caption-split-word-boundary）：横屏 20 / 竖屏 13 字宽档
@@ -356,6 +362,7 @@ export async function runSubtitleLay(opts: SubtitleLayOpts, deps: SubtitleLayDep
 		cloudUnavailable,
 		cloudDegraded,
 		cloudDegradeMessage,
+		clamped_lines: clampedLines,
 		style: presetId,
 		color: colorId,
 		canvas: [canvas.width, canvas.height],

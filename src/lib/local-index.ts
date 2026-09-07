@@ -1158,7 +1158,12 @@ export interface PlannedMaterial {
 	durationMs: number;
 	width: number;
 	height: number;
+	/** 名义帧率（`r_frame_rate` 求值）——落库 `materials.fps`。视频 ≤ 0 = 帧率不可解析 ⇒ 编排层跳过不入库（T6 不兜底）。 */
 	fps: number;
+	/** 平均帧率（`avg_frame_rate`；add-frame-rate-table-vfr-detect）。只作告警呈现，**不落库**（登记转出：索引 DB 不加列）。 */
+	avgFps?: number;
+	/** VFR 三态（`probeGeometry` 判据）：`true` ⇒ 编排层 WARN + `vfrMaterials` 计数；`false / null / undefined`（旧注入面）零告警。 */
+	vfr?: boolean | null;
 	/** 场景区间（毫秒取整）；图片恒统一形态一行 0..0（无场景轴，D1）。
 	 * stable（add-index-stability-sampling）：缺省 undefined = unstable 语义（旧注入面零改动）；
 	 * 图片行不参与判定（本就单帧），恒不带该标记。 */
@@ -1217,6 +1222,9 @@ export interface IndexRunOptions {
 	ffmpegPath?: string;
 	/** 逐素材进度行（人读，命令层接 log.info）。**换行留痕**的事实行。 */
 	onProgress?: (line: string) => void;
+	/** 逐素材告警行（人读，命令层接 log.warn；add-frame-rate-table-vfr-detect：VFR / 帧率不可解析）。
+	 *  缺席时退回 `onProgress` 通道——旧注入面一行不丢。与 `onProgress` 同受「先收口心跳」纪律。 */
+	onWarn?: (line: string) => void;
 	/** 单素材内心跳（人读，命令层接 log.tick）：**原地刷新不留痕**的过程读数
 	 * （add-matrix-index-phase-progress）。与 onProgress 分工明确，MUST NOT 互相顶替——
 	 * 心跳留痕会把日志刷爆，事实行不留痕会让「这条素材处理过」这件事查无实据。 */
@@ -1279,6 +1287,9 @@ export interface IndexRunResult {
 		 * 一笔是省、一笔是增，合并成净值会把「成本为什么涨了」这件事藏起来）。 */
 		blackVetoFrames: number;
 	};
+	/** 本轮入库的视频素材里判为 VFR 的条数（add-frame-rate-table-vfr-detect D4；只计数不落库）；为 0 时无本键，
+	 *  命令层 `--json vfr_materials` 恒带（`?? 0`）。 */
+	vfrMaterials?: number;
 	/** 计量会话账面：仅会话真开过时出现（豁免/零计划帧 = 无本键）。 */
 	billing?: IndexBillingOutcome;
 	/** 本轮枚举遇到的**断链**（目标不可达的链接自身路径）；无断链时无本键。
@@ -1588,6 +1599,9 @@ async function planMaterialDefault(
 		width: geo.width,
 		height: geo.height,
 		fps: geo.fps,
+		// VFR 两值随同一次 ffprobe 带出（零额外进程），入库门与告警在编排层统一处置（注入面同一口径）
+		avgFps: geo.avgFps,
+		vfr: geo.vfr ?? null,
 		scenes: scenes.map((s) => ({
 			st_ms: Math.round(s.st * 1000),
 			ed_ms: Math.round(s.ed * 1000),
@@ -1690,6 +1704,10 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 		ticker.end();
 		opts.onProgress?.(line);
 	};
+	const warn = (line: string): void => {
+		ticker.end();
+		(opts.onWarn ?? opts.onProgress)?.(line);
+	};
 	// 缺省枚举口 = 视频 + 图片（--no-image-broll 下索引仍收录图片：索引是缓存，排除发生在检索/铺轨侧）
 	const files = (opts.listFiles ?? listMaterialFiles)(opts.dirs);
 	// 先给分母（spec §1）：此前第一条带总数的行是下面那条「抽帧计划就绪」，要等**阶段一全跑完**
@@ -1725,6 +1743,8 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 	const stability = { stableScenes: 0, unstableScenes: 0, framesSaved: 0, blackVetoScenes: 0, blackVetoFrames: 0 };
 	let sceneCount = 0;
 	let frameCount = 0;
+	// VFR 素材计数（add-frame-rate-table-vfr-detect D4）：只计本轮真正入库（阶段一通过）的视频素材；不落库、只进 summary。
+	let vfrMaterials = 0;
 	// ffmpeg 只在走默认处理链时才是硬依赖（测试注入 planMaterial+embedFrames 免装）。
 	// ⚠️ 零枚举时 MUST NOT 要 ffmpeg：一个素材都没有就没有任何抽帧要做，这里若先 `requireFfmpeg` 抛
 	//    「未找到 ffmpeg」，命令层的零枚举诊断（真因点名 / ok:false / 退出码 1）就一句都到不了用户面前——
@@ -1843,6 +1863,26 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 				if (planned.decodeLane) {
 					laneState.lanes[planned.decodeLane] = (laneState.lanes[planned.decodeLane] ?? 0) + 1;
 					if (planned.decodeLane === "gpu") laneState.gpuStatus = laneState.tripped ? "tripped" : "on";
+				}
+				// 帧率门（add-frame-rate-table-vfr-detect D5）：视频素材帧率不可解析 ⇒ 跳过不入库 + WARN（计入 failed），
+				// MUST NOT 以 25 / 30 兜底落库——`materials.fps` 是检索 / 铺轨侧帧网格吸附的时间基，写个猜的值比缺席更坏
+				// （下游会以为「帧网格吸附已生效」）。判在入库边界而非探测处：注入面（planMaterial）产的计划同受此门。
+				const plannedKind = planned.kind ?? materialKindForPath(path) ?? "video";
+				if (plannedKind !== "image" && !(Number.isFinite(planned.fps) && planned.fps > 0)) {
+					stats.failed++;
+					warn(
+						`[${seq}/${files.length}] ${name} · 源文件帧率不可解析（r_frame_rate 求值得 ${String(planned.fps)}），已跳过不入库——` +
+							"帧率是帧网格吸附的时间基，不以 25/30 兜底；请先重封装（ffmpeg -c copy）或重编码后再索引",
+					);
+					continue;
+				}
+				// VFR 可见（D4）：只告警不阻断、照常入库；`results[].fps` 仍是名义值，不加 DB 列，计数进 summary `vfrMaterials`。
+				if (plannedKind !== "image" && planned.vfr === true) {
+					vfrMaterials++;
+					warn(
+						`[${seq}/${files.length}] ${name} · 疑似可变帧率（VFR）：r_frame_rate ${planned.fps.toFixed(3)} / avg_frame_rate ${planned.avgFps !== undefined ? planned.avgFps.toFixed(3) : "?"}——` +
+							"照常入库，检索透出的 fps 是名义值；铺轨的帧网格吸附按名义帧率，VFR 源端点在播放器 / 渲染器上可能逐段漂移",
+					);
 				}
 				// 收尾行（spec §2）：数据全部取自 planned，MUST NOT 为这一行新增任何 ffprobe / 解码。
 				// ⚠️ 这一行 MUST NOT 顶替阶段二那条「时长 / 场景 / 帧」行（主规格 `首次索引` 要的是后者，
@@ -2042,6 +2082,9 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 			probeMs: laneState.probeMs,
 		},
 		stability,
+		// VFR 计数与 brokenLinks / linkedOutsideDirs 同款「没有就不带键」：全 CFR 的一轮在库侧机读面上与本件之前逐字节一致
+		// （既有 phase-progress 用例锁着 IndexRunResult 键集）；命令层 --json 恒带 `vfr_materials`（0 也带）。
+		...(vfrMaterials > 0 ? { vfrMaterials } : {}),
 		...(billing ? { billing } : {}),
 		// 断链/跨域上抛给命令层诊断消费（§2.8）：**没有就不带这两个键**，
 		// 于是「本轮没遇到链接」在机读面上与本条落地前逐字节一致。

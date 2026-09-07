@@ -9,6 +9,8 @@ import { videoRateOf } from "../lib/gtrk-patch";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic } from "../lib/gtrk-writeback";
 import { reportMaterialIntegrity, safeCheckMaterialIntegrity } from "../lib/material-integrity";
 import { reportReprojection, reprojectDispatchWindows } from "../lib/reproject";
+import { probeGeometry, type Geometry } from "../lib/media";
+import { compareWalls, wallFromDeclared, wallFromProbe } from "../lib/clock-adapter";
 import { log, routeLogsToStderr } from "../lib/log";
 
 interface AiDramaOpts {
@@ -38,10 +40,25 @@ interface ReturnManifest {
 	skipped?: unknown;
 }
 
+/** 可注入依赖（测试替身，离线）：`probe` = 拷贝落盘后对导出片段 ffprobe（add-cross-clock-adapter D3；缺省 = 真 `probeGeometry`）。 */
+export interface AiDramaDeps {
+	probe?: (abs: string) => Geometry;
+}
+
+/** 时钟账面（--json `clock`）：manifest 自述 vs 落盘实测。 */
+interface AiDramaClock {
+	/** 实测成功、`measuredSec` 已由实测覆盖的镜头数。 */
+	manifest_probed: number;
+	/** 探测失败、沿用 manifest 自述的镜头数。 */
+	unverified: number;
+	/** 自述 vs 实测差 > 1ms 的明细（实测已覆盖自述；这里只是把差异说出来）。 */
+	manifest_mismatch: Array<{ beat: string; shot_index: number; file: string; declared_ms: number; probed_ms: number }>;
+}
+
 const collectPath = (v: string, prev: string[] | undefined): string[] => [...(prev ?? []), v];
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
-export function registerAiDrama(program: Command): void {
+export function registerAiDrama(program: Command, deps: AiDramaDeps = {}): void {
 	program
 		.command("ai-drama [words...]")
 		.description("AI 情景片段回填：消费 AI Drama Desk return-v1 导出包，新增一条独立 AI 视频轨（纯本地、零模型调用、零计费）")
@@ -50,7 +67,7 @@ export function registerAiDrama(program: Command): void {
 		.option("--replace-all", "已铺 AI 轨在客户端被编辑过时仍重置重铺（会覆盖该 AI 轨上的手调）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: AiDramaOpts) => {
-			await runAiDrama(words ?? [], opts);
+			await runAiDrama(words ?? [], opts, deps);
 		});
 }
 
@@ -122,7 +139,7 @@ async function readPackage(input: string): Promise<{ exportDir: string; pkg: AiD
 	};
 }
 
-export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Record<string, unknown>> {
+export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDramaDeps = {}): Promise<Record<string, unknown>> {
 	if (opts.json) routeLogsToStderr();
 	if (words.length !== 1 || words[0] !== "lay") {
 		throw new Error("用法：gtrk ai-drama lay --project <目录> --package <导出目录或manifest.json> [--package ...]");
@@ -174,11 +191,63 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Re
 	}
 	if (!packages.length) throw new Error("所有 AI beat 都已从当刻成片中剪除，没有可回填内容；工程未改动");
 
+	// ── 拷贝落盘即实测（add-cross-clock-adapter D3）：`materials[].duration` 与越素材判据（帧格化的 `measuredMs`）从此同源于
+	//    落盘文件本身；工作台 manifest 的 `measuredSec` 只作比对（外部 manifest 差 > 1ms 即告警）。探测失败 ⇒ 沿自述 + unverified，
+	//    MUST NOT 让 lay 失败。判据本身（ai-drama-lay 的 `durMs > measuredMs` / `assertSourceBound`）一字未改，改的是值的真相源。
+	const probe = deps.probe ?? probeGeometry;
+	const clock: AiDramaClock = { manifest_probed: 0, unverified: 0, manifest_mismatch: [] };
+	const unverifiedSamples: string[] = [];
+	// VFR 可见（add-frame-rate-table-vfr-detect D4）：叠在同一次拷贝后探测上，零额外进程；只 WARN 不阻断、不改 lay 判据。
+	const vfrSamples: string[] = [];
 	for (const pkg of packages) {
 		const src = loaded.find((p) => p.pkg.slug === pkg.slug && p.pkg.beatId === pkg.beatId)!;
 		const assetDir = join(gtrkDir, "assets", "ai-drama", pkg.slug);
 		await mkdir(assetDir, { recursive: true });
-		for (const item of pkg.items) await copyFile(join(src.exportDir, item.file), join(assetDir, item.file));
+		for (const item of pkg.items) {
+			const dst = join(assetDir, item.file);
+			await copyFile(join(src.exportDir, item.file), dst);
+			const declared = wallFromDeclared(item.measuredSec, "external_manifest", "return-v1 manifest")!; // readPackage 已判正数
+			try {
+				const geo = probe(dst);
+				if (geo.vfr === true) {
+					vfrSamples.push(`${pkg.beatId} s${item.shotIndex}（r ${geo.fps.toFixed(3)} / avg ${geo.avgFps !== undefined ? geo.avgFps.toFixed(3) : "?"}）`);
+				}
+				const measured = wallFromProbe(geo, "source_container", "ffprobe");
+				if (!measured) throw new Error(`ffprobe 时长无效（${geo.duration}）`);
+				const cmp = compareWalls(declared, measured); // 外部 manifest：无帧率可谈，容差退 1ms
+				if (cmp.exceeds) {
+					clock.manifest_mismatch.push({ beat: pkg.beatId, shot_index: item.shotIndex, file: item.file, declared_ms: cmp.declaredMs, probed_ms: cmp.measuredMs });
+				}
+				item.measuredSec = measured.durationSec;
+				clock.manifest_probed++;
+			} catch (e) {
+				clock.unverified++;
+				unverifiedSamples.push(`${pkg.beatId} s${item.shotIndex}（${e instanceof Error ? e.message : String(e)}）`);
+			}
+		}
+	}
+	if (vfrSamples.length) {
+		log.warn(
+			`导出片段疑似可变帧率（VFR）${vfrSamples.length} 镜：${vfrSamples.slice(0, 3).join("、")}${vfrSamples.length > 3 ? " 等" : ""}——` +
+				"已按落盘实测时长入轨、lay 判据不变；但 VFR 片段在客户端 / 渲染器上的帧对齐可能逐段漂移，" +
+				"稳妥做法是让工作台按固定帧率导出（或 ffmpeg -vsync cfr 重封装）后重跑本命令（幂等重铺）。",
+		);
+	}
+	if (unverifiedSamples.length) {
+		log.warn(
+			`导出片段实测失败 ${unverifiedSamples.length} 镜：沿用工作台 manifest 自述的 measuredSec（unverified）——` +
+				`${unverifiedSamples.slice(0, 3).join("、")}${unverifiedSamples.length > 3 ? " 等" : ""}。ffmpeg 就位后重跑本命令即可实测（幂等重铺）。`,
+		);
+	}
+	if (clock.manifest_mismatch.length) {
+		const sample = clock.manifest_mismatch
+			.slice(0, 3)
+			.map((m) => `${m.beat} s${m.shot_index}（自述 ${m.declared_ms}ms / 实测 ${m.probed_ms}ms）`)
+			.join("、");
+		log.warn(
+			`工作台 manifest 自述时长与落盘实测差 > 1ms：${clock.manifest_mismatch.length} 镜——${sample}${clock.manifest_mismatch.length > 3 ? " 等" : ""}。` +
+				"materials[].duration 与越素材判据已按实测；自述值只作比对。全量明细见 --json clock.manifest_mismatch。",
+		);
 	}
 
 	const generatedAt = new Date().toISOString();
@@ -202,6 +271,8 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Re
 		skipped,
 		reprojection: reproj.summary,
 		frame_grid: laid.summary.frameGrid,
+		// 时钟账面（add-cross-clock-adapter D3）：实测覆盖 / 回退自述计数 + manifest_mismatch 全量明细
+		clock,
 		...(integrity ? { integrity } : {}),
 	};
 	if (opts.json) console.log(JSON.stringify(result));

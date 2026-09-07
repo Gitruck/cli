@@ -23,8 +23,11 @@ import {
 	compress720p,
 	assertDurationConsistent,
 	assertWithinMediaDurationLimit,
+	assertSourceFrameRate,
+	vfrNotice,
+	sourceRateInfo,
 } from "../lib/media";
-import { materializeResult, type MaterializeResult } from "../lib/materialize";
+import { materializeResult, type LandingCheck, type MaterializeResult } from "../lib/materialize";
 import { renderClipBrief, renderClipsOverview } from "../lib/clip-brief";
 import { pollToolTask, parseExtraParams, mergeParams } from "../lib/tool-runner";
 import { openFolder } from "../lib/open";
@@ -268,6 +271,11 @@ export async function runLong2Short(
 	log.step("① 本地预处理（探几何 + 抽音频/720p 代理）…");
 	const geo = deps.probe(inputAbs, opts.ffmpegPath);
 	log.info(`原片几何 ${geo.width}x${geo.height} @ ${geo.fps.toFixed(2)}fps · ${(geo.duration / 60).toFixed(1)}min`);
+	// ①0 帧率门 + VFR 可见（add-frame-rate-table-vfr-detect D4/D5，与 oralcut 同款）：帧率解析不到 ⇒ 上传前报错退出
+	//   （零抽取、零上传、outDir 未建）；VFR ⇒ WARN 一行不阻断，payload 的 video_rate 仍是真实 r_frame_rate，机读见 --json source.vfr。
+	assertSourceFrameRate(geo);
+	const vfrWarn = vfrNotice(geo);
+	if (vfrWarn) log.warn(vfrWarn);
 
 	// ①a 零成本前置校验区（add-pre-upload-duration-gate）——本区 MUST 排在**任何抽取与上传之前**：
 	//   区内三项都只花本地几毫秒，而它们要拦的失败在服务端一律是「建单期硬拒」，
@@ -379,6 +387,8 @@ export async function runLong2Short(
 		ok: boolean;
 		/** 该 clip 的剪映草稿目录（两件套齐全时为绝对路径，否则 null）——日志的「可见」声明的机读对应物。 */
 		jianyingDraftPath?: string | null;
+		/** 落地复核（add-cross-clock-adapter D5）：该 clip 的 gtrk 对本地原片实测时长的不变量报告；gtrk 未落盘时缺席。 */
+		landing_check?: LandingCheck;
 	}> = [];
 	for (const [i, clip] of clips.entries()) {
 		const clipDir = join(outDir, `clip${i}`);
@@ -393,9 +403,11 @@ export async function runLong2Short(
 				json: false,
 				open: false,
 				quiet: true,
+				// 落地复核之墙（D5）：上传前探得的原片实测时长（source_container 钟）；逐 clip 报告、只报告不改产物
+				landingWall: { sourcePath: inputAbs, durationSec: geo.duration },
 			});
 			Object.assign(errors, Object.fromEntries(Object.entries(r.errors).map(([k, v]) => [`clip${i}:${k}`, v])));
-			clipResults.push({ dir: clipDir, title: clip.title, files: r.files, ok: r.ok });
+			clipResults.push({ dir: clipDir, title: clip.title, files: r.files, ok: r.ok, ...(r.landing_check ? { landing_check: r.landing_check } : {}) });
 			log.info(`clip${i}${clip.title ? `「${clip.title}」` : ""}：${Object.keys(r.files).join("/") || "（无产物）"}`);
 		} catch (e) {
 			errors[`clip${i}`] = e instanceof Error ? e.message : String(e);
@@ -459,6 +471,13 @@ export async function runLong2Short(
 		clips: clipResults,
 		splitMaterials: { landed: splitLanded, total: manifest.length },
 		reportFile: join(outDir, "report.json"),
+		// 源片帧率账面（add-frame-rate-table-vfr-detect D4）：上传前探得的 r / avg / vfr，机读对应上传前那条 VFR WARN
+		source: sourceRateInfo(inputAbs, geo),
+		// 落地复核汇总（D5）：逐 clip 明细在 clips[i].landing_check，这里只给一眼能看的总数（不改退出码）
+		landing_check: {
+			clips_checked: clipResults.filter((c) => c.landing_check && !c.landing_check.error).length,
+			violations: clipResults.reduce((n, c) => n + (c.landing_check?.violations.length ?? 0), 0),
+		},
 		...(Object.keys(errors).length ? { errors } : {}),
 	};
 	await writeFile(join(outDir, "result.json"), JSON.stringify({ ...rootResult, finishedAt: new Date().toISOString() }, null, 2));

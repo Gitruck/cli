@@ -42,6 +42,7 @@ import {
 	type GapFillEntry,
 	type GapFillMode,
 	type MarkLookup,
+	type ProxyProbe,
 	type SourceLayer,
 	wouldRefuseLay,
 } from "../lib/matrix-lay";
@@ -69,7 +70,8 @@ import {
 	imageStaticMaterialId,
 	type ImageMoveParams,
 } from "../lib/image-move";
-import { probeGeometry } from "../lib/media";
+import { probeGeometry, type Geometry } from "../lib/media";
+import { wallFromProbe } from "../lib/clock-adapter";
 import { uploadCached, invalidateUpload } from "../lib/upload-cache";
 import { submitTask, getTaskResult } from "../lib/cloud";
 import type { CloudFileTaskDeps } from "../lib/tool-runner";
@@ -293,6 +295,9 @@ export interface MatrixRunDeps {
 	 *  于是 `lay.arrange_run` 的端到端闸（自校验回落 / shadow / 回放 / 违约）一条都跑不起来。
 	 *  射程就这一个字段，MUST NOT 顺手加别的替身。 */
 	arrangeRequest?: typeof requestArrange;
+	/** 代理落盘即实测的 ffprobe 替身（add-cross-clock-adapter D2；缺省 = 真 `probeGeometry`）。
+	 *  单测注入 fake 离线跑「实测覆盖自述 / 失败回退 / 差 2 帧告警 / fps 不等告警」；生产路恒 `undefined`。 */
+	probe?: (abs: string) => Geometry;
 }
 
 export function registerMatrix(program: Command): void {
@@ -796,6 +801,8 @@ export interface MatrixIndexResult {
 	 * 与该否决带来的**新增**抽帧数。⚠️ 与 `frames_saved` **分列不相抵**——一笔是省、一笔是增，
 	 * 合并成净值会把「成本为什么涨了」藏起来。旧库/未扫黑段的素材两键恒为 0（不是缺席）。 */
 	stability: { stable_scenes: number; unstable_scenes: number; frames_saved: number; black_veto_scenes: number; black_veto_frames: number };
+	/** 本轮入库视频素材里判为 VFR 的条数（add-frame-rate-table-vfr-detect；对应逐条 WARN，不落库）。 */
+	vfr_materials: number;
 	billing: MatrixIndexBilling;
 	elapsedSec: number;
 	[k: string]: unknown;
@@ -1035,6 +1042,8 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 		embed: (inputs, sessionToken) => embedInputs(endpoint, inputs, { sessionToken }),
 		session: exempt ? undefined : buildIndexSessionHooks(endpoint),
 		onProgress: (line) => log.info(line),
+		// 告警行（add-frame-rate-table-vfr-detect）：VFR / 帧率不可解析走 WARN 级，与事实行分级，不淹在 INFO 里
+		onWarn: (line) => log.warn(line),
 		// 长跑心跳（add-matrix-index-phase-progress）：本仓既有的 tick/tickEnd 口径（render / oralcut /
 		// transcript / long2short / music-visualizer / chunk-upload 六处在用），index 是唯一漏掉的长跑命令。
 		// 收口纪律在编排层：任何 onProgress 之前先 tickEnd，命令层这里只做直连、MUST NOT 自己再判。
@@ -1077,9 +1086,12 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	// MUST NOT 加 `--allow-empty` 之类让零枚举重新变成成功的逃生门。
 	const zeroAll = run.materials.total === 0;
 	if (zeroAll) log.warn(zeroEnumerationDiagnosis(analysis, dirs, readBrokenLinks(run)));
+	// VFR 计数（add-frame-rate-table-vfr-detect）：>0 才上摘要行（逐条 WARN 已在上面打过，这里是一眼总数）
+	const vfrMaterials = run.vfrMaterials ?? 0;
+	const vfrNote = vfrMaterials > 0 ? ` · VFR 素材 ${vfrMaterials}` : "";
 	const summary =
 		`${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
-		`场景 ${run.scenes} · 帧 ${run.frames}${stabNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`;
+		`场景 ${run.scenes} · 帧 ${run.frames}${stabNote}${vfrNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`;
 	// MUST NOT 打出与正常完成无差别的成功行（真机就是被那句「✅ 索引完成：0/0」骗过去的）
 	if (zeroAll) log.err(`索引未产出任何素材：${summary}\n   判失败（退出码 1 · --json 的 ok=false）——「让这批素材可检索」这句祈使句没兑现。`);
 	else log.ok(`索引完成：${summary}`);
@@ -1102,6 +1114,8 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 			black_veto_scenes: stab.blackVetoScenes,
 			black_veto_frames: stab.blackVetoFrames,
 		},
+		// VFR 素材计数（add-frame-rate-table-vfr-detect D4）：机读对应逐条 WARN；不加 DB 列，恒带（0 = 本轮入库的都是 CFR / 未判）
+		vfr_materials: vfrMaterials,
 		billing,
 		elapsedSec: Math.round(run.elapsedMs / 100) / 10,
 	};
@@ -3406,6 +3420,21 @@ async function layIntoProject(
 	// 备好全部槽位 clip 的素材引用（按 clip_id 幂等复用）
 	const downloads = new Map<string, DownloadedProxy>();
 	const dlStats = { preview: 0, raw: 0, reused: 0, failed: 0, local: 0 };
+	// ── 代理落盘即实测（add-cross-clock-adapter D2）：每颗落盘代理（新下载 / 缓存命中 / 回落原片）ffprobe **一次**
+	//    → SourceWall（preview 代理 = preview_proxy 钟；回落原片 = source_container 钟）。失败只记原因，
+	//    纯函数据此回退自述 + unverified；这里 MUST NOT 抛——探不到不是铺不了。本地素材路不探（索引期已实测，恒等）。
+	const probe = layOpts.deps.probe ?? probeGeometry;
+	const proxyProbes = new Map<string, ProxyProbe>();
+	const probeLanded = (clipId: string, abs: string, source: "preview" | "raw"): void => {
+		try {
+			const geo = probe(abs);
+			const wall = wallFromProbe(geo, source === "raw" ? "source_container" : "preview_proxy");
+			if (!wall) throw new Error(`ffprobe 时长无效（${geo.duration}）`);
+			proxyProbes.set(clipId, { wall, width: geo.width, height: geo.height, fps: geo.fps });
+		} catch (e) {
+			proxyProbes.set(clipId, { error: e instanceof Error ? e.message : String(e) });
+		}
+	};
 	for (const clipId of clipIds) {
 		const cand = candById.get(clipId);
 		if (!cand) continue;
@@ -3429,6 +3458,7 @@ async function layIntoProject(
 			const prev = prevSource.get(clipId);
 			if (prev !== "raw") {
 				downloads.set(clipId, { rel, source: prev ?? "preview" });
+				probeLanded(clipId, abs, prev ?? "preview"); // 缓存命中同样实测：首轮成本，条目描述文件本身
 				dlStats.reused++;
 				continue;
 			}
@@ -3436,10 +3466,12 @@ async function layIntoProject(
 			const retried = await downloadProxy(cand, abs, { previewOnly: true });
 			if (retried === "preview") {
 				downloads.set(clipId, { rel, source: "preview" });
+				probeLanded(clipId, abs, "preview");
 				dlStats.preview++;
 				log.info(`clip ${clipId} 代理已补产,已从原片回落态换回 preview`);
 			} else {
 				downloads.set(clipId, { rel, source: "raw" });
+				probeLanded(clipId, abs, "raw");
 				dlStats.reused++;
 			}
 			continue;
@@ -3447,6 +3479,7 @@ async function layIntoProject(
 		const got = await downloadProxy(cand, abs);
 		if (got) {
 			downloads.set(clipId, { rel, source: got });
+			probeLanded(clipId, abs, got);
 			dlStats[got]++;
 		} else {
 			dlStats.failed++;
@@ -3479,6 +3512,7 @@ async function layIntoProject(
 		downloads,
 		covers,
 		injectedMaterials: prep.injected,
+		proxyProbes,
 		sourceLayer: layOpts.sourceLayer,
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
@@ -3544,6 +3578,7 @@ async function layIntoProject(
 				downloads,
 				covers,
 				injectedMaterials: prep.injected,
+				proxyProbes,
 				sourceLayer: layOpts.sourceLayer,
 				generatedAt: new Date().toISOString(),
 				planPath: "split/broll-plan.json",
@@ -3849,6 +3884,9 @@ async function layIntoProject(
 			// 写出侧帧网格统计（fix-matrix-lay-frame-grid 2.4，纯诊断）：rate = 顶层 video_rate，
 			// slots / black_bed = 本轮落在网格上的候选轨 clip 数 / 黑底 clip 数，shifted = 越段界宁短一帧的次数
 			...(summary.frameGrid ? { frame_grid: summary.frameGrid } : {}),
+			// 时钟账面（add-cross-clock-adapter D2）：代理实测 / 回退自述 / 本地恒等计数 + proxy_mismatch / proxy_fps_mismatch 全量明细
+			//（人读只汇总一行，机读 MUST NOT 按阈值过滤——后者是交 infra 核查代理生成的真机证据）
+			...(summary.clock ? { clock: summary.clock } : {}),
 			// 云端编排归因（fix-arrange-selfcheck-json-surface）：**真发过请求才出现**。
 			// ⚠️ 键名是 `arrange_run` 不是 `arrange`——`arrange` 已被 `--arrange-estimate-only`
 			//    那条路占用且形态不同（`{applicable, units, scale}` 的预估形态）。两条路的语义

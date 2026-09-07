@@ -7,10 +7,12 @@
  * 下载遇 404（产物过期被 GC）不整体中止：记入 errors、仍完成报告落盘与输出。
  */
 import { join, basename, dirname } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { collectWriteViolations, type WriteViolation } from "./gtrk-invariants";
 import { download as realDownload, type OralCutOutput } from "./cloud";
 import { copyJianyingDraft } from "./jianying";
 import { renderGtrk, readGtrkFile, type GtrkV1 } from "./render";
+import type { SourceRateInfo } from "./media";
 import { openFolder } from "./open";
 import { log } from "./log";
 
@@ -53,6 +55,34 @@ export interface MaterializeOpts {
 	quiet?: boolean;
 	/** 可注入下载实现（测试用）；缺省真 download。 */
 	download?: (url: string, dest: string) => Promise<void>;
+	/**
+	 * 云端产物落地复核（add-cross-clock-adapter D5，spec `clock-adapter`「云端产物落地 SHALL 复核不变量，只报告不改写」）：
+	 * 以**本地原片实测时长**为墙（上传前 `probeGeometry` 的 `geo.duration`，`source_container` 钟）替换 gtrk 里同路径 material 的
+	 * 自述时长，跑 `collectWriteViolations` 报告模式。给了才复核（跑批路）；恢复命令（`oralcut result`）无原片几何 ⇒ 缺席不复核。
+	 */
+	landingWall?: LandingWall;
+	/**
+	 * 源片帧率账面（add-frame-rate-table-vfr-detect D4）：上传前 `probeGeometry` 的 `r / avg / vfr` 三值，原样进 `--json source`
+	 * 与 result.json（`vfr` 三态；VFR 的人读 WARN 已在上传前打过，这里只是机读对应物）。跑批路给；恢复命令无原片几何 ⇒ 缺席。
+	 */
+	source?: SourceRateInfo;
+}
+
+/** 落地复核之墙：`sourcePath` = 上传前的毛片绝对路径（云端把它原样写进 `materials[].path`），`durationSec` = 本地 ffprobe 实测。 */
+export interface LandingWall {
+	sourcePath: string;
+	durationSec: number;
+}
+
+/** 落地复核报告（`--json landing_check` / result.json）：只报告，MUST NOT 改写产物、MUST NOT 非 0 退出。 */
+export interface LandingCheck {
+	gtrk: string;
+	wall: { source_path: string; duration_sec: number; clock: "source_container" };
+	/** 被本地实测时长替换了自述的 material 数（0 = 产物里没有同路径 material，此时按产物自述跑）。 */
+	materials_walled: number;
+	violations: WriteViolation[];
+	/** 读不到 / 解析不了产物时的原因（此时 `violations` 为空，不代表合规）。 */
+	error?: string;
 }
 
 export interface MaterializeResult {
@@ -65,9 +95,45 @@ export interface MaterializeResult {
 	errors: Record<string, string>;
 	taskId: string;
 	fileId: string | null;
+	/** 仅给了 `landingWall` 且 gtrk 已落盘时出现。 */
+	landing_check?: LandingCheck;
+	/** 仅跑批路（给了 `source`）出现：源片 `fps / avg_fps / vfr`。 */
+	source?: SourceRateInfo;
 }
 
 const isExpired404 = (msg: string): boolean => /HTTP 404/.test(msg);
+
+const wallLabel = (w: LandingWall): string => `${basename(w.sourcePath)} ${w.durationSec.toFixed(3)}s · source_container`;
+
+/** 路径同一性（Windows 反斜杠 / 大小写）：云端把 `source_path` 原样写回，这里只消反斜杠与 `/` 的差。 */
+const normSlash = (p: string): string => p.split("\\").join("/").toLowerCase();
+const samePath = (a: unknown, b: string): boolean => typeof a === "string" && normSlash(a) === normSlash(b);
+
+/**
+ * 落地复核（D5）：读产物 → 同路径 material 的 `duration` 换成本地实测 → `collectWriteViolations`（与写方自检**同一套断言、同一遍历**）。
+ * 纯报告：产物文件一个字节不碰（改的是内存里的副本），任何异常都收进 `error` 而不是抛。
+ */
+export async function landingCheckGtrk(gtrkPath: string, wall: LandingWall): Promise<LandingCheck> {
+	const report: LandingCheck = {
+		gtrk: gtrkPath,
+		wall: { source_path: wall.sourcePath, duration_sec: wall.durationSec, clock: "source_container" },
+		materials_walled: 0,
+		violations: [],
+	};
+	try {
+		const gtrk = JSON.parse(await readFile(gtrkPath, "utf8")) as Record<string, unknown>;
+		const materials = Array.isArray(gtrk.materials) ? (gtrk.materials as unknown[]) : [];
+		const walled = materials.map((m) => {
+			if (typeof m !== "object" || m === null || !samePath((m as { path?: unknown }).path, wall.sourcePath)) return m;
+			report.materials_walled += 1;
+			return { ...(m as Record<string, unknown>), duration: wall.durationSec };
+		});
+		report.violations = collectWriteViolations({ ...gtrk, materials: walled }, "landing");
+	} catch (e) {
+		report.error = e instanceof Error ? e.message : String(e);
+	}
+	return report;
+}
 
 /** 从 gtrk materials[0].path 推毛片基名（供成片命名）。 */
 function gtrkSourceName(gtrk: GtrkV1): string | undefined {
@@ -99,6 +165,7 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			errors,
 			taskId,
 			fileId: opts.fileId ?? null,
+			...(opts.source ? { source: opts.source } : {}),
 			...extra,
 		};
 		await writeFile(resultPath, JSON.stringify(r, null, 2));
@@ -174,8 +241,26 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 		}
 	}
 
+	// 云端产物落地复核（D5）：gtrk 已落盘且给了墙才跑；WARN 逐条 + 机读 landing_check，产物逐字节不改、退出码不变
+	let landing_check: LandingCheck | undefined;
+	const landedGtrk = (byFormat.gtrk ?? [])[0];
+	if (opts.landingWall && landedGtrk) {
+		landing_check = await landingCheckGtrk(landedGtrk, opts.landingWall);
+		if (landing_check.error) {
+			log.warn(`落地复核未能进行（${basename(landedGtrk)}）：${landing_check.error}——产物已落盘、未改动`);
+		} else if (landing_check.violations.length) {
+			log.warn(
+				`落地复核：云端工程 ${basename(landedGtrk)} 对本地原片实测时长（${wallLabel(opts.landingWall)}）有 ${landing_check.violations.length} 条不变量违例` +
+					"（只报告、产物未改；客户端打开后重存或 `gtrk patch` 可修）：",
+			);
+			for (const v of landing_check.violations) log.warn(`  · [${v.kind}] ${v.message}`);
+		} else {
+			log.info(`落地复核：云端工程对本地原片实测时长（${wallLabel(opts.landingWall)}）零违例（${landing_check.materials_walled} 条 material 按实测复核）`);
+		}
+	}
+
 	// result.json 补写解析出的本地路径
-	const result = await writeResult({ files: byFormat, jianyingDraftPath, rendered });
+	const result = await writeResult({ files: byFormat, jianyingDraftPath, rendered, ...(landing_check ? { landing_check } : {}) });
 
 	// 三方打开提示（人读；--json / quiet 跳过，避免污染 stdout 机读 JSON）
 	if (!opts.json && !opts.quiet) {

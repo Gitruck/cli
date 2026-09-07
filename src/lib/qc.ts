@@ -18,6 +18,8 @@ import { parseSceneScores } from "./local-index";
 // 单向 import 不成环；本文件内部（scanFinalCut）也用这一个绑定，MUST NOT 再写第二份正则。
 import { parseBlackSpans } from "./index-decode";
 import { r3, sec2frame } from "./frame-domain";
+// VFR 判据阈值与源片侧 `probeGeometry` 同一常量（add-frame-rate-table-vfr-detect D2）：MUST NOT 在此内联第二份。
+import { VFR_MISMATCH_RATIO } from "./media";
 
 // ── 阈值基线（v1 标定值；标定批次调参只改这一处）─────────────────────────
 export const QC_THRESHOLDS = {
@@ -616,7 +618,7 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 	};
 	const rFps = rateOf(v?.r_frame_rate);
 	const aFps = rateOf(v?.avg_frame_rate);
-	if (rFps && aFps && Math.abs(rFps - aFps) / rFps > 0.01) {
+	if (rFps && aFps && Math.abs(rFps - aFps) / rFps > VFR_MISMATCH_RATIO) {
 		items.push({
 			type: "vfr",
 			severity: "error",

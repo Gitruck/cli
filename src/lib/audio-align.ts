@@ -16,7 +16,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
 import { probeGeometry, probeDuration } from "./media";
-import { r3 } from "./frame-domain";
+import { r3, deliveryRate } from "./frame-domain";
 
 /** 粗对齐 PCM 采样率（Hz）。 */
 const PCM_RATE = 4000;
@@ -292,13 +292,16 @@ export function buildAlignProject(
 ): Record<string, unknown> {
 	const vStart = r3(Math.max(0, -offsetEstimate));
 	const aStart = r3(Math.max(0, offsetEstimate));
+	// 顶层 / 素材 `video_rate` 经标准帧率表交付视图取整数（add-frame-rate-table-vfr-detect T6；此前裸 `Math.round`）：
+	// 29.97 → 30、23.98 → 24 与旧值同，fps 缺失（0）不再静默变 1 而是报错——帧率是时间基，MUST NOT 兜底。
+	const rate = deliveryRate(geo.fps);
 	return {
 		version: "v1",
 		video_size: [geo.width, geo.height],
-		video_rate: Math.max(1, Math.round(geo.fps)),
+		video_rate: rate,
 		duration: r3(Math.max(vStart + geo.duration, aStart + extDuration)),
 		materials: [
-			{ id: "align-video", path: fwd(videoAbs), duration: r3(geo.duration), video_size: [geo.width, geo.height], video_rate: Math.max(1, Math.round(geo.fps)) },
+			{ id: "align-video", path: fwd(videoAbs), duration: r3(geo.duration), video_size: [geo.width, geo.height], video_rate: rate },
 			{ id: "align-ext-audio", path: fwd(extAudioAbs), duration: r3(extDuration), audio_channel: "stereo" },
 		],
 		video_track: [

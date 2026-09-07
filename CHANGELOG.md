@@ -2,6 +2,37 @@
 
 ## 未发布
 
+### 标准帧率表与 VFR 可见；`gtrk render` 对非整数 `video_rate` 从静默渲染改为报错（含修复指引）
+
+`frame-domain.ts` 新增本仓唯一的标准帧率表 `STANDARD_RATES`（`24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, 60, 120`）与两个视图：
+`snapRationalRate`（源真值：与表中值相对差 ≤ 0.2% 才吸附，`29.970029 → 30000/1001`，非标值原样）、`deliveryRate`（交付整数：NLE 表
+`[23.976, 24, 25, 29.97, 30, 50, 59.94, 60]` 最近邻后取整，与客户端同口径、封顶 60，`(0, ∞)` 无洞）。`audio align` 兜底工程的顶层与素材
+`video_rate` 改经 `deliveryRate`（29.97 → 30、23.98 → 24 与此前同值；源片帧率解析不到时改为报错，不再静默写出 1fps 工程）。
+`probeGeometry` 在同一次 ffprobe 里加读 `avg_frame_rate`，给出 `avgFps` 与三态 `vfr`（`|avg − r| / r > 1%`；容器无 avg 时 `null` 不判）；
+判据阈值 `VFR_MISMATCH_RATIO` 一处定义，成片质检 `qc` 的 `vfr` 项改 import 同一常量（行为不变）。
+
+**`gtrk render` 变严**：顶层 `video_rate` 缺席、非正或非整数（典型是老工程里的 29.97）此前会按 29.97 静默分配帧数并进 `fps=` 滤镜，
+现在与 `matrix lay` / `gtrk patch` 同一条判据、同一条话术报错退出，且在解析 ffmpeg、探测素材、写临时滤镜文件**之前**即止（无产物、无残留）。
+修复：用客户端打开该工程重存一次即吸附到标准帧率（29.97 → 30、23.976 → 24），或手工把顶层 `video_rate` 改成正整数；
+`video_rate` 已是正整数的工程渲染结果与此前逐字节相同。
+
+`oralcut` / `long2short` 上传前：源片判为 VFR 时 WARN 一行（名义 `r_frame_rate` 与平均 `avg_frame_rate` 两值）但不阻断，上行几何仍是
+真实 `r_frame_rate`；`--json` 与 result.json 多一个 `source: { path, fps, avg_fps, vfr }`。源片帧率解析不到（`r_frame_rate = 0/0`）时
+在上传前报错退出（零抽取、零上传、不留产物目录），不以 25 / 30 兜底。`matrix index` 入库：VFR 视频素材逐条 WARN、`--json` 多
+`vfr_materials` 计数（不加索引列，检索透出的 `fps` 仍是名义值）；帧率解析不到的视频素材跳过不入库并 WARN（计入 `failed`）。
+`ai-drama lay` 拷贝后探测顺带 VFR 告警。决策层的吸附网格、铺轨金样与 `.gtrk` 字段零改动。
+
+### 跨时钟适配器：preview 代理落盘即实测、云端产物落地复核、写方自检覆盖音频轨
+
+`matrix lay` 下载（或缓存命中）每颗 preview 代理后现场 ffprobe 一次，`materials[]` 条目的 `duration / video_size / video_rate`
+改写**落盘文件本身**的实测值（此前写的是云端自述的原片时长与猜测尺寸）；云端自述只用于比对——时长差超一帧或帧率不等各打一条
+WARN，全量明细进 `--json lay.clock`（`proxy_probed / unverified / proxy_mismatch[] / proxy_fps_mismatch[]`）；探测失败回退自述并计
+`unverified`，不让铺轨失败。槽位选段与吸附网格不消费实测值（云本平价，决策与金样逐字节不变）。`ai-drama lay` 同款：拷贝后实测覆盖
+工作台 manifest 的 `measuredSec`，差 > 1ms 告警并进 `--json clock.manifest_mismatch[]`。`subtitle lay` 云端拆行的兜底行时码钳进父句
+包络（越出父句的行不再原样落轨），计数进 INFO 与 `--json clamped_lines`。`oralcut` / `long2short` 拉回 `.gtrk` 后以本地原片实测时长
+为墙复核不变量，只 WARN + `--json landing_check`，产物一个字节不改、退出码不变。写方自检射程扩到 `audio_track`，`audio lay` 写回前自检
+本次 BGM clip（存量违例只 WARN）。本地索引代理三档解码参数由单测锁定无任何时基滤镜。
+
 ### matrix lay 落轨在工程帧网格上（写出侧变换，决策与金样不变）；gtrk patch 的毫秒投影改向下
 
 `matrix lay` 写出的每一颗 B-roll 槽位与黑底 clip，起止时码现在都是顶层 `video_rate` 帧网格上某个整帧号的投影

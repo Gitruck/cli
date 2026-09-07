@@ -633,16 +633,24 @@ export function classOf(el: Element): "clip" | "gap" | "beat" {
 }
 
 /**
- * 顶层 `video_rate`。契约保证恒为**正整数**且已吸附标准帧率表；缺失 / 非正 / 非整数 ⇒ 抛（同一条话术）。
+ * 顶层 `video_rate` 的**读侧判据**：契约保证恒为**正整数**；缺失 / 非正 / 非整数 ⇒ 抛（同一条话术，含修复指引）。
+ *
+ * 本函数只判不吸附——**写侧吸附函数 = `frame-domain.ts deliveryRate`**（add-frame-rate-table-vfr-detect T6：
+ * 标准帧率表只在 `frame-domain.ts` 一处，本仓写顶层 `video_rate` 的模块经 `deliveryRate` 取整数；客户端保存即吸附）。
+ * 此前头注写「已吸附标准帧率表」而全仓并无该表——读侧判据假设写侧吸附过、写侧却各自 `Math.round`，本件补齐写侧。
  *
  * 整数判据（fix-matrix-lay-frame-grid 2.8）：契约说「恒为正整数」而本函数此前只判正数，
  * 客户端本地写出的 29.97 之类会漏过 ⇒ 帧域三件套在非整帧率上往返不再可逆。
- * `gtrk patch` 与 `matrix lay` 共用本读法（D7：缺席即报错退出、零副作用，MUST NOT 静默退回毫秒路）。
+ * `gtrk patch` / `matrix lay` / `gtrk render` 共用本读法（D7：缺席即报错退出、零副作用，MUST NOT 静默退回毫秒路，
+ * `render` MUST NOT 静默吸附后渲染——按 29.97 与按 30 分配的帧数不同，吸附即第二个权威）。
  */
 export function videoRateOf(gtrk: Obj): number {
 	const r = gtrk.video_rate;
 	if (typeof r !== "number" || !Number.isFinite(r) || r <= 0 || !Number.isInteger(r)) {
-		throw new Error(`工程缺少合法的 video_rate（读到 ${JSON.stringify(r)}）——帧对齐无从谈起`);
+		throw new Error(
+			`工程缺少合法的 video_rate（读到 ${JSON.stringify(r)}，须为正整数）——帧对齐无从谈起。` +
+				"修复：用客户端打开该工程重存一次即吸附到标准帧率（29.97 → 30、23.976 → 24），或手工把顶层 video_rate 改成正整数",
+		);
 	}
 	return r;
 }

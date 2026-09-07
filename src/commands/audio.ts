@@ -34,6 +34,7 @@ import { basename, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic } from "../lib/gtrk-writeback";
+import { assertGtrkWriteInvariants } from "../lib/gtrk-invariants";
 import { probeDuration, probeAudioChannel, probeGeometry } from "../lib/media";
 import {
 	DEFAULT_ALIGN_THRESHOLD,
@@ -886,6 +887,13 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 			(a, b) => ((a.track_index as number) ?? 0) - ((b.track_index as number) ?? 0),
 		),
 	};
+	// 写方自检（gtrk-writer-invariants，add-cross-clock-adapter D6 把射程扩到 audio_track）：本次写出的 BGM clip 查裁剪恒等式 /
+	// 素材上界（clip_ed ≤ materials[].duration + 1ms）/ 与同轨邻居零重叠，违约即抛、工程文件逐字节不写；
+	// 存量违例（旧客户端重存 / 旧版本产物）只经 log.warn 打一条汇总，MUST NOT 阻断。判据在 gtrk-invariants，这里不复刻。
+	assertGtrkWriteInvariants(next, "audio lay", {
+		ownClipIds: new Set(clips.map((c) => String(c.clip_id))),
+		warn: (m) => log.warn(m),
+	});
 	writeGtrkAtomic(gtrkPath, next, revision);
 
 	const laidSt = anchored ? (clips[0]!.track_st as number) : trackSt;
