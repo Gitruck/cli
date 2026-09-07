@@ -2,6 +2,22 @@
 
 ## 未发布
 
+### 时间消费侧统一：`gtrk render` 接缝判据与 `gtrk patch` 校验器同源（整毫秒格）、匿名 ε 清退、`qc` 阈值具名
+
+`gtrk render` 的同轨重叠 / 缝 / 尾补判据从 `±1e-6` 浮点秒改为**整毫秒格**（`sec2ms`），与 `gtrk patch` 的 E9 `same_track_overlap` 同一判据：
+`sec2ms(track_st)` 小于前一元素终点即拒渲、大于即补 gap、相等即相邻。**`render` 变严的一面**：重叠 ≥ 0.5ms 的工程拒渲，话术含修复指引
+（用 `gtrk patch` 校验并修正该轨，或用客户端打开工程重存一次后再渲染）；此前 render 收而 patch 拒的「一收一拒」不再存在。
+**变宽的一面**（只影响时码不在毫秒格上的老工程 / 客户端按帧写出的工程）：亚毫秒（< 0.5ms）重叠视为相邻不再拒渲，亚毫秒缝不再插一个 0 帧黑场元素；
+gap / 尾补时长落在整毫秒格上（`atrim=end=` 一类字面从 `276.366667` 变 `276.367000`）。三位小数工程的 filter_complex 逐字节不变；
+`allocateFrames` 累计量改整毫秒和、帧化经 `sec2frame`，真机工程副本（客户端按帧写出，110 元素）裁定帧数与改前相同（8291 帧）。
+`caption-align` 三种时间比较（同句回缝 gap / 字级去重 / 行推进与小 gap 桥接）统一到具名 `CAPTION_TIME_GRID_MS = 1`，`EPS = 1e-6` 与裸 `1e-3` 清退
+（亚毫秒差的重复字现在会去重、亚毫秒缝不再算一次桥接）；`audio align` 的 `adelay` 分流阈从 `0.0005s` 改整毫秒（不足 1ms 的偏移即零偏移）。
+全仓 32 处内联换算收编为 `frame-domain` 的 `r3`（15 处）/ `sec2ms`（15 处）/ `sec2frame`（2 处），逐值同；`matrix lay` 代理帧率不等判据改用
+`VFR_MISMATCH_RATIO`（相对差 1%，此前本地 `PROXY_FPS_EPS` 按绝对差 0.01 比、与其头注「1% 以内」不符）。
+`qc`：`cutMatchTolSec` 改名 `cutMatchWindowSec`（未经 `--json` 暴露，无别名），`cutMaxDriftSec / slotLookupSec / knownBlackHoleMatchSec` 进
+`QC_THRESHOLDS`（值不变），`av_drift` 项新增 `frames: {probed, expected}` 佐证（成片 `nb_frames` vs `sec2frame(工程时间线终点或音频时长, video_rate)`，判级不变）。
+决策层（`matrix lay` 的 `refineWindow / fillSlots / layAnchored / planBeatFills / slotTimes` 与 gap 填充）零改动，铺轨金样与 `MANIFEST` 逐字节不变。
+
 ### 标准帧率表与 VFR 可见；`gtrk render` 对非整数 `video_rate` 从静默渲染改为报错（含修复指引）
 
 `frame-domain.ts` 新增本仓唯一的标准帧率表 `STANDARD_RATES`（`24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, 60, 120`）与两个视图：

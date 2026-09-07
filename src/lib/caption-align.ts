@@ -10,6 +10,12 @@
  *   改任一处 MUST 同批改另一处。同步基线：2026-09-06。
  *   ⚠️ 2026-09-07 cli 侧先行（add-cross-clock-adapter D4：`attributeAndAlign` 兜底分支钳进父句包络 + `stats` 出参），
  *   客户端仓待同步（该 change 转出项）；黄金样本 `aligned / bridged` 逐字节未变（样本里无越出父句的行）。
+ *   ⚠️ 2026-09-07 cli 侧再先行（unify-time-consumers-and-tolerance D2）：三种时间比较全部落到**整毫秒格**
+ *   （`CAPTION_TIME_GRID_MS = 1`），匿名 `EPS = 1e-6` 与裸 `1e-3` 清退；客户端件镜像同一组常量与判据，
+ *   两仓共用测试向量 `test/fixtures/caption-align-grid.json`。
+ * ★ 零 import 的代价：秒 → 整毫秒的换算在本文件**本地镜像**一份 `sec2ms`（与 `frame-domain.ts sec2ms` 逐字同体、
+ *   MUST NOT 分叉）——这是全仓 `Math.round(x × 1000)` 机械判据的登记豁免行（同 `mg-lint.ts` 零依赖豁免），
+ *   理由：本文件在客户端仓没有 `frame-domain` 可 import，加 import 即破两仓逐字节同源。
  */
 
 /** 轨上时基的字（秒）。 */
@@ -59,7 +65,15 @@ export const DEFAULT_RESEW_GAP_SECONDS = 0.5;
  */
 export const DEFAULT_BRIDGE_GAP_SECONDS = 1.5;
 
-const EPS = 1e-6;
+/**
+ * 字级时码的整毫秒格（unify-time-consumers-and-tolerance D2；capability `time-tolerance-whitelist` 白名单项）：
+ * 本文件所有时间比较的**唯一**容差——「相邻 / 相同」= 整毫秒相等，「推进到下一父句」= 行起点 + 1 格 ≥ 父句终点。
+ * MUST NOT 再引入 `1e-6` / `1e-3` 一类匿名 ε：审计与实现引用同一个常量。
+ */
+export const CAPTION_TIME_GRID_MS = 1;
+
+/** 秒 → 整毫秒（`frame-domain.ts sec2ms` 的零 import 镜像，见文件头；MUST 与正本逐字同体）。 */
+const sec2ms = (sec: number): number => Math.round(sec * 1000);
 
 /**
  * 同句回缝：相邻且同 `utteranceId` 且 gap ≤ 阈值（含负 gap）的实例并为一条。
@@ -78,7 +92,7 @@ export function resewProjectedInstances(
 		if (
 			prev &&
 			prev.utteranceId === inst.utteranceId &&
-			inst.startTime - prev.endTime <= gapSec + EPS
+			sec2ms(inst.startTime - prev.endTime) <= sec2ms(gapSec)
 		) {
 			if (prev.words && inst.words) {
 				const merged = mergeWordsByTime(prev.words, inst.words);
@@ -106,7 +120,8 @@ function mergeWordsByTime(a: AlignedWord[], b: AlignedWord[]): AlignedWord[] {
 	const out: AlignedWord[] = [];
 	for (const w of all) {
 		const last = out[out.length - 1];
-		if (last && last.w === w.w && Math.abs(last.st - w.st) < EPS && Math.abs(last.ed - w.ed) < EPS) {
+		// 字级时码「相同」= 整毫秒相等（同一素材摆在两条轨上吐出的重复字，时码差只会是浮点尾差）
+		if (last && last.w === w.w && sec2ms(last.st) === sec2ms(w.st) && sec2ms(last.ed) === sec2ms(w.ed)) {
 			continue;
 		}
 		out.push(w);
@@ -274,7 +289,7 @@ export function attributeAndAlign({
 	enterUnit(0);
 
 	for (const line of lines) {
-		while (ui + 1 < units.length && line.st + 1e-3 >= units[ui].endTime) enterUnit(ui + 1);
+		while (ui + 1 < units.length && sec2ms(line.st) + CAPTION_TIME_GRID_MS >= sec2ms(units[ui].endTime)) enterUnit(ui + 1);
 		const unit = units[ui];
 		let startTime = line.st;
 		let endTime = line.ed;
@@ -329,8 +344,9 @@ export function bridgeSmallGaps(
 	for (let i = 0; i + 1 < captions.length; i++) {
 		const cur = captions[i];
 		const next = captions[i + 1];
-		const gap = next.startTime - (cur.startTime + cur.duration);
-		if (gap > 0 && gap <= maxGapSec + EPS) {
+		// 整毫秒格上判「有缝」：亚毫秒缝 = 相邻，不计桥接
+		const gapMs = sec2ms(next.startTime - (cur.startTime + cur.duration));
+		if (gapMs > 0 && gapMs <= sec2ms(maxGapSec)) {
 			cur.duration = next.startTime - cur.startTime;
 			bridged += 1;
 		}

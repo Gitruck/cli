@@ -15,6 +15,7 @@ import { submitTask } from "../cloud";
 import { uploadCached, invalidateUpload } from "../upload-cache";
 import { pollToolTask } from "../tool-runner";
 import { probeDuration } from "../media";
+import { r3 } from "../frame-domain";
 import { madJsx, type MadWindow, type FootageMap, type BeatMarker } from "../convert/ir_to_jsx";
 import { scanFolder, masterCanvas, type ProbeFn } from "./scan";
 import { selectWindows } from "./selector";
@@ -226,7 +227,7 @@ export async function runMad(inputArg: string | undefined, opts: MadOpts, deps: 
 			const room = Math.max(0, vidDur - winLen);
 			if (room > 0) off = off % room;
 			else off = 0;
-			footage[lid] = { path: c.video.path, srcOffset: Math.round(off * 1000) / 1000 };
+			footage[lid] = { path: c.video.path, srcOffset: r3(off) };
 		});
 		return {
 			ir: ir as unknown as MadWindow["ir"],

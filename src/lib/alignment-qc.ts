@@ -19,6 +19,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { r3, sec2ms } from "./frame-domain";
 import {
 	describeImages,
 	putCachedDescribe,
@@ -134,7 +135,7 @@ export function pairSentencesWithClips(args: {
 		const base: AlignmentItem = {
 			id: u.id,
 			sentence: u.text,
-			track_mid: Math.round(mid * 1000) / 1000,
+			track_mid: r3(mid),
 			clip_id: null,
 			source_path: null,
 			source_sec: null,
@@ -156,7 +157,7 @@ export function pairSentencesWithClips(args: {
 			role,
 			clip_id: clip.clip_id ?? null,
 			source_path: path,
-			source_sec: Math.round(srcSec * 1000) / 1000,
+			source_sec: r3(srcSec),
 		};
 	});
 }
@@ -310,7 +311,7 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 			// 客观卡片顺手写缓存（免费副产物；claim 字段刻意不入缓存——判定随稿句走，不可复用）
 			if (deps.db && it.source_path !== null && it.source_sec !== null) {
 				try {
-					putCachedDescribe(deps.db, `align-${basename(it.source_path)}`, Math.round(it.source_sec * 1000), {
+					putCachedDescribe(deps.db, `align-${basename(it.source_path)}`, sec2ms(it.source_sec), {
 						...r,
 						claim_aligned: undefined,
 						claim_verdict: undefined,

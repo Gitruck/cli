@@ -21,6 +21,7 @@ import { readFile, mkdir, copyFile } from "node:fs/promises";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 // [adjust-lay-frame-domain D2] 顶层 video_rate 与 matrix lay / ai-drama lay 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
 import { videoRateOf } from "../lib/gtrk-patch";
+import { r3 } from "../lib/frame-domain";
 import { lintParticle, parseCompositionId } from "../lib/mg-lint";
 import { renderParticle, CID_SHAPE } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
@@ -227,7 +228,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		const html = await readFile(srcPath, "utf8");
 		const category = typeof q.category === "string" ? q.category : undefined;
 		// 铁律⑦：坑位长度 = 槽位包络，与 dispatch 的 duration（=duration_hint 语义）彻底解耦。
-		const slotDuration = Math.round((win.track_ed - win.track_st) * 1000) / 1000;
+		const slotDuration = r3(win.track_ed - win.track_st);
 		const lint = lintParticle(html, {
 			compositionId: q.composition_id,
 			dispatchIds,
@@ -459,7 +460,7 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 		const hit = byName ?? (innerCid ? queue.find((q) => q.composition_id === innerCid) : undefined);
 		if (hit) {
 			// 铁律⑦：坑位长度 = 槽位包络（与 dispatch.duration 的 hint 语义解耦），同 runLay
-			const d = Math.round((hit.track_ed - hit.track_st) * 1000) / 1000;
+			const d = r3(hit.track_ed - hit.track_st);
 			if (d > 0) slotDuration = d;
 		}
 		if (byName) compositionId = byName.composition_id;

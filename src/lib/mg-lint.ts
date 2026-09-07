@@ -1,6 +1,11 @@
 /**
  * MG 颗粒静态 lint（add-rrv-lay，去品牌化前 rrv-lint）——六铁律的**机器可判定静态子集**，纯本地零云端。
  *
+ * **零 import 自足**是既有设计（本文件不依赖仓内任何模块）。代价：铁律⑦静态估长里的三位小数舍入
+ * `Math.round(raw * 1000) / 1000`（`estimateTimelineLength`）是 `frame-domain.ts r3` 的本地同体副本——
+ * unify-time-consumers-and-tolerance 登记为全仓 `Math.round(x × 1000)` 机械判据的**豁免行**（与 `caption-align.ts`
+ * 的零 import 镜像同类）；MUST 与正本逐字同体、MUST NOT 分叉。
+ *
  * 契约正本 contracts/gsap-emit-v1.md。**只查静态可判定项**——逐帧非冻结只有真 Hyperframes 能判
  * （契约明令禁本地无头模拟），留客户端出片期，不在此。
  *
@@ -297,7 +302,7 @@ export function estimateTimelineSec(html: string): TimelineEstimate {
 		else chain += span;
 	}
 	const raw = Math.max(chain, maxEnd);
-	const est = Number.isFinite(raw) ? Math.round(raw * 1000) / 1000 : raw;
+	const est = Number.isFinite(raw) ? Math.round(raw * 1000) / 1000 : raw; // 零 import 豁免行：= frame-domain.r3（见文件头）
 	return { est, parsed, skipped, hasInfiniteRepeat };
 }
 

@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg, ffprobeJson } from "./ffmpeg";
 import { videoRateOf } from "./gtrk-patch";
+import { ms2sec, sec2frame, sec2ms } from "./frame-domain";
 import { log } from "./log";
 
 const AUDIO_SAMPLE_RATE = 48000;
@@ -92,9 +93,11 @@ function pickPreviewMainTrack(gtrk: GtrkV1, sortedV: Track[]): Track {
 	return sortedV[0];
 }
 
+/** 时间线元素。`duration` 是源侧秒值（`trim` / `atrim` 寻址与 afade 用，不动）；`lineMs` 是它在成片时间线上
+ *  占的**整毫秒数**（接缝判据与帧数分配的累计量，unify-time-consumers-and-tolerance D1）。三位小数工程两者同值。 */
 type Element =
-	| { kind: "clip"; material: string | number; clip_st: number; duration: number; volume?: number }
-	| { kind: "gap"; duration: number };
+	| { kind: "clip"; material: string | number; clip_st: number; duration: number; lineMs: number; volume?: number }
+	| { kind: "gap"; duration: number; lineMs: number };
 
 const isGap = (clip: Clip): boolean => clip.material === null || clip.material === undefined;
 
@@ -119,19 +122,35 @@ function normalizeVolume(v: number): number | undefined {
 	return v;
 }
 
-/** track_timeline → 连续 clip/gap 元素序列（铺满、无重叠），返回 [elements, cursor]。 */
+/**
+ * track_timeline → 连续 clip/gap 元素序列（铺满、无重叠），返回 [elements, cursor（秒，恒落整毫秒格）]。
+ *
+ * 接缝判据在**整毫秒格**上（unify-time-consumers-and-tolerance D1；spec `local-ffmpeg-render`「铺轨判据与帧化 SHALL 与
+ * `gtrk patch` 校验器同源」）：`sec2ms(track_st)` 与整毫秒游标直接比较——小于即重叠（硬拒，与 E9 `same_track_overlap`
+ * 同判）、大于即缝（补 gap）、相等即相邻。MUST NOT 用 `±1e-6` 浮点秒（T4 禁止的匿名 ε）。
+ * 游标 = `sec2ms(track_st + duration)`：终点由未舍入的和**一次取整**，与 `slotTimes` / `assertTrackContinuity` 的
+ * `sec2ms(track_ed)` 同口径（客户端按帧写出的 `n/rate` 浮点时码若逐项取整再相加，会因 `f2ms` 不可加漂 1ms 而误判重叠——
+ * 真机工程副本实测 9 对）。三位小数工程上与 E9 的 `readMs(st) + readMs(duration)` 逐值同。
+ */
 function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[], number] {
 	const items = [...trackTimeline].sort((a, b) => Number(a.track_st) - Number(b.track_st));
 	const elements: Element[] = [];
-	let cursor = 0;
+	let cursorMs = 0;
 	for (const clip of items) {
 		const trackSt = Number(clip.track_st);
 		const duration = Number(clip.duration);
 		if (duration <= 0) throw new Error(`clip duration 非法: ${JSON.stringify(clip)}`);
-		if (trackSt < cursor - 1e-6) {
-			throw new Error(`track_timeline 时间重叠: track_st=${trackSt} < cursor=${cursor.toFixed(6)}`);
+		const stMs = sec2ms(trackSt);
+		if (stMs < cursorMs) {
+			throw new Error(
+				`track_timeline 时间重叠: track_st=${trackSt} 早于前一元素终点 ${ms2sec(cursorMs)}` +
+					`（重叠 ${cursorMs - stMs}ms；整毫秒格零容差，与 gtrk patch 校验器同判）` +
+					"——修复：用 `gtrk patch` 校验并修正该轨，或用客户端打开工程重存一次后再渲染",
+			);
 		}
-		if (trackSt > cursor + 1e-6) elements.push({ kind: "gap", duration: trackSt - cursor });
+		if (stMs > cursorMs) elements.push({ kind: "gap", duration: ms2sec(stMs - cursorMs), lineMs: stMs - cursorMs });
+		const edMs = sec2ms(trackSt + duration);
+		const lineMs = edMs - stMs;
 		if (!isGap(clip)) {
 			// 契约双层音量：clip 级覆盖轨级，均缺省=1（不产生 volume 滤镜）；
 			// 折叠后的原始值再过存量启发式（normalizeVolume）换成可消费线性。
@@ -142,14 +161,15 @@ function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[]
 				material: clip.material as string | number,
 				clip_st: Number(clip.clip_st),
 				duration,
+				lineMs,
 				...(typeof vol === "number" && vol !== 1 ? { volume: vol } : {}),
 			});
 		} else {
-			elements.push({ kind: "gap", duration });
+			elements.push({ kind: "gap", duration, lineMs });
 		}
-		cursor = trackSt + duration;
+		cursorMs = edMs;
 	}
-	return [elements, cursor];
+	return [elements, ms2sec(cursorMs)];
 }
 
 /**
@@ -237,17 +257,21 @@ export interface RenderAudioInfo {
  * 画面对配音渐进失步（旅拍打样实测：视频流比音频流长 0.279s，切点漂移 0.028s→0.256s 单调增长）。
  * 该行为与 VFR 无关，纯 CFR 源同样发生（合成源实测 2.010s→61 帧、2.510s→76 帧）。
  *
- * 累计取整：第 i 段帧数 = `round(cumEnd_i × rate) − round(cumStart_i × rate)`，
- * 每段的取整误差被下一段起点吸收，全片总帧数恒 `round(total × rate)`，不随段序累加。
+ * 累计取整：第 i 段帧数 = `sec2frame(cumEnd_i) − sec2frame(cumStart_i)`（半帧进一，与写方同一口径），
+ * 每段的取整误差被下一段起点吸收，全片总帧数恒 `sec2frame(total)`，不随段序累加。
  * 各段时长均为帧长整数倍时退化为原值（零回归）。导出供单测与跨仓对拍。
+ *
+ * 累计量是**整毫秒和**（各元素 `lineMs`，unify-time-consumers-and-tolerance D1）：它逐项等于成片时间线上的元素终点
+ * （`normalizeTrack` 的游标序列），不再是浮点 `duration` 的加法链；帧化只经 `sec2frame`，MUST NOT 内联 `Math.round(x × rate)`。
+ * 正数域上 `sec2frame` 与此前的 `Math.round` 逐值同，三位小数工程的裁定帧数逐字节不变。
  */
-export function allocateFrames(elements: { duration: number }[], rate: number): number[] {
+export function allocateFrames(elements: { lineMs: number }[], rate: number): number[] {
 	const out: number[] = [];
-	let cum = 0;
+	let cumMs = 0;
 	let prevFrame = 0;
 	for (const el of elements) {
-		cum += el.duration;
-		const edge = Math.round(cum * rate);
+		cumMs += el.lineMs;
+		const edge = sec2frame(ms2sec(cumMs), rate);
 		out.push(edge - prevFrame);
 		prevFrame = edge;
 	}
@@ -333,7 +357,9 @@ export function buildFilterGraph(
 	}
 	const total = Math.max(vEnd, ...aLens, ...laneA.map((l) => l.end));
 	if (total <= 0) throw new Error("时间线总时长为 0");
-	if (total > vEnd + 1e-6) vElements.push({ kind: "gap", duration: total - vEnd });
+	// 尾补 gap 同样在整毫秒格上判（各 lane 终点本就是 normalizeTrack 的整毫秒游标）
+	const totalMs = sec2ms(total);
+	if (totalMs > sec2ms(vEnd)) vElements.push({ kind: "gap", duration: ms2sec(totalMs - sec2ms(vEnd)), lineMs: totalMs - sec2ms(vEnd) });
 
 	// 逐元素输出帧数：按成片时间线**累计取整**裁定（fix-render-frame-drift D1）——
 	// 取整误差被下一段起点吸收，全片总帧数恒 round(total×rate)，MUST NOT 逐段累加
@@ -375,7 +401,8 @@ export function buildFilterGraph(
 	 *  尾部补齐到 total 后 concat 成与时间线等长的连续 lane。lane A 与 audio_track 共用**同一套**
 	 *  滤镜语义（主规格钉死的音频链，本件逐字不改，只是把输入从哪来这一面补上）。 */
 	const emitLane = (els: Element[], end: number): string => {
-		if (total > end + 1e-6) els.push({ kind: "gap", duration: total - end });
+		const endMs = sec2ms(end);
+		if (totalMs > endMs) els.push({ kind: "gap", duration: ms2sec(totalMs - endMs), lineMs: totalMs - endMs });
 		const segLabels: string[] = [];
 		for (const el of els) {
 			const lab = label();

@@ -11,6 +11,7 @@ import type { CloudConfig } from "./config";
 import type { FilmDispatch } from "./splitdoc";
 import type { ColumnBroll } from "./column-config";
 import { parseJson, CloudError, type ApiResp } from "./cloud";
+import { r3 } from "./frame-domain";
 
 // ── 类型（broll-plan-contract spec 字段级）────────────────────────────────
 
@@ -511,7 +512,7 @@ export function anchorAtSec(utteranceText: string, keyword: string, trackSt: num
 	if (idx < 0) return null;
 	const span = trackEd - trackSt;
 	if (!(Number.isFinite(trackSt) && Number.isFinite(span) && span > 0)) return null;
-	return Math.round((trackSt + (idx / utteranceText.length) * span) * 1000) / 1000;
+	return r3(trackSt + (idx / utteranceText.length) * span);
 }
 
 /**

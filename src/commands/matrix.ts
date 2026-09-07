@@ -21,6 +21,7 @@ import { resolveColumnConfig } from "../lib/column-config";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 // [fix-matrix-lay-frame-grid D7] 顶层 video_rate 与 gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
 import { videoRateOf } from "../lib/gtrk-patch";
+import { sec2ms } from "../lib/frame-domain";
 import {
 	BROLL_COVER_DIR,
 	BROLL_META_CANDIDATE_CAP,
@@ -1365,7 +1366,7 @@ function collectPlanDescribeItems(
 					log.warn(`clip ${r.clip_id} 无可取帧来源（缺 local_path/url），跳过理解`);
 					continue;
 				}
-				items.push({ materialId, tsMs: Math.round(bestSec * 1000), source: { kind: "frame", src, tsSec: bestSec } });
+				items.push({ materialId, tsMs: sec2ms(bestSec), source: { kind: "frame", src, tsSec: bestSec } });
 				targets.push(r);
 			}
 		}
@@ -1395,7 +1396,7 @@ async function collectMaterialDescribeItems(
 			try {
 				const { materialId, frameTsSec } = await videoSceneFrames(p);
 				for (const ts of frameTsSec) {
-					items.push({ materialId, tsMs: Math.round(ts * 1000), source: { kind: "frame", src: p, tsSec: ts } });
+					items.push({ materialId, tsMs: sec2ms(ts), source: { kind: "frame", src: p, tsSec: ts } });
 				}
 			} catch (e) {
 				skipped++;
@@ -2984,7 +2985,7 @@ async function layIntoProject(
 	const cutRatio = layOpts.cutAlign ?? CUT_ALIGN_DEFAULT;
 	let cutStarts: number[] | undefined;
 	if (cutRatio > 0) {
-		const starts = [...new Set([...(reproj.utteranceIndex?.values() ?? [])].map((u) => Math.round(u.track_st * 1000)))]
+		const starts = [...new Set([...(reproj.utteranceIndex?.values() ?? [])].map((u) => sec2ms(u.track_st)))]
 			.sort((a, b) => a - b)
 			.map((v) => v / 1000);
 		if (starts.length) {

@@ -30,8 +30,16 @@ export const QC_THRESHOLDS = {
 	 * 与铺轨的 SLIVER_MIN_SEC 同为 1.0s：防与查同一条感知线。
 	 * 严重级 MUST 按端点来源分级（见 scanFinalCut）——一刀切会把素材自身的快剪蒙太奇误报成缺陷。 */
 	flashMaxSec: 1.0,
-	/** 段内跳切对表容差（秒）：跳变与漂移修正后的 clip 边界之差在此内算正常剪切。 */
-	cutMatchTolSec: 0.12,
+	/** 段内跳切对表**窗口**（秒）：clip 边界向前认领跳变的窗口宽度，边界与漂移修正后的跳变之差在此内算正常剪切。
+	 * 这是检测阈值不是时间容差（unify-time-consumers-and-tolerance · `time-tolerance-whitelist`：名字 MUST NOT 含
+	 * tolerance / eps）；原名 `cutMatchTolSec`——核查过 `--json` / 报告不暴露该键（`QcReport` 无 thresholds 字段），故不留别名。 */
+	cutMatchWindowSec: 0.12,
+	/** 对表时跳变可落后于 clip 边界的最大漂移（秒）——超过即该边界记 missing（渲染累计漂移的上限，此前是检测体内裸 `1.0`）。 */
+	cutMaxDriftSec: 1.0,
+	/** 成片时码 → 工程槽位反查窗（秒）：扣渲染漂移，槽位两端各放宽 0.1s = **3 帧@30**（此前注释写「帧级」，实际就是 3 帧；裸 `0.1`）。 */
+	slotLookupSec: 0.1,
+	/** 黑段 ↔ 工程登记黑底空洞的匹配窗（秒）：空洞两端各放宽 0.25s 内的黑段算命中（降级 info；此前裸 `0.25`）。 */
+	knownBlackHoleMatchSec: 0.25,
 	/** blackdetect：最短黑段/像素黑判据/单像素黑阈值。 */
 	blackMinDurSec: 0.1,
 	blackPicTh: 0.98,
@@ -391,9 +399,11 @@ export function detectFlashes(
  *     error，与「除非素材颗粒内部本来就高频」的例外条款直接冲突。
  *   · `spliceCuts === null`（未开工程感知）→ 来源不可判，退回不分级的 `warn` 并标注口径受限。
  *
- * 端点归属判在**帧域**（fix-matrix-lay-frame-grid 2.9）：工程有合法 `video_rate` 时，切点与拼接集合都经
- * `sec2frame` 帧化后比对——写出侧 `f2ms` 改向下投影后，30fps 下 `n ≡ 2 (mod 3)` 的帧位写出 `0.066`
- * 而成片切点 `r3(2/30) = 0.067`，毫秒等值比对恒 miss、分级会静默退成 `info`；同一帧号则两侧恒等。
+ * 端点归属的比对口径（fix-matrix-lay-frame-grid 2.9；头注于 unify-time-consumers-and-tolerance 订正为与实现相符）：
+ * 拼接集合**来自成片切点**（`matchCutsToBoundaries` 认领成功的 `matched[].cut`，见 scanFinalCut），与闪帧端点
+ * （`detectFlashes(cuts)`）**同源**——两侧都是同一组 scene-score 时刻，不是工程写出的 `track_st / track_ed`。
+ * 工程有合法 `video_rate` 时两侧都经 `sec2frame` 帧化后比对：这是**同源加固**（同一时刻经同一函数恒得同一帧号，
+ * 不受 `r3` 表示层与浮点尾差影响），不是为了弥合「写出 `0.066` vs 切点 `0.067`」——那对数只在拿工程边界直接比对时才会出现。
  * 工程无合法帧率（老工程）时退回毫秒等值口径（`kind: "ms"`），MUST NOT 编造帧率。
  *
  * 纯函数，供单测直调 spec 的三条 Scenario。
@@ -435,22 +445,22 @@ export function shortShotItems(cuts: number[], spliceCuts: SpliceIndex | null): 
 
 /**
  * 跳变 ↔ clip 边界有序对表（单调匹配，见文件头「工程感知」注记）：每个边界认领其后**首个**
- * 落在 [−tol, maxDriftSec] 内的跳变；认领不到即记 missing（该剪切点在成片里没形成可见跳变，
- * 多为相邻两颗粒画面本就相近，不报缺陷只作诊断）。未被认领的跳变 = 段内跳切。
+ * 落在 [−cutMatchWindowSec, cutMaxDriftSec] 内的跳变；认领不到即记 missing（该剪切点在成片里没形成可见跳变，
+ * 多为相邻两颗粒画面本就相近，不报缺陷只作诊断）。未被认领的跳变 = 段内跳切。两个阈值都具名于 `QC_THRESHOLDS`。
  */
 export function matchCutsToBoundaries(
 	cuts: number[],
 	boundaries: number[],
-	opts: { tolSec?: number; maxDriftSec?: number } = {},
+	opts: { windowSec?: number; maxDriftSec?: number } = {},
 ): { matched: { boundary: number; cut: number; drift: number }[]; intra: number[]; missing: number[] } {
-	const tol = opts.tolSec ?? QC_THRESHOLDS.cutMatchTolSec;
-	const maxDrift = opts.maxDriftSec ?? 1.0;
+	const win = opts.windowSec ?? QC_THRESHOLDS.cutMatchWindowSec;
+	const maxDrift = opts.maxDriftSec ?? QC_THRESHOLDS.cutMaxDriftSec;
 	const matched: { boundary: number; cut: number; drift: number }[] = [];
 	const missing: number[] = [];
 	const claimed = new Set<number>();
 	let j = 0;
 	for (const b of boundaries) {
-		while (j < cuts.length && cuts[j]! < b - tol) j++;
+		while (j < cuts.length && cuts[j]! < b - win) j++;
 		if (j < cuts.length && cuts[j]! - b <= maxDrift) {
 			matched.push({ boundary: r3(b), cut: r3(cuts[j]!), drift: r3(cuts[j]! - b) });
 			claimed.add(j);
@@ -513,15 +523,15 @@ export function slotsFromGtrk(gtrk: unknown): SlotRef[] {
 	return out.sort((a, b) => a.trackSt - b.trackSt);
 }
 
-/** 成片时码 → 所属槽位（扣渲染漂移：容差按帧级给，命中不唯一时返回 null）。 */
-export function slotAt(slots: SlotRef[], t: number, tolSec = 0.1): SlotRef | null {
-	const hit = slots.filter((s) => t >= s.trackSt - tolSec && t < s.trackEd + tolSec);
+/** 成片时码 → 所属槽位（扣渲染漂移：反查窗 `QC_THRESHOLDS.slotLookupSec` = 3 帧@30，命中不唯一时返回 null）。 */
+export function slotAt(slots: SlotRef[], t: number, windowSec: number = QC_THRESHOLDS.slotLookupSec): SlotRef | null {
+	const hit = slots.filter((s) => t >= s.trackSt - windowSec && t < s.trackEd + windowSec);
 	return hit.length === 1 ? hit[0]! : null;
 }
 
 /** 成片时码 → 源素材时码（经所属槽位换算；槽位不唯一时 null）。 */
-export function toSourceTime(slots: SlotRef[], t: number, tolSec = 0.1): { slot: SlotRef; src: number } | null {
-	const slot = slotAt(slots, t, tolSec);
+export function toSourceTime(slots: SlotRef[], t: number, windowSec: number = QC_THRESHOLDS.slotLookupSec): { slot: SlotRef; src: number } | null {
+	const slot = slotAt(slots, t, windowSec);
 	if (!slot) return null;
 	return { slot, src: r3(slot.clipSt + (t - slot.trackSt)) };
 }
@@ -564,7 +574,65 @@ export function isKnownBlackHole(gtrk: unknown, st: number, ed: number): boolean
 	const holes = (gtrk as { struct_meta?: { broll?: { holes?: { track_st: number; track_ed: number }[] } } })
 		?.struct_meta?.broll?.holes;
 	if (!Array.isArray(holes)) return false;
-	return holes.some((h) => ed >= Number(h.track_st) - 0.25 && st <= Number(h.track_ed) + 0.25);
+	const w = QC_THRESHOLDS.knownBlackHoleMatchSec;
+	return holes.some((h) => ed >= Number(h.track_st) - w && st <= Number(h.track_ed) + w);
+}
+
+/** 工程顶层 `video_rate` 的合法读法（正整数即收，否则 null——老工程无合法帧率时 MUST NOT 编造）。 */
+export function integerVideoRate(gtrk: unknown): number | null {
+	const vr = (gtrk as { video_rate?: unknown }).video_rate;
+	return typeof vr === "number" && Number.isFinite(vr) && vr > 0 && Number.isInteger(vr) ? vr : null;
+}
+
+/** 工程时间线终点（秒）：全部 `*_track[].track_timeline[]` 的 `track_st + duration` 最大值；无可读元素时 null。 */
+export function projectTotalSec(gtrk: unknown): number | null {
+	if (!gtrk || typeof gtrk !== "object") return null;
+	let max = Number.NEGATIVE_INFINITY;
+	for (const [key, val] of Object.entries(gtrk as Record<string, unknown>)) {
+		if (!key.endsWith("_track") || !Array.isArray(val)) continue;
+		for (const t of val as { track_timeline?: { track_st?: unknown; duration?: unknown }[] }[]) {
+			for (const c of t?.track_timeline ?? []) {
+				const ed = Number(c?.track_st) + Number(c?.duration);
+				if (Number.isFinite(ed) && ed > max) max = ed;
+			}
+		}
+	}
+	return Number.isFinite(max) ? max : null;
+}
+
+/**
+ * 音画总长不一致 → `av_drift` 条目（unify-time-consumers-and-tolerance D5 · qc-command「帧数佐证随音画漂移项输出」）。
+ *
+ * 判级只看秒差：`|vDur − aDur| > avDurationDiffSec` ⇒ error，否则 null。`evidence.frames` 是**佐证不是判据**：
+ * 成片视频流 `nb_frames`（`probed`）vs `sec2frame(参照总长, rate)`（`expected`），两者之差就是画面漂了几帧。
+ * 参照总长 = 工程时间线终点（工程感知时）或音频流时长（音频是画面漂离的基准）；rate = 工程顶层合法 `video_rate`
+ * 或成片 `r_frame_rate`。拿不到的一侧记 `null`（容器无 `nb_frames` 的成片照样出条目），MUST NOT 编造。
+ */
+export function avDriftItem(
+	vDur: number,
+	aDur: number,
+	frames: { probed: number | null; refSec: number | null; rate: number | null },
+	thresholdSec: number = QC_THRESHOLDS.avDurationDiffSec,
+): QcItem | null {
+	const diff = vDur - aDur;
+	if (!(Math.abs(diff) > thresholdSec)) return null;
+	const expected =
+		frames.refSec !== null && frames.rate !== null && Number.isFinite(frames.refSec) && frames.rate > 0
+			? sec2frame(frames.refSec, frames.rate)
+			: null;
+	return {
+		type: "av_drift",
+		severity: "error",
+		st: r3(Math.min(vDur, aDur)),
+		ed: r3(Math.max(vDur, aDur)),
+		evidence: {
+			video_duration: r3(vDur),
+			audio_duration: r3(aDur),
+			diff_sec: r3(diff),
+			frames: { probed: frames.probed, expected },
+			note: "画面与音频总长不一致：画面对口播渐进失步（成片切点相对工程时间线累积漂移）；frames 是佐证（成片帧数 vs 参照总长应有帧数），不参与判级",
+		},
+	};
 }
 
 // ── 扫描编排 ─────────────────────────────────────────────────────────────
@@ -594,23 +662,6 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 	const a = streams.find((s) => s.codec_type === "audio");
 	const vDur = v?.duration != null ? Number(v.duration) : null;
 	const aDur = a?.duration != null ? Number(a.duration) : null;
-	if (vDur !== null && aDur !== null) {
-		const diff = vDur - aDur;
-		if (Math.abs(diff) > T.avDurationDiffSec) {
-			items.push({
-				type: "av_drift",
-				severity: "error",
-				st: r3(Math.min(vDur, aDur)),
-				ed: r3(Math.max(vDur, aDur)),
-				evidence: {
-					video_duration: r3(vDur),
-					audio_duration: r3(aDur),
-					diff_sec: r3(diff),
-					note: "画面与音频总长不一致：画面对口播渐进失步（成片切点相对工程时间线累积漂移）",
-				},
-			});
-		}
-	}
 	const rateOf = (s?: string): number | null => {
 		if (!s) return null;
 		const [n, d] = s.split("/").map(Number);
@@ -618,6 +669,15 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 	};
 	const rFps = rateOf(v?.r_frame_rate);
 	const aFps = rateOf(v?.avg_frame_rate);
+	// 工程顶层合法帧率（工程感知时）：av_drift 佐证与拼接集合帧化共用同一读法
+	const gtrkRate = opts.gtrk ? integerVideoRate(opts.gtrk) : null;
+	if (vDur !== null && aDur !== null) {
+		// nb_frames 此前请求了不消费；现在作 av_drift 的帧数佐证（判级仍只看秒差）
+		const probedFrames = v?.nb_frames != null && Number.isFinite(Number(v.nb_frames)) ? Number(v.nb_frames) : null;
+		const refSec = (opts.gtrk ? projectTotalSec(opts.gtrk) : null) ?? aDur;
+		const drift = avDriftItem(vDur, aDur, { probed: probedFrames, refSec, rate: gtrkRate ?? rFps }, T.avDurationDiffSec);
+		if (drift) items.push(drift);
+	}
 	if (rFps && aFps && Math.abs(rFps - aFps) / rFps > VFR_MISMATCH_RATIO) {
 		items.push({
 			type: "vfr",
@@ -650,8 +710,7 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 		const { matched, intra } = matchCutsToBoundaries(cuts, bounds);
 		const drifts = matched.map((m) => m.drift);
 		// 拼接集合在构建处按顶层 video_rate 帧化（fix-matrix-lay-frame-grid 2.9）；老工程无合法帧率 ⇒ 毫秒口径
-		const vr = (opts.gtrk as { video_rate?: unknown }).video_rate;
-		const rate = typeof vr === "number" && Number.isFinite(vr) && vr > 0 && Number.isInteger(vr) ? vr : null;
+		const rate = gtrkRate;
 		spliceCuts =
 			rate !== null
 				? { kind: "frames", rate, frames: new Set(matched.map((m) => sec2frame(m.cut, rate))) }

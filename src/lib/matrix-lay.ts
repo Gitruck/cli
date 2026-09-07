@@ -47,6 +47,7 @@ import {
 // MUST NOT 在本文件复刻第二份取整。决策层（slotTimes / 实数游标 / 毫秒黑底合并）一字未动、仍在毫秒域；
 // 帧格化只在 layBrollTracks 的**写出侧**发生（projectSlotsToFrameGrid，见下）。
 import { f2ms, r3, sec2frame, sec2ms } from "./frame-domain";
+import { VFR_MISMATCH_RATIO } from "./media";
 import { compareWalls, wallFromDeclared, type SourceWall } from "./clock-adapter";
 import { videoRateOf } from "./gtrk-patch";
 import { assertGtrkWriteInvariants, assertTrackContinuity, assertTrimIdentity } from "./gtrk-invariants";
@@ -203,7 +204,7 @@ export function measureCutAlignment(opts: {
 	let total = 0;
 	let aligned = 0;
 	for (const s of opts.starts) {
-		const key = Math.round(s * 1000);
+		const key = sec2ms(s);
 		if (seen.has(key)) continue;
 		if (!opts.beats.some((b) => s >= b.track_st - eps && s < b.track_ed - eps)) continue;
 		seen.add(key);
@@ -576,7 +577,7 @@ interface Pair {
  * 在诊断口径上本就该并；MUST NOT 为消除折叠改用区间键（`start-end`）——那正是上面那条分家。
  */
 export function segDiagKey(clipId: string, seg: { best: number }): string {
-	return `${clipId}@${Math.round(seg.best * 1000)}`;
+	return `${clipId}@${sec2ms(seg.best)}`;
 }
 
 /** mark/highlight 融合统计收集器（按**段**去重，键 = `segDiagKey`；planBeatFills 聚合进 summary）。
@@ -690,8 +691,9 @@ export interface ClockSummary {
 	proxy_fps_mismatch: Array<{ clip_id: string; declared_fps: number; probed_fps: number }>;
 }
 
-/** 帧率相等判据（代理 vs 自述）：`29.97` 与 `30000/1001` 同一口径下差 3e-5，1% 以内视为同一帧率。 */
-const PROXY_FPS_EPS = 0.01;
+// 帧率相等判据（代理 vs 自述）：与 `media.ts VFR_MISMATCH_RATIO` **同一常量、同一相对差公式**
+// （unify-time-consumers-and-tolerance D4；T6 判据只许一份）——`|declared − probed| / probed > 1%` 才算不等，
+// `29.97` 与 `30000/1001` 差 3e-5 视为同一帧率。此前本地 `PROXY_FPS_EPS = 0.01` 按**绝对差**比，与头注「1% 以内」不符。
 
 export interface FrameGridProjection<T> {
 	/** 变换后的槽位（保持入参原序；被弃的槽位不在内）。 */
@@ -3631,7 +3633,7 @@ export function layBrollTracks(opts: {
 								const cmp = compareWalls(declared, probed.wall, cand?.fps);
 								if (cmp.exceeds) clock.proxy_mismatch.push({ clip_id: s.clip_id, declared_ms: cmp.declaredMs, probed_ms: cmp.measuredMs, frames: cmp.frames });
 							}
-							if (typeof cand?.fps === "number" && probed.fps > 0 && Math.abs(cand.fps - probed.fps) > PROXY_FPS_EPS) {
+							if (typeof cand?.fps === "number" && probed.fps > 0 && Math.abs(cand.fps - probed.fps) / probed.fps > VFR_MISMATCH_RATIO) {
 								clock.proxy_fps_mismatch.push({ clip_id: s.clip_id, declared_fps: cand.fps, probed_fps: r3(probed.fps) });
 							}
 						} else {
@@ -3802,10 +3804,10 @@ export function layBrollTracks(opts: {
 		//   · 下界 —— 不足一帧的是**亚帧残片**，渲染侧累计取整判 0 帧、观众根本看不见，
 		//     报成「黑闪」就是假话；那一档归 fix-gapfill-subframe-residue（它负责**消掉**它们，
 		//     不是报它们）。两件的射程在 1 帧处接壤，本件 MUST NOT 越界去认领。
-		//     黑片如今一出生就在帧网格上（一帧 = f2ms 投影差 33/34ms @30），帧数按就近取整判——
-		//     sec × rate ≥ 1 会把向下投影的一帧（0.033 × 30 = 0.99）误判成亚帧而漏报。
+		//     黑片如今一出生就在帧网格上（一帧 = f2ms 投影差 33/34ms @30），帧数按 `sec2frame`（半帧进一）判——
+		//     sec × rate ≥ 1 会把向下投影的一帧（0.033 × 30 = 0.99）误判成亚帧而漏报。帧化只经 frame-domain（T3）。
 		//   · 上界 —— MIN_SHOT_SEC：短于它的黑片按铺轨自己的口径就不成一个镜头。
-		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && Math.round(f.sec * rate) >= 1);
+		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && sec2frame(f.sec, rate) >= 1);
 		if (shortSolids.length) {
 			gapFillSummary.short_solid = {
 				count: shortSolids.length,
@@ -3813,8 +3815,8 @@ export function layBrollTracks(opts: {
 				// 全量，MUST NOT 按阈值过滤
 				items: shortSolids.map((f) => ({ beat: f.beat, sec: f.sec })),
 			};
-			// 帧数按顶层 video_rate 换算（黑片在网格上，就近取整即整帧数）。
-			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s（${Math.round(f.sec * rate)} 帧）`;
+			// 帧数按顶层 video_rate 换算（黑片在网格上，sec2frame 半帧进一即整帧数）。
+			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s（${sec2frame(f.sec, rate)} 帧）`;
 			const head = shortSolids.slice(0, 5).map(fmt).join("、");
 			warnings.push(
 				`主轨落了 ${shortSolids.length} 处**过短黑片**（短于最小槽长 ${MIN_SHOT_SEC}s，合计 ` +

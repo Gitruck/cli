@@ -19,6 +19,7 @@ import { resolveDescribeUrl } from "../lib/describe";
 import { probeGcMemberType } from "../lib/matrix";
 import { loadConfig } from "../lib/config";
 import { requireFfmpeg } from "../lib/ffmpeg";
+import { sec2ms } from "../lib/frame-domain";
 
 interface QcOpts {
 	gtrk?: string;
@@ -133,7 +134,7 @@ export function registerQc(program: Command): void {
 					}
 					const materialId = clipId.startsWith("broll-") ? clipId : `broll-${clipId}`;
 					const list = byMaterial.get(materialId) ?? [];
-					list.push(Math.round(src * 1000));
+					list.push(sec2ms(src));
 					byMaterial.set(materialId, list);
 				}
 				const db = await openLocalIndexDb();

@@ -25,7 +25,7 @@
 export const AI_DRAMA_MATERIAL_PREFIX = "ai-drama-";
 export const AI_DRAMA_PRODUCER_BY = "gtrk:ai-drama@1";
 
-import { f2ms, r3, sec2frame } from "./frame-domain";
+import { f2ms, r3, sec2frame, sec2ms } from "./frame-domain";
 import { assertGtrkWriteInvariants } from "./gtrk-invariants";
 import { videoRateOf } from "./gtrk-patch";
 
@@ -194,7 +194,7 @@ export function layAiDramaTracks(opts: {
 				cursor = nextMs;
 				continue;
 			}
-			const measuredMs = Math.round(item.measuredSec * 1000);
+			const measuredMs = sec2ms(item.measuredSec);
 			if (durMs > measuredMs) {
 				// 源窗不许越素材：帧量化多出的那不足一帧超过了 ffprobe 实测 ⇒ 宁短一帧，后续帧号整体前移（接缝仍相等）。
 				// 判越界用整毫秒 `durMs > measured_ms`：批 1 `assertSourceBound` 的 +1ms 容差对写出值恒成立。

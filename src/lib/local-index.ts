@@ -39,6 +39,7 @@ import { log } from "./log";
 import { homeFile, tmpDir } from "./paths";
 import { requireFfmpeg, runFfmpeg, type FfmpegResolution } from "./ffmpeg";
 import { probeGeometry } from "./media";
+import { sec2ms } from "./frame-domain";
 import { BROLL_LOCAL_MATERIAL_PREFIX } from "./matrix-lay";
 import { EMBED_BATCH_MAX, EMBED_UNREACHABLE_CODE, type EmbedInput } from "./embed-client";
 import { cpus } from "node:os";
@@ -1595,7 +1596,7 @@ async function planMaterialDefault(
 	return {
 		materialId,
 		kind,
-		durationMs: Math.round(geo.duration * 1000),
+		durationMs: sec2ms(geo.duration),
 		width: geo.width,
 		height: geo.height,
 		fps: geo.fps,
@@ -1603,15 +1604,15 @@ async function planMaterialDefault(
 		avgFps: geo.avgFps,
 		vfr: geo.vfr ?? null,
 		scenes: scenes.map((s) => ({
-			st_ms: Math.round(s.st * 1000),
-			ed_ms: Math.round(s.ed * 1000),
+			st_ms: sec2ms(s.st),
+			ed_ms: sec2ms(s.ed),
 			stable: s.stable,
 			blackVeto: s.blackVeto,
 			motion: s.motion,
 		})),
-		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: Math.round(p.ts * 1000) })),
-		cutsMs: det.cuts.map((t) => Math.round(t * 1000)),
-		blackMs: det.blackSpans.map((b) => [Math.round(b.st * 1000), Math.round(b.ed * 1000)] as [number, number]),
+		framePlan: plan.map((p) => ({ sceneIdx: p.sceneIdx, ts_ms: sec2ms(p.ts) })),
+		cutsMs: det.cuts.map((t) => sec2ms(t)),
+		blackMs: det.blackSpans.map((b) => [sec2ms(b.st), sec2ms(b.ed)] as [number, number]),
 		decodeLane: det.lane,
 	};
 }

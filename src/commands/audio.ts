@@ -1141,7 +1141,7 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	]);
 	const buf = readFileSync(pcmPath);
 	const pcm = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 2));
-	const oldDur = Math.round((pcm.length / TIGHTEN_PCM_RATE) * 1000) / 1000;
+	const oldDur = r3(pcm.length / TIGHTEN_PCM_RATE);
 	const win = Math.round(TIGHTEN_PCM_RATE * SILENCE_WIN_SEC);
 	const rms: number[] = [];
 	for (let i = 0; i + win <= pcm.length; i += win) {
@@ -1160,7 +1160,7 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	);
 
 	const planned = planTightenCuts(runs, boundaries, protect, { keep, minSilence, boundaryTol });
-	const newDur = Math.round((oldDur - planned.removedSec) * 1000) / 1000;
+	const newDur = r3(oldDur - planned.removedSec);
 	const m = makeTightenMapper(planned.cuts);
 	// 引用段边界再切一刀：让它单独成 clip，用户能单独选中调出入点（仍在配音轨上、仍是同一素材）
 	const keeps = splitIntervalsAt(
@@ -1275,7 +1275,7 @@ function applyTightenToProject(
 		const proto = voiceTrack.track_timeline.find((c) => String(c.material) === voiceMatId) ?? {};
 		voiceTrack.track_timeline = keeps.map((k) => {
 			const { clip_st: _a, clip_ed: _b, track_st: _c, track_ed: _d, duration: _e, ...rest } = proto;
-			return { ...rest, material: voiceMatId, clip_st: k.st, clip_ed: k.ed, track_st: m(k.st), track_ed: m(k.ed), duration: Math.round((m(k.ed) - m(k.st)) * 1000) / 1000 };
+			return { ...rest, material: voiceMatId, clip_st: k.st, clip_ed: k.ed, track_st: m(k.st), track_ed: m(k.ed), duration: r3(m(k.ed) - m(k.st)) };
 		});
 	}
 	// BGM 等其它音轨：按素材时长循环铺满新时长
@@ -1287,8 +1287,8 @@ function applyTightenToProject(
 		const md = Number(matById.get(String(proto.material))?.duration ?? newDur) || newDur;
 		const out: Record<string, unknown>[] = [];
 		for (let cur = 0; cur < newDur - 1e-6; cur += md) {
-			const seg = Math.round(Math.min(md, newDur - cur) * 1000) / 1000;
-			out.push({ ...proto, clip_st: 0, clip_ed: seg, track_st: Math.round(cur * 1000) / 1000, track_ed: Math.round((cur + seg) * 1000) / 1000, duration: seg });
+			const seg = r3(Math.min(md, newDur - cur));
+			out.push({ ...proto, clip_st: 0, clip_ed: seg, track_st: r3(cur), track_ed: r3(cur + seg), duration: seg });
 		}
 		t.track_timeline = out;
 	}
@@ -1298,7 +1298,7 @@ function applyTightenToProject(
 			const st = m(Number(c.track_st));
 			const ed = m(Number(c.track_st) + Number(c.duration));
 			c.track_st = st;
-			c.duration = Math.round((Math.min(ed, newDur) - st) * 1000) / 1000;
+			c.duration = r3(Math.min(ed, newDur) - st);
 		}
 	}
 	const sm = (gtrk.struct_meta as Record<string, unknown>) ?? {};
@@ -1315,7 +1315,7 @@ function applyTightenToProject(
 		const ed = m(Number(b.track_ed));
 		b.track_st = st;
 		b.track_ed = ed;
-		b.duration = Math.round((ed - st) * 1000) / 1000;
+		b.duration = r3(ed - st);
 	}
 	// 字幕：tick 单位（120000/秒），MUST 换算后再映射
 	for (const lane of ((sm.client_visual_elements as { lanes?: { elements?: Record<string, unknown>[] }[] })?.lanes ?? [])) {
@@ -1335,7 +1335,7 @@ function applyTightenToProject(
 			// 引用段轨长 MUST 恒等于源长（它被豁免、内部没有刀）
 			const src = d.clip_ed - d.clip_st;
 			d.track_st = m(d.track_st);
-			d.track_ed = Math.round((d.track_st + src) * 1000) / 1000;
+			d.track_ed = r3(d.track_st + src);
 		}
 	}
 }

@@ -16,7 +16,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
 import { probeGeometry, probeDuration } from "./media";
-import { r3, deliveryRate } from "./frame-domain";
+import { r3, deliveryRate, sec2ms } from "./frame-domain";
 
 /** 粗对齐 PCM 采样率（Hz）。 */
 const PCM_RATE = 4000;
@@ -261,10 +261,12 @@ export async function muxExternalAudio(
 	const vDur = probeDuration(videoAbs, ffmpegPath);
 	const filters: string[] = [];
 	const args = ["-y", "-v", "error", "-i", videoAbs];
-	if (offsetSec >= 0.0005) {
+	// 分流阈在整毫秒格上（unify-time-consumers-and-tolerance）：`adelay` 只能表达整毫秒，不足 1ms 的偏移就是零偏移。
+	const offsetMs = sec2ms(offsetSec);
+	if (offsetMs >= 1) {
 		args.push("-i", extAudioAbs);
-		filters.push(`adelay=${Math.round(offsetSec * 1000)}:all=1`);
-	} else if (offsetSec <= -0.0005) {
+		filters.push(`adelay=${offsetMs}:all=1`);
+	} else if (offsetMs <= -1) {
 		args.push("-ss", (-offsetSec).toFixed(4), "-i", extAudioAbs);
 	} else {
 		args.push("-i", extAudioAbs);
