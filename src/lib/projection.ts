@@ -98,10 +98,7 @@ export interface ProjectionView {
 	utterances: ViewUtterance[];
 }
 
-/** 3 位小数（对齐 transcript / gtrk 秒值精度），消除浮点尾差。 */
-function r3(n: number): number {
-	return Math.round(n * 1000) / 1000;
-}
+import { r3 } from "./frame-domain";
 
 /** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + duration 推。 */
 function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: number } {

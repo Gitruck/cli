@@ -56,8 +56,7 @@ function ownAssetCompositionId(p: unknown): string | undefined {
 // 裁剪恒等式的判据 MUST 只有一份，复制一遍就是给「两份判据慢慢漂开」留门。
 // 已核不成环（matrix-lay 不引 mg-lay），无额外加载成本。
 import { assertTrimIdentity } from "./matrix-lay";
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+import { r3 } from "./frame-domain";
 
 /**
  * 槽位包络（秒）= 落轨 clip 的唯一时长来源（铁律⑦「颗粒占满坑位 + 终态驻留」）。

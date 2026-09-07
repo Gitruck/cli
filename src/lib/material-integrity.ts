@@ -20,11 +20,10 @@
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { r3 } from "./frame-domain";
 
 /** 人读逐条清单上限（截断时明示总数）；机读侧 MUST NOT 截断。 */
 export const INTEGRITY_LIST_CAP = 10;
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** `materials[].path` 的四种形态。 */
 export type MaterialPathKind = "relative" | "absolute" | "remote" | "none";

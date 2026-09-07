@@ -29,6 +29,7 @@ import { resolveToolPricing, type ResolvedToolPricing } from "../lib/tool-pricin
 import { invalidateUpload, uploadCached } from "../lib/upload-cache";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { normalizeAsrOutput, renderTranscriptMarkdown } from "../lib/transcript";
+import { r3 } from "../lib/frame-domain";
 
 const TASK_TYPE = "asr";
 const PRICE_KEY = "asr";
@@ -219,7 +220,6 @@ export async function runTranscript(
 	// sha256(utterances[].text join "\n")，与 infra transcript_emit / split 复算逐字节一致）
 	let transcriptJson: string | undefined;
 	if (opts.json) {
-		const r3 = (n: number) => Math.round(n * 1000) / 1000;
 		const utterances = asr.sentences.map((s, i) => ({
 			id: `u${i + 1}`,
 			text: s.text,

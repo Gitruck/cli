@@ -3,9 +3,9 @@
  * 纯函数（喂 mock 分析结果可单测）；不触云端。
  */
 import type { DegradeLevel } from "./types";
+import { r3 } from "../frame-domain";
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-const r3 = (v: number) => Math.round(v * 1000) / 1000;
 
 /** 云端 audio_music_analyze 输出的关切字段。 */
 export interface BeatAnalysis {

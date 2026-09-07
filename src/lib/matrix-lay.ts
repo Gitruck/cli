@@ -43,6 +43,7 @@ import {
 	solidMaterialId,
 	solidRelPath,
 } from "./solid-png";
+import { r3 } from "./frame-domain";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
 /** 本地素材封面目录（工程内相对路径；铺轨时 ffmpeg 现抽 best 帧落此，add-matrix-local-search 4.2）。 */
@@ -523,10 +524,11 @@ export function previewDims(width?: number, height?: number): [number, number] |
 	return [640, h];
 }
 
-/** 三位小数舍入。⚠️ `Math.round` 是**半上入**（含 `Math.round(-0.5) === -0`），
- * 与 Python `round()` 的半偶入**不同**——移植 MUST 用 `math.floor(x*1000+0.5)/1000`。
- * 导出供 golden fixture 生成器直取真身。 */
-export const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+/** 三位小数舍入（毫秒就近）。正本已迁 `./frame-domain`（link-time-domain-discipline T3，全仓唯一定义）；
+ * 此处 re-export 保既有 import（golden fixture 生成器 / `commands/matrix.ts` 直取真身）不变。
+ * ⚠️ `Math.round` 是**半上入**（含 `Math.round(-0.5) === -0`），
+ * 与 Python `round()` 的半偶入**不同**——移植 MUST 用 `math.floor(x*1000+0.5)/1000`。 */
+export { r3 } from "./frame-domain";
 
 // ── 平铺填充 ──────────────────────────────────────────────────────────────
 

@@ -14,7 +14,7 @@
 export const AI_DRAMA_MATERIAL_PREFIX = "ai-drama-";
 export const AI_DRAMA_PRODUCER_BY = "gtrk:ai-drama@1";
 
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+import { r3 } from "./frame-domain";
 
 export interface AiDramaLayItem {
 	shotIndex: number;

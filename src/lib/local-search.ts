@@ -25,6 +25,7 @@ import { resolve, sep } from "node:path";
 import type { PlanResult } from "./matrix";
 import { BROLL_MATERIAL_PREFIX } from "./matrix-lay";
 import { decodeVec, type SqlDb } from "./local-index";
+import { r3 } from "./frame-domain";
 
 // ── 聚合参数（POC 标定基线）───────────────────────────────────────────────
 export const AGG_GAP_MS = 3000;
@@ -336,7 +337,6 @@ export function localClipIdForMaterialId(materialId: string): string {
 	return materialId.startsWith(BROLL_MATERIAL_PREFIX) ? materialId.slice(BROLL_MATERIAL_PREFIX.length) : materialId;
 }
 
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 const r4 = (n: number): number => Math.round(n * 10000) / 10000;
 
 /**

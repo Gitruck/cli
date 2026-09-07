@@ -55,82 +55,15 @@ export interface Locator {
 	track_st: number;
 }
 
-/** 元素的帧域视图（自由变量 + 源侧毫秒），是所有动作的运算对象。 */
-export interface FrameView {
-	stFrame: number;
-	durFrames: number;
-	/** 源侧入点（整毫秒）。gap 与 beat 恒为 `null`（契约禁写 `clip_st`/`clip_ed`）。 */
-	clipStMs: number | null;
-}
-
-// ────────────────────────────── 表示层换算 ──────────────────────────────
-
-/**
- * 秒 → 帧，**半帧进一**。
- *
- * MUST NOT 用 `int()` 截断（会系统性掉一帧：帧 130 @30fps = 4333.33ms，ms 量化成 4.333s 后
- * ×30 = 129.99 帧，截断即 129）；MUST NOT 用裸 `round()`（银行家舍入把恰好半帧取偶，
- * 20ms@25fps ⇒ 0 帧 ⇒ 零时长元素）。须与消费侧帧化口径同源。
- */
-export function sec2frame(sec: number, rate: number): number {
-	return Math.floor(sec * rate + 0.5);
-}
-
-/**
- * 帧 → 整毫秒。标准帧率下往返可逆：`sec2frame(f2ms(n)/1000, rate) === n`
- * （帧域偏差 ≤0.03 帧 ≪ 0.5 帧）。
- *
- * ⚠️ **不可加**：存在 a/b 使 `f2ms(a+b) ≠ f2ms(a)+f2ms(b)`（rate=30 时 f2ms(1)+f2ms(1)=66
- * 而 f2ms(2)=67）。所以它 MUST NOT 被用来单独换算时长——见模块头。
- */
-export function f2ms(frame: number, rate: number): number {
-	return Math.round((frame * 1000) / rate);
-}
-
-/** 秒 → 整毫秒（源侧量化用；不涉帧）。 */
-export function sec2ms(sec: number): number {
-	return Math.round(sec * 1000);
-}
-
-/** 整毫秒 → 秒字面（3 位小数，与既有 `r3` 口径同一）。 */
-export function ms2sec(ms: number): number {
-	return ms / 1000;
-}
-
-/** 读入的秒值 → 整毫秒；非有限数按 `NaN` 透出，由调用方判非法。 */
-export function readMs(v: unknown): number {
-	const n = typeof v === "number" ? v : Number(v);
-	return Number.isFinite(n) ? sec2ms(n) : Number.NaN;
-}
-
-// ────────────────────────────── 导出链 ──────────────────────────────
-
-/** 一个元素经导出链算出的全部写出值（整毫秒域，写文件前再 `ms2sec`）。 */
-export interface DerivedMs {
-	trackStMs: number;
-	trackEdMs: number;
-	durationMs: number;
-	clipStMs: number | null;
-	clipEdMs: number | null;
-	/** 帧数，供「时长是几帧」类判断与回执用。 */
-	durFrames: number;
-}
-
-/**
- * 导出链：由三个自由变量算出全部写出值。**这是本模块唯一允许产出时码的路径。**
- *
- * ⚠️ `durationMs` 恒取 `trackEdMs − trackStMs`（导出 ④），
- * MUST NOT 写成 `f2ms(durFrames, rate)`——两者不是同一个数。
- */
-export function derive(view: FrameView, rate: number): DerivedMs {
-	const edFrame = view.stFrame + view.durFrames; // 导出 ①
-	const trackStMs = f2ms(view.stFrame, rate); // 导出 ②
-	const trackEdMs = f2ms(edFrame, rate); // 导出 ③
-	const durationMs = trackEdMs - trackStMs; // 导出 ④ —— 恒是两端之差
-	const clipStMs = view.clipStMs;
-	const clipEdMs = clipStMs === null ? null : clipStMs + durationMs; // 导出 ⑤
-	return { trackStMs, trackEdMs, durationMs, clipStMs, clipEdMs, durFrames: view.durFrames };
-}
+// ────────────────────────────── 帧域换算（正本已迁 frame-domain.ts） ──────────────────────────────
+//
+// [link-time-domain-discipline] 帧域三件套（`sec2frame / f2ms / derive`）与配套 `sec2ms / ms2sec / readMs`、
+// `FrameView / DerivedMs` 原样搬到 `./frame-domain`（零 IO、零依赖，供 lay 模块直接接、不再反向依赖本文件）；
+// 此处 re-export 保既有 import 路径不变。取整方向一字未改。
+import { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
+import type { FrameView, DerivedMs } from "./frame-domain";
+export { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
+export type { FrameView, DerivedMs } from "./frame-domain";
 
 // ────────────────────────────── 元素收集与寻址 ──────────────────────────────
 

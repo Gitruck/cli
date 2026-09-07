@@ -18,6 +18,10 @@
 `--json` 多了 `splitter` / `cloudUnavailable` / `cloudDegraded`。要走老的本地拆窗器加 `--offline`
 （它已冻结、只做兜底；`--max-units` 只在离线下有意义）。两条 skill 里「字幕纯本地零云端」的说法随之改口。
 
+### 内部重构：时间换算收敛到一处
+
+秒 / 毫秒 / 帧换算（`sec2frame / f2ms / derive` 与 17 处各自复制的 `r3`）收敛到 `src/lib/frame-domain.ts` 一份正本，行为零变化——不改任何写出值与取整方向。
+
 ## 1.1.4（2026-09-06）
 
 ### AI 片段回填不用再手搓脚本了

@@ -58,7 +58,7 @@ export interface TightenPlan {
 	removedSec: number;
 }
 
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+import { r3 } from "./frame-domain";
 
 /**
  * 由逐窗 RMS 序列找出静音段。

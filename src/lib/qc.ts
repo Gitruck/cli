@@ -17,6 +17,7 @@ import { parseSceneScores } from "./local-index";
 // 黑段解析**唯一实现**（见下方 parseBlackDetect 的头注）：index-decode 是零 I/O 纯函数层，
 // 单向 import 不成环；本文件内部（scanFinalCut）也用这一个绑定，MUST NOT 再写第二份正则。
 import { parseBlackSpans } from "./index-decode";
+import { r3 } from "./frame-domain";
 
 // ── 阈值基线（v1 标定值；标定批次调参只改这一处）─────────────────────────
 export const QC_THRESHOLDS = {
@@ -100,8 +101,6 @@ export interface QcReport {
 	summary: { error: number; warn: number; info: number };
 	items: QcItem[];
 }
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** 跑 ffmpeg 抓全量 stderr（分析滤镜输出体量 O(帧数)，runFfmpeg 只留尾 4000 字会截断）。 */
 function captureStderr(bin: string, args: string[]): Promise<string> {

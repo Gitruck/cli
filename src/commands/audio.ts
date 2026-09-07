@@ -69,6 +69,7 @@ import {
 	planTightenCuts,
 	splitIntervalsAt,
 } from "../lib/audio-tighten";
+import { r3 } from "../lib/frame-domain";
 
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
 // ★ 主理人 2026-08-19 拍板:BGM 垫底口径 -20dB=线性 0.10(契约 volume 只写线性,MUST NOT 写 dB——composition-contract-v1 §4)
@@ -77,8 +78,6 @@ export const AUDIO_LAY_VOLUME_DEFAULT = 0.1;
 export const AUDIO_LAY_MATERIAL_PREFIX = "audio-lay-";
 /** 上轨最短可用长度（秒）：低于此长度视为无处可放。 */
 const MIN_LAY_SEC = 0.05;
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** positional 解析：`lay` 或 `align [<视频> <外录>]`。 */
 export function parseAudioPositional(

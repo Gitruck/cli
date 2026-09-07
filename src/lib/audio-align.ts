@@ -16,6 +16,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
 import { probeGeometry, probeDuration } from "./media";
+import { r3 } from "./frame-domain";
 
 /** 粗对齐 PCM 采样率（Hz）。 */
 const PCM_RATE = 4000;
@@ -280,7 +281,6 @@ export async function muxExternalAudio(
 }
 
 const fwd = (p: string): string => resolve(p).replace(/\\/g, "/");
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** 低置信兜底：产对齐工程（Profile B 双素材；两 clip 相对错开表达正负偏移，各自 ≥0）。 */
 export function buildAlignProject(

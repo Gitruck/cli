@@ -2447,8 +2447,6 @@ function buildDefaultImageMoveGenerator(): NonNullable<MatrixRunDeps["generateIm
 	};
 }
 
-const r3num = (n: number): number => Math.round(n * 1000) / 1000;
-
 /** 运镜产物材料条目：ffprobe 实测（matrix-lay-tracks spec）；探测失败按生成参数兜底登记。 */
 function mvMaterialEntry(
 	materialId: string,
@@ -2465,9 +2463,9 @@ function mvMaterialEntry(
 	return {
 		id: materialId,
 		path: rel,
-		duration: geo && geo.duration > 0 ? r3num(geo.duration) : fallback.duration,
+		duration: geo && geo.duration > 0 ? r3(geo.duration) : fallback.duration,
 		video_size: geo && geo.width > 0 && geo.height > 0 ? [geo.width, geo.height] : [fallback.canvas[0], fallback.canvas[1]],
-		...(geo && geo.fps > 0 ? { video_rate: r3num(geo.fps) } : {}),
+		...(geo && geo.fps > 0 ? { video_rate: r3(geo.fps) } : {}),
 	};
 }
 
@@ -2689,8 +2687,8 @@ function anchorRankNote(d: AnchorOutcome): string | null {
 				: d.top_miss === "unfit"
 					? "在本锚窗口用不上（供长不足 / 同 beat 跨轨归属互斥 / 精修后不足最小镜头长）"
 					: "去向未记账";
-	const sim = typeof d.sim === "number" ? r3num(d.sim) : "?";
-	const top = typeof d.top_sim === "number" ? r3num(d.top_sim) : "?";
+	const sim = typeof d.sim === "number" ? r3(d.sim) : "?";
+	const top = typeof d.top_sim === "number" ? r3(d.top_sim) : "?";
 	return (
 		`${d.beat} 锚「${d.keyword}」取的是 sim 第 ${d.sim_rank} 名（${sim}）——top-1（${top}）${whither}。\n` +
 		"   画面仍来自本锚 query 的合格命中（不是无关素材），属良性降级；" +
@@ -3273,7 +3271,7 @@ async function layIntoProject(
 	// 信号覆盖率（add-signal-coverage-reporting）：分母是**参与融合的候选段总数**——
 	// 靠 fix-arrange-diagnostics-granularity 把 markStats 换成段粒度之后这个数才算得准
 	// （此前是 Set<clip_id>，二创单素材场景下恒 1/1）。
-	const covOf = (hit: number, neutral: number): number | undefined => (hit + neutral > 0 ? r3num(hit / (hit + neutral)) : undefined);
+	const covOf = (hit: number, neutral: number): number | undefined => (hit + neutral > 0 ? r3(hit / (hit + neutral)) : undefined);
 	const markCov = markOn ? covOf(markStats.hit, markStats.neutral) : undefined;
 	const hlCov = hlOn ? covOf(markStats.hlHit, markStats.hlNeutral) : undefined;
 	const pct = (v: number): string => `${Math.round(v * 1000) / 10}%`;

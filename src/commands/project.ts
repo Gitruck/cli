@@ -33,6 +33,7 @@ import { defaultExtsFor, extFromUrl, pickUrl } from "../lib/tool-descriptors";
 import { FORMAT_META } from "../lib/materialize";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
+import { r3 } from "../lib/frame-domain";
 
 // cli 域同步轻接口（SYNC_INLINE 家族）：cloud.ts 的 /task/${taskType} 模板天然拼出该路径
 const TASK_TYPE = "cli/audio_project_struct";
@@ -47,8 +48,6 @@ function timestamp(): string {
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** positional 解析：仅支持 `init`（后续族命令在此扩展）。 */
 export function parseProjectPositional(words: string[] | undefined): "init" {

@@ -9,6 +9,7 @@ import type { ProjectionView } from "./projection";
 // 「span → 存活实例包络」的**唯一**实现（add-consume-side-reprojection）：split 落地与 mg/matrix
 // 消费侧共用同一份 —— 两侧相等是「同一段代码 × 同一份输入」的构造性保证，MUST NOT 两处各算一遍。
 import { buildSpanIndex, envelopeForSpan } from "./reproject";
+import { r3 } from "./frame-domain";
 
 export const BASE_TRACKS = ["真人出镜", "口播继续", "旁白主导"] as const;
 export const LANES = ["A_ROLL", "MG", "AI_DRAMA", "FILM_BROLL"] as const;
@@ -583,11 +584,6 @@ export interface Landing {
  * 落地：把（已校验通过的）拆分稿 × 投影视图 → struct_meta.split 快照 + dispatch 派单清单 + 收缩/跳过报告。
  * 纯函数，不写文件。整 beat 全 dropped 跳过；部分 dropped 按存活包络收缩。
  */
-/** 3 位小数（对齐 transcript / gtrk 秒值精度，与投影层 r3 同式）。 */
-function r3(n: number): number {
-	return Math.round(n * 1000) / 1000;
-}
-
 export function buildLanding(
 	doc: SplitDoc,
 	view: ProjectionView,
