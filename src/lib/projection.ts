@@ -100,6 +100,21 @@ export interface ProjectionView {
 
 import { r3 } from "./frame-domain";
 
+/**
+ * 源区间 `[s, e)` 经 clip 映射到轨道时基——**起点取整一次，终点由时长导出**
+ * （adjust-lay-frame-domain D3，spec `timeline-projection`「投影端点取整规则」）：
+ * `track_st = r3(clip.track_st + (s − clip_st))`、`len = r3(e − s)`、`track_ed = r3(track_st + len)`
+ * （`track_st` 与 `len` 都已在毫秒格上，外层 `r3` 只消浮点尾差，不是第二次取整）。
+ * MUST NOT 两端各自 `r3`——非整毫秒相位下那会让 `track_ed − track_st ≠ r3(len)`，正是 fix-trim-identity-constructive
+ * 在写方禁掉的形状（批 0 T2）。投影产物**留在整毫秒域**：消费者是字幕文本 lane 与 beat 包络（T1 例外），
+ * 帧格化只在各 lay 写出时发生（`matrix lay` / `mg lay` / `ai-drama lay`），MUST NOT 在这里吸帧。
+ */
+function projectSpan(clipTrackSt: number, clipSt: number, s: number, e: number): { track_st: number; track_ed: number } {
+	const track_st = r3(clipTrackSt + (s - clipSt));
+	const len = r3(e - s);
+	return { track_st, track_ed: r3(track_st + len) };
+}
+
 /** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + duration 推。 */
 function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: number } {
 	const clip_st = c.clip_st ?? 0;
@@ -410,13 +425,7 @@ export function projectTranscript(
 				// 与 clip 源区间夹逼后相交（严格重叠，零长不算存活）
 				const s = Math.max(word.st, clip.clip_st);
 				const e = Math.min(word.ed, clip.clip_ed);
-				if (e > s) {
-					surviving.push({
-						w: word.w,
-						track_st: r3(clip.track_st + (s - clip.clip_st)),
-						track_ed: r3(clip.track_st + (e - clip.clip_st)),
-					});
-				}
+				if (e > s) surviving.push({ w: word.w, ...projectSpan(clip.track_st, clip.clip_st, s, e) });
 			}
 			if (surviving.length) {
 				instances.push({
@@ -431,14 +440,7 @@ export function projectTranscript(
 				// kept_words 保持 0（total_words 亦 0，语义如实：无词级明细，句级在轨）。
 				const s = Math.max(utt.st, clip.clip_st);
 				const e = Math.min(utt.ed, clip.clip_ed);
-				if (e > s) {
-					instances.push({
-						track_st: r3(clip.track_st + (s - clip.clip_st)),
-						track_ed: r3(clip.track_st + (e - clip.clip_st)),
-						kept_words: 0,
-						words: [],
-					});
-				}
+				if (e > s) instances.push({ ...projectSpan(clip.track_st, clip.clip_st, s, e), kept_words: 0, words: [] });
 			}
 		}
 		if (!instances.length) {

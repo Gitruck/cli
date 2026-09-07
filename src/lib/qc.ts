@@ -17,7 +17,7 @@ import { parseSceneScores } from "./local-index";
 // 黑段解析**唯一实现**（见下方 parseBlackDetect 的头注）：index-decode 是零 I/O 纯函数层，
 // 单向 import 不成环；本文件内部（scanFinalCut）也用这一个绑定，MUST NOT 再写第二份正则。
 import { parseBlackSpans } from "./index-decode";
-import { r3 } from "./frame-domain";
+import { r3, sec2frame } from "./frame-domain";
 
 // ── 阈值基线（v1 标定值；标定批次调参只改这一处）─────────────────────────
 export const QC_THRESHOLDS = {
@@ -389,10 +389,21 @@ export function detectFlashes(
  *     error，与「除非素材颗粒内部本来就高频」的例外条款直接冲突。
  *   · `spliceCuts === null`（未开工程感知）→ 来源不可判，退回不分级的 `warn` 并标注口径受限。
  *
+ * 端点归属判在**帧域**（fix-matrix-lay-frame-grid 2.9）：工程有合法 `video_rate` 时，切点与拼接集合都经
+ * `sec2frame` 帧化后比对——写出侧 `f2ms` 改向下投影后，30fps 下 `n ≡ 2 (mod 3)` 的帧位写出 `0.066`
+ * 而成片切点 `r3(2/30) = 0.067`，毫秒等值比对恒 miss、分级会静默退成 `info`；同一帧号则两侧恒等。
+ * 工程无合法帧率（老工程）时退回毫秒等值口径（`kind: "ms"`），MUST NOT 编造帧率。
+ *
  * 纯函数，供单测直调 spec 的三条 Scenario。
  */
-export function shortShotItems(cuts: number[], spliceCuts: Set<number> | null): QcItem[] {
-	const isSplice = (t: number): boolean => spliceCuts !== null && spliceCuts.has(r3(t));
+export type SpliceIndex =
+	| { kind: "frames"; rate: number; frames: Set<number> }
+	| { kind: "ms"; ms: Set<number> };
+
+export function shortShotItems(cuts: number[], spliceCuts: SpliceIndex | null): QcItem[] {
+	const isSplice = (t: number): boolean =>
+		spliceCuts !== null &&
+		(spliceCuts.kind === "frames" ? spliceCuts.frames.has(sec2frame(t, spliceCuts.rate)) : spliceCuts.ms.has(r3(t)));
 	return detectFlashes(cuts).map((f) => {
 		if (spliceCuts === null) {
 			return {
@@ -630,13 +641,19 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 
 	// 闪现判定放在**工程对表之后**（tune-shot-rhythm-thresholds D1）：严重级要按端点来源裁定，
 	// 而来源只有对表才知道。无工程时退回不分级的纯阈值报告。
-	let spliceCuts: Set<number> | null = null;
+	let spliceCuts: SpliceIndex | null = null;
 
 	if (opts.gtrk) {
 		const bounds = boundariesFromGtrk(opts.gtrk);
 		const { matched, intra } = matchCutsToBoundaries(cuts, bounds);
 		const drifts = matched.map((m) => m.drift);
-		spliceCuts = new Set(matched.map((m) => m.cut));
+		// 拼接集合在构建处按顶层 video_rate 帧化（fix-matrix-lay-frame-grid 2.9）；老工程无合法帧率 ⇒ 毫秒口径
+		const vr = (opts.gtrk as { video_rate?: unknown }).video_rate;
+		const rate = typeof vr === "number" && Number.isFinite(vr) && vr > 0 && Number.isInteger(vr) ? vr : null;
+		spliceCuts =
+			rate !== null
+				? { kind: "frames", rate, frames: new Set(matched.map((m) => sec2frame(m.cut, rate))) }
+				: { kind: "ms", ms: new Set(matched.map((m) => m.cut)) };
 		// 工程坐标（add-material-motion-signal）：把成片时码映射回 (beat, 槽位, clip, 源窗)
 		const slots = slotsFromGtrk(opts.gtrk);
 		for (const t of intra) {

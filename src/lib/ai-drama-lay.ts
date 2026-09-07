@@ -9,13 +9,25 @@
  *   条文见 `ai-drama-lay-command` 的「素材短于窗口时留空档而非拉伸」Scenario；
  * - 只剥 `struct_meta.ai_drama.lay_tracks` 登记过的自产轨/素材，其他轨零连带；
  * - 不生成媒体、不调用云端、不计费。
+ *
+ * **落轨走帧域**（adjust-lay-frame-domain D1 修订版，spec `ai-drama-lay-command`「AI 轨落轨走帧域」）：
+ * 毫秒决策链（`cursor` / `remaining` / `desired` / `duration` / 末镜吃满 / 不足即跳）**一字不改**，
+ * 帧号是对该毫秒游标位置的**一次**取整——`stF = sec2frame(cursorMs)`、每镜 `edF = sec2frame(nextMs) + shift`
+ * （累计实位置一次取整，MUST NOT 逐镜取整帧后相加：逐段取整实测累计漂 1.7–5 帧、翻决策），
+ * 写出 `track_st / track_ed = f2ms(帧号)`（向下投影，与 `matrix lay` / `gtrk patch` 同一套 `frame-domain`），
+ * `duration = f2ms(edF) − f2ms(stF)` 导出（`f2ms` 不可加，MUST NOT 用 `f2ms(帧数)`）。
+ * 帧量化多出的不足一帧越过素材实测时长时 `edF −= 1; shift −= 1`（源窗不许越素材：宁短一帧，后续整体前移，
+ * 接缝仍由同一帧号构成）；量化后不足一帧的镜跳过（INFO）、游标照常推进（被相邻镜吸收）。
+ * 性质：任一端点与毫秒链位置差 ≤ 半帧 + 1ms（+ |shift| 帧）；包末端 = `sec2frame(pkg.trackEd) + shift`。
+ * 帧率 = 顶层 `video_rate`（`videoRateOf`，非正整数即抛——本函数纯、抛在 `writeGtrkAtomic` 之前 ⇒ 工程零改动）。
  */
 
 export const AI_DRAMA_MATERIAL_PREFIX = "ai-drama-";
 export const AI_DRAMA_PRODUCER_BY = "gtrk:ai-drama@1";
 
-import { r3 } from "./frame-domain";
+import { f2ms, r3, sec2frame } from "./frame-domain";
 import { assertGtrkWriteInvariants } from "./gtrk-invariants";
+import { videoRateOf } from "./gtrk-patch";
 
 export interface AiDramaLayItem {
 	shotIndex: number;
@@ -78,7 +90,14 @@ export interface StructMetaAiDrama {
 export interface AiDramaLayResult {
 	next: Record<string, unknown>;
 	meta: StructMetaAiDrama;
-	summary: { laidTrack: number | null; laidClips: number; beats: number; removedTracks: number[] };
+	summary: {
+		laidTrack: number | null;
+		laidClips: number;
+		beats: number;
+		removedTracks: number[];
+		/** 写出侧帧格统计（adjust-lay-frame-domain D1）：rate = 顶层 video_rate；shifted = 越素材前移次数；dropped = 量化后不足一帧跳过数。 */
+		frameGrid: { rate: number; shifted: number; dropped: number };
+	};
 }
 
 export function aiDramaProducerTag(run: string): string {
@@ -120,8 +139,14 @@ export function layAiDramaTracks(opts: {
 	generatedAt: string;
 	/** 写方自检里**存量**违例的 WARN 出口（gtrk-writer-invariants D2′）；命令层接 `log.warn`，纯函数单测可不传。 */
 	warn?: (message: string) => void;
+	/** 帧格化的人读 INFO 出口（越素材前移一帧 / 不足一帧跳过，逐次一行）；命令层接 `log.info`，纯函数单测可不传。 */
+	info?: (message: string) => void;
 }): AiDramaLayResult {
 	const { gtrk, generatedAt } = opts;
+	// 帧率读法与 `matrix lay` / `gtrk patch` 同源（fix-matrix-lay-frame-grid D7 的整数判据）：缺席 / 非正 / 非整数即抛，
+	// 抛在一切构造之前 ⇒ 入参零改动；命令层在复制素材之前另做同一预检（零副作用）。MUST NOT 静默退回毫秒路。
+	const rate = videoRateOf(gtrk);
+	const info = opts.info ?? (() => {});
 	const packages = [...opts.packages].sort((a, b) => a.trackSt - b.trackSt || a.beatId.localeCompare(b.beatId));
 	const prev = previousMeta(gtrk);
 	const oldIndices = new Set(Array.isArray(prev?.lay_tracks) ? prev.lay_tracks.filter((n): n is number => typeof n === "number") : []);
@@ -137,9 +162,15 @@ export function layAiDramaTracks(opts: {
 	const newMaterials: LooseMaterial[] = [];
 	const materialIds: string[] = [];
 	const metaPackages: StructMetaAiDrama["packages"] = [];
+	let shifted = 0;
+	let dropped = 0;
 
 	for (const pkg of packages) {
+		// ── 毫秒决策链（下面 cursor / remaining / desired / duration / 末镜吃满 / 不足即跳）与帧格化前**逐字同源**，MUST NOT 改 ──
 		let cursor = r3(pkg.trackSt);
+		// ── 帧游标：起点对包起点一次取整；shift 只在越素材时出现、作用域 = 本包（同一游标连续推出的序列），MUST NOT 跨包传播 ──
+		let stF = sec2frame(cursor, rate);
+		let shift = 0;
 		const beatClips: AiDramaMetaClip[] = [];
 		const items = [...pkg.items].sort((a, b) => a.shotIndex - b.shotIndex);
 		for (let i = 0; i < items.length; i++) {
@@ -151,7 +182,37 @@ export function layAiDramaTracks(opts: {
 			if (!(duration > 0)) continue;
 			const materialId = `${AI_DRAMA_MATERIAL_PREFIX}${pkg.slug}-${pkg.beatId.toLowerCase()}-s${item.shotIndex}`;
 			const clipId = `${pkg.slug}-${pkg.beatId.toLowerCase()}-s${item.shotIndex}`;
-			const trackEd = r3(cursor + duration);
+			// 毫秒链里这一镜的终点（改前的 trackEd）；帧号由它**一次**取整，不是 stF + round(duration × rate)
+			const nextMs = r3(cursor + duration);
+			let edF = sec2frame(nextMs, rate) + shift;
+			let durMs = f2ms(edF, rate) - f2ms(stF, rate);
+			const tag = `${pkg.beatId} s${item.shotIndex}（毫秒链 ${cursor}–${nextMs}）`;
+			if (durMs <= 0) {
+				// 量化后不足一帧：不落轨，游标照常推进——这一镜的亚帧残量被相邻镜吸收（写出侧结构性消失）
+				dropped++;
+				info(`帧网格：${tag} 投影后不足一帧（帧 ${stF}→${edF}），跳过`);
+				cursor = nextMs;
+				continue;
+			}
+			const measuredMs = Math.round(item.measuredSec * 1000);
+			if (durMs > measuredMs) {
+				// 源窗不许越素材：帧量化多出的那不足一帧超过了 ffprobe 实测 ⇒ 宁短一帧，后续帧号整体前移（接缝仍相等）。
+				// 判越界用整毫秒 `durMs > measured_ms`：批 1 `assertSourceBound` 的 +1ms 容差对写出值恒成立。
+				const over = durMs - measuredMs;
+				edF -= 1;
+				shift -= 1;
+				shifted++;
+				durMs = f2ms(edF, rate) - f2ms(stF, rate);
+				info(`帧网格：${tag} 取整帧后越素材实测 ${over}ms（实测 ${measuredMs}ms）⇒ 终点前移一帧（帧 ${edF + 1}→${edF}），本包后续镜整体前移一帧`);
+				if (durMs <= 0) {
+					dropped++;
+					info(`帧网格：${tag} 前移后不足一帧，跳过`);
+					cursor = nextMs;
+					continue;
+				}
+			}
+			// 写出值三件同一个对象：轨上 clip 与 struct_meta 登记从同一份 spread ⇒ 逐字节同源（2.2）
+			const timing = { track_st: f2ms(stF, rate) / 1000, track_ed: f2ms(edF, rate) / 1000, duration: durMs / 1000 };
 			newMaterials.push({
 				id: materialId,
 				path: item.relPath,
@@ -164,16 +225,15 @@ export function layAiDramaTracks(opts: {
 				clip_id: clipId,
 				material: materialId,
 				clip_st: 0,
-				clip_ed: duration,
-				track_st: cursor,
-				track_ed: trackEd,
-				duration,
+				clip_ed: timing.duration,
+				...timing,
 				producer,
 				beat: pkg.beatId,
 				shot_index: item.shotIndex,
 			});
-			beatClips.push({ clip_id: clipId, material_id: materialId, shot_index: item.shotIndex, track_st: cursor, track_ed: trackEd, duration });
-			cursor = trackEd;
+			beatClips.push({ clip_id: clipId, material_id: materialId, shot_index: item.shotIndex, ...timing });
+			cursor = nextMs;
+			stF = edF;
 		}
 		metaPackages.push({
 			slug: pkg.slug,
@@ -200,7 +260,7 @@ export function layAiDramaTracks(opts: {
 	const next: Record<string, unknown> = { ...gtrk, materials: [...keptMaterials, ...newMaterials], video_track: [...keptTracks, ...createdTracks], struct_meta: structMeta };
 	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：本次写出的 AI clip 查恒等式 / 素材上界 / 与同轨邻居零重叠，
 	// 违约即抛、命令层还没走到 writeGtrkAtomic ⇒ 工程文件逐字节不变。保留轨里的存量违例只 WARN（D2′）。
-	// 三次 r3 一条链的恒等式今天靠「所有量都在毫秒格上」成立，这里是它的证明而不是修补；判据 MUST NOT 在本文件复刻。
+	// 恒等式今天靠「track_* 是整帧号的 f2ms 投影、duration 恒为两端投影之差」构造性成立，这里是它的证明而不是修补；判据 MUST NOT 在本文件复刻。
 	assertGtrkWriteInvariants(next, "ai-drama lay", {
 		ownClipIds: new Set(sortedClips.map((c) => c.clip_id as string)),
 		warn: opts.warn,
@@ -213,6 +273,7 @@ export function layAiDramaTracks(opts: {
 			laidClips: sortedClips.length,
 			beats: metaPackages.filter((p) => p.clips.length > 0).length,
 			removedTracks: [...oldIndices].sort((a, b) => a - b),
+			frameGrid: { rate, shifted, dropped },
 		},
 	};
 }

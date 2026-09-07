@@ -19,6 +19,8 @@ import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
 import { resolveColumnConfig } from "../lib/column-config";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
+// [fix-matrix-lay-frame-grid D7] 顶层 video_rate 与 gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
+import { videoRateOf } from "../lib/gtrk-patch";
 import {
 	BROLL_COVER_DIR,
 	BROLL_META_CANDIDATE_CAP,
@@ -2930,6 +2932,10 @@ async function layIntoProject(
 	// 的秒~分钟级收回毫秒级（fix-lay-refuse-order-and-qc-holes 1.2；也是 broll_arrange 网络往返的地基）。
 	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
+	// ── 帧率预检（fix-matrix-lay-frame-grid D7）：写出侧帧格化锚在顶层 video_rate；缺席 / 非正 / 非整数在这里就抛
+	//    （与 gtrk patch / layBrollTracks 同一读法与话术）——此刻零云端调用、零下载、零改动，MUST NOT 静默退回毫秒路。
+	//    决策层（planBeatFills / 云端 broll_arrange）不认识帧率：帧格化只在 layBrollTracks 写出前发生。
+	videoRateOf(gtrk);
 
 	// ── ②-B 拒铺**前置**（fix-lay-refuse-order-and-qc-holes 1.1）─────────────────────────
 	// 公约「计费动作恒在停点之后」：能不能铺是本命令的停点，而运镜生成是真计费动作
@@ -3465,7 +3471,7 @@ async function layIntoProject(
 		);
 	}
 
-	let { next, summary, warnings } = layBrollTracks({
+	let { next, summary, warnings, infos } = layBrollTracks({
 		gtrk: freshGtrk,
 		plan,
 		lay: layN,
@@ -3530,7 +3536,7 @@ async function layIntoProject(
 					gapSolidUsed ? "、主轨黑片填充一并回退（留 gap——客户端若开主轨磁吸请注意与配音错位的风险）" : ""
 				}，候选轨照常。`,
 			);
-			({ next, summary, warnings } = layBrollTracks({
+			({ next, summary, warnings, infos } = layBrollTracks({
 				gtrk: freshGtrk,
 				plan,
 				lay: layN,
@@ -3581,6 +3587,15 @@ async function layIntoProject(
 			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.local ? ` · 本地直引 ${dlStats.local}` : ""}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}${imageNote}）${bedNote}${keptNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
+	// 帧网格明示（fix-matrix-lay-frame-grid 2.4）：写出侧统计一行 + 每次前移 / 弃置一行（良性、已知根因 ⇒ info 级，不升告警）
+	if (summary.frameGrid) {
+		const fg = summary.frameGrid;
+		log.info(
+			`帧网格：${fg.rate}fps · 候选轨 ${fg.slots} 颗 / 黑底 ${fg.black_bed} 颗全部落在整帧上` +
+				(fg.shifted ? ` · 越段界宁短一帧 ${fg.shifted} 次（明细见下）` : ""),
+		);
+	}
+	for (const m of infos) log.info(m);
 	// 主轨 gap 填充明示（adjust-main-track-gap-fill）：生效才出（口播 / none / 不适用零噪音）
 	if (summary.gapFill) {
 		const gf = summary.gapFill;
@@ -3831,6 +3846,9 @@ async function layIntoProject(
 			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。
 			blackBedHoleSec: summary.blackBedHoleSec,
 			blackBedHoles: summary.blackBedHoles,
+			// 写出侧帧网格统计（fix-matrix-lay-frame-grid 2.4，纯诊断）：rate = 顶层 video_rate，
+			// slots / black_bed = 本轮落在网格上的候选轨 clip 数 / 黑底 clip 数，shifted = 越段界宁短一帧的次数
+			...(summary.frameGrid ? { frame_grid: summary.frameGrid } : {}),
 			// 云端编排归因（fix-arrange-selfcheck-json-surface）：**真发过请求才出现**。
 			// ⚠️ 键名是 `arrange_run` 不是 `arrange`——`arrange` 已被 `--arrange-estimate-only`
 			//    那条路占用且形态不同（`{applicable, units, scale}` 的预估形态）。两条路的语义

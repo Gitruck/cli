@@ -4,6 +4,8 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { aiDramaTracksEdited, layAiDramaTracks, type AiDramaLayPackage } from "../lib/ai-drama-lay";
+// [adjust-lay-frame-domain D1] 顶层 video_rate 与 matrix lay / gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
+import { videoRateOf } from "../lib/gtrk-patch";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic } from "../lib/gtrk-writeback";
 import { reportMaterialIntegrity, safeCheckMaterialIntegrity } from "../lib/material-integrity";
 import { reportReprojection, reprojectDispatchWindows } from "../lib/reproject";
@@ -133,6 +135,9 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Re
 	const gtrkDir = dirname(gtrkPath);
 	const { gtrk, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
+	// ── 帧率预检（adjust-lay-frame-domain D1）：AI 轨落轨锚在顶层 video_rate；缺席 / 非正 / 非整数在这里就抛
+	//    （与 matrix lay / layAiDramaTracks 同一读法与话术）——此刻零复制、零改动，MUST NOT 静默退回毫秒路。
+	videoRateOf(gtrk);
 	if (!opts.replaceAll && aiDramaTracksEdited(gtrk)) {
 		throw new Error("已铺 AI 轨在客户端被编辑过，已拒绝覆盖；确认要丢弃该 AI 轨上的手调后再加 --replace-all");
 	}
@@ -177,7 +182,7 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Re
 	}
 
 	const generatedAt = new Date().toISOString();
-	const laid = layAiDramaTracks({ gtrk, packages, generatedAt, warn: log.warn });
+	const laid = layAiDramaTracks({ gtrk, packages, generatedAt, warn: log.warn, info: log.info });
 	laid.meta.timecode_source = reproj.summary.mode === "reprojected" ? "reprojected" : "dispatch_snapshot";
 	if (reproj.summary.projected_at) laid.meta.reprojected_at = reproj.summary.projected_at;
 	if (reproj.summary.reason) laid.meta.timecode_degrade_reason = reproj.summary.reason;
@@ -196,6 +201,7 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Re
 		beats: laid.summary.beats,
 		skipped,
 		reprojection: reproj.summary,
+		frame_grid: laid.summary.frameGrid,
 		...(integrity ? { integrity } : {}),
 	};
 	if (opts.json) console.log(JSON.stringify(result));

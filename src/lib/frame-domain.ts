@@ -5,9 +5,11 @@
  * **零 IO、零依赖**：本仓所有秒 ↔ 毫秒 ↔ 帧换算 SHALL 只经此模块，MUST NOT 在他处复刻
  * （机械判据：`Math.round(x × 1000) / 1000` 全仓只在本文件出现）。
  *
- * 本文件由 `gtrk-patch.ts` 的帧域三件套原样搬出（`sec2frame / f2ms / derive` 与配套 `sec2ms / ms2sec / readMs`），
- * 取整方向一字未改；帧域法（导出链 ①→⑤、唯一 1ms 容差）的正本仍是 `patch-command`「帧对齐」Requirement，
+ * 本文件由 `gtrk-patch.ts` 的帧域三件套原样搬出（`sec2frame / f2ms / derive` 与配套 `sec2ms / ms2sec / readMs`）；
+ * 搬出时取整方向一字未改，其后 `fix-matrix-lay-frame-grid`（D5）把 `f2ms` 由就近改为**向下**（见其头注）。
+ * 帧域法（导出链 ①→⑤、唯一 1ms 容差）的正本仍是 `patch-command`「帧对齐」Requirement，
  * `gtrk-patch.ts` 模块头有整段推导。`gtrk-patch.ts` 对本模块 re-export，既有 import 路径不变。
+ * 写方两家（`gtrk patch`、`matrix lay`）共用本模块，MUST NOT 在铺轨侧复刻第二份取整。
  */
 
 /** 元素的帧域视图（自由变量 + 源侧毫秒），是所有动作的运算对象。 */
@@ -32,14 +34,22 @@ export function sec2frame(sec: number, rate: number): number {
 }
 
 /**
- * 帧 → 整毫秒。标准帧率下往返可逆：`sec2frame(f2ms(n)/1000, rate) === n`
- * （帧域偏差 ≤0.03 帧 ≪ 0.5 帧）。
+ * 帧 → 整毫秒，**向下**投影（fix-matrix-lay-frame-grid D5，改自就近）。
  *
- * ⚠️ **不可加**：存在 a/b 使 `f2ms(a+b) ≠ f2ms(a)+f2ms(b)`（rate=30 时 f2ms(1)+f2ms(1)=66
- * 而 f2ms(2)=67）。所以它 MUST NOT 被用来单独换算时长——见 `gtrk-patch.ts` 模块头。
+ * 为什么是向下：消费侧有**两种**帧化口径——客户端合成器按「`startTime ≤ t < end`、帧起点采样」判在场
+ * （有效帧 = 第一个 ≥ 投影值的采样帧，即**向上**），`gtrk render` 按累计**就近**取整分配帧数。
+ * 向下的投影值 ≤ 帧时刻 ⇒ 客户端恰得 `n`；残差 <1ms ≤ 0.06 帧 ⇒ 就近仍得 `n`。
+ * 就近投影会让 30/24/60fps 下三分之一的帧位（`n·1000/rate` 小数部分 > .5）在客户端晚一帧显示，MUST NOT 回退。
+ *
+ * 标准帧率下往返可逆：`sec2frame(f2ms(n)/1000, rate) === n`——证明：`f2ms(n)/1000 ≥ n/rate − 1/1000`，
+ * 于是 `f2ms(n)/1000·rate + 0.5 ≥ n − rate/1000 + 0.5`，而 `rate ≤ 60` 时 `rate/1000 ≤ 0.06 < 0.5`，
+ * 向下取整恒得 `n`（上界 `≤ n + 0.5` 显然）。
+ *
+ * ⚠️ **不可加**：存在 a/b 使 `f2ms(a+b) ≠ f2ms(a)+f2ms(b)`（rate=30 时 f2ms(2)+f2ms(1)=66+33=99
+ * 而 f2ms(3)=100）。所以它 MUST NOT 被用来单独换算时长——见 `gtrk-patch.ts` 模块头。
  */
 export function f2ms(frame: number, rate: number): number {
-	return Math.round((frame * 1000) / rate);
+	return Math.floor((frame * 1000) / rate);
 }
 
 /** 秒 → 整毫秒（源侧量化用；不涉帧）。 */

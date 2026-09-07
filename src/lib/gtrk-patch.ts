@@ -7,8 +7,9 @@
  * ## 唯一权威域 = 帧域，毫秒是帧号的单向投影
  *
  * 因为**取整不可加**（`f2ms(a+b) ≠ f2ms(a)+f2ms(b)`），「两端各自取整到毫秒」与
- * 「时长由帧差单独换算」**不可同时成立**。护栏例（`rate=30`）：`st_frame=1`、`ed_frame=2` 时
- * `f2ms` 两端得 33 / 67 ms，差 **34ms**，而帧差换算 `f2ms(1)=33ms` —— `34 ≠ 33`。
+ * 「时长由帧差单独换算」**不可同时成立**。护栏例（`rate=30`，`f2ms` 向下投影，fix-matrix-lay-frame-grid D5）：
+ * `st_frame=2`、`ed_frame=3` 时 `f2ms` 两端得 66 / 100 ms，差 **34ms**，而帧差换算 `f2ms(1)=33ms` —— `34 ≠ 33`。
+ * 这不是可以靠换取整方向绕开的——任何取整都不可加。
  *
  * 故自由变量只有三个（`st_frame` / `dur_frames` / `clip_st`），其余全是**导出量**，
  * 且导出顺序固定（delta「帧对齐」Requirement 的权威表）：
@@ -59,7 +60,8 @@ export interface Locator {
 //
 // [link-time-domain-discipline] 帧域三件套（`sec2frame / f2ms / derive`）与配套 `sec2ms / ms2sec / readMs`、
 // `FrameView / DerivedMs` 原样搬到 `./frame-domain`（零 IO、零依赖，供 lay 模块直接接、不再反向依赖本文件）；
-// 此处 re-export 保既有 import 路径不变。取整方向一字未改。
+// 此处 re-export 保既有 import 路径不变。搬出时取整方向一字未改；其后 `fix-matrix-lay-frame-grid` D5
+// 把 `f2ms` 改为向下投影（理由与往返可逆证明见 `frame-domain.ts` 头注）。
 import { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
 import type { FrameView, DerivedMs } from "./frame-domain";
 export { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
@@ -630,10 +632,16 @@ export function classOf(el: Element): "clip" | "gap" | "beat" {
 	return classifyForValidation(el);
 }
 
-/** 顶层 `video_rate`。契约保证恒为正整数且已吸附标准帧率表；缺失或非正 ⇒ 抛。 */
+/**
+ * 顶层 `video_rate`。契约保证恒为**正整数**且已吸附标准帧率表；缺失 / 非正 / 非整数 ⇒ 抛（同一条话术）。
+ *
+ * 整数判据（fix-matrix-lay-frame-grid 2.8）：契约说「恒为正整数」而本函数此前只判正数，
+ * 客户端本地写出的 29.97 之类会漏过 ⇒ 帧域三件套在非整帧率上往返不再可逆。
+ * `gtrk patch` 与 `matrix lay` 共用本读法（D7：缺席即报错退出、零副作用，MUST NOT 静默退回毫秒路）。
+ */
 export function videoRateOf(gtrk: Obj): number {
 	const r = gtrk.video_rate;
-	if (typeof r !== "number" || !Number.isFinite(r) || r <= 0) {
+	if (typeof r !== "number" || !Number.isFinite(r) || r <= 0 || !Number.isInteger(r)) {
 		throw new Error(`工程缺少合法的 video_rate（读到 ${JSON.stringify(r)}）——帧对齐无从谈起`);
 	}
 	return r;

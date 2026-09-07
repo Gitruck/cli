@@ -43,7 +43,11 @@ import {
 	solidMaterialId,
 	solidRelPath,
 } from "./solid-png";
-import { r3 } from "./frame-domain";
+// [fix-matrix-lay-frame-grid D1 / D2″] 帧域三件套直接从 frame-domain 接（与 gtrk-patch.ts 同一份 import），
+// MUST NOT 在本文件复刻第二份取整。决策层（slotTimes / 实数游标 / 毫秒黑底合并）一字未动、仍在毫秒域；
+// 帧格化只在 layBrollTracks 的**写出侧**发生（projectSlotsToFrameGrid，见下）。
+import { f2ms, r3, sec2frame, sec2ms } from "./frame-domain";
+import { videoRateOf } from "./gtrk-patch";
 import { assertGtrkWriteInvariants, assertTrackContinuity, assertTrimIdentity } from "./gtrk-invariants";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
@@ -645,6 +649,134 @@ function slotTimes(
 // 这里保留 re-export：既有 `import { assertTrimIdentity } from "./matrix-lay"`（mg-lay 等）路径零改动。
 // ⚠️ MUST NOT 在本文件重新长出这两条的副本——判据只许有一份。
 export { assertTrimIdentity, assertTrackContinuity } from "./gtrk-invariants";
+
+// ── 写出侧帧格化（fix-matrix-lay-frame-grid D2″）────────────────────────────────────────
+//
+// 决策层（fillSlots / layAnchored / gap 填充 / refineWindow / slotTimes / mergeBlackBedSegments）**一个字不动**：
+// 实数游标、毫秒槽位、金样、MANIFEST、DECISION_ALGO_PIN、infra broll_arrange 平价全部保持。
+// 帧格化是 layBrollTracks 写出前对**每条轨的槽位序列**做的一次纯变换——「同一时刻只取整一次」：
+// 每颗槽位的两端各由实数位置一次 sec2frame 得帧号（不来自逐段帧数相加），毫秒是帧号的单向投影（f2ms）。
+//
+// 为什么不在决策层取整（D2 已实测作废）：槽长在决策层取整帧让 remaining 跨过 MIN_SHOT_SEC、句界吸附计数错位、
+// 两份真机金样选段翻转、127/556 槽位 track_st 累计漂到 +5 帧、71 颗 clip_st 被居中窗带着动。三条红同一个根。
+
+/** 写出侧帧格统计（summary.frameGrid / --json 的 frame_grid）。shifted = 越段界 / 越素材上界前移次数。 */
+export interface FrameGridSummary {
+	rate: number;
+	slots: number;
+	black_bed: number;
+	shifted: number;
+}
+
+export interface FrameGridProjection<T> {
+	/** 变换后的槽位（保持入参原序；被弃的槽位不在内）。 */
+	slots: T[];
+	/** 越上界前移次数（每次 1 帧）。 */
+	shifted: number;
+	/** 投影后零帧而被弃的槽位数（不足半帧的决策残片；亚帧残量在写出侧结构性消失）。 */
+	dropped: number;
+	/** 人读 INFO（每次前移 / 弃槽一行；纯函数不做 IO，交命令层打印）。 */
+	info: string[];
+}
+
+/**
+ * 槽位序列 → 帧网格（纯函数、零 IO）。对**同一条轨、同一个 beat**的槽位序列按 track_st 排序后：
+ *
+ *   shift = 0
+ *   for slot:
+ *     st_f = sec2frame(track_st) + shift
+ *     ed_f = sec2frame(track_ed) + shift          # 决策层接缝毫秒逐字节相等 ⇒ 相邻 ed_f == 下一颗 st_f
+ *     dur_ms = f2ms(ed_f) − f2ms(st_f)            # 投影不可加：时长恒为两端投影之差，MUST NOT 用 f2ms(dur_frames)
+ *     dur_ms ≤ 0 ⇒ 弃该槽（INFO）；shift 不变
+ *     有上界且 clip_st_ms + dur_ms > bound_ms ⇒ ed_f −= 1; shift −= 1（宁短一帧；后续槽位整体前移 ⇒ 接缝仍相等）
+ *     写出 track_st = f2ms(st_f)/1000、track_ed = f2ms(ed_f)/1000、clip_st 逐字节不动、clip_ed = clip_st + dur_ms
+ *
+ * 性质：① 选段身份与 clip_st 逐字节不变；② 任一端点与决策层毫秒时刻差 ≤ 半帧 + 1ms（有 shift 时再加 |shift| 帧）；
+ * ③ 相邻接缝由同一帧号构成（字面逐字节相等）；④ assertTrimIdentity / assertTrackContinuity 在变换**之后**跑，
+ * 判据零改动。boundMsOf 给的是 clip_ed 的整毫秒上界（段界严格 ∧ 素材时长 +1ms，由调用方合成）；缺省 = 无上界；
+ * 上界只约束量化多出的部分——决策层 clip_ed 本就越界的槽位不动（留给 T5 抛）。
+ *
+ * 作用域是「同一个游标连续推出的序列」= 一个 beat 的一条轨：shift MUST NOT 跨 beat 传播——黑底按 beat 包络整条铺、
+ * 不参与 shift，首槽起点与黑底起点封口靠的正是「shift 从 0 起」。跨 beat 的接缝（beat 末 = 下一 beat 首）不是同一游标
+ * 推出、不在接缝条款射程内；前移留下的那一帧落在**发生前移的 beat 末端**（黑底之下），可数、INFO 可见。
+ */
+export function projectSlotsToFrameGrid<T extends { clip_id: string; clip_st: number; clip_ed: number; track_st: number; track_ed: number }>(
+	slots: readonly T[],
+	rate: number,
+	boundMsOf?: (slot: T) => number | undefined,
+): FrameGridProjection<T> {
+	const order = slots.map((s, i) => ({ s, i })).sort((a, b) => a.s.track_st - b.s.track_st || a.i - b.i);
+	const out: (T | null)[] = slots.map(() => null);
+	const info: string[] = [];
+	let shift = 0;
+	let shifted = 0;
+	let dropped = 0;
+	const tag = (s: T): string => `${s.clip_id}@${s.clip_st}（轨 ${s.track_st}–${s.track_ed}）`;
+	for (const { s, i } of order) {
+		const stF = sec2frame(s.track_st, rate) + shift;
+		let edF = sec2frame(s.track_ed, rate) + shift;
+		const csMs = sec2ms(s.clip_st);
+		let durMs = f2ms(edF, rate) - f2ms(stF, rate);
+		if (durMs <= 0) {
+			dropped++;
+			info.push(`帧网格：槽位 ${tag(s)} 投影后不足一帧（帧 ${stF}→${edF}），弃置（决策层残片，不落轨）`);
+			continue;
+		}
+		// 上界只约束**帧量化多出的那不足一帧**：决策层自身已越界的槽位（sec2ms(clip_ed) > 上界）不动——那是决策层的事，
+		// 由写方自检（assertSourceBound / T5）如实抛，MUST NOT 让写出侧「顺手修掉」而把决策缺陷藏起来
+		// （lay-writer-selfcheck：候选 clip_ed 超素材 duration 2ms ⇒ 抛 source_overrun，上界不参与决策）。
+		const boundMs = boundMsOf?.(s);
+		if (boundMs !== undefined && csMs + durMs > boundMs && sec2ms(s.clip_ed) <= boundMs) {
+			const over = csMs + durMs - boundMs;
+			edF -= 1;
+			shift -= 1;
+			shifted++;
+			durMs = f2ms(edF, rate) - f2ms(stF, rate);
+			info.push(
+				`帧网格：槽位 ${tag(s)} 取整帧后 clip_ed 越上界 ${over}ms（上界 ${boundMs}ms）⇒ 终点前移一帧（帧 ${edF + 1}→${edF}），` +
+					`同轨后续槽位整体前移一帧（宁短一帧不截邻场景）`,
+			);
+			if (durMs <= 0) {
+				dropped++;
+				info.push(`帧网格：槽位 ${tag(s)} 前移后不足一帧，弃置`);
+				continue;
+			}
+		}
+		out[i] = {
+			...s,
+			clip_ed: (csMs + durMs) / 1000,
+			track_st: f2ms(stF, rate) / 1000,
+			track_ed: f2ms(edF, rate) / 1000,
+		};
+	}
+	return { slots: out.filter((s): s is T => s !== null), shifted, dropped, info };
+}
+
+/**
+ * 写出侧的段界回查（fix-matrix-lay-frame-grid 2.2）：槽位记录（FillSlot）不携带检索段，段界从 plan 反查——
+ * 包含判据与决策层 segBoundsOf（gap 填充的延长上限）**同一条**：sg.start ≤ clip_st ≤ clip_ed ≤ sg.end（1e-6 松弛），
+ * 先本 beat、后其他 beat（借来的料属别的 beat）。决策层已越过段界的窗口（借头 / 复吸的「越段界 ≤ 一帧」松弛档）
+ * 查不到包含段 ⇒ 不受段界约束（那是决策层有意的松弛，写出侧 MUST NOT 反过来把它削掉）；图片候选与整片伪段候选
+ * （无 segments）无段界，只受素材时长（由调用方另合成）。返回秒；undefined = 无段界。
+ */
+export function slotSegmentEnd(
+	plan: BrollPlan,
+	beat: PlanBeat,
+	slot: { clip_id: string; clip_st: number; clip_ed: number },
+): number | undefined {
+	const beatsToScan = [beat, ...plan.beats.filter((b) => b !== beat)];
+	for (const bb of beatsToScan) {
+		for (const q of bb.queries) {
+			for (const rr of q.results ?? []) {
+				if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
+				for (const sg of rr.segments ?? []) {
+					if (sg.start <= slot.clip_st + 1e-6 && slot.clip_ed <= sg.end + 1e-6) return sg.end;
+				}
+			}
+		}
+	}
+	return undefined;
+}
 
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
 const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
@@ -2792,10 +2924,15 @@ export interface LayResult {
 			 */
 			short_solid?: { count: number; sec: number; items: Array<{ beat: string; sec: number }> };
 		};
+		/** 写出侧帧格统计（fix-matrix-lay-frame-grid 2.4）：rate = 顶层 video_rate；slots / black_bed = 落在网格上的
+		 * 候选轨 clip 数（含 gap 黑片）/ 黑底 clip 数；shifted = 越段界 / 越素材上界前移次数。拒铺时缺席。 */
+		frameGrid?: FrameGridSummary;
 	};
 	broll: StructMetaBroll;
 	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
 	warnings: string[];
+	/** 人读 INFO（良性、有已知根因的写出侧事件：帧格前移 / 弃置残片），交由命令层以 info 级打印，MUST NOT 升成告警。 */
+	infos: string[];
 }
 
 // ── 自产指纹判据（fix-matrix-strip-identity）──────────────────────────────
@@ -3185,6 +3322,13 @@ export function layBrollTracks(opts: {
 	const forceRelay = opts.forceRelay === true;
 	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : "common");
 	const warnings: string[] = [];
+	const infos: string[] = [];
+	// ── 帧率（fix-matrix-lay-frame-grid D7）：写出侧帧格化的锚，与 gtrk patch 同一读法与话术；缺席 / 非正 / 非整数
+	//    在这里就抛——此刻尚未动任何结构、入参 gtrk 原样（零副作用），MUST NOT 静默退回毫秒路。
+	const videoRate = videoRateOf(gtrk);
+	/** 毫秒时刻 → 帧网格投影（一次 sec2frame、一次 f2ms）：黑底包络与空洞诊断的包络两端都走它，不参与 shift。 */
+	const gridSec = (sec: number): number => f2ms(sec2frame(sec, videoRate), videoRate) / 1000;
+	let shiftedTotal = 0;
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}) };
 
@@ -3273,6 +3417,7 @@ export function layBrollTracks(opts: {
 				beats: [],
 			}) as StructMetaBroll,
 			warnings,
+			infos,
 		};
 	}
 
@@ -3398,13 +3543,29 @@ export function layBrollTracks(opts: {
 		for (let k = 0; k < perTrack.length; k++) {
 			// 下载失败的槽位丢弃（留空）；图片槽位以 material_id 指向注入材料（运镜/静态兜底）；全空轨槽不建 laid 条目；
 			// gap 填充规划槽位在填充不适用时滤出（adjust-main-track-gap-fill 应用段门控）
-			const slots = perTrack[k].filter(
+			const decided = perTrack[k].filter(
 				(s) =>
 					(!s.gap_fill || gapFillOn) &&
 					(downloads.has(s.clip_id) || (s.material_id !== undefined && opts.injectedMaterials?.has(s.material_id))),
 			);
-			if (!slots.length) continue;
+			if (!decided.length) continue;
 			const trackIndex = bandStart[targetLayer] + k;
+			// ── 写出侧帧格化（fix-matrix-lay-frame-grid D2″）：决策层槽位（毫秒）在此投影到顶层 video_rate 的帧网格。
+			//    本地槽位与云端编排（arrange-apply）返回的槽位走同一入口——fills 到这里已经不分来路。
+			//    clip_ed 上界 = 检索段界（严格，spec「越段界宁短一帧」）∧ 素材时长 + 1ms（与 assertSourceBound / T5 同一容差，
+			//    素材 = 本槽位真正会登记进 materials[] 的那条：图片走注入材料，其余走 plan 候选的 duration）。
+			const projected = projectSlotsToFrameGrid(decided, videoRate, (s) => {
+				const segEnd = slotSegmentEnd(plan, beat, s);
+				const injected = s.material_id !== undefined ? opts.injectedMaterials?.get(s.material_id) : undefined;
+				const matDur = injected ? injected.duration : candById.get(s.clip_id)?.duration;
+				const segMs = segEnd === undefined ? undefined : sec2ms(segEnd);
+				const matMs = typeof matDur === "number" && Number.isFinite(matDur) && matDur > 0 ? sec2ms(matDur) + 1 : undefined;
+				return segMs === undefined ? matMs : matMs === undefined ? segMs : Math.min(segMs, matMs);
+			});
+			shiftedTotal += projected.shifted;
+			for (const m of projected.info) infos.push(`${beat.beat} 轨 ${trackIndex}：${m}`);
+			const slots = projected.slots;
+			if (!slots.length) continue;
 			const bucket = trackClips.get(trackIndex) ?? [];
 			slots.forEach((s, i) => {
 				const materialId = s.material_id ?? brollMaterialIdFor(s.clip_id);
@@ -3457,8 +3618,10 @@ export function layBrollTracks(opts: {
 		// ——磁吸安全不变量（beat 包络内主轨零 gap）在此收口，不依赖下载成败。
 		if (gapFillOn) {
 			const mainLaid = laid.find((l) => l.order === 0);
+			// 洞按**帧网格上的**包络算（fix-matrix-lay-frame-grid）：槽位已在网格上，包络两端同一 gridSec ⇒ 洞的两端
+			// 天然是整帧号投影，黑片一出生就在网格上；不足半帧的决策残量与包络末端同帧 ⇒ 连洞都没有（亚帧黑片结构性消失）。
 			const { holes } = computeBlackBedHoles({
-				beats: [{ beat: beat.beat, track_st: beat.track_st, track_ed: beat.track_ed, slots: mainLaid?.slots ?? [] }],
+				beats: [{ beat: beat.beat, track_st: gridSec(beat.track_st), track_ed: gridSec(beat.track_ed), slots: mainLaid?.slots ?? [] }],
 			});
 			if (holes.length) {
 				if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
@@ -3565,15 +3728,17 @@ export function layBrollTracks(opts: {
 		// 要治的是**沉默**：同一个 filled_sec 背后既可能是一段 8 秒整段留白，
 		// 也可能是十几处几帧的黑闪，而今天的产物说不出这两者的区别。
 		// 上界取 MIN_SHOT_SEC 不是凑数——短于它的黑片，按铺轨自己的口径就不该单独存在。
-		// 帧率按**顶层 video_rate** 取；缺失或非正 ⇒ 判不了帧数，此时下界退化为「大于 0」
-		// （秒数仍是确定事实，账面照记；只是没法说它是几帧）。
-		const rate = typeof gtrk.video_rate === "number" && gtrk.video_rate > 0 ? gtrk.video_rate : null;
+		// 帧率 = 顶层 video_rate（fix-matrix-lay-frame-grid 之后恒合法：缺席 / 非正 / 非整数在本函数入口已抛，
+		// 「判不了帧数只报秒数」那条分支随之退役）。
+		const rate = videoRate;
 		// ★ **双边**区间 [1 帧, MIN_SHOT_SEC)：
 		//   · 下界 —— 不足一帧的是**亚帧残片**，渲染侧累计取整判 0 帧、观众根本看不见，
 		//     报成「黑闪」就是假话；那一档归 fix-gapfill-subframe-residue（它负责**消掉**它们，
 		//     不是报它们）。两件的射程在 1 帧处接壤，本件 MUST NOT 越界去认领。
+		//     黑片如今一出生就在帧网格上（一帧 = f2ms 投影差 33/34ms @30），帧数按就近取整判——
+		//     sec × rate ≥ 1 会把向下投影的一帧（0.033 × 30 = 0.99）误判成亚帧而漏报。
 		//   · 上界 —— MIN_SHOT_SEC：短于它的黑片按铺轨自己的口径就不成一个镜头。
-		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && (rate === null ? f.sec > 0 : f.sec * rate >= 1));
+		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && Math.round(f.sec * rate) >= 1);
 		if (shortSolids.length) {
 			gapFillSummary.short_solid = {
 				count: shortSolids.length,
@@ -3581,14 +3746,12 @@ export function layBrollTracks(opts: {
 				// 全量，MUST NOT 按阈值过滤
 				items: shortSolids.map((f) => ({ beat: f.beat, sec: f.sec })),
 			};
-			// 帧数只在能判时出现；判不了就只报秒数，MUST NOT 编造
-			// （与 cuts 三态 / motion 缺省同口径：判不了就说判不了）。
-			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s${rate ? `（${Math.round(f.sec * rate)} 帧）` : ""}`;
+			// 帧数按顶层 video_rate 换算（黑片在网格上，就近取整即整帧数）。
+			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s（${Math.round(f.sec * rate)} 帧）`;
 			const head = shortSolids.slice(0, 5).map(fmt).join("、");
 			warnings.push(
 				`主轨落了 ${shortSolids.length} 处**过短黑片**（短于最小槽长 ${MIN_SHOT_SEC}s，合计 ` +
 					`${gapFillSummary.short_solid.sec}s）：${head}${shortSolids.length > 5 ? ` 等 ${shortSolids.length} 处` : ""}。\n` +
-					(rate ? "" : "（工程 video_rate 不可用，只报秒数、不换算帧数。）\n") +
 					"短到不成一个镜头的黑片，在成片里就是一下黑闪。这**不阻断交片**——黑片是候选枯竭时的正确兜底，\n" +
 					"没有它主轨会露洞、客户端开主轨磁吸后配音与画面错位，那是更坏的结果。\n" +
 					"真要消掉它，只有扩候选池这一条路：① 给这些 beat 补素材、重跑 `matrix index`；\n" +
@@ -3701,16 +3864,35 @@ export function layBrollTracks(opts: {
 					track_index: blackTrack,
 					track_size: [width, height],
 					muted: true,
-					track_timeline: segments.map((s, i) => ({
-						clip_id: `blackbed-${i}`,
-						material: solidId,
-						clip_st: 0,
-						clip_ed: r3(s.track_ed - s.track_st),
-						track_st: s.track_st,
-						track_ed: s.track_ed,
-						duration: r3(s.track_ed - s.track_st),
-						producer: producerTag(opts.generatedAt),
-					})),
+					// 黑底同域（fix-matrix-lay-frame-grid D4′）：毫秒合并（mergeBlackBedSegments，决策口径不动、段数与
+					// expectedSelfProducedTracks 的复算同源）之后，每段两端各取一次 sec2frame、写出经 f2ms；**不参与 shift**
+					// （黑底按 beat 包络整条铺是铁律）⇒ 与首槽起点封口由构造成立（同一 sec2frame(beat.track_st)），末槽终点 ≤ 黑底终点。
+					// 时长恒为两端投影之差（不可加）。不足一帧的段（beat 包络 < 半帧，理论边角）弃置并告警——不留零长 clip。
+					track_timeline: segments.flatMap((s, i) => {
+						const stF = sec2frame(s.track_st, videoRate);
+						const edF = sec2frame(s.track_ed, videoRate);
+						const durMs = f2ms(edF, videoRate) - f2ms(stF, videoRate);
+						if (durMs <= 0) {
+							warnings.push(
+								`黑底段 ${s.track_st}–${s.track_ed} 在 ${videoRate}fps 网格上不足一帧（帧 ${stF}→${edF}），本段不铺黑底；` +
+									`下一轮重铺的黑底 clip 数会与登记复算差 1，若因此被判「已编辑」请用 --force-relay。`,
+							);
+							return [];
+						}
+						const len = durMs / 1000;
+						return [
+							{
+								clip_id: `blackbed-${i}`,
+								material: solidId,
+								clip_st: 0,
+								clip_ed: len,
+								track_st: f2ms(stF, videoRate) / 1000,
+								track_ed: f2ms(edF, videoRate) / 1000,
+								duration: len,
+								producer: producerTag(opts.generatedAt),
+							},
+						];
+					}),
 				};
 			}
 		}
@@ -3745,8 +3927,10 @@ export function layBrollTracks(opts: {
 			.filter((b) => b.laid.length > 0) // 与黑底时窗同一批 beat（laid 为空者本就不铺黑底）
 			.map((b) => ({
 				beat: b.beat,
-				track_st: b.track_st,
-				track_ed: b.track_ed,
+				// 包络两端取黑底同一投影（fix-matrix-lay-frame-grid）：口径不变（洞 = 黑底 − 槽位并集），只是两边都读
+				// **写出后**的值——槽位已在网格上，包络若仍读毫秒会把 ≤ 半帧的相位差误报成洞。登记 track_st/track_ed 本身不动。
+				track_st: gridSec(b.track_st),
+				track_ed: gridSec(b.track_ed),
 				slots: b.laid.flatMap((l) => l.slots), // 跨轨取并：轨 1 空、轨 2 有的段落不算空洞
 			}));
 		({ holes: blackBedHoles, totalSec: blackBedHoleSec } = computeBlackBedHoles({ beats: holeBeats }));
@@ -3869,8 +4053,15 @@ export function layBrollTracks(opts: {
 			blackBedHoleSec,
 			blackBedHoles,
 			...(gapFillSummary ? { gapFill: gapFillSummary } : {}),
+			frameGrid: {
+				rate: videoRate,
+				slots: laidClips,
+				black_bed: blackTrackObj ? (blackTrackObj.track_timeline as unknown[]).length : 0,
+				shifted: shiftedTotal,
+			},
 		},
 		broll,
 		warnings,
+		infos,
 	};
 }

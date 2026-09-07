@@ -19,6 +19,8 @@ import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { readFile, mkdir, copyFile } from "node:fs/promises";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
+// [adjust-lay-frame-domain D2] 顶层 video_rate 与 matrix lay / ai-drama lay 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
+import { videoRateOf } from "../lib/gtrk-patch";
 import { lintParticle, parseCompositionId } from "../lib/mg-lint";
 import { renderParticle, CID_SHAPE } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
@@ -177,6 +179,9 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 	}
 	// 版本门位置不挪（gtrk-writeback.ts assertGtrkV1）：铺轨路径仍硬失败，MUST NOT 降成放行。
 	if (!opts.lintOnly && project) assertGtrkV1(project.gtrk);
+	// ── 帧率预检（adjust-lay-frame-domain D2）：颗粒窗口帧格化锚在顶层 video_rate；缺席 / 非正 / 非整数在这里就抛
+	//    （与 matrix lay / layMgTracks 同一读法与话术）——此刻零复制、零改动，MUST NOT 静默退回毫秒路。`--lint-only` 不铺不查。
+	if (!opts.lintOnly && project) videoRateOf(project.gtrk);
 	const laidBefore = laidCompositionIds(opts.lintOnly ? undefined : project?.gtrk);
 
 	// ── 现场重投影（add-consume-side-reprojection）：恒执行、在 lint 之前 ─────────────────
@@ -368,7 +373,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 				"若你改的正是时间线或 beat 派单，颗粒时码可能与新窗口对不齐，重跑一次本命令即可（纯本地、不计费）。",
 		);
 	}
-	const { next, summary, mg } = layMgTracks({ gtrk: freshGtrk, items, generatedAt: new Date().toISOString(), keep, warn: log.warn });
+	const { next, summary, mg } = layMgTracks({ gtrk: freshGtrk, items, generatedAt: new Date().toISOString(), keep, warn: log.warn, info: log.info });
 	// 时码来源登记（add-consume-side-reprojection 7.1，纯追加可选字段）：
 	// 让「这批已铺产物是照哪条时间线、哪种模式铺的」可被后续体检读取。本 change 只**登记**，不据此判失效。
 	// 注意它描述的是**本次铺的那些**——保留条目带的是上一轮时码（混排形态，见 spec 同名 Scenario）。
