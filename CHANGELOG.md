@@ -2,6 +2,14 @@
 
 ## 未发布
 
+### 锚点金样入册（fix-anchor-top-hit-guarantee §5）：决策 pin v5 的金样清单 53 → 57、哈希重登记不升 v6
+
+`test/fixtures/broll-arrange/cases/` 新增 `44-anchor-sim-order-real-q1`（真机复刻 Q1/B04 两刀合璧：锚槽按原始 sim 取校门段而非融合分顶上来的广告牌，B02 泛化槽让位转次优）/
+`45-anchor-cross-beat-reserve-lay2`（备选轨同受预留约束 + 不相交 beat 零回归）/ `46-anchor-reserve-release`（逐锚 finally 与零长度 beat 早退两条释放路）/
+`47-anchor-vs-anchor-at-sec-order`（at_sec 先到先得、`reserved` 与 `consumed`+`top_by` 两种归因形态），均由 `regenerate.mjs` 产出，临时变异实证各自在「锚序退回融合分 / 关掉预留」下 expected 会变。
+决策层零改动（`matrix-lay.ts` 零 diff），既有 53 项金样逐字节不变、`cloud-form.json` 逐字节不变、`metering.json` 只多 4 条派生 entry（`METERING_ALGO_PIN` 不动）。
+v5 尚未发版 ⇒ `PIN_TO_MANIFEST_SHA[v5]` 由 `3bcc7aef…` 重登记为 `cc82e20e…`（57 项）而不升 v6，infra `link-anchor-top-hit-guarantee` 同批把 `_PIN_TO_MANIFEST_SHA[v5]` 改成同一个数。
+
 ### gap 填充：恰等 1ms 的残量并入前一颗、合并容差统一到整毫秒格（决策 pin v5）
 
 `matrix lay` 主轨 gap 填充的合并容差从秒域浮点 `BLACK_BED_MERGE_EPS = 0.001` 改为整毫秒格具名常量 `BLACK_BED_MERGE_TOL_MS = 1`（`sec2ms` 整数差比较）。

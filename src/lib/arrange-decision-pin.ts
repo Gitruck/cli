@@ -60,6 +60,9 @@
  *          （`sec2ms` 整数差 ≥ `BLACK_BED_MERGE_TOL_MS = 1`，消灭浮点相位下同一行代码的「两个真相」）；
  *          ③ B 档改名零字节（`CUT_ALIGN_EPS → CUT_ALIGN_WINDOW_SEC`、`BLACK_BED_MERGE_EPS → BLACK_BED_MERGE_TOL_MS`）。
  *          金样清单条数 52 → 53（新增 `cases/43-gapfill-eps-exact-residue`，既有 52 项逐字节未变）。
+ *          ⟲ 同批（发版前）含 `fix-anchor-top-hit-guarantee` §5.1–5.4 的四条锚点金样 `cases/44–47`
+ *          （锚槽 sim 序 / 跨 beat 预留 lay2 / 预留释放两路 / 双锚 at_sec 先到先得；决策层零改动、既有 53 项逐字节未变），
+ *          清单 53 → 57、`PIN_TO_MANIFEST_SHA[v5]` **哈希重登记而不升 v6**——v5 尚未发版，没有任何已上线缓存条目会因此失效。
  *          ⚠️ 版本差的**真实后果**（design D5 纠偏，MUST NOT 再写成「≤1.1.2 被服务端前置拒绝并直接报错」）：
  *          服务端只把决策 pin 混进幂等键并回传，**不按它拒绝客户端**；≥ 1.1.3 客户端读到 v5 走 `server_ahead`
  *          采纳服务端产物；≤ 1.1.2 客户端不比对 ⇒ 退回自校验 → `self_check_failed` 回落本地并白付一次编排费。
