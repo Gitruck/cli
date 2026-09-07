@@ -44,6 +44,7 @@ import {
 	solidRelPath,
 } from "./solid-png";
 import { r3 } from "./frame-domain";
+import { assertGtrkWriteInvariants, assertTrackContinuity, assertTrimIdentity } from "./gtrk-invariants";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
 /** 本地素材封面目录（工程内相对路径；铺轨时 ffmpeg 现抽 best 帧落此，add-matrix-local-search 4.2）。 */
@@ -638,70 +639,12 @@ function slotTimes(
 	return { clip_st: csMs / 1000, clip_ed: (csMs + durMs) / 1000, track_st: tsMs / 1000, track_ed: teMs / 1000 };
 }
 
-/**
- * 写方自检：裁剪恒等式（fix-trim-identity-constructive §3.1）。
- *
- * ★ 为什么必须是**写方**自检，而不是只靠 `gtrk-patch.ts` 的 E1/E2：
- * 那条校验器只在用户**主动悔棋**（跑 `gtrk patch`）时才经过，于是违约可以长期无声
- * 存在——实测存量 55/352 槽位（15.6%），而全套测试照样绿、客户端也不报错，
- * 唯一的症状是「成片可能用陈旧出点」和「悔棋通道在自家产物上失效」。
- *
- * 判据与 `gtrk-patch.ts` 逐字同源：**整毫秒域、零容差**。
- * MUST NOT 在这里放宽成「差 1ms 以内可接受」——那正是本缺陷的形状。
- */
-export function assertTrimIdentity(
-	c: { clip_st?: number; clip_ed?: number; track_st?: number; track_ed?: number; duration: number },
-	where: string,
-): void {
-	const ms = (v: number | undefined): number | undefined => (typeof v === "number" ? Math.round(v * 1000) : undefined);
-	const [cs, ce, ts, te, du] = [ms(c.clip_st), ms(c.clip_ed), ms(c.track_st), ms(c.track_ed), ms(c.duration)!];
-	if (cs !== undefined && ce !== undefined && ce - cs !== du) {
-		throw new Error(
-			`铺轨自检失败（${where}）：clip_ed − clip_st = ${ce - cs}ms ≠ duration ${du}ms。` +
-				"裁剪恒等式须**构造性成立**（composition-contract-v1 §3），" +
-				"两个端点 MUST NOT 各自舍入——见 slotTimes 头注。",
-		);
-	}
-	if (ts !== undefined && te !== undefined && te - ts !== du) {
-		throw new Error(`铺轨自检失败（${where}）：track_ed − track_st = ${te - ts}ms ≠ duration ${du}ms。`);
-	}
-}
-
-/**
- * 写方自检：同轨零重叠（fix-slot-seam-continuity）。
- *
- * ★ 为什么与 `assertTrimIdentity` 分两条：那条管的是**单颗槽位内部**两个时基自洽，
- * 这条管的是**相邻两颗之间**。前者全绿时后者照样可以塌——上一版就是这么塌的：
- * 恒等式构造性成立了，接缝却在非整毫秒相位上差 1ms，而 `gtrk render` 对同轨重叠
- * 是零容差硬拒（E9），真机三条工程全部渲不出来，全套测试却是绿的。
- *
- * 判据与 `gtrk-patch.ts` 的 E9 逐字同源：**整毫秒域、零容差**。
- *
- * ⚠️ 本条只判**重叠**，不判空洞：候选枯竭造成的留空是有意为之（填槽循环里
- * 「宁空不重复」那条铁律的正常产物），在这里看不出与违约的区别——
- * 「相邻两颗中间有没有过一次空槽推进」这个信息只在填槽循环内存在，到组装期已经丢了。
- * 所以**严格接缝**（两个方向都管，含 1ms 空洞）由填槽循环内那条断言负责，
- * 本条是覆盖全轨的兜底网：重叠在任何情况下都不合法，无需分流即可判。
- */
-export function assertTrackContinuity(
-	clips: { clip_id?: string; track_st?: number; track_ed?: number }[],
-	where: string,
-): void {
-	const ms = (v: number | undefined): number | undefined => (typeof v === "number" ? Math.round(v * 1000) : undefined);
-	const ordered = clips.filter((c) => typeof c.track_st === "number" && typeof c.track_ed === "number").sort((a, b) => a.track_st! - b.track_st!);
-	for (let i = 0; i + 1 < ordered.length; i++) {
-		const prevEd = ms(ordered[i]!.track_ed)!;
-		const nextSt = ms(ordered[i + 1]!.track_st)!;
-		if (nextSt < prevEd) {
-			throw new Error(
-				`铺轨自检失败（${where}）：同轨相邻槽位重叠 ${prevEd - nextSt}ms` +
-					`（${ordered[i]!.clip_id ?? "?"} 的 track_ed=${ordered[i]!.track_ed} > ` +
-					`${ordered[i + 1]!.clip_id ?? "?"} 的 track_st=${ordered[i + 1]!.track_st}）。` +
-					"接缝两侧 MUST 由同一个表达式求值——见 slotTimes 头注。",
-			);
-		}
-	}
-}
+// ── 写方不变量断言（add-lay-writer-self-check D1）────────────────────────────────────────
+// `assertTrimIdentity`（fix-trim-identity-constructive）与 `assertTrackContinuity`（fix-slot-seam-continuity）
+// 原本长在本文件；批 1 起搬到共用模块 `gtrk-invariants.ts`（头注随迁、判据一字未改），三个写方共用一份。
+// 这里保留 re-export：既有 `import { assertTrimIdentity } from "./matrix-lay"`（mg-lay 等）路径零改动。
+// ⚠️ MUST NOT 在本文件重新长出这两条的副本——判据只许有一份。
+export { assertTrimIdentity, assertTrackContinuity } from "./gtrk-invariants";
 
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
 const isImagePair = (p: Pair): boolean => p.cand.kind === "image";
@@ -3894,6 +3837,19 @@ export function layBrollTracks(opts: {
 		video_track: [...keptOtherTracks, ...bandTracksSorted, ...(blackTrackObj ? [blackTrackObj] : [])],
 		struct_meta: { ...structMeta, broll },
 	};
+	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：上面逐槽 assertTrimIdentity / 逐轨 assertTrackContinuity
+	// 之外补**素材上界**（T5：B-roll 素材带 ffprobe / plan duration，代理与原片不同也只认 materials[] 登记的那条；
+	// 黑底与黑片 material 无 duration ⇒ 跳过）。射程 = 本次落的候选轨 + 黑底轨（D2′）；他层保留轨 / 用户轨的
+	// 存量违例只进 warnings（命令层逐条 log.warn），MUST NOT 阻断。slotTimes 与决策层零改动。
+	{
+		const ownClipIds = new Set<string>();
+		for (const t of [...createdTracks, ...(blackTrackObj ? [blackTrackObj] : [])]) {
+			const tl = (t as { track_timeline?: unknown }).track_timeline;
+			if (!Array.isArray(tl)) continue;
+			for (const c of tl) if (c && typeof c === "object" && typeof (c as { clip_id?: unknown }).clip_id === "string") ownClipIds.add((c as { clip_id: string }).clip_id);
+		}
+		assertGtrkWriteInvariants(next, "matrix lay", { ownClipIds, warn: (m) => warnings.push(m) });
+	}
 	return {
 		next,
 		summary: {

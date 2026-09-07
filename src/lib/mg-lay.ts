@@ -55,7 +55,7 @@ function ownAssetCompositionId(p: unknown): string | undefined {
 // 本文件原为零 import 的自足模块；本条是唯一的例外（fix-mg-beat-clip-track-ed D2）：
 // 裁剪恒等式的判据 MUST 只有一份，复制一遍就是给「两份判据慢慢漂开」留门。
 // 已核不成环（matrix-lay 不引 mg-lay），无额外加载成本。
-import { assertTrimIdentity } from "./matrix-lay";
+import { assertGtrkWriteInvariants, assertTrimIdentity } from "./gtrk-invariants";
 import { r3 } from "./frame-domain";
 
 /**
@@ -194,6 +194,8 @@ export function layMgTracks(opts: {
 	 * `laidCompositionIds` + orphans），本层不推断、不设守门。
 	 */
 	keep?: string[];
+	/** 写方自检里**存量**违例的 WARN 出口（gtrk-writer-invariants D2′）；命令层接 `log.warn`，纯函数单测可不传。 */
+	warn?: (message: string) => void;
 }): MgLayResult {
 	const { gtrk, items, generatedAt } = opts;
 	const beatTracks = [...((gtrk.beat_track as LooseTrack[] | undefined) ?? [])];
@@ -352,6 +354,13 @@ export function layMgTracks(opts: {
 		beat_track: [...keptTracks, ...createdTracks],
 		struct_meta: nextStructMeta,
 	};
+	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：上面逐颗的 assertTrimIdentity 管不到相邻两颗之间——
+	// 本次颗粒与同轨**任一**邻居（含原样搬运的保留颗粒：它们带的是上一轮时码）零重叠在这里兜；
+	// 颗粒 material 无 duration ⇒ 上界恒跳过（D3），但接线不许漏。保留颗粒自身的存量违例只 WARN（D2′）。
+	assertGtrkWriteInvariants(next, "mg lay", {
+		ownClipIds: new Set(clips.map((c) => String(c.clip_id))),
+		warn: opts.warn,
+	});
 	return {
 		next,
 		summary: {

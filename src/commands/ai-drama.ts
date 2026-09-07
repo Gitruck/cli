@@ -177,7 +177,7 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts): Promise<Re
 	}
 
 	const generatedAt = new Date().toISOString();
-	const laid = layAiDramaTracks({ gtrk, packages, generatedAt });
+	const laid = layAiDramaTracks({ gtrk, packages, generatedAt, warn: log.warn });
 	laid.meta.timecode_source = reproj.summary.mode === "reprojected" ? "reprojected" : "dispatch_snapshot";
 	if (reproj.summary.projected_at) laid.meta.reprojected_at = reproj.summary.projected_at;
 	if (reproj.summary.reason) laid.meta.timecode_degrade_reason = reproj.summary.reason;

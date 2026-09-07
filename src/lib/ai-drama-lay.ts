@@ -15,6 +15,7 @@ export const AI_DRAMA_MATERIAL_PREFIX = "ai-drama-";
 export const AI_DRAMA_PRODUCER_BY = "gtrk:ai-drama@1";
 
 import { r3 } from "./frame-domain";
+import { assertGtrkWriteInvariants } from "./gtrk-invariants";
 
 export interface AiDramaLayItem {
 	shotIndex: number;
@@ -117,6 +118,8 @@ export function layAiDramaTracks(opts: {
 	gtrk: Record<string, unknown>;
 	packages: AiDramaLayPackage[];
 	generatedAt: string;
+	/** 写方自检里**存量**违例的 WARN 出口（gtrk-writer-invariants D2′）；命令层接 `log.warn`，纯函数单测可不传。 */
+	warn?: (message: string) => void;
 }): AiDramaLayResult {
 	const { gtrk, generatedAt } = opts;
 	const packages = [...opts.packages].sort((a, b) => a.trackSt - b.trackSt || a.beatId.localeCompare(b.beatId));
@@ -194,8 +197,16 @@ export function layAiDramaTracks(opts: {
 		packages: metaPackages,
 	};
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}), ai_drama: meta };
+	const next: Record<string, unknown> = { ...gtrk, materials: [...keptMaterials, ...newMaterials], video_track: [...keptTracks, ...createdTracks], struct_meta: structMeta };
+	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：本次写出的 AI clip 查恒等式 / 素材上界 / 与同轨邻居零重叠，
+	// 违约即抛、命令层还没走到 writeGtrkAtomic ⇒ 工程文件逐字节不变。保留轨里的存量违例只 WARN（D2′）。
+	// 三次 r3 一条链的恒等式今天靠「所有量都在毫秒格上」成立，这里是它的证明而不是修补；判据 MUST NOT 在本文件复刻。
+	assertGtrkWriteInvariants(next, "ai-drama lay", {
+		ownClipIds: new Set(sortedClips.map((c) => c.clip_id as string)),
+		warn: opts.warn,
+	});
 	return {
-		next: { ...gtrk, materials: [...keptMaterials, ...newMaterials], video_track: [...keptTracks, ...createdTracks], struct_meta: structMeta },
+		next,
 		meta,
 		summary: {
 			laidTrack: createdTracks[0]?.track_index ?? null,
