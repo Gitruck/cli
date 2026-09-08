@@ -158,7 +158,7 @@ gtrk transcript "D:/素材/采访视频.mp4"
 | 情况 | 怎么做（跟 agent 说，或 agent 自动） |
 |---|---|
 | 只想要剪辑工程、暂不做视觉 | 到「剪一版」就停：「先只要剪辑工程」 |
-| 报告丢了 / 换台机器再拉产物 | 「用 taskId 取回上次的」→ `gtrk oralcut-result <taskId>`（跳过重跑云端） |
+| 报告丢了 / 换台机器再拉产物 | 「用 taskId 取回上次的」→ `gtrk oralcut-result <taskId> --out <目录>`（跳过重跑云端） |
 | 想在几个 B-roll 候选里挑 | 「B-roll 多铺几条候选」→ `gtrk matrix --lay N`，opencut 里用轨道小眼睛切换对比 |
 | B-roll 填充太差 / 有空槽 | 调 `--score-floor` / `--top-k` 重跑，或「单独搜个词」→ `matrix search "<词>"` 补 |
 | 想用自己的素材铺 B-roll | 「用我本地的素材铺」→ `gtrk matrix index --dirs <素材夹>` 建索引后 `gtrk matrix --local --dirs … --project …`（**素材本体不上云**，详见命令参考 matrix 节） |
@@ -367,13 +367,13 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 
 > 每次跑批都会把这份结果**恒写一份 `result.json` 到产物目录**（不受 `--json` 约束）；提交成功后还会落一份 `task.json` 面包屑。即便 stdout 丢了、或中途崩了，报告与 `taskId` 都在盘上，可用下面的 `oralcut-result` 秒级取回、无需重跑云端。
 
-### `gtrk oralcut-result <taskId>`
+### `gtrk oralcut-result <taskId> --out <目录>`
 
 按 `task_id` 从云端取回一个**已完成**任务的报告与三方工程产物（可选本地渲染成片），**跳过预处理 / 上传 / 提交 / 轮询**——报告丢了、或想换台机器再拉一次产物时用它，不重跑云端。
 
 | 参数 | 作用 | 缺省 |
 |---|---|---|
-| `-o, --out <dir>` | 产物目录 | `<当前目录>/<taskId>-video-project-<时间戳>` |
+| `-o, --out <dir>` | 产物目录 | **必填**（2026-09-08 起无缺省；`--out .` = 当前目录本身） |
 | `--render` | 额外本地渲染成片（需原毛片仍在 gtrk 内嵌路径 + ffmpeg） | 关 |
 | `--jianying-draft-dir <dir>` | 剪映草稿根目录（或 `auto`） | 读 init 配置 / 自动探测 |
 | `--no-open` / `--json` | 同 `oralcut` | — |

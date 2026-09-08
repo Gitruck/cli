@@ -20,6 +20,15 @@
   （如用户文档目录下 agent 产品自建的目录、agent 家目录缓存、会话工作区）。
   需要引用媒体时**用原路径引用**，不做副本。
 - 临时文件（抽帧图 / 中间物等）一律放系统 temp 且**用完即删**（含中断 / 失败路径也要清干净）。
+- **交付物 SHALL 直写工程目录，MUST NOT 中转暂存**（2026-09-07 事故后立）。
+  产颗粒 / 产工程 / 产派单稿时，**写入路径本身**就必须是工程目录里的最终路径；
+  MUST NOT 先写 agent 自有工作目录（会话工作区 / `work/` / 暂存区）再拷进工程。
+  · **中转本身即违规**，不以「最后确实拷进去了」免责——事故当晚工程目录里的 10 个颗粒
+    全都正确落地了，漏出来的是那份留在 agent 工作目录里的副本。
+  · **体积不是豁免理由**：上一条禁的是「大媒体文件」，而事故里漂掉的是 2.7–6.2 KB 的 HTML。
+  · 与上一条的分界：抽帧图这类**不交付**的中间物走系统 temp；**要交付的东西没有暂存态**。
+  · 直观后果：一份无主副本只要留着，迟早与工程正本漂成两版，而**两份读起来各自都自洽**，
+    没有任何信号提示谁是正本。
 - 违反本条的直观后果：用户系统盘被静默吃满——这是真机发生过的事故，不是假设。
 
 **在 gtrk-cli 仓库自身里跑真机走查时，追加一条（2026-08-23 立）：**
@@ -162,7 +171,7 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
 - **节奏预设**：`steady` 保留更多停顿（稳）、`concise` 默认精炼、`compact` 最紧凑（压停顿最狠）。
 - **部分格式失败不致命**：CLI 如实回显云端 `errors`（某格式没出来不影响其余）。
 - **本地预处理 · 只传抽出物**：跑批先本地探几何 + 抽 16k 单声道 mp3（默认）/ 压 720p 代理（`--visual-assist`）；**毛片永不上传**，只传几十 MB 抽出物。抽出物按原片 `size:mtime` 指纹缓存在 `~/.gitruck/audio-cache/`，同毛片重剪免重抽（720p 与 mp3 各缓存各的、互不覆盖）。
-- **结果恒落盘 · 可按 task_id 恢复**：每次跑批恒写 `<产物目录>/result.json`（含完整 `report`，**不受 `--json` 约束**）；submit 一成功就写 `task.json`（含 `taskId`）面包屑，且产物目录**延后到首次写入才建**（提交前失败不留空壳、提交后失败留 `task.json` 可恢复）。→ stdout 丢了 / 中途崩了，报告与 `taskId` 都在盘上，用 `gtrk oralcut-result <taskId>` 秒级取回、**别重跑整条 `oralcut`**（见 §2.1）。
+- **结果恒落盘 · 可按 task_id 恢复**：每次跑批恒写 `<产物目录>/result.json`（含完整 `report`，**不受 `--json` 约束**）；submit 一成功就写 `task.json`（含 `taskId`）面包屑，且产物目录**延后到首次写入才建**（提交前失败不留空壳、提交后失败留 `task.json` 可恢复）。→ stdout 丢了 / 中途崩了，报告与 `taskId` 都在盘上，用 `gtrk oralcut-result <taskId> --out <目录>` 秒级取回、**别重跑整条 `oralcut`**（见 §2.1）。
 
 **细节微调 —— 按用户诉求因势象形、自由组合**（上表是常用一等 flag；下面是节奏细调 + 完整取值）。你有云端全部参数，按需自由决定用哪些。**唯一要求：名字 / 取值 / 范围照文档用**（别记错拼错）；传越界云端报 `6016` 附原因、照改即可（乱传不产错误成片、只明确报错）。没特别诉求就跑默认。
 
@@ -185,14 +194,14 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
 
 - 优先级：`--preset` → 一等 flag → 透传（后者覆盖前者）。用户**自己点名**某参数 + 值 → 照他原样透传（CLI 底层支持任意云端参数）。**以上即 agent 需要的全部参数、本文档自足**（`gtrk oralcut --help` 也列全部 flag）；官网的原始 HTTP API 文档是给人看的，agent 不必也无法访问。
 
-### 2.1 取回命令：`gtrk oralcut-result <taskId>`（报告丢了别重跑）
+### 2.1 取回命令：`gtrk oralcut-result <taskId> --out <目录>`（报告丢了别重跑）
 
 按 `task_id` 从云端取回一个**已完成**任务的报告 + 三方工程产物（可选本地渲染成片），**跳过预处理 / 上传 / 提交 / 轮询**。用在：`--json` 的 stdout 丢了、进程中途崩了、或想换台机器再拉一次产物 —— **不要重跑整条 `gtrk oralcut`**（后端 `get_task_by_id` 幂等，报告本就存着）。`taskId` 从产物目录 `task.json`、上次结果 JSON 或日志里取。
 
 | 参数 | 作用 | 缺省 |
 |---|---|---|
 | `<taskId>`（位置参数） | 任务 id | 必填 |
-| `-o, --out <dir>` | 产物目录 | `<当前目录>/<taskId>-video-project-<时间戳>` |
+| `-o, --out <dir>` | 产物目录 | **必填**（2026-09-08 起无缺省；`--out .` = 当前目录本身） |
 | `--render` | 额外本地渲染成片（需原毛片仍在 gtrk 内嵌路径 + ffmpeg） | 关 |
 | `--jianying-draft-dir` / `--ffmpeg-path` / `--crf` / `--codec` / `--no-open` / `--json` | 同 `oralcut` | — |
 
@@ -202,7 +211,7 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
 
 ```bash
 # 报告丢了、按 task_id 取回（不重跑云端）
-gtrk oralcut-result 88269671080189958 --json
+gtrk oralcut-result 88269671080189958 --out ./88269671080189958-video-project --json
 # 顺带本地重渲成片（原毛片需仍在 gtrk 内嵌路径）
 gtrk oralcut-result 88269671080189958 --render --out "D:/回收/某条"
 ```
@@ -368,7 +377,7 @@ gtrk patch set   --project <dir> --total max               # 改顶层总长（�
 
 **跑完读 `report`、验证、给用户交代**（`--json` 的 stdout 那行带 `files` / `errors` / **`report`**；别只信"成功"、别谎报三端都好）：
 - **读 `report`（因势象形的另一半）**：`duration_before`→`after`（剪了多少）；`script_source`/`final_script`（无稿 `rebuilt` 时把 `final_script` 回给用户核对）；`dropped[]`（剔了哪些、`reason` retake/misread）；`coverage`（<0.6 附 `low_coverage` = 文稿与实拍严重不符）；`uncovered_script[]`（**漏读**：文稿有、实拍没找到 → 如实说，疑似漏识别则建议 `--visual-assist` 重跑）；`review_points[]`（建议复核处）；开了 visual_assist 还有 `suspect_omissions` / `stt_recovered` / `visual_assist_degraded`。**据此因势象形**：覆盖率低 / 漏读多 → 开 `--visual-assist` 或核对文稿重跑；节奏不满意 → 调 `--preset` / 散参数重跑（同毛片可反复剪对比）。
-- **报告也在盘上、丢了能取回**：同一份 `report` 恒写在 `<产物目录>/result.json`（不必依赖 stdout）。万一 stdout 没接住或进程崩了 → 直接读 `result.json`，或 `gtrk oralcut-result <taskId> --json` 按 task_id 重新取回，**不要重跑 `oralcut`**（见 §2.1）。
+- **报告也在盘上、丢了能取回**：同一份 `report` 恒写在 `<产物目录>/result.json`（不必依赖 stdout）。万一 stdout 没接住或进程崩了 → 直接读 `result.json`，或 `gtrk oralcut-result <taskId> --out <目录> --json` 按 task_id 重新取回，**不要重跑 `oralcut`**（见 §2.1）。
 - 确认产物目录在、`gtrk/project.gtrk` 非空（>0 字节）；要剪映就确认剪映草稿根里有**同名工程目录**，且目录里是 `draft_content.json` + `draft_meta_info.json` **两个精确文件名**——剪映只认这两个固定名，带前缀的（如 `clip0_draft_content.json`）它扫不到、草稿列表里不显示。`long2short` 逐 clip 草稿同判据。
 - 云端 `errors` 非空 → 如实告知哪个格式失败、原因。
 - 然后**回给用户**：产物目录路径 + 三端各自怎么打开（客户端选 `gtrk/project.gtrk`、剪映已在项目列表、PR 导入 `xml/premiere.xml`），并**据 `report` 给一句交代**（剪了多久 → 多久、去掉了什么、有无漏读需复核）。
@@ -410,8 +419,8 @@ gtrk oralcut "D:/素材/某条.mp4" --params-json '{"punctuation_breaks":{"。":
 | 云端 errors 含某格式 | 该格式单独失败、其余可用；把 errors 原文回给用户/反馈维护方 |
 | 同毛片改了内容但产物像旧的 | 指纹意外没变 → 加 `--reupload` 强制重传 |
 | 任务很久不动 | 轮询有 30min 墙钟上限；超时 CLI 会报，稍后重试或查云端任务 |
-| 结果 JSON / 报告丢了（stdout 没接住、进程崩了） | 别重跑 → 读产物目录 `result.json`，或 `gtrk oralcut-result <taskId> --json` 按 task_id 取回 |
-| 想换机器再拉产物 / 补渲成片 | `gtrk oralcut-result <taskId> [--out <目录>] [--render]`（须同账号 key；产物约 60 天有效，过期仍可取报告） |
+| 结果 JSON / 报告丢了（stdout 没接住、进程崩了） | 别重跑 → 读产物目录 `result.json`，或 `gtrk oralcut-result <taskId> --out <目录> --json` 按 task_id 取回 |
+| 想换机器再拉产物 / 补渲成片 | `gtrk oralcut-result <taskId> --out <目录> [--render]`（须同账号 key；产物约 60 天有效，过期仍可取报告） |
 
 ---
 

@@ -9,15 +9,35 @@
  * 仍会打印/落盘报告。取结果需用「提交该任务的同一账号」的 API Key；异账号/已删任务报 TASK_NOT_FOUND。
  */
 import { Command } from "commander";
-import { resolve, join } from "node:path";
+import { resolve } from "node:path";
 import { loadConfig } from "../lib/config";
 import { getTaskResult, CloudError, type OralCutOutput } from "../lib/cloud";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { materializeResult } from "../lib/materialize";
+import { ensureLandingWritable } from "../lib/landing-wait";
+import type { LandingWaitDeps } from "../lib/landing-wait";
 import { log, routeLogsToStderr } from "../lib/log";
 
 // 与 oralcut 主命令同一 cli 域任务类型
 const TASK_TYPE = "cli/video_oral_cut_for_cli";
+
+/** 可注入依赖（形态照 `src/commands/oralcut.ts:71` 的 OralCutDeps）。单测据此断言「零网络往返」。 */
+export interface OralCutResultDeps {
+	loadConfig: typeof loadConfig;
+	getTaskResult: typeof getTaskResult;
+	materialize: typeof materializeResult;
+	/** 落点闸的交互依赖；Gate A 与 Gate B 共用同一份，MUST NOT 各自实现。 */
+	landingWait: Partial<LandingWaitDeps>;
+}
+
+function buildDeps(o: Partial<OralCutResultDeps> = {}): OralCutResultDeps {
+	return {
+		loadConfig: o.loadConfig ?? loadConfig,
+		getTaskResult: o.getTaskResult ?? getTaskResult,
+		materialize: o.materialize ?? materializeResult,
+		landingWait: o.landingWait ?? {},
+	};
+}
 
 interface OralCutResultOpts {
 	out?: string;
@@ -30,19 +50,12 @@ interface OralCutResultOpts {
 	json?: boolean;
 }
 
-/** 本地时间戳 YYMMDD-HHMMSS（产物目录名区分每一次取回）。 */
-function timestamp(): string {
-	const d = new Date();
-	const p = (n: number) => String(n).padStart(2, "0");
-	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-}
-
 /** 注册顶层命令 `gtrk oralcut-result <taskId>`。 */
 export function registerOralCutResult(program: Command): void {
 	program
 		.command("oralcut-result <taskId>")
 		.description("按 task_id 取回已完成任务的报告 + 三方工程产物（可选 --render），不重跑云端")
-		.option("-o, --out <dir>", "产物目录（缺省 = <当前目录>/<taskId>-video-project-<时间戳>）")
+		.option("-o, --out <dir>", "产物目录（**必填**；`.` = 当前目录本身。2026-09-08 起不再有 cwd 缺省）")
 		.option("--render", "额外本地渲染成片（需原毛片仍在 gtrk 内嵌路径 + ffmpeg）")
 		.option("--crf <n>", "本地渲染 CRF 14-28（默认 18；需配 --render）")
 		.option("--codec <c>", "本地渲染编码（默认 h264；需配 --render）")
@@ -55,14 +68,44 @@ export function registerOralCutResult(program: Command): void {
 		});
 }
 
-async function runOralCutResult(taskId: string, opts: OralCutResultOpts): Promise<void> {
+export async function runOralCutResult(
+	taskId: string,
+	opts: OralCutResultOpts,
+	overrides: Partial<OralCutResultDeps> = {},
+): Promise<void> {
 	if (opts.json) routeLogsToStderr(); // 机读模式：人读日志转 stderr，stdout 只留结果 JSON
-	const cfg = loadConfig();
+	const deps = buildDeps(overrides);
+	const cfg = deps.loadConfig();
+
+	// ══ Gate A（D3 + artifact-landing-gate 第一条）：任何网络往返之前 ══
+	// `--out` 自 2026-09-08 起必填。旧缺省会把整套工程静默写进「敲命令时恰好所在的目录」，
+	// 那是 CLI 替用户选了落点——正是本轮裁决要消除的形态，故当场硬拒，MUST NOT 降级成 WARN。
+	// ⚠️ 本段 MUST 排在 getTaskResult 之前：零网络往返是本条的判据本身（tasks §3.6）。
+	if (!opts.out) {
+		throw new Error(
+			`缺少必填参数 --out <目录>：gtrk oralcut-result 不会替你选产物落点。\n` +
+				`  · 落到当前目录：      gtrk oralcut-result ${taskId} --out .\n` +
+				`  · 落到具名子目录：    gtrk oralcut-result ${taskId} --out ./${taskId}-video-project\n` +
+				`（旧版缺省是「当前目录下的一个带时间戳子目录」，但那个目录纯属偶然；` +
+				`产物落错地方而用户收不到硬信号，是 2026-09-07 事故的形态之一。）`,
+		);
+	}
+	// `--out` 保持字面目标目录语义（同全仓 `--out`）：`.` 就是当前目录本身，不再套一层子目录。
+	const outDir = resolve(opts.out);
+	await ensureLandingWritable(outDir, "产物目录", { json: opts.json, deps: deps.landingWait });
+
+	// 剪映草稿根的解析不依赖网络，故一并提前；但**是否真会产剪映产物**要等取回结果才知道
+	// （materialize.ts 里 `if (byFormat.jianying && opts.draftDir)`）。
+	// 因此只有用户**显式**给了 --jianying-draft-dir（= 明示要落到那儿）才在此刻探；
+	// 未显式指定时草稿根的可写性交给 Gate B 兜底，避免为一个可能用不上的落点阻塞用户。
+	const draftDir = resolveJianyingDraftDir(opts.jianyingDraftDir);
+	if (opts.jianyingDraftDir && draftDir)
+		await ensureLandingWritable(draftDir, "剪映草稿根", { json: opts.json, deps: deps.landingWait });
 
 	log.step(`▶ 按 task_id 取回口播剪辑结果：${taskId}`);
 	let got: { status: string; progress?: number; output: OralCutOutput };
 	try {
-		got = await getTaskResult(cfg, TASK_TYPE, taskId);
+		got = await deps.getTaskResult(cfg, TASK_TYPE, taskId);
 	} catch (e) {
 		if (e instanceof CloudError) {
 			throw new Error(
@@ -82,11 +125,9 @@ async function runOralCutResult(taskId: string, opts: OralCutResultOpts): Promis
 		throw new Error(`任务尚未完成（当前 ${got.status || "未知"}${pct}），暂无法取回结果；请稍后再试。`);
 	}
 
-	// 恢复命令没有毛片名，缺省用 <当前目录>/<taskId>-video-project-<时间戳>
-	const outDir = resolve(opts.out ?? join(process.cwd(), `${taskId}-video-project-${timestamp()}`));
-	const draftDir = resolveJianyingDraftDir(opts.jianyingDraftDir);
+	// outDir / draftDir 已在 Gate A（本函数顶部、任何网络往返之前）解析并探过可写性。
 
-	await materializeResult({
+	const mat = await deps.materialize({
 		outDir,
 		output: got.output,
 		taskId,
@@ -97,7 +138,18 @@ async function runOralCutResult(taskId: string, opts: OralCutResultOpts): Promis
 		ffmpegPath: opts.ffmpegPath,
 		json: opts.json,
 		open: opts.open,
+		landingWait: deps.landingWait,
 	});
 
+	// 4.5 未消解的本地写入失败 ⇒ 非零退出（形态照 long2short.ts:490-494：设 exitCode 后 return，
+	//     MUST NOT 调 process.exit）。云端 404 过期**不**改退出码——过期时仍能取回报告是本命令的价值。
+	if (mat.localWriteFailed) {
+		log.err(
+			"存在未消解的本地写入失败：产物没有全部落到你指定的目录。" +
+				`报告与 task.json 已保留，修好写入权限后可用：gtrk oralcut-result ${taskId} --out <目录>（不重跑、不二次计费）。`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	log.ok(`已取回。产物目录：${outDir}`);
 }

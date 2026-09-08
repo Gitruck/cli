@@ -79,7 +79,7 @@ ffmpeg -ss 3600 -t 2400 -i "<直播回放>" -c copy "<工作区>/inputs/<名>_se
 单段仍超墙钟时，**轮询超时属预期不属故障**：
 
 ```bash
-gtrk oralcut-result <task_id>   # task_id 在产物根 task.json
+gtrk oralcut-result <task_id> --out <目录>   # task_id 在产物根 task.json；--out 必填
 ```
 
 服务端按 task_id 取结果**幂等**。**MUST NOT 重跑**——重跑是重复计费。
@@ -220,7 +220,7 @@ gtrk oralcut-result <task_id>   # task_id 在产物根 task.json
   - **别改参数、别一味切更短**——那会掩盖问题；先确认是不是 ASR 侧的事。
   - 分段跑的好处在这里体现：**只需处理失败的那一段**，其余段的成果不受影响。
 - **`6019 媒体时长无效或超过业务限制`** → 单次提交超服务端 2 小时硬闸。**分段**，别重试。
-- **轮询超时** → 不是失败，`gtrk oralcut-result <task_id>` 取回（§二）。
+- **轮询超时** → 不是失败，`gtrk oralcut-result <task_id> --out <目录>` 取回（§二）。
 - **分屏没生效但也没报错** → 正常静默面（§四）。按 `split_manifest` 与 `split_screen/` 目录核实；确无多人同框就是没候选，不是 bug。
 - **clips 为空** → 该段没有可成片的高光（纯语义选段），看 `report.json` 摘要给用户解释；直播的垫场/等人段落出现这个属正常。
 - **工程打开缺素材** → 多半是切段文件被移动/删除了（§二 警告）。

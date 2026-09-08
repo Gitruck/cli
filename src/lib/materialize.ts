@@ -15,6 +15,7 @@ import { renderGtrk, readGtrkFile, type GtrkV1 } from "./render";
 import type { SourceRateInfo } from "./media";
 import { openFolder } from "./open";
 import { log } from "./log";
+import { ensureLandingWritable, type LandingWaitDeps } from "./landing-wait";
 
 /** 把云端返回的细分格式名归一化到基础格式（jianying_draft/jianying_meta → jianying）。 */
 export function baseFormat(fmt: string): string {
@@ -42,6 +43,14 @@ export interface MaterializeOpts {
 	fileId?: string | null;
 	/** 剪映草稿根目录（有则把草稿拷进去）。 */
 	draftDir?: string;
+	/**
+	 * Gate B（落点闸的兜底面，add-artifact-landing-gate §4.4a）。
+	 * `materializeResult` 是 `gtrk oralcut` 与 `gtrk oralcut-result` **共用的**唯一落地入口，
+	 * 故两条命令的 Gate B MUST 经由这里的同一个等待器，MUST NOT 各自实现。
+	 * ⚠️ 不注入**不等于**放行：缺等待器时按非交互形态硬失败（更严，不是旁路）——
+	 * 本地写入失败在任何情况下都 MUST NOT 退化成 `log.warn` + 继续 + 退出码 0。
+	 */
+	landingWait?: Partial<LandingWaitDeps>;
 	render?: boolean;
 	crf?: string;
 	codec?: string;
@@ -99,9 +108,28 @@ export interface MaterializeResult {
 	landing_check?: LandingCheck;
 	/** 仅跑批路（给了 `source`）出现：源片 `fps / avg_fps / vfr`。 */
 	source?: SourceRateInfo;
+	/**
+	 * 存在**未消解的本地写入失败**时为 true（机读位，供调用方置非零退出码）。
+	 * 与 `ok` 正交且不改 `ok` 的语义（`errors` 非空即 false，逐字不动）：
+	 * 它回答的是「这次失败是本地还是云端」——云端 404 过期 MUST NOT 置本位。
+	 */
+	localWriteFailed?: true;
 }
 
 const isExpired404 = (msg: string): boolean => /HTTP 404/.test(msg);
+
+/** 本地写入失败 errno（与 `outdir-guard.LOCAL_WRITE_ERRNOS` 同表）。 */
+const LOCAL_WRITE_ERRNOS = new Set(["EACCES", "EPERM", "EROFS", "ENOSPC", "ENAMETOOLONG"]);
+
+/**
+ * 本地写入失败判据（4.1）。今日 `EACCES` 与网络 404 共用一条 catch，`isExpired404` 不命中
+ * 就一律报「产物下载失败」——用户照着网络问题排查，永远修不好一个权限问题。
+ * 判 `e.code` 而非文案：文案会随 Node / 上游库版本漂移。
+ */
+function isLocalWriteError(e: unknown): boolean {
+	const code = (e as NodeJS.ErrnoException | null)?.code;
+	return typeof code === "string" && LOCAL_WRITE_ERRNOS.has(code);
+}
 
 const wallLabel = (w: LandingWall): string => `${basename(w.sourcePath)} ${w.durationSec.toFixed(3)}s · source_container`;
 
@@ -173,6 +201,25 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 	};
 	await writeResult({});
 
+	// ══ Gate B（add-artifact-landing-gate §4.4a）══
+	// 本地写入失败 ⇒ 阻塞重探到可写为止，然后**只重跑这一段**（下载/拷贝），
+	// MUST NOT 重新提交任务、MUST NOT 二次计费。非交互当场硬失败。
+	// 未消解则置 localWriteFailed，由调用方转非零退出码——MUST NOT 退化成 warn + 继续 + 退 0。
+	let localWriteFailed = false;
+	const gateB = async (target: string, label: string): Promise<boolean> => {
+		try {
+			await ensureLandingWritable(target, label, {
+				json: opts.json,
+				deps: opts.landingWait,
+				recoveryHint: `修好后可用：gtrk oralcut-result ${taskId} --out <目录>（按 task_id 取回，不重跑、不二次计费）`,
+			});
+			return true;
+		} catch {
+			localWriteFailed = true;
+			return false;
+		}
+	};
+
 	// 拉回三方产物（按基础格式分组到 <out>/<格式>/）；下载 404=产物过期，记错不整体中止
 	log.step("拉回产物到本地…");
 	const byFormat: Record<string, string[]> = {};
@@ -187,6 +234,35 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			log.info(`${FORMAT_META[base]?.label ?? f.format} ← ${f.filename}`);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
+			// ── 本地写入失败：与云端失败分开呈现，MUST NOT 报成「产物下载失败」 ──
+			if (isLocalWriteError(e)) {
+				log.warn(`本地写入失败（${f.filename}）：写不进 ${fmtDir} —— ${msg}`);
+				if (await gateB(fmtDir, "产物目录")) {
+					try {
+						await dl(f.download_url, dest); // 只重跑这一段
+						(byFormat[base] ??= []).push(dest);
+						log.info(`${FORMAT_META[base]?.label ?? f.format} ← ${f.filename}（重试成功）`);
+						continue;
+					} catch (e2) {
+						const m2 = e2 instanceof Error ? e2.message : String(e2);
+						// ⚠️ 重试是**完整重新拉网**（→ cloud.ts 的 fetch + writeFile），第二次的失败
+						// 完全可能是网络/过期而不是权限。用 e2 自己的来源判据分流，
+						// MUST NOT 一律贴「本地写入失败」——那和改前把权限问题谎报成网络问题是同一种病，
+						// 只是方向反了（2026-09-08 审计订正）。
+						const localAgain = isLocalWriteError(e2);
+						errors[`${f.format}:${f.filename}`] = localAgain
+							? `本地写入失败（重试后仍失败）：${fmtDir} —— ${m2}`
+							: isExpired404(m2)
+								? `产物已过期（重试时）：${f.filename} 已被清理 —— ${m2}`
+								: `产物下载失败（重试时）：${m2}`;
+						if (localAgain) localWriteFailed = true;
+						log.warn(errors[`${f.format}:${f.filename}`]);
+						continue;
+					}
+				}
+				errors[`${f.format}:${f.filename}`] = `本地写入失败：${fmtDir} —— ${msg}`;
+				continue;
+			}
 			errors[`${f.format}:${f.filename}`] = msg;
 			if (isExpired404(msg)) log.warn(`产物已过期（${f.filename}）：文件已被清理，报告仍可用`);
 			else log.warn(`产物下载失败（${f.filename}）：${msg}`);
@@ -209,8 +285,38 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 				log.warn(errors["jianying:draft"]);
 			}
 		} catch (e) {
-			errors["jianying:draft"] = e instanceof Error ? e.message : String(e);
-			log.warn(`剪映草稿落盘失败：${errors["jianying:draft"]}`);
+			const msg = e instanceof Error ? e.message : String(e);
+			// 本地写入失败与「两件套不全」是两回事：后者的记 errors 与告警义务归
+			// `jianying-draft-landing` 管辖（上面那支，逐字不动），此处只分类本地写失败。
+			if (isLocalWriteError(e)) {
+				log.warn(`本地写入失败：剪映草稿写不进 ${dest} —— ${msg}`);
+				if (await gateB(opts.draftDir, "剪映草稿根")) {
+					try {
+						const again = await copyJianyingDraft(join(outDir, "jianying"), dest);
+						if (again.complete) {
+							jianyingDraftPath = dest;
+							log.info(`剪映草稿已落到：${dest}（重试成功）`);
+						} else {
+							errors["jianying:draft"] = `草稿两件套不全（缺 ${again.missing.join("、")}），剪映列表里不会显示：${dest}`;
+							log.warn(errors["jianying:draft"]);
+						}
+					} catch (e2) {
+						const m2 = e2 instanceof Error ? e2.message : String(e2);
+						// 同上：第二次失败按 e2 自己的来源分流，MUST NOT 一律贴「本地写入失败」。
+						const localAgain = isLocalWriteError(e2);
+						errors["jianying:draft"] = localAgain
+							? `本地写入失败（重试后仍失败）：${dest} —— ${m2}`
+							: `剪映草稿落盘失败（重试时）：${m2}`;
+						if (localAgain) localWriteFailed = true;
+						log.warn(errors["jianying:draft"]);
+					}
+				} else {
+					errors["jianying:draft"] = `本地写入失败：${dest} —— ${msg}`;
+				}
+			} else {
+				errors["jianying:draft"] = msg;
+				log.warn(`剪映草稿落盘失败：${errors["jianying:draft"]}`);
+			}
 		}
 	}
 
@@ -260,7 +366,15 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 	}
 
 	// result.json 补写解析出的本地路径
-	const result = await writeResult({ files: byFormat, jianyingDraftPath, rendered, ...(landing_check ? { landing_check } : {}) });
+	const result = await writeResult({
+		files: byFormat,
+		jianyingDraftPath,
+		rendered,
+		...(landing_check ? { landing_check } : {}),
+		// 未消解的本地写入失败：机读位，调用方据此置非零退出码。
+		// 云端 404 过期 MUST NOT 置本位（过期时仍能取回报告，是本命令的主要价值）。
+		...(localWriteFailed ? { localWriteFailed: true as const } : {}),
+	});
 
 	// 三方打开提示（人读；--json / quiet 跳过，避免污染 stdout 机读 JSON）
 	if (!opts.json && !opts.quiet) {

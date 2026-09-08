@@ -23,6 +23,7 @@ import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 import { videoRateOf } from "../lib/gtrk-patch";
 import { r3 } from "../lib/frame-domain";
 import { lintParticle, parseCompositionId } from "../lib/mg-lint";
+import { isInsideDir } from "../lib/outdir-guard";
 import { renderParticle, CID_SHAPE } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
 import type { Dispatch, MgDispatch } from "../lib/splitdoc";
@@ -220,6 +221,21 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		// 本次采用窗口（重投影值；降级时是派单快照回退值）——lint 与落轨同源于它
 		const win = outcome ?? { track_st: q.track_st, track_ed: q.track_ed };
 		const srcPath = locateSrcHtml(baseDir, q.composition_id);
+		// ══ 铺轨侧的工程内含闸（add-artifact-landing-gate §6.1 的「与铺轨路径」那半）══
+		// `locateSrcHtml` 是 `join(baseDir, d, cid + ".html")`，**结构上**只往工程内看 ——
+		// 但 `composition_id` 来自派单文件，是外部输入：含 `../` 的 cid 会让 join 归一化后**逃出工程根**。
+		// runLint 那半有 isInsideDir 把关，铺轨这半此前一处都没有（2026-09-08 审计查出）。
+		// 判据与 runLint 同源（realpath 包含关系，MUST NOT 字符串前缀），故软链抵达仍放行。
+		if (srcPath && !isInsideDir(srcPath, baseDir)) {
+			throw new Error(
+				`派单条目 ${q.composition_id} 解析出的颗粒路径逃出了工程目录，已拒绝：${resolve(srcPath)}
+` +
+					`  工程根：${baseDir}
+` +
+					`  composition_id 来自派单文件（外部输入），含 \`../\` 时 join 会归一化到工程外。` +
+					`交付物 SHALL 直接产在工程目录里，MUST NOT 经派单把读取指向别处。`,
+			);
+		}
 		if (!srcPath) {
 			skipped.push({ beat: q.beat, reason: "缺颗粒 HTML（未产出）" });
 			log.warn(`${q.beat}：缺 ${join(baseDir, MG_SRC_DIRS[0], `${q.composition_id}.html`)}，跳过`);
@@ -450,8 +466,18 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	let dispatchIds: string[] | undefined;
 	let slotDuration: number | undefined;
 	let compositionId: string | undefined; // 期望 id（非覆盖值）
-	if (opts.dispatch && existsSync(resolve(opts.dispatch))) {
-		const queue = await readMgQueue(resolve(opts.dispatch));
+	// 工程根/派单定位：`--dispatch` 与 `--project` 都能解析出来（今日只认前者，于是给了
+	// `--project` 时既不比对派单、也无从谈工程内含闸——2026-09-07 正是这条路）。
+	let dispatchPath: string | undefined;
+	if (opts.dispatch || opts.project) {
+		try {
+			dispatchPath = resolveDispatch(opts).dispatchPath;
+		} catch {
+			/* 解析不出（两个参数都没给）⇒ 裸 lint，本闸天然不介入 */
+		}
+	}
+	if (dispatchPath && existsSync(dispatchPath)) {
+		const queue = await readMgQueue(dispatchPath);
 		dispatchIds = queue.map((q) => q.composition_id);
 		// 定位派单条目：先按文件名（铺轨链路上文件名恒 = composition_id，见 :151/:174），
 		// 未命中再退回 HTML 内 cid（这时不设期望 id——拿自己比自己是恒真检查）。
@@ -464,6 +490,33 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 			if (d > 0) slotDuration = d;
 		}
 		if (byName) compositionId = byName.composition_id;
+
+		// ══ 工程内含闸（add-artifact-landing-gate §6 · D1b 的可执行抓手）══
+		// 命中派单 = 这是一件**正式交付物**；此刻工程根也已解析出来。
+		// 2026-09-07 的失守形态正是：CLI 既知道工程根、又知道文件命中派单，
+		// 却照样 lint 了一个住在 agent 工作目录里的副本，退出码 0。
+		// 故此处**命令级前置硬拒**（跑在 lint 之前），MUST NOT 做成 lint 违规项
+		// （`x-` 恒非致命拦不住 / 数字前缀会让铁律条数漂移 / `c-` 语义不符）。
+		// ⚠️ 判据只取 `byName`（文件名 = composition_id），**不含** innerCid 命中：
+		//   铺轨链路上交付物的文件名恒 = composition_id（:151/:174），2026-09-07 那 10 个正是这形态；
+		//   而改过名的临时副本（`tmp.html`）里同样含 cid，若按 innerCid 判就会误杀
+		//   `1-cid-expect` 明文祝福的那条豁免（mg-command/spec.md:64 与 Scenario :114）。
+		//   本处偏离了 tasks 6.1 括注里的「或 HTML 内 cid 命中」，理由见 tasks 6.1 下的施工记。
+		if (byName) {
+			const { baseDir } = resolveDispatch(opts);
+			if (!isInsideDir(file, baseDir)) {
+				throw new Error(
+					`颗粒不在工程目录内，已拒绝：${resolve(file)}
+` +
+						`  工程根：${baseDir}
+` +
+						`  该文件命中派单条目 ${byName.composition_id}，即它是一件正式交付物；` +
+						`交付物 SHALL 直接产在工程目录里，MUST NOT 先写别处再拷进来。
+` +
+						`  出路：把它**直接产到** ${join(baseDir, "mg", `${byName.composition_id}.html`)}，然后对那个路径跑本命令。`,
+				);
+			}
+		}
 	}
 	// 无派单命中时：文件名形如 composition_id 才拿它当期望 id（改过名的临时副本不比对，防误判致命）
 	if (compositionId === undefined && CID_SHAPE.test(nameId)) compositionId = nameId;

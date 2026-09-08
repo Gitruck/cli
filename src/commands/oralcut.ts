@@ -27,6 +27,7 @@ import {
 } from "../lib/media";
 import { materializeResult } from "../lib/materialize";
 import { log, routeLogsToStderr } from "../lib/log";
+import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
 
 // cli 域特例：taskType 含 /cli 前缀，cloud.ts 的 /task/${taskType} 模板天然拼出 /task/cli/video_oral_cut_for_cli
 const TASK_TYPE = "cli/video_oral_cut_for_cli";
@@ -73,6 +74,20 @@ export interface OralCutDeps {
 	probe: typeof probeGeometry;
 	extract: typeof extractAudio;
 	compress: typeof compress720p;
+	/** 落点闸的交互依赖（isTty / waitForEnter / notify），单测据此闸住非交互硬失败路径。 */
+	landingWait: Partial<LandingWaitDeps>;
+	/**
+	 * 上传 + 提交（= **计费动作本体**）。
+	 *
+	 * ⚠️ 2026-09-08 审计补：tasks §2.9 的判据原文是「注入的 `extract` / `compress` /
+	 * `upload` / `submit` **四个** dep 调用次数全为 0」，但此前 `OralCutDeps` 里
+	 * **根本没有 upload / submit 两项** —— 提交走模块级 import 直调，无注入面 ⇒
+	 * 那半判据在本仓**写不出来**，实收只断言了前两个，靠「不抽取 ⇒ 没东西可传」的
+	 * 传递性成立。传递性是推理不是判据：把 Gate A 挪到抽取**之后**、上传之前，
+	 * 前两个断言会红，但「零计费」这句话本身没有任何一条断言直接守着。
+	 * 现补上注入点，让 §2.9 的四个数字都能被**字面**断言。
+	 */
+	uploadAndSubmit: typeof uploadAndSubmitTask;
 }
 
 function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
@@ -81,6 +96,8 @@ function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
 		probe: o.probe ?? probeGeometry,
 		extract: o.extract ?? extractAudio,
 		compress: o.compress ?? compress720p,
+		landingWait: o.landingWait ?? {},
+		uploadAndSubmit: o.uploadAndSubmit ?? uploadAndSubmitTask,
 	};
 }
 
@@ -209,6 +226,19 @@ export async function runOralCut(
 	//   本地此刻已经知道时长，没有理由先花几分钟转码、再传几百 MB 才让服务端说不行。
 	assertWithinMediaDurationLimit(geo.duration, DURATION_LIMIT_HINT);
 
+	// ①b 落点可写性闸 Gate A（add-artifact-landing-gate · 裁决 D5）——MUST 排在抽取/上传/提交之前：
+	//   此刻 outDir 与 draftDir 都已解析，且零抽取、零上传、零提交、零计费。
+	//   排在时长硬闸**之后**，是为了不让一个注定被 2h 上限拒掉的跑批先去打扰用户等待。
+	//   写不进去 ⇒ 阻塞拉用户处理到可写为止（非交互当场硬失败），MUST NOT 静默改投别的目录。
+	await ensureLandingWritable(outDir, "产物目录", {
+		json: opts.json,
+		deps: overrides.landingWait,
+	});
+	if (wantJianying && draftDir) {
+		// 草稿根「探不到」维持既有 WARN 语义（上方已 warn 并继续）；此处只管「探得到但写不进」。
+		await ensureLandingWritable(draftDir, "剪映草稿根", { json: opts.json, deps: overrides.landingWait });
+	}
+
 	const artifact = opts.visualAssist
 		? await deps.compress(inputAbs, opts.ffmpegPath)
 		: await deps.extract(inputAbs, opts.ffmpegPath);
@@ -249,7 +279,7 @@ export async function runOralCut(
 	};
 
 	// ③ 提交 cli/video_oral_cut_for_cli；共享恢复边界收编新 ID 可见性与缓存失效
-	const submitted = await uploadAndSubmitTask(cfg, artifact, TASK_TYPE, buildPayload, {
+	const submitted = await deps.uploadAndSubmit(cfg, artifact, TASK_TYPE, buildPayload, {
 		force: opts.reupload,
 		onUploaded: (uploaded) => {
 			log.info(
@@ -283,7 +313,7 @@ export async function runOralCut(
 	log.tickEnd();
 
 	// ⑤⑥⑦ 拉回产物 / 剪映草稿 / 可选渲染 / result.json 两段写 / 输出（共享落地逻辑）
-	await materializeResult({
+	const mat = await materializeResult({
 		outDir,
 		output: result,
 		taskId,
@@ -300,7 +330,18 @@ export async function runOralCut(
 		landingWall: { sourcePath: inputAbs, durationSec: geo.duration },
 		// 源片帧率账面（add-frame-rate-table-vfr-detect D4）：r / avg / vfr 三值进 --json source 与 result.json
 		source: sourceRateInfo(inputAbs, geo),
+		landingWait: overrides.landingWait,
 	});
 
+	// 4.5 未消解的本地写入失败 ⇒ 非零退出（形态照 long2short.ts:490-494：设 exitCode 后 return，
+	//     MUST NOT 调 process.exit）。云端 404 过期**不**改退出码——过期时仍能取回报告是本命令的价值。
+	if (mat.localWriteFailed) {
+		log.err(
+			"存在未消解的本地写入失败：产物没有全部落到你指定的目录。" +
+				`报告与 task.json 已保留，修好写入权限后可用：gtrk oralcut-result ${taskId} --out <目录>（不重跑、不二次计费）。`,
+		);
+		process.exitCode = 1;
+		return;
+	}
 	log.ok(`闭环完成。产物目录：${outDir}`);
 }

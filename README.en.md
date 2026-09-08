@@ -160,7 +160,7 @@ Chain names above: *口播链* = talking-head (you shot yourself: short-form mon
 | Situation | What to do (tell the agent, or it handles it) |
 |---|---|
 | You only want the editing project, no visuals yet | Stop after "cut a version": "just the editing project for now" |
-| Lost the report / want the artifacts on another machine | "fetch the previous one by taskId" → `gtrk oralcut-result <taskId>` (skips the cloud re-run) |
+| Lost the report / want the artifacts on another machine | "fetch the previous one by taskId" → `gtrk oralcut-result <taskId> --out <dir>` (skips the cloud re-run) |
 | You want to choose between several B-roll candidates | "lay a few more B-roll candidates" → `gtrk matrix --lay N`, then toggle track visibility in opencut |
 | B-roll fill is poor / there are empty slots | Adjust `--score-floor` / `--top-k` and re-run, or "search a single query" → `matrix search "<query>"` to patch it |
 | You want to lay B-roll from your own footage | "use my local footage" → `gtrk matrix index --dirs <folders>` to build the index, then `gtrk matrix --local --dirs … --project …` (**your footage never leaves your machine**; see the matrix section in the command reference) |
@@ -371,13 +371,13 @@ Live pricing is queried from the website's price table under `asr` before the ru
 
 > Every run **always writes a `result.json` into the output folder** (regardless of `--json`), and once submission succeeds it also drops a `task.json` breadcrumb. Even if stdout is lost or the run crashes midway, the report and `taskId` are on disk, and `oralcut-result` below can fetch everything back in seconds without re-running the cloud job.
 
-### `gtrk oralcut-result <taskId>`
+### `gtrk oralcut-result <taskId> --out <dir>`
 
 Fetches the report and the three project formats of an **already completed** task by `task_id` (with optional local rendering), **skipping preprocessing / upload / submission / polling** — use it when the report is lost or you want to pull the artifacts again on another machine, without re-running the cloud job.
 
 | Parameter | Purpose | Default |
 |---|---|---|
-| `-o, --out <dir>` | Output folder | `<cwd>/<taskId>-video-project-<timestamp>` |
+| `-o, --out <dir>` | Output folder | **Required** (no default since 2026-09-08; `--out .` = the current directory itself) |
 | `--render` | Additionally render locally (requires the raw file still at the path embedded in gtrk, plus ffmpeg) | off |
 | `--jianying-draft-dir <dir>` | Jianying draft root (or `auto`) | Reads the init config / auto-detects |
 | `--no-open` / `--json` | Same as `oralcut` | — |
