@@ -123,7 +123,8 @@
   .layer-text.selected { outline: 5px dashed rgba(122,134,158,0.95); }
   .layer-text.dragging { cursor: grabbing; outline: 5px solid rgba(122,134,158,0.95); }
 
-  /* 替换位：T1 主字风格——字体/描边/发光按栏目风格资产注入；发光 rgba 与 applyT1Style() 内保持同色 */
+  /* 替换位：T1 主字风格——默认字体/字重与 script 顶部 T1_DEFAULT_FONT 保持一致（首帧无闪）；发光 rgba 与 applyT1Style() 内保持同色。
+     描边缺省 0：思源黑/宋这类重叠轮廓的特黑字体一加 text-stroke 会把部件内部轮廓全描出来（镂空积木），托底改靠下面的暗色多层 text-shadow */
   .t1 {
     font-family: "Noto Sans SC", sans-serif;
     font-weight: 900;
@@ -131,14 +132,13 @@
     line-height: 1;
     letter-spacing: 0;
     z-index: 10;
-    -webkit-text-stroke: 2px var(--midnight);
+    -webkit-text-stroke: 0 transparent;
     text-shadow:
-      0 0 1px var(--midnight),
-      0 0 2px var(--midnight),
-      0 0 3px var(--midnight),
+      0 0 6px rgba(20,22,30,0.9),
+      0 0 14px rgba(20,22,30,0.8),
       0 0 20px rgba(200,210,230,0.14),
       0 0 45px rgba(200,210,230,0.10),
-      0 8px 24px rgba(0,0,0,0.55);
+      0 10px 28px rgba(0,0,0,0.6);
   }
 
   /* 替换位：T2 副标题风格 */
@@ -410,11 +410,34 @@
 
     <div class="ctrl-group">
       <h3>T1 全局样式</h3>
+      <!-- 字体：下拉首项恒为当期默认（skill 注入，见 script 顶部 T1_DEFAULT_FONT）；其余来自用户本机——
+           打开即用候选表探测已装字体填入；「读取本机字体」经 Local Font Access API 取全量（需授权，Chromium）；
+           两条都没列出的字体在下方输入框敲名字回车 -->
+      <div class="row">
+        <label>字体</label>
+        <select id="t1-font"></select>
+      </div>
+      <div class="row">
+        <button class="reset-btn" id="font-scan-btn" style="margin-top:0;">⌕ 读取本机字体（全量，需授权一次）</button>
+      </div>
+      <div class="row">
+        <input type="text" id="t1-font-free" placeholder="或输入本机字体名，回车应用">
+      </div>
+      <div class="row">
+        <label>字重</label>
+        <select id="t1-weight">
+          <option value="400">常规 400</option>
+          <option value="700">粗体 700</option>
+          <option value="900">特黑 900</option>
+        </select>
+      </div>
+      <p class="notes" id="font-note" style="margin-top:4px;">字体列表读的是<strong>你本机</strong>装的字；导出用同一字体。</p>
       <div class="row">
         <label>描边粗细</label>
-        <input type="range" id="t1-stroke" min="0" max="8" step="0.5" value="2">
-        <span class="val" id="t1-stroke-val">2</span>
+        <input type="range" id="t1-stroke" min="0" max="8" step="0.5" value="0">
+        <span class="val" id="t1-stroke-val">0</span>
       </div>
+      <p class="notes" style="margin-top:-2px;">描边缺省 0：思源黑 / 宋这类特黑字体一加描边会镂空成积木（描的是部件内部轮廓）。单轮廓字体才适合开。</p>
       <div class="row">
         <!-- 替换位：发光名与默认值跟色板叫（银辉/琥珀/…） -->
         <label>外发光</label>
@@ -471,6 +494,7 @@
         · 数值框选中后 <kbd>滚轮</kbd> 微调，<kbd>Shift</kbd>+滚轮 ×10<br>
         · 一键导出首次会请求「允许下载多个文件」，点允许即可<br>
         · 布局状态在内存里，调好就导出、导出前别刷新<br>
+        · 字体：下拉是本机已装字体；换字后字重按最近字面匹配<br>
       </p>
     </div>
   </aside>
@@ -480,6 +504,108 @@
 // ===== 替换位：T1 字数驱动（当期 T1 为 N 字 → T1_KEYS 列 N 项 + 各 cover 放 N 个 char div + maxlength=N + DEFAULTS 各含 N 条）=====
 const T1_KEYS = ['char1', 'char2', 'char3', 'char4'];
 const T1_LEN = T1_KEYS.length;
+
+// ===== 替换位：当期默认字（skill 按栏目封面风格资产 / 中性默认做的审美决策）——字体下拉首项；与 CSS .t1 的 font-family / font-weight 一致 =====
+const T1_DEFAULT_FONT = { label: '当期默认（skill 注入）', family: '"Noto Sans SC", sans-serif', weight: 900 };
+
+// 本机字体候选表（引擎层，勿按栏目改）：无 Local Font Access API 时逐个探测是否已安装。常见中文字体，英文名 / 中文名两写法都列，
+// 装了哪种名字就命中哪种。想让某款字体不靠授权也能出现在下拉里，加到这里即可。
+const LOCAL_FONT_CANDIDATES = [
+  'Microsoft YaHei', '微软雅黑', 'PingFang SC', '苹方-简', 'Source Han Sans SC', '思源黑体', 'Source Han Sans CN', '思源黑体 CN',
+  'Noto Sans SC', 'Noto Sans CJK SC', 'Source Han Serif SC', '思源宋体', 'Source Han Serif CN', 'Noto Serif SC', 'Noto Serif CJK SC',
+  'HarmonyOS Sans SC', 'Alibaba PuHuiTi', '阿里巴巴普惠体', 'Alibaba PuHuiTi 3.0', 'MiSans', 'OPPO Sans', 'HONOR Sans CN',
+  'Smiley Sans', '得意黑', 'ZCOOL QingKe HuangYou', '站酷庆科黄油体', 'ZCOOL KuaiLe', '站酷快乐体', 'ZCOOL XiaoWei', '站酷小薇体',
+  '站酷高端黑', '站酷酷黑', '站酷文艺体', 'LXGW WenKai', '霞鹜文楷', 'Sarasa Gothic SC', '更纱黑体 SC',
+  'Alimama ShuHeiTi', '阿里妈妈数黑体', 'Alimama DongFangDaKai', '阿里妈妈东方大楷', 'Alimama FangYuanTi VF', '阿里妈妈方圆体',
+  'FZLanTingHei-R-GBK', '方正兰亭黑简体', '方正粗黑宋简体', '方正粗谭黑简体', '方正清刻本悦宋简体', '汉仪旗黑', 'HYQiHei', '汉仪文黑',
+  'SimHei', '黑体', 'SimSun', '宋体', 'KaiTi', '楷体', 'FangSong', '仿宋', 'DengXian', '等线', 'Microsoft JhengHei', '微软正黑体',
+  'STXihei', '华文细黑', 'STHeiti', '华文黑体', 'STKaiti', '华文楷体', 'STSong', '华文宋体', 'STZhongsong', '华文中宋',
+];
+
+// ===== 本机字体：探测 / 读取 / 填下拉（引擎层，勿改） =====
+const _fontProbe = (() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const SAMPLE = '封面工作台Wg字体测试1234';
+  const BASES = ['monospace', 'serif', 'sans-serif'];
+  const baseW = BASES.map(b => { ctx.font = `72px ${b}`; return ctx.measureText(SAMPLE).width; });
+  // 宽度对比法：同一串文本，"候选, 通用族" 与 "通用族" 宽度不同即说明候选已安装并参与了渲染。
+  // 不用 document.fonts.check()——它对系统字体恒返回 true，判不了装没装。
+  return (family) => BASES.some((b, i) => { ctx.font = `72px "${family}", ${b}`; return Math.abs(ctx.measureText(SAMPLE).width - baseW[i]) > 0.5; });
+})();
+function isCjkName(name) { return /[\u3400-\u9fff]/.test(name) || LOCAL_FONT_CANDIDATES.includes(name); }
+function sortFonts(list) {
+  return list.slice().sort((a, b) => {
+    const ca = isCjkName(a) ? 0 : 1, cb = isCjkName(b) ? 0 : 1;
+    return ca !== cb ? ca - cb : a.localeCompare(b, 'zh-Hans-CN');
+  });
+}
+function fillFontSelect(families, keepValue) {
+  const sel = document.getElementById('t1-font');
+  const current = keepValue ?? sel.value;
+  sel.innerHTML = '';
+  const def = document.createElement('option');
+  def.value = T1_DEFAULT_FONT.family; def.textContent = T1_DEFAULT_FONT.label;
+  sel.appendChild(def);
+  families.forEach(fam => {
+    if (fam === T1_DEFAULT_FONT.family) return;
+    const o = document.createElement('option');
+    o.value = `"${fam.replace(/"/g, '')}", sans-serif`; o.textContent = fam; o.style.fontFamily = `"${fam}"`;
+    sel.appendChild(o);
+  });
+  if (current) {
+    if (![...sel.options].some(o => o.value === current)) {
+      const o = document.createElement('option');
+      o.value = current; o.textContent = current.replace(/^"([^"]*)".*$/, '$1') || current;
+      sel.appendChild(o);
+    }
+    sel.value = current;
+  }
+}
+let _probedFonts = [];
+function probeLocalFonts() {
+  _probedFonts = sortFonts([...new Set(LOCAL_FONT_CANDIDATES.filter(_fontProbe))]);
+  fillFontSelect(_probedFonts);
+  return _probedFonts;
+}
+async function scanLocalFonts() {
+  const note = document.getElementById('font-note');
+  const btn = document.getElementById('font-scan-btn');
+  if (!window.queryLocalFonts) {
+    const n = probeLocalFonts().length;
+    note.innerHTML = `这个浏览器没有本机字体读取接口（Chrome / Edge 才有）。已按候选表探测到 <strong>${n}</strong> 款已装字体；没列出的在输入框敲名字。`;
+    return;
+  }
+  btn.disabled = true; btn.textContent = '读取中…';
+  try {
+    const list = await window.queryLocalFonts();
+    const apiFams = [...new Set(list.map(f => f.family))];
+    if (!apiFams.length) throw Object.assign(new Error('empty'), { name: 'EmptyResult' });   // 空结果按失败退化，别把探测结果清掉
+    const fams = sortFonts([...new Set([...apiFams, ..._probedFonts])]);   // 并集：接口没列到的探测项也留着
+    fillFontSelect(fams);
+    note.innerHTML = `已读取本机 <strong>${apiFams.length}</strong> 款字体（并入探测结果共 ${fams.length} 款，中文名排前）。导出用同一字体。`;
+    btn.textContent = '✓ 已读取本机字体';
+  } catch (err) {
+    const n = probeLocalFonts().length;
+    const why = err && err.name === 'EmptyResult' ? '接口返回空列表（多半是这个浏览器没给授权）' : `授权被拒或读取失败（${err && err.name ? err.name : 'error'}）`;
+    note.innerHTML = `${why}。保留候选表探测到的 <strong>${n}</strong> 款已装字体；没列出的在输入框敲名字，或换 Chrome / Edge 直开再读。`;
+    btn.disabled = false; btn.textContent = '⌕ 读取本机字体（全量，需授权一次）';
+  }
+}
+function applyFreeFont() {
+  const input = document.getElementById('t1-font-free');
+  const fam = input.value.trim().replace(/^["']|["']$/g, '');
+  if (!fam) return;
+  const sel = document.getElementById('t1-font');
+  const value = `"${fam}", sans-serif`;
+  if (![...sel.options].some(o => o.value === value)) {
+    const o = document.createElement('option'); o.value = value; o.textContent = fam; sel.appendChild(o);
+  }
+  sel.value = value;
+  applyT1Style();
+  document.getElementById('font-note').innerHTML = _fontProbe(fam)
+    ? `已应用「${escapeHtml(fam)}」。`
+    : `已应用「${escapeHtml(fam)}」，但探测不到这款字体已安装——画面若没变化，核对一下字体名（以系统字体面板里的名字为准）。`;
+}
 
 // ===== 替换位：默认布局配方——从 layout-recipes 选配方起步，按实际画面气口微调；注意分发平台安全区 =====
 const DEFAULTS = {
@@ -589,22 +715,25 @@ function applyT1Text() {
 }
 
 function applyT1Style() {
-  const stroke = document.getElementById('t1-stroke').value;
+  const stroke = parseFloat(document.getElementById('t1-stroke').value) || 0;
   const glow = document.getElementById('t1-glow').value / 100;
   const color = document.getElementById('t1-color').value;
+  const family = document.getElementById('t1-font').value || T1_DEFAULT_FONT.family;
+  const weight = document.getElementById('t1-weight').value || String(T1_DEFAULT_FONT.weight);
   document.getElementById('t1-stroke-val').textContent = stroke;
   document.getElementById('t1-glow-val').textContent = (glow * 100 | 0) + '%';
   document.querySelectorAll('.t1').forEach(el => {
-    el.style.webkitTextStroke = `${stroke}px var(--midnight)`;
+    el.style.fontFamily = family;
+    el.style.fontWeight = weight;
+    el.style.webkitTextStroke = stroke > 0 ? `${stroke}px var(--midnight)` : '0 transparent';
     el.style.color = color;
-    // 替换位：发光 rgba 与 CSS .t1 的 text-shadow 保持同色
+    // 替换位：发光 rgba 与 CSS .t1 的 text-shadow 保持同色（前两层暗晕是托底，不随栏目变）
     el.style.textShadow = `
-      0 0 1px var(--midnight),
-      0 0 2px var(--midnight),
-      0 0 3px var(--midnight),
+      0 0 6px rgba(20,22,30,0.9),
+      0 0 14px rgba(20,22,30,0.8),
       0 0 20px rgba(200,210,230,${glow * 0.7}),
       0 0 45px rgba(200,210,230,${glow * 0.5}),
-      0 8px 24px rgba(0,0,0,0.55)
+      0 10px 28px rgba(0,0,0,0.6)
     `;
   });
 }
@@ -837,8 +966,10 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 document.getElementById('t1-text').addEventListener('input', applyT1Text);
-['t1-stroke', 't1-glow', 't1-color'].forEach(id =>
+['t1-stroke', 't1-glow', 't1-color', 't1-font', 't1-weight'].forEach(id =>
   document.getElementById(id).addEventListener('input', applyT1Style));
+document.getElementById('font-scan-btn').addEventListener('click', scanLocalFonts);
+document.getElementById('t1-font-free').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyFreeFont(); } });
 document.getElementById('t1-size-all').addEventListener('input', applyT1SizeAll);
 document.getElementById('corner-show').addEventListener('input', applyCorner);
 document.getElementById('inner-show').addEventListener('input', applyInner);
@@ -940,6 +1071,8 @@ function init() {
   fitStage();
   applyT1Text();
   applyLayers();
+  document.getElementById('t1-weight').value = String(T1_DEFAULT_FONT.weight);
+  probeLocalFonts();            // 打开即探测候选表（无需授权）；全量本机字体点按钮读
   applyT1Style();
   applyCorner();
   applyInner();
