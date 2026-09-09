@@ -675,11 +675,103 @@ export function createSceneScoreParser(): {
  * **3639 个（51%）**的和 >0.15 ⇒ 滑窗和对这一类**完全不可分离**：即当初没撤回，它也接不住。
  * 换言之，渐变过黑不是「判据不够灵敏」，是**逐帧打分这条路本身对它失明**
  * （score 取 min(mafd,|Δmafd|)，匀速渐变 Δmafd≈0 把分数压到零），只能换正交信号（blackdetect）。 */
+/*
+ * ⟲ 2026-09-10（add-material-motion-signal 1.4）：**判定口径在倍帧区改了**，非倍帧区一字未动。
+ *
+ * 「切点全集按 θ 可复算」这条承诺**仍然成立**——本函数依旧是 `(frames, θ)` 的确定性纯函数，
+ * 只是规则从「裸阈值过滤」变成「倍帧区在去重序列上判」。但要注意它的一个后果：
+ * **同一素材、同一 θ，本版与旧版重扫会得到不同的切点集**（旧版在倍帧素材上多出一批假切点）。
+ * 那是修复本身，不是索引坏了。存量索引不会自愈，要 `--rebuild` 才吃到新口径。
+ */
 export function detectCutsFromScores(
 	frames: { ts: number; score: number }[],
 	threshold: number = SCENE_THRESHOLD_DEFAULT,
 ): number[] {
-	return frames.filter((f) => f.score > threshold).map((f) => f.ts);
+	const doubled = doubledFrameMask(frames);
+	if (!doubled) return frames.filter((f) => f.score > threshold).map((f) => f.ts);
+
+	// 倍帧区：判定挪到**去重后的帧序列**上。复制帧把真实帧间分挤成隔帧交替，在原始序列里
+	// 每个真实帧都长得像「孤立尖峰」；去重恢复相邻关系之后，持续快摇呈**连续高分串**，
+	// 而真实一刀仍是**孤立**的一个。判据据此二分：串内全丢，孤立点照留。
+	const kept: number[] = [];
+	// 帧下标 → 它在去重序列里的位次（非去重帧为 -1）。⚠️ MUST NOT 用 `kept.indexOf(i)` 现查——
+	// 那是 O(n²)，一条 30 分钟 60fps 的片子有十万帧，现查会把索引卡死。
+	const posInKept = new Array<number>(frames.length).fill(-1);
+	for (let i = 0; i < frames.length; i++) {
+		if (frames[i]!.score >= DUP_FRAME_EPS) {
+			posInKept[i] = kept.length;
+			kept.push(i);
+		}
+	}
+	const hot = kept.map((i) => frames[i]!.score > threshold);
+
+	const cuts: number[] = [];
+	for (let i = 0; i < frames.length; i++) {
+		const f = frames[i]!;
+		if (!(f.score > threshold)) continue;
+		if (!doubled[i]) {
+			cuts.push(f.ts); // 非倍帧区：与改前逐字节同行为
+			continue;
+		}
+		const k = posInKept[i]!;
+		// 复制帧本身不该过 θ（近零），真过了说明它不是复制帧 —— 保守留下
+		if (k < 0) {
+			cuts.push(f.ts);
+			continue;
+		}
+		const runNeighbour = (k > 0 && hot[k - 1]) || (k + 1 < hot.length && hot[k + 1]);
+		if (!runNeighbour) cuts.push(f.ts); // 去重序列上孤立 ⇒ 仍判为一刀
+	}
+	return cuts;
+}
+
+/** 倍帧区滑窗掩码（`add-material-motion-signal` 1.4）：逐帧标注「它是否落在一段倍帧区里」。
+ *
+ * 判据与 `computeSceneMotion` 的 D2 **同源**（近零占比 ≥ `DUP_RATIO_MIN`、近零连续长度
+ * ≤ `DUP_MAX_RUN`、去重后样本 ≥ `MOTION_MIN_SAMPLES`），只是作用域从「场景」换成「滑窗」——
+ * 切点是**场景分段的输入**，此处还没有场景可用，不能反过来依赖它。
+ *
+ * 返回 `null` = 全片一处倍帧区都没有 ⇒ 调用方走原路，逐字节零回归。
+ */
+function doubledFrameMask(frames: { ts: number; score: number }[]): boolean[] | null {
+	const n = frames.length;
+	if (n < DOUBLED_WINDOW_HALF * 2 + 1) return null;
+
+	// runLen[i]：i 所属近零连续段的长度（非近零帧为 0）
+	const isZero = frames.map((f) => f.score < DUP_FRAME_EPS);
+	const longRun = new Array<number>(n).fill(0); // 1 = 该帧是长度 > DUP_MAX_RUN 的连零段成员
+	for (let i = 0; i < n; ) {
+		if (!isZero[i]) {
+			i++;
+			continue;
+		}
+		let j = i;
+		while (j < n && isZero[j]) j++;
+		if (j - i > DUP_MAX_RUN) for (let k = i; k < j; k++) longRun[k] = 1;
+		i = j;
+	}
+	// 前缀和：窗内近零帧数、窗内长连零成员数
+	const pz = new Array<number>(n + 1).fill(0);
+	const pl = new Array<number>(n + 1).fill(0);
+	for (let i = 0; i < n; i++) {
+		pz[i + 1] = pz[i]! + (isZero[i] ? 1 : 0);
+		pl[i + 1] = pl[i]! + longRun[i]!;
+	}
+
+	const mask = new Array<boolean>(n).fill(false);
+	let any = false;
+	for (let i = 0; i < n; i++) {
+		const lo = Math.max(0, i - DOUBLED_WINDOW_HALF);
+		const hi = Math.min(n, i + DOUBLED_WINDOW_HALF + 1);
+		const size = hi - lo;
+		const zeros = pz[hi]! - pz[lo]!;
+		if (pl[hi]! - pl[lo]! > 0) continue; // 窗内出现长串连零 ⇒ 静止镜头，不是倍帧
+		if (zeros / size < DUP_RATIO_MIN) continue;
+		if (size - zeros < MOTION_MIN_SAMPLES) continue; // 去重后样本不足 ⇒ 判不了
+		mask[i] = true;
+		any = true;
+	}
+	return any ? mask : null;
 }
 
 /** 切点 → 场景区间（秒）：<0.5s 的边界间隔并入前段（POC detect_scenes 逐行对齐）。
@@ -917,6 +1009,13 @@ const DUP_RATIO_MIN = 0.35;
 const DUP_MAX_RUN = 2;
 /** 运动量分位可信所需的最小去重样本数（长静止镜头去重后可能只剩个位数）。 */
 const MOTION_MIN_SAMPLES = 12;
+/** 倍帧区滑窗半径（帧，`add-material-motion-signal` 1.4）：窗宽 = 2×半径+1 = 49 帧 ≈ 0.8s@60fps。
+ *
+ * 取值由两头夹出来：**下界**是窗内去重后至少要有 `MOTION_MIN_SAMPLES` 个样本才判得动
+ * （倍帧近零占比约 0.5 ⇒ 窗宽至少 ~24）；**上界**是别宽到把一整段静止镜头也圈进来
+ * 稀释掉判据。倍帧是**容器层**属性（30fps 内容装进 60fps），一整条素材要么全是要么全不是，
+ * 所以窗宽在这个量级上不敏感——它只需要「足够判、又不至于跨越素材边界」。 */
+const DOUBLED_WINDOW_HALF = 24;
 
 /**
  * 场景内逐帧分 → 运动量与倍帧注记（add-material-motion-signal D1/D2，纯函数供单测直调）。
