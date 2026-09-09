@@ -454,6 +454,14 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 | `--dump-request <file>` | **排障用**：把**实际上行的**云端编排请求体逐字节写到该文件。服务端**不保存你的 plan**（只留规模摘要），所以出了问题只有这份文件能复现——把它发给我们即可。⚠️ **不能指向工程目录内**（工程会被打包、拷贝、同步出去，而这份文件里有你的 beat 名与检索词）；开 `--arrange-qc` 时每轮各写一份，第 N 轮落在同名加 `.roundN`。机读回执在 `lay.arrange_run.dump_request` | 不写 |
 | `--explain` | **外发调参仪表**：缺省的机读账面只给「留空槽数」`lay.dedup.emptySlots`（够判断素材池是不是不够用），其余调参用的细账（其中多少是窗口精修致空、跳剪避让枯竭放行几次、取用了几个高运动/模糊段）收在本开关后，人读日志同口径。不影响任何决策，工程产物逐字节不变 | 关 |
 | `--arrange-estimate-only` | **只要预估不要执行**：走到云端编排的计价确认那一步就停，报出编排量后**成功**返回（`ok:true` + `estimateOnly:true`——那是「我在做决定」，不是「我拒绝了」），零云端调用、工程文件零改动。机读值在 `lay.arrange.units` / `lay.arrange.scale`。⚠️ 它省的是**云端那一次调用与其计费**（以及其后的候选下载与落轨），不是整条链：编排量的分母本来就要读工程、读 plan、做重投影才算得出。素材矩阵路报 `applicable:false` 而**不是 0**。与 `--yes` 同给时以本开关为准 | 关 |
+| `--cut-align <ratio>` | 句界吸附目标比例 0..1：`0.7` ≈ 约七成字幕句起点恰逢镜头切点、三成有意错开（全对齐反而机械），`0` = 关闭、回旧节奏切槽。⚠️ 句级时码取 `transcript` 现场重投影（与关键词锚同源），**重投影降级时自动回旧行为并告警**——那一轮的吸附比例不作数 | `0.7` |
+| `--gap-fill <mode>` | 音频驱动工程主轨的空洞怎么填：`fast` = **尽量不留黑**（放宽 score 地板从候选池填 → 耗尽则延长相邻颗粒 → 再耗尽跨 beat 借候选 → 短于最小镜头长的残洞也补真画面 → 补不满整段才垫黑片）；`solid` = 一律黑片垫齐（精修时一眼看出「这里没匹配到」）；`none` = 原样留 gap。⚠️ `fast` 借来的画面与本段稿子相关性弱、次地板槽是不到 1.2s 的快切，两者都会在日志里按 `kind` 报成 `borrowed` / `subfloor`——**如实告知，不是缺陷**；`none` 撞上客户端主轨磁吸会把 gap 吸掉，导致其后画面与配音**整体错位** | `solid` |
+| `--highlight-weight <w>` | 仅 `matrix lay`：把「有没有看点」（信息量 / 戏剧性 / 情绪强度 / 稀缺性）融进候选排序，0..1。与 `--mark-weight`（画面好不好看）**正交**，两权之和钳到 1。⚠️ 看点分取 `describe` 的理解缓存，**没跑过 `describe` 就等于没开**——无缓存候选按中性处理，权重回吐给相似度 | `0`（关闭、零回归） |
+| `--decode-path <mode>` | 仅 `matrix index`：场景检测的解码路 `auto` \| `gpu` \| `cpu` \| `full`。`auto` 自动探测硬解并**逐素材降级**（推荐）；`gpu`/`cpu`/`full` 钉死某档且**失败不降级**（对照与排障用）。⚠️ 缺省仍是 `full`（旧行为），要提速得自己传 `auto` | `full` |
+| `--proxy-width <n>` | 仅 `matrix index`：代理解码宽度。⚠️ 再往下保真度明显劣化，**勿随手调小** | `384` |
+| `--proxy-scaler <name>` | 仅 `matrix index`：代理缩放算法。缺省 `neighbor`（点采样不滤波，实测比 `bicubic` 又快又准）。⚠️ 改它基本只有做对照实验才需要 | `neighbor` |
+| `--exclude-recent <n>` | 仅 `matrix material --scope audio`：选曲避让最近 n 首用过的 BGM。历史由 `audio lay` 落轨**自动记账**，不用自己维护 | `12` |
+| `--no-exclude-recent` | 关掉上一条的选曲避让，允许复用近期曲目 | 关（缺省避让） |
 | `--out <file>` | ad-hoc 模式结果落文件；`matrix fetch` 原片落盘目录（绝不写剪映草稿目录） | stdout / `./matrix-fetch/` |
 | `--json` | 机读：stdout 只输出结果 JSON | 关 |
 
