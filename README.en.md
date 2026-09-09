@@ -334,6 +334,30 @@ Run `gtrk doctor` any time for a self-check:
 ✅ 剪映草稿目录：C:\Users\…\com.lveditor.draft
 ```
 
+### Crash reports, and how to turn them off
+
+When gtrk crashes (uncaught exception / unhandled promise rejection / a program defect reaching the top-level exit) it automatically sends one report so we can locate the defect. **On by default; you are told once, when you first configure the CLI.**
+
+**What is sent, in full**: the error message, the error stack, a source tag (`cli`), the CLI version, how many times this crash accumulated, and — only when the crash happened during a cloud task — that task's ID.
+
+**What is never sent**: your media files or their contents, project files and path listings, your scripts, your API key (the key's literal value and any `gc_…`-shaped token are replaced with `<KEY>` before sending), device identifiers, hostname, environment variables.
+
+**Only crashes are reported, never expected failures**: missing file, invalid argument, insufficient credits, wrong command usage — none of the errors you can read and act on are ever sent.
+
+Three ways to turn it off (any one of them, effective immediately):
+
+```bash
+gtrk init --no-crash-report          # persisted in config, off for good
+```
+
+```bash
+GITRUCK_CRASH_REPORT=0 gtrk oralcut a.mp4   # environment variable, off for one run (takes precedence over config)
+```
+
+Or set `"crashReport": false` directly in `~/.gitruck/config.json`.
+
+You can check the current state any time: the “崩溃自动上报” row in `gtrk doctor` shows on / off, and which of the two turned it off. With reporting off, the crash presentation and exit code are **exactly the same** as with it on — the switch only controls whether that one report is sent.
+
 ---
 
 ## Command reference

@@ -28,6 +28,7 @@
  */
 import { CloudError } from "./cloud";
 import { noticeOnce } from "./compliance-notice";
+import { crashReportNoticeOnce } from "./crash-report";
 import { log } from "./log";
 import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import { readUserConfig } from "./user-config";
@@ -200,6 +201,7 @@ export async function embedInputs(
 	// 合规告知（add-compliance-notice 2.2）：抽帧/检索词由此离机（matrix index / --local），
 	// 名字里带 local 也一样——判据是内容是否离机，不是命令名。零输入不算出口，故在早退之后。
 	noticeOnce();
+	crashReportNoticeOnce();
 	const fetchFn = deps.fetchFn ?? fetch;
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;

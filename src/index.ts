@@ -26,6 +26,7 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { migrateLegacyHome, packageRoot } from "./lib/paths";
+import { installCrashHooks, handleTopLevelError } from "./lib/crash-report";
 import { registerInstall } from "./commands/install";
 import { registerInit } from "./commands/init";
 import { registerOralCut } from "./commands/oralcut";
@@ -97,6 +98,11 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
 	skillFreshnessNoticeOnce({ command: top.name() });
 });
 
+// 崩溃自动上报（change link-client-error-report-cli）：进程级两钩子（uncaught / unhandledRejection）。
+// ⚠️ MUST 在注册子命令之前装——命令注册期自己抛的异常也算崩溃。幂等，重复调无副作用。
+// 装钩子本身零网络、零磁盘、零输出；真要不要发由 reportCrash 的三道闸（开关/告知痕迹/Key）判。
+installCrashHooks();
+
 // ── 注册子命令（后续新增命令在此加一行）──
 registerInstall(program);
 registerInit(program);
@@ -123,7 +129,14 @@ registerSubtitle(program); // 字幕零件：gtrk subtitle lay 把 transcript �
 registerFeedback(program); // 用户摩擦上报：gtrk feedback <话> —— 告知式提交，非 TTY 且未声明已告知时拒绝上报（-y 不构成豁免）
 registerAiDrama(program); // AI Drama Desk return-v1 导出包 → 独立 AI video_track（纯本地、零计费）
 
-program.parseAsync(process.argv).catch((e: unknown) => {
+// 顶层出口。⚠️ 三件事的**次序是契约**（change link-client-error-report-cli，design D2）：
+//   ① 先上报（最长 2 s 硬超时，只对判为「崩溃」的错误真发；其余立即 resolve）
+//   ② 再原样打印 ❌ 一行 —— 文案与本 change 之前**逐字相同**
+//   ③ 退出码恒 1
+// 为什么上报在打印之前：`process.exit(1)` 会立刻杀掉进程，打印之后再 await 就没机会发了；
+// 而上报器**绝不抛**、恒 resolve，所以它排在前面也不会挡住用户看到报错（最坏晚 2 s）。
+program.parseAsync(process.argv).catch(async (e: unknown) => {
+	await handleTopLevelError(e);
 	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);
 	process.exit(1);
 });

@@ -8,6 +8,7 @@ import { createReadStream } from "node:fs";
 import { Readable } from "node:stream";
 import { randomBytes } from "node:crypto";
 import type { CloudConfig } from "./config";
+import { setCrashContext } from "./crash-report";
 
 export interface ApiResp<T> {
 	code?: number;
@@ -122,7 +123,14 @@ export async function submitTask(
 		body: JSON.stringify(payload),
 	});
 	const r = await parseJson<{ task_id?: string }>(res);
-	if (r.code === 200 && r.data?.task_id) return String(r.data.task_id);
+	if (r.code === 200 && r.data?.task_id) {
+		const taskId = String(r.data.task_id);
+		// 崩溃上报的 task_id 上下文（change link-client-error-report-cli，design D6）。
+		// ⚠️ **唯一接入点就是这里**：submitTask 是所有云端任务命令的漏斗，一处接即全覆盖；
+		// 逐命令去接会漏掉新命令，且每处都要记得写。只登记不发送，纯进程内。
+		setCrashContext({ taskId });
+		return taskId;
+	}
 	throw new CloudError(r.code, `提交失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
 }
 

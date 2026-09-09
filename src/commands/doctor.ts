@@ -12,6 +12,7 @@ import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
 import { skillFreshnessDoctorRow } from "../lib/skill-freshness";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 import { commandReachDoctorRow } from "../lib/self-install";
+import { crashSwitchState, CRASH_REPORT_ENV } from "../lib/crash-report";
 
 export function registerDoctor(program: Command): void {
 	program
@@ -112,6 +113,20 @@ export async function runDoctor(): Promise<boolean> {
 		detail: col
 			? `${col}${colFile && existsSync(colFile) ? `（${colFile}）` : `（⚠ 配置文件缺失：${colFile}，将回落内置默认）`}`
 			: "内置默认 —— 想建自己栏目的风格体系，跑 /gtrk-style-maker（不建也能直接用默认）",
+	});
+
+	// 崩溃自动上报（link-client-error-report-cli）：三态如实呈现，**恒 ok 不挡路**——
+	// 关掉它是用户的正当选择，不是「体检不通过」。
+	const crashState = crashSwitchState();
+	rows.push({
+		name: "崩溃自动上报",
+		status: "ok",
+		detail:
+			crashState === "on"
+				? `开（仅错误消息与堆栈；关闭：gtrk init --no-crash-report 或 ${CRASH_REPORT_ENV}=0）`
+				: crashState === "off-env"
+					? `关（来源 环境变量 ${CRASH_REPORT_ENV}=0；它优先于配置文件）`
+					: "关（来源 gtrk init --no-crash-report 写下的 crashReport:false）",
 	});
 
 	// skill 新鲜度（fix-skill-install-staleness）：已装 skill 与包内正本是否同步。

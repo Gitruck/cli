@@ -15,6 +15,7 @@ import {
 } from "./chunk-upload";
 import { uploadFile } from "./cloud";
 import { noticeOnce } from "./compliance-notice";
+import { crashReportNoticeOnce } from "./crash-report";
 import type { CloudConfig } from "./config";
 
 const CACHE_DIR = gitruckHome();
@@ -133,6 +134,7 @@ export async function uploadCached(
 	// 位置在 stat 与缓存判定**之前**，确保任何情况下告知都早于内容离机。
 	// 幂等靠留痕，已告知过即静默返回；只告知不设闸——不阻断、不等输入、不改退出码（恒走 stderr）。
 	noticeOnce();
+	crashReportNoticeOnce();
 	const s0 = await deps.stat(path);
 	const fp = fingerprintFromStat(s0);
 	const cache = await deps.cacheStore.load();

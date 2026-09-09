@@ -28,6 +28,7 @@
  */
 
 import { noticeOnce } from "./compliance-notice";
+import { crashReportNoticeOnce } from "./crash-report";
 import { log } from "./log";
 import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import type { ArrangeRequest } from "./arrange-wire";
@@ -190,6 +191,7 @@ export async function requestArrange(
 ): Promise<ArrangeResponse> {
 	// 合规告知：plan 的 beat 名与检索词由此离机（投影层已砍掉路径/描述文本/签名 URL）
 	noticeOnce();
+	crashReportNoticeOnce();
 	const fetchFn = deps.fetchFn ?? fetch;
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;
