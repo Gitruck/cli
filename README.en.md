@@ -66,9 +66,12 @@ The CLI calls Gitruck Cloud capabilities, so you need an API key first (it looks
 Requires Node.js ≥ 20.6 (check with `node -v`).
 
 ```bash
-# 1) 一条命令装全：命令行 gtrk + /gtrk-oralcut skill + 配置（填 API Key、自动扫剪映目录）
-npm i -g @gitruck/cli@latest && gtrk install
-#   或免全局安装直接用：npx @gitruck/cli@latest install
+# 1) One command installs everything: the gtrk CLI + the /gtrk-oralcut skill + config (API Key, Jianying dir)
+#    Open a NEW terminal afterwards and `gtrk` responds: the installer keeps a global copy and, on Windows,
+#    adds its directory to your user PATH
+npx @gitruck/cli@latest install
+#   Equivalent: npm i -g @gitruck/cli@latest && gtrk install
+#   `gtrk` not found in a new terminal? Run `gtrk doctor` and read the "命令可达" row
 
 # 2) 剪一条（剪完自动打开产物目录）
 gtrk oralcut "D:/素材/某选题-原始口播.mp4" --script "D:/素材/某选题-文字稿.txt"

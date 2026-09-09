@@ -2,6 +2,13 @@
 
 ## 未发布
 
+### `gtrk` 装完即可敲：install 自持全局副本 + Windows 用户级 PATH + doctor「命令可达」+ upgrade 沿自己的通道升级（add-gtrk-command-availability）
+
+此前 `npx @gitruck/cli@latest install`（官网默认路线、全套 `install.ps1` 第三步）只装 skill 与配置，**从不安装 gtrk 本体**——npx 跑完把包丢掉，新开终端敲 `gtrk` 不是命令；`npm i -g` 路线则要靠 npm 全局目录恰好在 PATH 上。
+现在 `gtrk install` 先做第 ⓪ 步：运行中的自己若不是持久 PATH 能解析到的那份（npx 临时态 / 未 link 的本地检出），先 `npm i -g @gitruck/cli@<运行中版本>` 自持（钉运行版、已有更高版本不动）；随后按**持久** PATH（Windows 读注册表 HKLM+HKCU，不是启动它的终端给的 PATH）核对启动器目录，不在就追加到 HKCU 用户 PATH **尾部**（保留 `REG_EXPAND_SZ`、原值 `%…%` 不展开、不去重不重排、幂等）并广播 `WM_SETTINGCHANGE`；写被拒只给可读原因与手工指引、不让 install 退非零。macOS/Linux 不改任何 rc 文件，不可达时打一行 `export PATH=…`。
+`gtrk doctor` 新增「命令可达」行：持久 PATH 解析到且版本一致为绿，解析不到为红并指向 `gtrk install`，敲到另一版为黄。`gtrk upgrade` 按 `process.execPath` 是否在 `~/.gitruck/node/` 之下判定通道：私有运行时（桌面端自举落位）用私有 node + 私有 npm + `--prefix ~/.gitruck/npm` 升级并复核启动器，**不去找系统 npm**；npm 全局通道维持现状。
+规格：新立 `gtrk-command-availability`；`ffmpeg-runtime` 的「用户环境零侵入」条款收窄射程为 ffmpeg/字体等运行时资产（gtrk 自身启动器目录进用户 PATH 是明确例外）；`gitruck-home` 登记 `node/` `npm/` `bin/` 三目录（客户端自举的私有运行时布局）。与 opencut 仓 `add-cli-bootstrap-runtime` 联动：本版先发，客户端再发。
+
 ### 封面工作台：T1 字体读用户本机、描边缺省 0（add-cover-workbench-font-switcher）
 
 `gtrk-cover` 排字工作台右栏新增「字体」下拉与「字重」档位（400 / 700 / 900）：下拉首项恒为 skill 注入的当期默认字（`T1_DEFAULT_FONT`，仍是 skill 按栏目封面风格资产或中性默认做的审美决策），

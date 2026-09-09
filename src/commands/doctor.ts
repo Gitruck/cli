@@ -11,6 +11,7 @@ import { resolveJianyingDraftDir } from "../lib/jianying";
 import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
 import { skillFreshnessDoctorRow } from "../lib/skill-freshness";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
+import { commandReachDoctorRow } from "../lib/self-install";
 
 export function registerDoctor(program: Command): void {
 	program
@@ -42,6 +43,10 @@ export async function runDoctor(): Promise<boolean> {
 		status: "ok",
 		detail: bunVer ? `bun ${bunVer}` : `node ${process.version}`,
 	});
+
+	// 命令可达（change add-gtrk-command-availability）：判据是**持久** PATH（注册表），不是启动本进程的终端给的 PATH——
+	// 从一个碰巧带 npm 目录的终端里跑会假绿。POSIX 无持久 PATH 可读，detail 注明「按当前 shell」。
+	rows.push(commandReachDoctorRow());
 
 	const uc = readUserConfig();
 	const apiKey = (process.env.GITRUCK_API_KEY ?? uc.apiKey ?? "").trim();

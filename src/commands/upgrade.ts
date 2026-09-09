@@ -10,6 +10,13 @@ import { spawnSync } from "node:child_process";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 import { log } from "../lib/log";
 import { desktopClientUpgradeHint } from "../lib/desktop-client-hint";
+import {
+	detectChannel,
+	ensureLauncher,
+	privateSelfInvocation,
+	privateUpgradeInvocation,
+	type PrivateChannel,
+} from "../lib/runtime-channel";
 
 /**
  * 打一行客户端升级提示；无客户端的平台静默跳过。
@@ -28,6 +35,23 @@ interface UpgradeOpts {
 /** 走系统 shell 跑命令（npm / gtrk 在 Windows 是 .cmd shim，shell:true 才能按 PATH 解析）。 */
 function run(cmd: string): number {
 	const r = spawnSync(cmd, { stdio: "inherit", shell: true });
+	return r.status ?? 1;
+}
+
+/**
+ * 私有运行时通道的升级（change add-gtrk-command-availability · design D-3）：
+ * 私有 node + 私有 npm + `--prefix ~/.gitruck/npm`，不经 shell、不看系统 PATH 上有没有 npm。
+ */
+function runPrivateUpgrade(ch: PrivateChannel): number {
+	const inv = privateUpgradeInvocation(ch);
+	const r = spawnSync(inv.command, inv.args, { stdio: "inherit", env: { ...process.env, ...inv.env } });
+	return r.status ?? 1;
+}
+
+/** 私有通道下调自身（绕开 PATH：启动器可能还没进本进程的 PATH）。 */
+function runPrivateSelf(ch: PrivateChannel, args: string[]): number {
+	const inv = privateSelfInvocation(ch, args);
+	const r = spawnSync(inv.command, inv.args, { stdio: "inherit" });
 	return r.status ?? 1;
 }
 
@@ -58,17 +82,28 @@ export function registerUpgrade(program: Command): void {
 				return;
 			}
 
-			// ① 升级全局 CLI 包
-			log.step(`① 升级 CLI → v${latest}…`);
-			if (run("npm i -g @gitruck/cli@latest") !== 0) {
+			// ① 升级 CLI 包——沿自己所在的通道走，两条通道 MUST NOT 混用
+			const channel = detectChannel();
+			log.step(`① 升级 CLI → v${latest}…${channel.kind === "private" ? "（私有运行时通道）" : ""}`);
+			if (channel.kind === "private") {
+				if (runPrivateUpgrade(channel) !== 0) {
+					log.err("升级失败（私有运行时）。可稍后重试，或在桌面端「环境自检」里重跑自动安装");
+					process.exitCode = 1;
+					return;
+				}
+				const launcher = ensureLauncher(channel);
+				if (launcher === "written") log.info("启动器已重写（~/.gitruck/bin/gtrk.cmd）");
+			} else if (run("npm i -g @gitruck/cli@latest") !== 0) {
 				log.err("升级失败。手动重试：npm i -g @gitruck/cli@latest（若报权限，按你的 npm 全局目录权限处理）");
 				process.exitCode = 1;
 				return;
 			}
 
-			// ② 用升级后的新版刷新 skill（只装 skill、不碰配置；gtrk shim 已指向新包）
+			// ② 用升级后的新版刷新 skill（只装 skill、不碰配置；gtrk shim / 启动器已指向新包）
 			log.step("② 通过通用适配器刷新 Agent Skills…");
-			if (run("gtrk skills install") !== 0) {
+			const skillsRc =
+				channel.kind === "private" ? runPrivateSelf(channel, ["skills", "install"]) : run("gtrk skills install");
+			if (skillsRc !== 0) {
 				log.warn("skill 没刷成，手动跑一次：gtrk skills install");
 			}
 
