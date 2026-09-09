@@ -5,7 +5,7 @@
  * P0 只落 L0+L2。逐维度算子（交并集非父子集，禁全局 deep-merge）：
  *   vocab / lanes.enabled / broll.column_tag_ids = UNION（附加不丢默认）
  *   broll.facet_allowed = INTERSECTION（收窄）
- *   lanes.appearance / broll.material_class_policy / facet_defaults / style = OVERRIDE（换装）
+ *   lanes.appearance / broll.material_class_policy / facet_defaults / highlight_rubric / style = OVERRIDE（换装）
  * 零配置 = 只评 L0（《实在界漫游指南》全套词表），split 链路行为与词表化前逐字节等价。
  */
 import { join } from "node:path";
@@ -39,6 +39,11 @@ export interface ColumnBroll {
 	material_class_policy?: string;
 	facet_defaults?: Record<string, unknown>;
 	facet_allowed?: string[];
+	/** [fix-highlight-rubric-wiring] 看点评判准则的 L2 层（三级取用 L1 flag > L2 此处 > L0 服务端缺省）。
+	 * 纯文本，**只影响看点评分口径**，MUST NOT 参与检索/过滤/候选剔除。
+	 * 折叠算子 = OVERRIDE 而非 UNION：准则是一份要整体喂给评分模型的文本，
+	 * 把两层拼起来会产出自相矛盾的口径（「判奇观地貌」与「判分量对比」并列）。 */
+	highlight_rubric?: string;
 }
 
 /** style.skills 清单条目（column-style-manifest spec）：栏目自产 skill 的逻辑引用登记。
@@ -150,6 +155,8 @@ export function foldColumnConfigs(layers: ColumnConfig[]): ColumnConfig {
 			// 其余：OVERRIDE
 			if (typeof l.broll.material_class_policy === "string") out.broll.material_class_policy = l.broll.material_class_policy;
 			if (l.broll.facet_defaults && typeof l.broll.facet_defaults === "object") out.broll.facet_defaults = l.broll.facet_defaults;
+			// highlight_rubric：OVERRIDE（整体换装，MUST NOT 与下层拼接——见字段注释）
+			if (typeof l.broll.highlight_rubric === "string") out.broll.highlight_rubric = l.broll.highlight_rubric;
 		}
 
 		// style：OVERRIDE 整块（「换装」语义，数组/子块不逐条 merge）

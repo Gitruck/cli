@@ -143,6 +143,12 @@ import {
 	type MaterialDescribe,
 	type OverlayFlagDim,
 } from "../lib/describe";
+import {
+	parseRubricOption,
+	resolveHighlightRubric,
+	rubricUplinkNote,
+	type ResolvedRubric,
+} from "../lib/highlight-rubric";
 import { tmpDir } from "../lib/paths";
 import {
 	BALANCE_INSUFFICIENT_CODE,
@@ -236,6 +242,9 @@ interface MatrixOpts {
 	markWeight?: string;
 	/** `--highlight-weight <0..1>`：看点权重（与 mark 正交）；默认 0 零回归。 */
 	highlightWeight?: string;
+	/** [fix-highlight-rubric-wiring] `--highlight-rubric <text|@file>`：看点评判准则（L1 层）。
+	 *  describe 用它决定上行什么、落哪个桶；lay 用它决定读哪个桶。不传 = L0（服务端缺省，零回归）。 */
+	highlightRubric?: string;
 	// ── 句界吸附（adjust-shot-cut-sentence-align）──
 	/** `--cut-align <ratio>`：字幕句起点吸附目标比例（默认 0.7；0=关闭回旧节奏切槽）。 */
 	cutAlign?: string;
@@ -360,6 +369,12 @@ export function registerMatrix(program: Command): void {
 		.option(
 			"--highlight-weight <w>",
 			"仅 matrix lay：看点权重 0..1（默认 0 关闭零回归）——与 --mark-weight 正交（mark=画面好不好看，highlight=有没有看点：信息量/戏剧性/情绪强度/稀缺性）；两权之和钳到 1，看点分取 describe 理解缓存，无缓存候选中性（权重回吐给 sim）",
+		)
+		.option(
+			"--highlight-rubric <text|@file>",
+			"仅 matrix describe / matrix lay：看点评判准则（≤2000 字符）。`@<路径>` 从文件读（多行准则的主用法，免命令行转义）。" +
+				"三级取用 L1 本参数 > L2 栏目配置 broll.highlight_rubric > L0 服务端领域无关缺省；" +
+				"**不传 = 整个字段不上行，行为与本参数引入前逐字节一致**。看点分按准则分桶缓存：换准则只重打分、不动客观描述缓存",
 		)
 		.option(
 			"--mark-weight <w>",
@@ -640,6 +655,14 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	}
 	if (opts.markWeight !== undefined && pos.kind !== "lay") {
 		throw new Error("--mark-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
+	}
+	// [fix-highlight-rubric-wiring] --highlight-rubric 只在「打分」与「读分」两步有意义：
+	// describe 决定按哪套准则打、lay 决定读哪个桶。检索/索引口收了它也无处生效，
+	// 静默忽略等于让用户以为准则起了作用（本件治的正是这类静默）。
+	if (opts.highlightRubric !== undefined && pos.kind !== "describe" && pos.kind !== "lay") {
+		throw new Error(
+			"--highlight-rubric 仅用于 matrix describe（按该准则打分）与 matrix lay（读该准则的分桶），不做静默忽略",
+		);
 	}
 	if (pos.kind === "material") {
 		if (opts.local || dirs.length) {
@@ -1423,6 +1446,24 @@ async function defaultVideoSceneFrames(path: string): Promise<{ materialId: stri
 	return { materialId: await brollLocalIdForFile(path), frameTsSec: scenes.map((s) => s.st + (s.ed - s.st) / 2) };
 }
 
+/**
+ * [fix-highlight-rubric-wiring] 看点准则决议（describe 与 lay 共用的**唯一**入口）。
+ *
+ * 三级：L1 `--highlight-rubric <text|@file>` > L2 栏目配置 `broll.highlight_rubric` > L0 缺省。
+ * 栏目 id 沿命令族既有口径 `--column` > `~/.gitruck` 的 defaultColumn。
+ *
+ * ⚠️ 栏目配置的加载告警此处**不复述**：describe/lay 不做检索，栏目配置只被读这一个字段，
+ * 把「栏目配置不存在，回落内置默认」原样打出来会让人以为准则出了问题——而那一路本就是 L0 正常路径。
+ */
+function resolveRubricFor(opts: MatrixOpts): ResolvedRubric {
+	const columnId = opts.column ?? readUserConfig().defaultColumn;
+	const flag = opts.highlightRubric !== undefined ? parseRubricOption(opts.highlightRubric) : undefined;
+	// flag 命中即短路：栏目配置连读都不用读（也就不会因为栏目配置损坏而拖累显式传参的那一路）
+	if (flag) return resolveHighlightRubric({ flag });
+	const columnRubric = columnId ? resolveColumnConfig({ columnId }).config.broll?.highlight_rubric : undefined;
+	return resolveHighlightRubric({ columnRubric, columnId });
+}
+
 /** matrix describe：三输入形态（--plan 注入 / --materials 视频按场景抽帧 / 图片直传）+ describes 缓存
  * + >20 张确认护栏（--yes 跳过、internal 豁免免确认仅提示）。 */
 async function runDescribeMode(
@@ -1431,7 +1472,16 @@ async function runDescribeMode(
 	deps: MatrixRunDeps,
 ): Promise<MatrixDescribeResult> {
 	const endpoint = { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey };
-	const describeBatch = deps.describeBatch ?? ((images: string[]) => describeImages(endpoint, images));
+	// [fix-highlight-rubric-wiring] 看点准则三级决议（L1 flag > L2 栏目配置 > L0 服务端缺省）。
+	// **这是全命令唯一的决议点**——describe 按它打分落桶、lay 按它读桶，两处各算各的哈希
+	// 就会把同一份准则拆成两个桶，用户看到的是「什么都没改又扣了一次看片钱」。
+	const rubric = resolveRubricFor(opts);
+	// ⚠️ 缺省（rubric.text 缺席）时 **MUST NOT 传 shotCard**：`describeImages` 只在
+	// `highlightRubric` 非空时才写请求体键，但这里连对象都不构造，让「整键缺席」在调用面就成立
+	// ——零回归靠结构保证，不靠下游记得判空。
+	const describeBatch =
+		deps.describeBatch ??
+		((images: string[]) => describeImages(endpoint, images, {}, rubric.text ? { highlightRubric: rubric.text } : undefined));
 	const extractFrame =
 		deps.extractFrame ?? (async (src: string, tsSec: number, outJpg: string) => extractFrameJpg(requireFfmpeg().ffmpeg, src, tsSec, outJpg));
 	// 计费身份探针（fix-describe-billing-report-honesty）：
@@ -1480,6 +1530,12 @@ async function runDescribeMode(
 		log.step(`▶ 理解素材文件：${paths.length} 个文件 → ${items.length} 帧（视频按场景中点、图片直传）…`);
 	}
 
+	// 上行告知（fix-highlight-rubric-wiring）：**只说「已上行」不说「已生效」**——
+	// 服务端对扩参是宽松超集，未升级时整段忽略且产物形状完全一致，CLI 拿不到任何回执。
+	// 把不可回执的事说成确定的事，正是本件在修的那类静默。缺省（L0）无此行，不打扰。
+	const uplink = rubricUplinkNote(rubric);
+	if (uplink) log.info(uplink);
+
 	// ── 缓存短路 + 护栏 + 批调用（describes 缓存宿主 = 本地索引库）──
 	const db = await openLocalIndexDb();
 	let run;
@@ -1493,6 +1549,7 @@ async function runDescribeMode(
 			yes: opts.yes === true,
 			frameDir: join(tmpDir(), `describe-${process.pid}`),
 			onLog: (line) => log.info(line),
+			rubricHash: rubric.hash,
 		});
 	} finally {
 		db.close();
@@ -1541,6 +1598,11 @@ async function runDescribeMode(
 			}
 		});
 		coverage = summarizeDescribeCoverage(covRows);
+		// [fix-highlight-rubric-wiring] 评分口径随 plan 走：钉本轮的桶与来源，lay 据此取同一个桶，
+		// 用户无需再传一遍准则。缺省桶也照钉——「这份 plan 用的是缺省准则」与「这份 plan 没被本版理解过」
+		// 是两件事，只有钉了才分得开。
+		planObj.rubric_hash = rubric.hash;
+		planObj.rubric_source = rubric.source;
 		await writeFile(planPath, JSON.stringify(planObj, null, 2));
 		log.ok(
 			`理解完成并回写 plan：注入 ${injected} 条 result.describe（缓存命中 ${run.cached} · 实际调用 ${run.called} 张${run.failed ? ` · 取帧失败 ${run.failed}` : ""}${skipped ? ` · 无源跳过 ${skipped}` : ""}）→ ${planPath}`,
@@ -1701,6 +1763,31 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 		);
 	}
 
+	// ── [fix-highlight-rubric-wiring] 看点桶决议：读哪一套准则打出来的分 ──
+	// 位置刻意贴着 plan 校验、在任何工程动作（重投影/读 .gtrk/铺轨）之前：串桶是**配置错**，
+	// 该在动工程之前就拦下，而不是等干了一半才报。
+	// plan 钉存优先（`describe --plan` 写下的评分口径随 plan 走，用户不必再传一遍）；
+	// 显式传了 `--highlight-rubric` 就要求与钉存**同源**。
+	const pinnedRubric = typeof plan.rubric_hash === "string" && plan.rubric_hash ? plan.rubric_hash : undefined;
+	// 决议**恒做**（不是只在传了 flag 时才做）：否则栏目配置那一级在 lay 侧读不到，
+	// 三级取用会退化成「describe 认 L2、lay 不认 L2」的两套口径。
+	const layRubric = resolveRubricFor(opts);
+	if (opts.highlightRubric !== undefined && pinnedRubric && layRubric.hash !== pinnedRubric) {
+		// 硬失败，**不择一继续**：择哪一个都是拿甲准则的分服务乙准则的排序，
+		// 而成片一旦出来就没人会回头查那条告警 —— 静默用错准则事后无从分辨。
+		throw new Error(
+			`看点准则与本 plan 钉存的不是同一份（plan rubric_hash=${pinnedRubric} · 本次 --highlight-rubric 解析出 ${layRubric.hash}，来源 ${layRubric.source}）。
+` +
+				`  这份 plan 的看点分是按前者打的，直接换准则排序等于拿甲准则的分服务乙准则，且事后无从分辨。
+` +
+				`  要按新准则排序，先重新打分：gtrk matrix describe --plan ${planPath} --highlight-rubric ${opts.highlightRubric?.startsWith("@") ? opts.highlightRubric : "<同一份准则>"}
+` +
+				`  要沿用 plan 现有口径，去掉 --highlight-rubric 即可（lay 自动读 plan 钉存的桶）。`,
+		);
+	}
+	// 优先级：plan 钉存 > 本次解析 > 缺省桶。plan 钉存缺席 = 本件之前产出的旧 plan，按缺省桶消费（零回归）。
+	const layRubricHash = pinnedRubric ?? layRubric.hash;
+
 	const layN = parseLay(opts.lay);
 	if (layN === 0) throw new Error("matrix lay 的 --lay 不能为 0（lay 就是铺轨这一步；只要 plan 不铺请直接编辑 plan 文件）");
 	log.step(`▶ 消费 plan：${planPath}（member_type=${plan.member_type} · ${plan.beats.length} beat）…`);
@@ -1774,7 +1861,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 			highlightLookup = (clipId, tsMs) => {
 				const key = `${clipId}@${tsMs}`;
 				if (cache.has(key)) return cache.get(key);
-				const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs);
+				const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs, layRubricHash);
 				cache.set(key, v);
 				return v;
 			};
@@ -1787,19 +1874,23 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 				highlightLookup = (clipId, tsMs) => {
 					const key = `${clipId}@${tsMs}`;
 					if (cache.has(key)) return cache.get(key);
-					const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs);
+					const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs, layRubricHash);
 					cache.set(key, v);
 					return v;
 				};
 			} else {
 				log.warn(
 					`--highlight-weight ${highlightWeight}：本地索引库不存在（${dbPath2}），无任何理解缓存——全部候选按中性处理。先跑 gtrk matrix describe 产看点分再开权重才有效`,
+					// 零调用零计费：lay MUST NOT 为补分自行发起看片（计费动作恒由用户显式发起）
 				);
 			}
 		}
 		if (highlightLookup) {
 			log.info(
-				`看点权重开启（wh=${highlightWeight}）：融合分 = sim×${Math.max(0, 1 - markWeight - highlightWeight)}+(mark/100)×${markWeight}+(highlight/100)×${highlightWeight}；看点分取 describe 理解缓存（素材内就近帧），无缓存候选按中性处理（权重回吐给 sim）`,
+				`看点权重开启（wh=${highlightWeight}）：融合分 = sim×${Math.max(0, 1 - markWeight - highlightWeight)}+(mark/100)×${markWeight}+(highlight/100)×${highlightWeight}；` +
+					`看点分取 describe 理解缓存（素材内就近帧）的**准则桶 ${layRubricHash}**` +
+					`${pinnedRubric ? `（随 plan 钉存${plan.rubric_source ? ` · 来源 ${plan.rubric_source}` : ""}）` : layRubric.text ? `（本次决议 · 来源 ${layRubric.source}）` : "（缺省准则）"}，` +
+					`无该桶缓存的候选按中性处理（权重回吐给 sim）`,
 			);
 		}
 	}
@@ -3322,7 +3413,8 @@ async function layIntoProject(
 	if (zeroCov.length) {
 		log.warn(
 			`${zeroCov.join(" 与 ")}权重开了但**本片零缓存覆盖**：全部候选按中性处理，排序与不开权重完全一致（权重已回吐给语义分）。` +
-				`根因通常是本 plan 未经理解——先跑 gtrk matrix describe --plan <plan 路径> 再重跑 lay 才有效；` +
+				`根因通常是本 plan 未经理解——先跑 gtrk matrix describe --plan <plan 路径> 再重跑 lay 才有效` +
+				`（看点一维还要求 describe 那次带的是**同一份 --highlight-rubric**：换了准则就是换了桶，旧桶的分不会串过来）；` +
 				`手写 plan（免索引直排）也走这条路，此时美观度/看点/模糊降权三条信号一并不生效`,
 		);
 	}

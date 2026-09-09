@@ -327,6 +327,27 @@ CREATE TABLE IF NOT EXISTS describes (
   created_at TEXT NOT NULL,
   PRIMARY KEY (material_id, ts_ms)
 );
+-- 看点层缓存（fix-highlight-rubric-wiring）：一帧在**某套评判准则下**的看点分。
+--
+-- ★ 与 describes 分表的理由与 qc_verdicts 同源，但更硬：describes 是「这一帧长什么样」
+--   （客观，与准则无关，一帧一份、永续复用）；这里是「按这套准则这一帧值不值得看」
+--   （主观，随准则变，一帧 × N 套准则 N 份）。
+--
+-- 塞回 describes 只有两条路，都错：
+--   ① 让 rubric_hash 进 describes 的唯一键 ⇒ 每换一套准则就把 desc/tags/flags 全量复制一份，
+--      「客观层唯一一份」的语义没了；
+--   ② 保持单行 INSERT OR REPLACE ⇒ 两套准则来回切会持续互相刷掉，
+--      而重看片是**按张计费**的动作——那是把钱烧在结构缺陷上。
+--
+-- 前瞻：将来服务端上「免看片的文本级重打分」轻通道，它只写本表、一行不碰 describes。
+CREATE TABLE IF NOT EXISTS describe_highlights (
+  material_id TEXT NOT NULL,            -- broll- 家族材料 id（同 describes）
+  ts_ms INTEGER NOT NULL,               -- 帧时刻
+  rubric_hash TEXT NOT NULL,            -- 分桶键；缺省准则恒为 'L0'（哨兵，非 NULL——见 highlight-rubric.ts）
+  highlight REAL,                       -- 0-100 看点分；NULL = 服务端没给这一维（旧服务端）
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (material_id, ts_ms, rubric_hash)
+);
 -- 查询向量持久缓存（fix-embed-ratelimit-backoff §4）：检索词 → 向量。
 -- 一次成片会反复用同一批 query 打 embed（三条片实测 104 次请求里绝大多数是重复的），
 -- 而进程内 Map 一退出就没了 ⇒ 每次重跑都从头烧一遍、还把限流窗口撑爆。
@@ -374,8 +395,12 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		// cuts.origin 幂等迁移：旧行 NULL 与 'detected' 同义（检测所得）
 		const cutCols = db.all<{ name: string }>("PRAGMA table_info(cuts)").map((c) => c.name);
 		if (!cutCols.includes("origin")) db.exec("ALTER TABLE cuts ADD COLUMN origin TEXT");
-		// 镜头卡片列幂等迁移（add-shot-cards-and-alignment-qc 1.1）：subject/action/shot_size 客观层
-		// 永续；highlight 与 rubric_hash 成对（换 rubric 只失效 highlight，不清客观层）。
+		// 镜头卡片列幂等迁移（add-shot-cards-and-alignment-qc 1.1）：subject/action/shot_size 客观层永续。
+		// ⚠️ [fix-highlight-rubric-wiring] `describes.highlight` / `describes.rubric_hash` 两列**已冻结**：
+		//    看点层自本件起住在 describe_highlights（按 rubric 分桶）。这两列**停写但保留**——
+		//    同一台机器上旧版与新版 gtrk 读写同一个索引库，DROP COLUMN 会让旧版的 SELECT 当场炸，
+		//    而本地索引库是缓存，用户不会想到它跟 CLI 版本有耦合。留两列冗余，换回滚安全。
+		//    仍在 ALTER 列表里，是因为旧版建的库仍需要它们存在才能被旧版读。
 		const descCols = db.all<{ name: string }>("PRAGMA table_info(describes)").map((c) => c.name);
 		for (const [col, type] of [
 			["subject", "TEXT"],
@@ -386,6 +411,14 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 		] as const) {
 			if (!descCols.includes(col)) db.exec(`ALTER TABLE describes ADD COLUMN ${col} ${type}`);
 		}
+		// [fix-highlight-rubric-wiring] 看点层一次性数据迁移：本件之前写下的 highlight 一律是
+		// **服务端 L0 缺省准则**打出来的（rubric 从来没人传过，那一列自建库以来零写入），
+		// 故按缺省桶 'L0' 灌进新表 ⇒ 不传准则的路径照常命中旧分，零回归靠这一步兜住。
+		// INSERT OR IGNORE = 幂等：已在新桶里的（含后续新写的）一行不动，重开库跑几次结果相同。
+		db.exec(
+			"INSERT OR IGNORE INTO describe_highlights(material_id, ts_ms, rubric_hash, highlight, created_at) " +
+				"SELECT material_id, ts_ms, 'L0', highlight, created_at FROM describes WHERE highlight IS NOT NULL",
+		);
 		// materials.cuts_indexed 幂等迁移（fix-broll-flash-frames D4）：NULL=旧行无切点全集数据
 		// （检索侧不透出 cuts、消费方按无已知切点兜底）；1=本素材已落切点全集（空集=真无切点）。
 		if (!cols.some((c) => c.name === "cuts_indexed")) {
@@ -473,6 +506,10 @@ export function recordConfirmedCuts(db: SqlDb, materialId: string, tsMs: number[
  * 生命周期独立，重建向量不该报废花过钱的 VLM 缓存）。 */
 export function clearDescribesForMaterial(db: SqlDb, materialId: string): void {
 	db.run("DELETE FROM describes WHERE material_id = ?", [materialId]);
+	// [fix-highlight-rubric-wiring] 看点层同批清 —— **漏了这一行就是本件最贵的 bug**：
+	// 素材内容换了、客观描述作废重来，而各准则桶里的看点分还留在原 (material, ts) 上，
+	// 于是新画面拿着旧画面的看点分参与排序，且现象只在排序次序上，肉眼不可见。
+	db.run("DELETE FROM describe_highlights WHERE material_id = ?", [materialId]);
 }
 
 // ── 查询向量持久缓存（fix-embed-ratelimit-backoff §4）────────────────────────

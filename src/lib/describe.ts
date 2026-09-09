@@ -33,6 +33,7 @@ import { noticeOnce } from "./compliance-notice";
 import { log } from "./log";
 import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import { readUserConfig } from "./user-config";
+import { RUBRIC_DEFAULT_BUCKET } from "./highlight-rubric";
 import type { MaterialDescribeMeta } from "./matrix";
 import type { SqlDb } from "./local-index";
 
@@ -382,6 +383,7 @@ export async function describeImages(
 
 // ── 索引库 describes 缓存（D1：键=(材料 id, ts_ms)，同帧免重复调用）──────────
 
+/** 客观层行（[fix-highlight-rubric-wiring] 起不含 highlight——看点层已迁 describe_highlights）。 */
 interface DescribeRow {
 	desc_text: string;
 	tags_json: string;
@@ -390,15 +392,35 @@ interface DescribeRow {
 	subject: string | null;
 	action: string | null;
 	shot_size: string | null;
-	highlight: number | null;
 }
 
-export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): MaterialDescribe | undefined {
+/**
+ * 缓存读取（[fix-highlight-rubric-wiring] 两层）。
+ *
+ * **命中判据随准则分岔，这是零回归的关键**：
+ * - **缺省桶**（`rubricHash` 缺省或 `L0`）：命中判据 = 客观层行存在，**与本件之前逐字节一致**。
+ *   看点分取缺省桶，取不到就 null——本件之前那些 `highlight IS NULL` 的旧行本就走这一路。
+ * - **非缺省桶**（显式传了准则）：命中判据 = 客观层行存在 **且** 该桶有看点分。
+ *   客观层有、桶里没有 = 未命中 ⇒ 上层会重新调用看片通道。这不是浪费，是「换准则要重新打分」
+ *   的必然代价（免看片的文本级重打分要服务端轻通道，尚未上线）。
+ */
+export function getCachedDescribe(
+	db: SqlDb,
+	materialId: string,
+	tsMs: number,
+	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
+): MaterialDescribe | undefined {
 	const row = db.get<DescribeRow>(
-		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size, highlight FROM describes WHERE material_id = ? AND ts_ms = ?",
+		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size FROM describes WHERE material_id = ? AND ts_ms = ?",
 		[materialId, tsMs],
 	);
 	if (!row) return undefined;
+	const hl = db.get<{ highlight: number | null }>(
+		"SELECT highlight FROM describe_highlights WHERE material_id = ? AND ts_ms = ? AND rubric_hash = ?",
+		[materialId, tsMs, rubricHash],
+	);
+	// 非缺省桶且本桶无分 ⇒ 未命中（须按新准则重新打分）。缺省桶不受此限，见函数注释。
+	if (!hl && rubricHash !== RUBRIC_DEFAULT_BUCKET) return undefined;
 	try {
 		return {
 			desc: row.desc_text,
@@ -408,7 +430,7 @@ export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): 
 			subject: row.subject ?? "",
 			action: row.action ?? "",
 			shot_size: row.shot_size ?? null,
-			highlight: row.highlight ?? null,
+			highlight: hl?.highlight ?? null,
 		};
 	} catch {
 		return undefined; // 缓存行损坏当未命中（重新理解即自愈覆盖）
@@ -450,25 +472,46 @@ export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number
  * ——旧缓存行没有这一维，当 0 会把老素材全部打成「零看点」静默沉底。
  * [fix-describe-cache-locality] 距离上限与 mark 同口径。
  */
-export function getNearestCachedHighlight(db: SqlDb, materialId: string, tsMs: number): number | undefined {
+export function getNearestCachedHighlight(
+	db: SqlDb,
+	materialId: string,
+	tsMs: number,
+	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
+): number | undefined {
+	// [fix-highlight-rubric-wiring] 看点层改查 describe_highlights 并**按桶过滤**：
+	// 甲准则打的分 MUST NOT 服务乙准则的排序（那是拿「判奇观地貌」的分去挑「大分量怼脸」的镜头）。
+	// 15s 就近窗口语义一字不改。
 	const row = db.get<{ highlight: number | null; ts_ms: number }>(
-		"SELECT highlight, ts_ms FROM describes WHERE material_id = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
-		[materialId, tsMs],
+		"SELECT highlight, ts_ms FROM describe_highlights WHERE material_id = ? AND rubric_hash = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
+		[materialId, rubricHash, tsMs],
 	);
 	if (!row) return undefined;
 	if (Math.abs(row.ts_ms - tsMs) > DESCRIBE_NEAREST_MAX_GAP_MS) return undefined;
 	return row.highlight ?? undefined;
 }
 
+/**
+ * 缓存写入（[fix-highlight-rubric-wiring] 分层落库）。
+ *
+ * 客观层进 `describes`（一帧一份，换准则重跑会原样覆盖成同样的内容——无害）；
+ * 看点分进 `describe_highlights` 的 `rubricHash` 桶（一帧 × N 套准则 N 份，互不覆盖）。
+ * ⚠️ `describes.highlight` / `describes.rubric_hash` **不再写**（冻结列，理由见 local-index 迁移块）。
+ */
 export function putCachedDescribe(
 	db: SqlDb,
 	materialId: string,
 	tsMs: number,
 	d: MaterialDescribe,
-	rubricHash?: string,
+	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
 ): void {
+	const now = new Date().toISOString();
+	// 客观层 **OR IGNORE 而非 OR REPLACE**：spec「换准则 MUST NOT 覆盖或失效客观层」。
+	// ⚠️ 这也正是本件之前的实际语义——那时客观层只在 `getCachedDescribe` 未命中（即行不存在）时才写，
+	//    REPLACE 从来没真的覆盖过任何一行。本件新增了「客观层在、看点桶不在 ⇒ 重新调用」这条路径，
+	//    继续用 REPLACE 就会让 VLM 每次的措辞漂移悄悄改写已落库的 desc（下游 at_sec / 叠加物交叉校验
+	//    读的都是它）。客观层的刷新口径不变：仍只由素材指纹变化的级联清除触发。
 	db.run(
-		"INSERT OR REPLACE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, highlight, rubric_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT OR IGNORE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
 		[
 			materialId,
 			tsMs,
@@ -479,11 +522,17 @@ export function putCachedDescribe(
 			d.subject || null,
 			d.action || null,
 			d.shot_size,
-			d.highlight,
-			rubricHash ?? null,
-			new Date().toISOString(),
+			now,
 		],
 	);
+	// 看点分缺席（旧服务端不给这一维）时不落桶——落一行 NULL 会让「本桶已打过分」与
+	// 「本桶没有分」不可分辨，正是 getCachedDescribe 的命中判据要区分的那件事。
+	if (d.highlight !== null && d.highlight !== undefined) {
+		db.run(
+			"INSERT OR REPLACE INTO describe_highlights(material_id, ts_ms, rubric_hash, highlight, created_at) VALUES (?,?,?,?,?)",
+			[materialId, tsMs, rubricHash, d.highlight, now],
+		);
+	}
 }
 
 // ── 叠加物交叉校验（add-describe-flag-desc-crosscheck）─────────────────────────────
@@ -726,6 +775,10 @@ export interface DescribeRunDeps {
 	onLog?: (line: string) => void;
 	/** 测试注入：direct 直传的文件读取。 */
 	readFileBase64?: (path: string) => string;
+	/** [fix-highlight-rubric-wiring] 本轮生效的看点准则分桶键（缺省 `L0`）。
+	 * 只影响缓存命中判据与落桶；**准则正文的上行归 `describeBatch` 闭包**（命令层组装），
+	 * 本函数不碰网络参数——否则同一件事会有两个真相来源。 */
+	rubricHash?: string;
 }
 
 export interface DescribeRunResult {
@@ -763,13 +816,16 @@ const keyOf = (it: DescribeWorkItem): string => `${it.materialId}@${it.tsMs}`;
  */
 export async function runDescribeItems(items: DescribeWorkItem[], deps: DescribeRunDeps): Promise<DescribeRunResult> {
 	const log = deps.onLog ?? (() => {});
+	const rubricHash = deps.rubricHash ?? RUBRIC_DEFAULT_BUCKET;
 	const resolved = new Map<string, MaterialDescribe | null>();
 	// ── 缓存短路：唯一键逐个查 describes（同素材同帧免重复调用——缓存即钱）──
+	// [fix-highlight-rubric-wiring] 命中判据带桶：缺省桶与本件之前逐字节一致；
+	// 非缺省桶要求该桶已有看点分，否则按未命中重新打分（换准则的必然代价，见 getCachedDescribe）。
 	const pending: DescribeWorkItem[] = [];
 	for (const it of items) {
 		const key = keyOf(it);
 		if (resolved.has(key)) continue;
-		const hit = getCachedDescribe(deps.db, it.materialId, it.tsMs);
+		const hit = getCachedDescribe(deps.db, it.materialId, it.tsMs, rubricHash);
 		if (hit) resolved.set(key, hit);
 		else {
 			resolved.set(key, null); // 占位（防同键重复进 pending）
@@ -853,7 +909,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 				called = ready.length;
 				ready.forEach((r, i) => {
 					const d = outs[i]!;
-					putCachedDescribe(deps.db, r.item.materialId, r.item.tsMs, d);
+					putCachedDescribe(deps.db, r.item.materialId, r.item.tsMs, d, rubricHash);
 					resolved.set(keyOf(r.item), d);
 				});
 			}

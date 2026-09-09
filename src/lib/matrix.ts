@@ -615,6 +615,12 @@ export interface BrollPlan {
 	url_ttl_note?: string;
 	project_slug?: string;
 	column_id?: string;
+	/** [fix-highlight-rubric-wiring] 本 plan 的看点分是按**哪套评判准则**打的（`matrix describe --plan` 钉存）。
+	 * 让「评分口径」随 plan 走，lay 无需用户再传一遍准则；缺席 = 缺省桶（本件之前的 plan 皆如此，宽松兼容不炸）。
+	 * ⚠️ 只钉哈希与来源，**不钉准则全文**——plan 是给 agent 读改的工件，塞 2000 字准则会挤占它的注意力。 */
+	rubric_hash?: string;
+	/** 准则来源留痕：`flag:@<path>` / `flag:inline` / `column:<id>` / `default`（人读，供事后追溯）。 */
+	rubric_source?: string;
 	beats: PlanBeat[];
 }
 

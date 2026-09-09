@@ -165,6 +165,18 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 > 分工是：**画面 rubric 管「这一帧值不值得看」，写稿管「这件事值不值得讲」。**
 > 平淡的过渡帧判低分不等于不可用——降权不排除，候选稀疏时照样上（留空更难看）。
 
+**怎么把它真的传进去**（2026-09-09 补：此前只有准则文本、没有入口，照做也传不进去，
+`--highlight-weight` 打的一直是服务端领域无关缺省分）：把上面代码块**原样**存成工程目录下的
+`highlight-rubric.txt`，理解那一步带上它——
+
+```bash
+gtrk matrix describe --plan <工程>/split/broll-plan.json --highlight-rubric @<工程>/highlight-rubric.txt
+```
+
+存成文件而非内联，除了免去多行转义，还留下「这条片用的是哪套准则」的可查痕迹。跑完 `gtrk matrix lay`
+自动读 plan 里钉存的同一个桶，不必再传；真传了而且与 plan 钉的不同源，CLI 会**硬失败**（不静默择一）。
+⚠️ 换准则重新打分要**重新看片**（1 积分/张）：客观描述缓存不被覆盖，但看点分按准则分桶，新桶没分就得重打。
+
 ## 四、检查点①（双模式共有，必停）
 
 写完稿**必须停下**，把以下六项一次给用户拍板。**未经确认 MUST NOT 发起 TTS 与 B-roll 云端编排计费动作**。
@@ -303,7 +315,9 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 
 **配方级参数口径**（打样标定）：
 - `--mark-weight 0.3`：美观度加权起步值（mark 缺失素材中性不受罚）；
-- `--highlight-weight 0.2`（260828 新增）：看点加权，配 §三′ 的 rubric。与 mark 正交——
+- `--highlight-weight 0.2`（260828 新增）：看点加权，配 §三′ 的 rubric——
+  **须在 describe 那一步带 `--highlight-rubric @<工程>/highlight-rubric.txt`**，
+  不带就是按服务端缺省准则打分，旅拍这一档的奇观地貌/极端天候/规模感全不算数。与 mark 正交——
   mark 判「好不好看」、highlight 判「有没有看点」。两权之和 0.5，语义仍占一半，
   **MUST NOT 加到语义压不住**（那会变成「专挑好看的，不管说的是什么」）。
   ⚠️ 两个权重与 blurry 降权**都依赖 `matrix describe --plan` 跑过**（编排 ⑦ 那一步）；

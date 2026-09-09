@@ -78,6 +78,12 @@ description: "能生产 skill 的 meta skill——通过启发式访谈引导视
 4. **安装**：以作坊里的 skill 目录为源，运行 `npx -y skills add "<skill正本目录>" -g -y`，让通用适配器自动探测 Agent，并以统一正本 + symlink/junction 安装；用户明确指定宿主时追加 `-a <agent-id>`（可重复），明确要求独立副本时追加 `--copy`。不要在本 skill 里维护各 Agent 宿主的安装路径表（探测归适配器）。skill README 写明**「正本→安装」单向流**：源码正本在作坊，安装位是产物，改动先改正本再重装。
 5. **登记**：把 `{id, ref: <正本路径>, produces: <handoff 类型或自造串>}` **追加**进本地栏目配置 `style.skills`（词表进 `style.shared`）。配置文件位置以 gtrk 的 paths 口径为准（当前 `~/.gitruck/columns/<栏目id>.json`）；文件不存在则创建最小骨架 `{meta:{id},style:{skills:[…]}}`。**追加，绝不清空既有条目**。产物是管线外的（封面等），登记时加 `routing:"none"`。
 
+   **顺带问一句看点准则**：访谈里若已问出「这个栏目什么样的画面才叫有看点」（哪怕只是几条口语判据），
+   把它写成一段纯文本落进同一份栏目配置的 `broll.highlight_rubric`（L2 层）。它只影响 B-roll 候选的
+   **看点评分口径**，不参与检索/过滤/剔除。配了之后该栏目跑 `gtrk matrix describe` 不必每次带
+   `--highlight-rubric`；单次要临时换一套，flag 会整体覆盖它（OVERRIDE，不拼接——两段准则拼起来
+   会产出自相矛盾的评分口径）。没问出来就别硬凑，缺省走服务端领域无关准则。
+
 ## 交付前自检（你自己的 Quality Bar）
 
 - [ ] 访谈记录里，产出 skill 的**每一个组织维度，首次都是用户说出的**（或从他的作品评语里直接引出的），不是我提出的？
