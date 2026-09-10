@@ -26,7 +26,7 @@ import {
 	sourceRateInfo,
 } from "../lib/media";
 import { materializeResult } from "../lib/materialize";
-import { assertEnum, assertEnumIn } from "../lib/enum-catalog";
+import { assertEnum, assertEnumIn, assertSourceLanguage } from "../lib/enum-catalog";
 import { log, routeLogsToStderr } from "../lib/log";
 import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
 
@@ -238,7 +238,11 @@ export async function runOralCut(
 	//   校验读的是盘上快照——它由 `gtrk doctor`（`gtrk init` 末尾就会跑一次）与
 	//   任一 `gtrk tool` 顺带刷新。没有快照 ⇒ 放行，交服务端裁决（fail-open 是本件的既定口径）。
 	// ⚠️ `--formats` 的**默认值** `gtrk,jianying,xml` 是产品决定不是枚举，本处不动它，只校验取值。
-	if (opts.lang != null) assertEnum("subtitle.languages", "--lang", String(opts.lang).trim());
+	// ⟲ 2026-09-10（infra add-enum-catalog-api 6.8 转入）：`--lang` 是**识别源语种**，按本线分档校验。
+	//   原先拿 `subtitle.languages`（11 项共同范围）校验，会放行 es-ES / pt-PT / ru-RU / vi-VN，
+	//   让它们抽完、传完再被服务端 6015 拒。键是 `video_oral_cut`：CLI 特例 `…_for_cli` 的入口闸查的就是它。
+	//   新键缺失（老服务端 / 旧快照）时自动退回共同范围，「只降不升」不变。
+	if (opts.lang != null) assertSourceLanguage("video_oral_cut", "--lang", String(opts.lang).trim());
 	assertEnum("oral_cut.rhythm_presets", "--preset", String(opts.preset));
 	// 并集校验：服务端**同时接受** aliases 里的旧细粒度值（jianying_draft 等），只按 public 判会误拒。
 	for (const f of formats) assertEnumIn(["project_formats.public", "project_formats.aliases"], "--formats", f);

@@ -492,11 +492,96 @@ export function assertEnumIn(keys: readonly CatalogEnumKey[], flag: string, valu
 	if (lists.some((l) => l == null)) return;
 	const all = lists.flat() as string[];
 	if (all.includes(value)) return;
-	const shown = lists[0] as string[];
-	throw new Error(
+	throw notListed(flag, lists[0] as string[]);
+}
+
+/** 「只支持…」报错的唯一句式。两个校验入口共用，免得文案分头漂。 */
+function notListed(flag: string, shown: readonly string[]): Error {
+	return new Error(
 		`${flag} 只支持 ${shown.join("、")}（取值来自服务端枚举清单；` +
 			`\`gtrk doctor\` 可查清单版本，\`--refresh-catalog\` 立刻刷新；\`--param\` 可绕过本地校验）`,
 	);
+}
+
+// ---------------------------------------------------------------------------
+// 识别源语种：按 task_type 分档（⟲ 2026-09-10 由 infra add-enum-catalog-api 6.8 转入）
+// ---------------------------------------------------------------------------
+
+/**
+ * 识别源语种分档的路径（infra `add-enum-catalog-api` §6.2 取 (a)；2026-09-10 以**加法**下发，schema 仍为 1）。
+ *
+ * ## 为什么识别源语种不能再拿 `subtitle.languages` 校验
+ *
+ * `subtitle.languages`（11 项）是字幕类任务**共同的语种范围**：服务端入口两道闸里的**第一道**，
+ * 同时是翻译目标语（`translate_language` / `output_language`）的全部可用集。
+ * 识别源语种（`language` / `la`）在入口还要过**第二道闸**：按 task_type 实算的可用面，
+ * 切点三线（`video_oral_cut` / `video_long2short` / `video_long2short_pro`）只剩 7 项。
+ * ⇒ 拿 11 项去校验切点线的识别源语种，`es-ES` / `pt-PT` / `ru-RU` / `vi-VN` 会**通过本地校验、
+ *    再被服务端 6015 拒**（计费前被拒、无实损，但用户白等了一次抽取与上传）。
+ *    这是本模块「同源铁律」要治的病的**镜像形态**：铁律防的是把合法值拒在本地，这里是把非法值放行出去。
+ *
+ * ## 退回语义（「只降不升」不变）
+ *
+ * 新键缺失（老服务端 / 快照拉取于该键上线之前）、该 task_type 无档、或形态不合 ⇒
+ * **退回** `subtitle.languages`。退回是安全的：服务端守卫钉住「各档 ⊆ 共同范围」，
+ * 退回只会**少拦**、不会多拦；共同范围也拿不到 ⇒ `null` ⇒ 放行交服务端。
+ *
+ * ⚠️ **翻译目标语 MUST NOT 走这里**：它在各入口只过第一道闸，拿识别源语种的分档去校验它，
+ *    会把合法的译文语种（如 `es-ES`）拒在本地。键名里带 `source` 就是服务端刻意挡这件事的。
+ */
+export const SOURCE_LANGUAGES_PATH = "subtitle.source_languages";
+
+/**
+ * 服务端登记了识别源语种可用面的 task_type（= infra `language_gated_task_types()`；
+ * 2026-09-10 本地 `build_sections()` 实算为这五个）。
+ *
+ * 做成字面量联合是为了**把拼错挡在编译期**：拼错的 task_type 在快照里查不到档，
+ * 会静默退回 11 项共同范围——不报错，只是又把那 4 个码放出去，正是本段要治的病。
+ * 服务端将来新增一条线：先在这里登记，再在消费点使用；登记之前那条线照旧退回共同范围（只降不升）。
+ */
+export const SOURCE_LANGUAGE_TASK_TYPES = [
+	"video_oral_cut",
+	"video_long2short",
+	"video_long2short_pro",
+	"video_ai_subtitle",
+	"subtitle_translate",
+] as const;
+
+export type SourceLanguageTaskType = (typeof SOURCE_LANGUAGE_TASK_TYPES)[number];
+
+/**
+ * 读某条线的识别源语种可用集。**该线分档缺失 / 形态不合 ⇒ 退回 `subtitle.languages`**；
+ * 两者都拿不到 ⇒ `null`（调用方放行）。
+ *
+ * ⚠️ 这里传**入口闸查表用的键**：`gtrk oralcut` 提交的是 CLI 特例 `video_oral_cut_for_cli`，
+ *    它的入口闸查的却是 `language_support_for("video_oral_cut")`
+ *    （infra `api/cli/video_oral_cut_for_cli.py`）⇒ 这里传 `video_oral_cut`。
+ */
+export function catalogSourceLanguages(
+	sections: Record<string, unknown> | null,
+	taskType: SourceLanguageTaskType,
+): string[] | null {
+	if (!sections) return null;
+	const tiers = dig(sections, SOURCE_LANGUAGES_PATH);
+	const own = isPlainObject(tiers) ? tiers[taskType] : undefined;
+	if (Array.isArray(own) && own.every((x) => typeof x === "string")) return own as string[];
+	return catalogEnum(sections, "subtitle.languages");
+}
+
+/** 同步取某条线的识别源语种可用集：先读进程内缓存、没有再退回盘上快照（口径同 {@link catalogEnumNow}）。 */
+export function sourceLanguagesNow(taskType: SourceLanguageTaskType): string[] | null {
+	if (cachedSections !== undefined) return catalogSourceLanguages(cachedSections, taskType);
+	return catalogSourceLanguages(readSnapshotSync(), taskType);
+}
+
+/**
+ * 校验一个**识别源语种** flag（`--lang` / `--language`）。拿不到清单就放行；
+ * 报错与 {@link assertEnum} 同一句式，列出的是**该线**的可用集。
+ */
+export function assertSourceLanguage(taskType: SourceLanguageTaskType, flag: string, value: string): void {
+	const list = sourceLanguagesNow(taskType);
+	if (list == null || list.includes(value)) return;
+	throw notListed(flag, list);
 }
 
 /**
