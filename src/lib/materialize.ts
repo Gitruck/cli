@@ -12,6 +12,7 @@ import { collectWriteViolations, type WriteViolation } from "./gtrk-invariants";
 import { download as realDownload, type OralCutOutput } from "./cloud";
 import { copyJianyingDraft } from "./jianying";
 import { renderGtrk, readGtrkFile, type GtrkV1 } from "./render";
+import { prepareParticlesForRender } from "./particle-qtrle";
 import type { SourceRateInfo } from "./media";
 import { openFolder } from "./open";
 import { log } from "./log";
@@ -331,11 +332,19 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			const project = await readGtrkFile(gtrkPath);
 			const name = opts.projName ?? gtrkSourceName(project) ?? taskId;
 			const outMp4 = join(outDir, `${name}.mp4`);
+			// ★ add-render-overlay-compositing：与 `gtrk render` **共用同一条**颗粒编排（含计费闸），
+			// MUST NOT 分叉出第二套。本路径是**起盘态**落地（oralcut / long2short 刚出的工程），
+			// 结构上还没有 `beat_track` ⇒ 实际是零动作、零计费；此处接线是为了将来精修态复用
+			// 这条落地入口时不至于静默丢颗粒。`--json` 透传保证机读模式下缺 `--yes` 是硬拒而非挂起。
+			const particles = await prepareParticlesForRender(project, dirname(gtrkPath), {
+				...(opts.json ? { json: true } : {}),
+			});
 			const r = await renderGtrk(project, outMp4, {
 				crf: opts.crf != null ? Number(opts.crf) : undefined,
 				codec: opts.codec,
 				ffmpegPath: opts.ffmpegPath,
 				gtrkDir: dirname(gtrkPath),
+				particlePaths: particles.paths,
 				onLine: (l) => {
 					const m = l.match(/time=(\S+)/);
 					if (m) log.tick(`渲染中 ${m[1]}`);

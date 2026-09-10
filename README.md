@@ -36,7 +36,7 @@
 | 📦 | `gtrk deps` | 运行时资产：`status` 查 ffmpeg/字体的来源与授权，`install` 从同合云镜像装（**须显式触发，绝不静默自动下载**） |
 | 🤖 | `gtrk skills install` | 通过通用 `skills` 适配器和 gtrk 补充层，把 14 个 CLI 自带 skill 装进本机检测到的主流 Agent；`--all` 可覆盖全部已登记宿主；`gtrk skills recommend --scene <id>` 查第三方 skill 推荐目录（随包快照、不联网、只推荐不打包），`gtrk skills add <owner/repo>` 透传安装并登记进栏目配置 `style.skills` |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
-| 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg）；输出帧按时间线**累计对齐**（逐段取整误差不累加，画面不会对配音渐进失步）；渲完自动质检并落 `.qc.json`（`--no-qc` 跳过） |
+| 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg）；按契约 z 序合成**全部可见叠加层**（B-roll 等 overlay 视频轨 + MG 颗粒，`hidden` 的轨不进片）；输出帧按时间线**累计对齐**（逐段取整误差不累加，画面不会对配音渐进失步）；渲完自动质检并落 `.qc.json`（`--no-qc` 跳过）。⚠️ 未命中缓存的 MG 颗粒要云渲**有计费**（先预估要确认；`--no-particles` 零计费出无颗粒版） |
 | 🔬 | `gtrk qc <成片>` | 成片质检：单趟扫全片查闪帧/黑帧/冻结/爆音/静音/音画不同步，带时码定位；`--gtrk <工程>` 开工程感知识别**段内跳切**，`--fail-on error\|warn\|never` 供管线门控 |
 | 🔎 | `gtrk matrix` | B-roll 检索+**候选铺轨**：消费 FILM_BROLL 派单 → 产候选清单 + 下载 preview 代理铺 N 条候选轨（`--lay N` 默认 1，opencut 打开即可用轨道小眼睛对比；`--lay 0` 只出清单）；`matrix search "<词>"` 单条 ad-hoc；`matrix fetch <clip_id...>` 精剪期拉原片（已授予素材免费重签+下载落盘，直接拖进剪映）；**本地素材模式**：`matrix index --dirs <素材夹>` 免切片建索引 → `--local --dirs` 检索铺轨（**素材本体不上云**）→ `matrix lay` 消费（可编辑的）plan；`matrix describe` 按需理解候选 |
 | 🎨 | `gtrk mg` | MG 动态图颗粒铺轨：消费 MG 派单 → 把 html-particle 颗粒（透明叠加 / 满屏底层，由你栏目的 MG 生产 skill 所产）铺进 `.gtrk` 的 beat_track；`mg lint <颗粒.html>` 铁律静态子集校验、`mg status --project <dir>` 编排看板（缺 HTML / 已产未铺 / 已铺）；`mg render <颗粒.html> --duration <sec>` 脱离工程独立云渲单颗颗粒为剪映可读 qtrle 透明 MOV（精剪补给口）；aux 叠层颗粒同段多铺（一 beat 派生主 + `-aux<n>`）。旧名 `gtrk rrv` 保留为弃用别名；`gtrk mg fetch` 从 Hyperframes registry 取中性块骨架（快照随包离线候选、三源取块我方镜像优先、机械改写后过 lint） |
@@ -145,7 +145,7 @@ gtrk transcript "D:/素材/采访视频.mp4"
 | ③ | 「**铺 B-roll 底轨**」（两条腿同一阶段） | `/gtrk-matrix` → `gtrk matrix` → 影视/本地素材候选轨铺入；`/gtrk-ai-drama`（skill，无命令）→ 四段描述稿（中英分块） | **opencut 里挑选/调整 B-roll**（小眼睛切换对比）；AI 片段去外部平台出片、**手动回铺** |
 | ④ | 「B-roll 齐了，**抽帧看看构图**」 | 对**三源合并后的最终底轨**抽帧（agent 纪律，无专属命令） | **确认构图**（主体位置 / 安全区 / 朝向 / 明暗） |
 | ⑤ | 「构图没问题，**铺 MG**」 | `/gtrk-mg` → `gtrk mg` → MG（含 ov）叠在已定稿的底轨之上 | 精修颗粒（opencut 手调） |
-| ⑥ | 「**出成片**」 | 客户端出片链（多车道合成 + 颗粒云渲 / 导剪映）；`gtrk render` 只出**主轨快照预览** | 客户端里精修定稿 |
+| ⑥ | 「**出成片**」 | 两条路都行：客户端出片链（多车道合成 + 颗粒云渲 / **导剪映**），或 `gtrk render`（本地叠全部可见叠加层出 mp4，颗粒未命中缓存时计费）；两端共用同一份颗粒缓存 | 客户端里精修定稿 |
 
 > **次序有理由**：**AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**——整条管线里唯一的叠加层是 MG（含 ov）。MG 的排版是「因势象形避主体」、**依赖底轨的最终画面构图**，所以三源（影视 / 本地 / AI）必须全落齐、构图核过，才轮到 MG。用不到的车道跳过（`dispatch` 里该队列为空就不铺）。
 >
@@ -193,7 +193,11 @@ CLI 写 .gtrk ─▶ 客户端打开(自动感知外部改动、先存脏改再�
 | **AI 再现回铺** | 外部平台出的 AI 片段**手动拖进 AI_DRAMA 车道**对齐区间（`/gtrk-ai-drama` 只吐描述稿，片在外部平台出，见 SOP ③——它属底轨阶段，MG 要等它落位后才铺） |
 | **最终出片** | 多车道合成（overlay / MG / particle 云渲叠起来）+ 剪映草稿导出，都在客户端出片链 |
 
-> **`gtrk render` ≠ 最终成片。** `gtrk render` 是本地 ffmpeg 出**主轨（口播粗剪）的快照预览**——只合主视频轨 + 音轨，**不合成 overlay（B-roll 候选）/ MG 颗粒 / AI 再现**。要出**真正的多车道成片**（各车道叠起来、颗粒云渲、导剪映草稿），走**客户端出片链**。一句话：**CLI 管「把料铺进工程」，客户端管「把工程出成片」。**
+> **`gtrk render` 现在会合成叠加层了（1.1.10 起）。** 它按契约 z 序（`track_index` 升序）把**全部可见**的叠加层叠进成片——overlay 视频轨（B-roll 候选 / AI 再现回铺）与 MG 颗粒都在内；在客户端关了「小眼睛」（`hidden`）的轨不进片。
+>
+> **颗粒那一段有计费**：CLI 没有 HTML 渲染引擎，颗粒要送同合云烤成透明 MOV 再本地叠。计量 = **唯一颗粒数 × 未命中缓存数**（按分钟），未命中时会先出预估并要你确认（`--yes` 跳过；`--json` 下必须显式 `--yes`）。**第二次渲染全命中缓存 ⇒ 零计费**；缓存与客户端导出剪映时那份**同键同落点**（`<工程目录>/.tonghe-cache/particles/`），所以客户端烤过的颗粒 CLI 直接命中、反之亦然。不想花钱用 `--no-particles` 出无颗粒版（overlay 视频轨照常合成，那部分零计费、纯本地）。
+>
+> **剪映草稿导出仍在客户端出片链**（`gtrk render` 只出 mp4）。
 
 ## 升级
 
@@ -265,7 +269,7 @@ gtrk skills install --copy
 | ④ | （无 skill） | （无命令） | **全局抽帧检查画面构图**：对三源合并后的最终底轨抽帧，用户确认构图——这是 agent 纪律硬门，供 ⑤ 的排版避让决策使用 |
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG（含 ov）最后叠上**（叠在已定稿、构图已核的底轨之上） |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
-| — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4 |
+| — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4（含 overlay 与 MG 颗粒；颗粒未命中缓存时云渲计费，`--no-particles` 可跳过） |
 | ✂️ | `/gtrk-long2short` | `gtrk long2short` | 长剪短·粗剪：长视频语义选段+跳剪 → 逐 clip 出客户端/剪映/PR 三方工程（毛片不上传），**不在成片 SOP 序列内**、随时可独立用 |
 | 📝 | `/gtrk-transcript` | `gtrk transcript` | 本地视频/配音音频 → 一个含 Agent 总结、时码记录和纯文本的 Markdown，**不在成片 SOP 序列内** |
 | 🧰 | `/gtrk-tools` | `gtrk tool <name>` | 单点工具族（图转运镜 / 图片·视频抠像…）——单发单收，**不在成片 SOP 序列内**、随时可独立用 |
@@ -727,6 +731,42 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - 净化、超分、插帧为长耗时 GPU 任务，描述器最多轮询 4 小时。等待超时不代表任务取消；保留 `task.json` / `result.json` 并按 `taskId` 恢复，不要直接重跑造成重复计费。
 
 配套 skill `/gtrk-tools`（一个 skill 覆盖整个工具族）。
+
+### `gtrk render <工程.gtrk>` — 本地渲染成片
+
+```
+gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>]
+                   [--no-qc] [--no-particles] [--particle-concurrency <n>] [-y|--yes]
+                   [--no-open] [--json]
+```
+
+把 `.gtrk` 当 EDL 用本地 ffmpeg 出成片。**素材一律取本地原片**（`materials[].path`），云端不产成片。
+
+**合成什么**：底轨（`track_index` 最小的非黑底垫轨）+ 全部音源，再按契约 z 序（`track_index` **升序**，越大越靠前）叠**全部可见叠加层**——overlay 视频轨（B-roll 候选 / AI 再现回铺）与 `beat_track` 的 MG 颗粒。
+
+- **可见性只读 `hidden` 字段**（客户端的「小眼睛」）：关掉的轨整条不进片，如实计数告知。渲染器**不猜**哪条该叠。
+- **多条候选轨都可见时成片取最上层**（= 客户端预览所见）。要换，在客户端关小眼睛或删轨。
+- overlay 素材本地缺失（如 B-roll 代理没下全）**只降级不阻断**：该 clip 不叠 + 告警，片子照出。
+
+**颗粒那一段有计费**（本命令唯一的云端出口）：
+
+| 事 | 口径 |
+|---|---|
+| 为什么要上云 | CLI 无 HTML 渲染引擎，颗粒像素权威在同合云 Hyperframes；上行的只有**颗粒 HTML 文本**，素材本体不上行 |
+| 计量 | **唯一颗粒数 × 未命中缓存数**（`html_render_simple`，按分钟）。同一颗粒在轨上出现 N 次只烤一次 |
+| 缓存 | `<工程目录>/.tonghe-cache/particles/<sha256>.mov`，与**客户端导出剪映**那条链**同键同落点** ⇒ 任一端烤过，另一端直接命中 |
+| 确认 | 有未命中即先出预估（总数 / 唯一 / 未命中 / 计费分钟）并要确认；`--yes` 跳过。**全命中不弹确认**（零计费不该有摩擦） |
+| `--json` | 有未命中且未给 `--yes` ⇒ **硬拒**（机读模式没有 stdin，不静默提交计费任务） |
+| 逃生舱 | `--no-particles` 零计费出无颗粒版；overlay 视频轨**照常合成**（那部分纯本地） |
+| 拒绝确认 | 零云端调用、零文件写入退出 |
+
+`--particle-concurrency <n>`（1–8，默认 6）调颗粒云渲并发。
+
+`--json` 结果含 `particles: {total,unique,cached,rendered,billedMinutes,skipped[]}` 与
+`overlay: {layers,particles,hiddenSkipped,missingMaterialSkipped,particleUnavailable}`——
+**跳过了什么都有机读通路**，不会出现「铺了 65 颗、成片一颗没有、退出码 0」。
+
+渲完自动质检并落 `.qc.json`（`--no-qc` 跳过）；质检结论只呈现、不改渲染退出语义（硬门控走 `gtrk qc --fail-on`）。
 
 ### 其它
 

@@ -2,7 +2,11 @@
  * gtrk mg —— MG 颗粒生产铺轨（add-rrv-lay，去品牌化前 gtrk rrv）。
  *
  * 脑手分工：real-roam-viz skill=脑（产 GSAP 颗粒 HTML），本命令=手（lint / 铺轨 / 看板）。
- * **不云渲、不下载 webm**——渲染是客户端出片期的事（客户端有内容 key 缓存）。
+ * **铺轨这几个模式不云渲、不下载 webm**——铺轨只管把颗粒落进 `beat_track`。
+ * ⚠️ 「CLI 不云渲」这句已被**两次**破例，别再照旧理解：
+ *   ① `gtrk mg render`（add-mg-standalone-render）——脱离工程的单颗粒 qtrle 云渲；
+ *   ② `gtrk render`（add-render-overlay-compositing）——出片时对未命中缓存的颗粒云渲再本地叠。
+ * 两者都走 `html_render_simple`，都有计费确认闸；②与客户端共用工程目录里的内容寻址缓存。
  *
  * 四模式（沿 matrix/split 的「顶层命令 + 可选 positional」范式）：
  *   gtrk mg --project <dir>        消费 dispatch.mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track
@@ -449,7 +453,10 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 				`——轨上内容 = 本次 ${summary.laidParticles} 颗 + 上轮 ${keptIds.length} 颗，与本次派单不完全对应（要全部刷新就去掉 --only 全量重铺）。`,
 		);
 	}
-	log.info("opencut 打开工程即见 MG 轨；出片走客户端云渲。");
+	log.info(
+		"opencut 打开工程即见 MG 轨；出片两条路都行：客户端云渲，" +
+			"或 `gtrk render`（对未命中缓存的颗粒云渲计费，两端共用同一份工程目录缓存）。",
+	);
 	if (integrity) reportMaterialIntegrity(integrity, log);
 	return done(opts, {
 		ok,

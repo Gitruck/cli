@@ -36,7 +36,7 @@
 | 📦 | `gtrk deps` | Runtime assets: `status` shows where ffmpeg/fonts come from and under which licence, `install` fetches them from the Gitruck Cloud mirror (**must be triggered explicitly — never a silent auto-download**) |
 | 🤖 | `gtrk skills install` | Installs the 14 bundled CLI skills into the agents detected on this machine, via the generic `skills` adapter plus a gtrk supplement layer; `--all` covers every registered host; `gtrk skills recommend --scene <id>` browses the bundled third-party skill catalog (snapshot, offline, recommend-only) and `gtrk skills add <owner/repo>` installs through the adapter and registers the skill in the show config `style.skills` |
 | ⬆️ | `gtrk upgrade` | Upgrade the CLI to the latest version + refresh skills (config preserved); `--check` only reports |
-| 🎞️ | `gtrk render` | Render a gtrk project (EDL) locally → finished mp4 (requires ffmpeg); output frames are allocated against the **cumulative** timeline (per-clip rounding never accumulates, so the picture cannot drift away from the voiceover); runs a QC pass afterwards and writes `.qc.json` (`--no-qc` skips it) |
+| 🎞️ | `gtrk render` | Render a gtrk project (EDL) locally → finished mp4 (requires ffmpeg); composites **every visible overlay layer** in contract z-order (B-roll and other overlay video tracks + MG particles; `hidden` tracks stay out); output frames are allocated against the **cumulative** timeline (per-clip rounding never accumulates, so the picture cannot drift away from the voiceover); runs a QC pass afterwards and writes `.qc.json` (`--no-qc` skips it). ⚠️ MG particles that miss the cache are cloud-rendered and **billed** (estimate + confirmation first; `--no-particles` renders particle-free at zero cost) |
 | 🔬 | `gtrk qc <cut>` | Final-cut QC: one decoding pass over the whole file for flash frames, black/frozen frames, clipping, silence and audio/video drift, each with a timecode; `--gtrk <project>` enables project-aware detection of **intra-clip cuts**, `--fail-on error\|warn\|never` gates pipelines via the exit code |
 | 🔎 | `gtrk matrix` | B-roll retrieval + **candidate track laying**: consumes the FILM_BROLL dispatch → produces a candidate list + downloads preview proxies and lays N candidate tracks (`--lay N`, default 1; open it in opencut and toggle track visibility to compare; `--lay 0` produces the list only); `matrix search "<query>"` is a one-off ad-hoc search; `matrix fetch <clip_id...>` pulls raw footage during the fine cut (free re-signing + download for already-granted materials, drag straight into Jianying); **local-footage mode**: `matrix index --dirs <folders>` builds a slice-free index → `--local --dirs` retrieves and lays tracks (**your footage never leaves your machine**) → `matrix lay` consumes the (editable) plan; `matrix describe` understands candidates on demand |
 | 🎨 | `gtrk mg` | MG motion-graphics particle laying: consumes the MG dispatch → lays html-particle assets (transparent overlay / full-screen bed, produced by your show's MG skill) into the `.gtrk` `beat_track`; `mg lint <particle.html>` runs the statically checkable subset of the house rules, `mg status --project <dir>` is an orchestration dashboard; `mg render <particle.html> --duration <sec>` renders a single particle in the cloud, independent of any project, into a Jianying-readable qtrle transparent MOV (the fine-cut supplement channel); aux overlay particles can be layered on the same span (one beat derives a main particle plus `-aux<n>`). The old name `gtrk rrv` remains as a deprecated alias; `gtrk mg fetch` pulls neutral block skeletons from the HyperFrames registry (offline snapshot candidates, three-source fetch with our mirror first, mechanical rewrite then lint) |
@@ -148,7 +148,7 @@ Chain names above: *口播链* = talking-head (you shot yourself: short-form mon
 | ③ | "**lay the B-roll base**" (two legs, one stage) | `/gtrk-matrix` → `gtrk matrix` → film/local-footage candidate tracks laid; `/gtrk-ai-drama` (skill, no command) → four-part description docs (Chinese/English blocks) | **pick/adjust B-roll in opencut** (toggle track visibility to compare); generate AI clips on an external platform and **drop them back in by hand** |
 | ④ | "B-roll is settled, **check the composition**" | samples frames from the **merged three-source base layer** (an agent discipline, no dedicated command) | **confirm the composition** (subject position / safe areas / facing / brightness) |
 | ⑤ | "composition looks good, **lay the MG**" | `/gtrk-mg` → `gtrk mg` → MG (incl. ov) stacked on the settled base layer | fine-tune particles (by hand in opencut) |
-| ⑥ | "**produce the final cut**" | the desktop client's production chain (multi-lane compositing + cloud particle rendering / export to Jianying); `gtrk render` only produces a **main-track snapshot preview** | final polish inside the client |
+| ⑥ | "**produce the final cut**" | either path works: the desktop client's production chain (multi-lane compositing + cloud particle rendering / **Jianying export**), or `gtrk render` (composites every visible overlay locally into mp4; billed when particles miss the cache); both share one particle cache | final polish inside the client |
 
 > The order exists for a reason: **AI scene clips belong to the base-layer B-roll family, not to an overlay layer** — the only overlay layer in the pipeline is MG (incl. ov). MG placement shapes itself around the picture and **depends on the final composition of the base layer**, so all three sources (film / local / AI) must land and the composition must be checked before MG goes on. Skip lanes you do not need (an empty queue in `dispatch` simply lays nothing).
 >
@@ -196,7 +196,11 @@ CLI 写 .gtrk ─▶ 客户端打开(自动感知外部改动、先存脏改再�
 | **Re-inserting AI re-enactment** | AI clips generated on external platforms are **dragged into the AI_DRAMA lane by hand** and aligned to their spans (`/gtrk-ai-drama` only emits description docs; the footage is produced externally — see SOP ③: it belongs to the base-layer stage, and MG waits until it has landed) |
 | **Final production** | Multi-lane compositing (overlay / MG / cloud-rendered particles stacked) plus Jianying draft export both live in the client's production chain |
 
-> **`gtrk render` ≠ the final cut.** `gtrk render` is a local ffmpeg **snapshot preview of the main track (the rough talking-head cut)** — it merges only the main video and audio tracks and **does not composite overlays (B-roll candidates) / MG particles / AI re-enactment**. For a **real multi-lane finished video** (all lanes stacked, particles cloud-rendered, Jianying draft exported), use the **client's production chain**. In one line: **the CLI puts material into the project; the client turns the project into a video.**
+> **`gtrk render` now composites overlays (since 1.1.10).** It stacks **every visible** overlay layer in contract z-order (ascending `track_index`) — overlay video tracks (B-roll candidates, AI re-enactment) and MG particles alike. Tracks you hid in the client (`hidden`) stay out of the cut.
+>
+> **The particle half is billed**: the CLI has no HTML render engine, so particles are baked into transparent MOVs in the cloud and composited locally. Metering = **unique particles × cache misses** (by the minute); on a miss you get an estimate and a confirmation prompt first (`--yes` skips it; under `--json` an explicit `--yes` is required). **A second render hits the cache entirely ⇒ zero billing**; the cache shares the same key and location as the client's Jianying export (`<project dir>/.tonghe-cache/particles/`), so particles baked by either side are reused by the other. To avoid spending, `--no-particles` renders without particles (overlay video tracks are still composited — that part is local and free).
+>
+> **Jianying draft export still lives in the client's production chain** (`gtrk render` only emits mp4).
 
 ## Upgrading
 
@@ -270,7 +274,7 @@ Then just say "**cut a version of this talking-head**", or explicitly pick `gtrk
 | ④ | (no skill) | (no command) | **Global frame-sampling composition check**: sample frames from the merged three-source base layer and have the user confirm the composition — a hard agent-discipline gate feeding ⑤'s placement decisions |
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG (incl. ov) goes on last** (stacked on the settled, composition-checked base layer) |
 | — | `/gtrk-style-maker` | (no command, builds a show) | A one-time interview that builds your show's style system (skill family + show config, see next section) |
-| — | (wrap-up) | `gtrk render` | Render a gtrk project locally → finished mp4 |
+| — | (wrap-up) | `gtrk render` | Render a gtrk project locally → finished mp4 (overlays and MG particles included; particles that miss the cache are cloud-rendered and billed, `--no-particles` skips them) |
 | ✂️ | `/gtrk-long2short` | `gtrk long2short` | Long-to-short rough cut: semantic segment selection + jump cuts → per-clip client/Jianying/Premiere projects (the raw file is never uploaded); **not part of the production SOP**, usable standalone at any time |
 | 📝 | `/gtrk-transcript` | `gtrk transcript` | Local video / voice-over audio → one Markdown file with an agent-written summary, timecoded record and plain text; **not part of the production SOP** |
 | 🧰 | `/gtrk-tools` | `gtrk tool <name>` | The single-shot tool family (image-to-camera-move / image & video matting …) — single request, single result, **not part of the production SOP**, usable standalone at any time |
@@ -711,6 +715,41 @@ The seven shared video tools — black-border removal, aspect adaptation, stabil
 - Cleanup, upscaling and interpolation are long-running GPU jobs, and their descriptors poll for up to 4 hours. A wait timeout does not mean the job was cancelled; keep `task.json` / `result.json` and recover by `taskId` instead of re-running and paying twice.
 
 The companion skill is `/gtrk-tools` (one skill covering the whole tool family).
+
+### `gtrk render <project.gtrk>` — render the finished video locally
+
+```
+gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>]
+                   [--no-qc] [--no-particles] [--particle-concurrency <n>] [-y|--yes]
+                   [--no-open] [--json]
+```
+
+Treats the `.gtrk` as an EDL and renders it with local ffmpeg. **Footage always comes from the local originals** (`materials[].path`); the cloud never produces the finished file.
+
+**What gets composited**: the base track (the lowest `track_index` that is not the black bed) plus every audio source, then **every visible overlay layer** stacked in contract z-order (ascending `track_index`, larger = closer to the front) — overlay video tracks (B-roll candidates, AI re-enactment) and the MG particles on `beat_track`.
+
+- **Visibility reads the `hidden` field only** (the client's "eye" toggle): a hidden track stays out of the cut entirely and is reported. The renderer never guesses which track belongs in the picture.
+- **When several candidate tracks are visible, the topmost one wins** (exactly what the client preview shows). To pick a different one, hide or delete tracks in the client.
+- Missing overlay footage (e.g. B-roll proxies not fully downloaded) **degrades instead of blocking**: that clip is not composited, a warning is printed, and the render still completes.
+
+**The particle half is billed** (the only cloud egress of this command):
+
+| Topic | How it works |
+|---|---|
+| Why the cloud | The CLI has no HTML render engine; particle pixels are authoritative in Gitruck Cloud's Hyperframes. Only the **particle HTML text** is uploaded — never the footage itself |
+| Metering | **unique particles × cache misses** (`html_render_simple`, per minute). A particle used N times on the timeline is baked once |
+| Cache | `<project dir>/.tonghe-cache/particles/<sha256>.mov`, sharing **the same key and location** as the client's Jianying export chain ⇒ whatever either side bakes, the other reuses |
+| Confirmation | Any miss triggers an estimate (total / unique / misses / billed minutes) and a prompt; `--yes` skips it. **A full cache hit never prompts** (a free operation should not add friction) |
+| `--json` | With misses and no `--yes`, the command **refuses** (machine mode has no stdin; it will not silently submit a billed task) |
+| Escape hatch | `--no-particles` renders particle-free at zero cost; overlay video tracks are **still composited** (that part is purely local) |
+| Declining | Exits with zero cloud calls and zero file writes |
+
+`--particle-concurrency <n>` (1–8, default 6) tunes particle render concurrency.
+
+The `--json` result carries `particles: {total,unique,cached,rendered,billedMinutes,skipped[]}` and
+`overlay: {layers,particles,hiddenSkipped,missingMaterialSkipped,particleUnavailable}` — **everything skipped has a machine-readable path**, so "65 particles laid, none in the cut, exit code 0" cannot happen quietly.
+
+A QC pass runs automatically afterwards and writes `.qc.json` (`--no-qc` skips it); QC findings are reported but never change the render's exit semantics (use `gtrk qc --fail-on` for a hard gate).
 
 ### Other
 

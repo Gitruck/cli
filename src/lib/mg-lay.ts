@@ -4,7 +4,9 @@
  * 与 broll 铺轨（matrix-lay）三处本质差异（fork 红线）：
  *   ① 操作 gtrk.beat_track（颗粒只能落这里；误落 video_track 会被 importer 静默丢弃）；
  *   ② 素材剥离面按**自产身份 × 零引用**判（不是 broll 的 clip.material），详见下「素材剥离键」；
- *   ③ 一对一（一 beat=一颗粒），无平铺/score/候选/下载——渲染是客户端出片期的事，CLI 不云渲。
+ *   ③ 一对一（一 beat=一颗粒），无平铺/score/候选/下载——**铺轨本身**不云渲。
+ *      颗粒的像素在出片期才烤：客户端云渲，或 `gtrk render`（add-render-overlay-compositing，
+ *      对未命中缓存的颗粒走 html_render_simple 再本地叠）。两端共用同一份内容寻址缓存。
  *
  * 幂等：struct_meta.mg.lay_tracks 登记自产 beat 轨，重铺先剥旧自产物再 append；用户手加轨零连带。
  * 读旧写新：登记键读并集 mg ∪ rrv（既有工程零迁移），写 mg 且 delete 旧 rrv 键防孤儿。

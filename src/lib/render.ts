@@ -12,8 +12,18 @@
  * （`track.muted` / `clip.muted` / `element_state.isSourceAudioEnabled`）与客户端同一套，
  * 收口母带与客户端同口径。
  *
+ * 视觉覆盖面（★ add-render-overlay-compositing，2026-09-09）：底轨 `concat` 之后**逐层叠加**
+ * 全部**可见**叠加层——非主 `video_track`（B-roll 候选 / AI 再现）与 `beat_track`（MG 颗粒）。
+ * 层序按 `track_index` 升序（契约 z 序：最小=底轨 main，越大越靠前），可见性只读轨级 `hidden`
+ * 字段，MUST NOT 按轨序/车道名自行猜——与音频侧「只认 `muted`」是同一条纪律。
+ * 颗粒像素权威在服务端 Hyperframes：CLI 经 `html_render_simple` 取回 qtrle alpha MOV 再叠
+ * （编排与跨端缓存在 `particle-qtrle.ts`，本模块**只消费路径不编排**）。
+ *
  * 验收口径：观感等价（时长/切点/画布/音画同步/编码参数一致），不承诺与云端逐字节一致（libx264 跨版本/平台）。
- * filter_complex 生成须与后端黄金用例对拍（change tasks §8.4，待后端导出向量）。
+ * 对拍分两段（add-render-overlay-compositing D4）：**底轨 + 音频链**与后端
+ * `video_timeline_render.build_filter_graph` 逐文本对拍；**叠加层段是 CLI 独有扩展**，
+ * 后端那条链结构性不合成叠加层（明文「只渲 track_index 最小的一条 video_track」「beat_track 忽略」），
+ * **不存在**可对拍的后端向量 ⇒ MUST NOT 声称同源，改以 CLI 自有黄金向量对拍。
  */
 import { writeFile, unlink, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -66,6 +76,32 @@ interface Track {
 	 *  ★ fix-render-bundled-clip-audio——CLI 首次消费；渲染器**只认这个字段**，
 	 *  MUST NOT 按轨序/车道名自行猜某条轨该不该发声。 */
 	muted?: boolean;
+	/** 轨级隐藏（客户端「小眼睛」，opencut change `add-gtrk-track-hidden` 稀疏写：只在 true 时写键）。
+	 *  ★ add-render-overlay-compositing——CLI 首次消费，**只作用于视觉叠加面**。
+	 *  🔴 严格布尔：非布尔值 MUST 按键缺席处理（视为可见），MUST NOT 报错——`.gtrk` 是外部可写的
+	 *  不可信输入，与契约里 `hidden`「严格布尔、非法即当缺席」同一口径。
+	 *  ⚠️ **不动音频面**：lane A 的取用判据仍只认 `muted` 三件套（隐藏 ≠ 静音，客户端小眼睛与喇叭
+	 *  是两个开关）。把 hidden 接进混音是另一次裁定，本件 MUST NOT 顺手改。 */
+	hidden?: boolean;
+}
+
+/** `beat_track` 的一颗颗粒（契约：**整段播、无源裁剪**，MUST NOT 含 clip_st/clip_ed）。 */
+interface Beat {
+	clip_id?: string;
+	/** ⚠️ = 颗粒 composition-id，**不是**素材引用键。MUST NOT 拿它去 materials 查表。 */
+	material?: unknown;
+	html_material?: unknown;
+	/** 全屏不透明标注。qtrle 产物里 opaque 的透明区**仍然透明**（服务端 opaque_cover 对
+	 *  webm/qtrle 生产链恒 False），故满屏盖底由本渲染器补黑背板兑现。 */
+	opaque?: boolean;
+	track_st?: unknown;
+	track_ed?: unknown;
+	duration?: unknown;
+}
+interface BeatTrack {
+	track_index?: number;
+	track_timeline?: Beat[];
+	hidden?: boolean;
 }
 interface GtrkMaterial {
 	id: string | number;
@@ -77,6 +113,8 @@ export interface GtrkV1 {
 	materials?: GtrkMaterial[];
 	video_track?: Track[];
 	audio_track?: Track[];
+	/** HTML 颗粒叠加层（★ add-render-overlay-compositing——CLI 渲染器首次消费）。 */
+	beat_track?: BeatTrack[];
 	struct_meta?: { broll?: { black_track?: number | null } };
 }
 
@@ -91,6 +129,98 @@ function pickPreviewMainTrack(gtrk: GtrkV1, sortedV: Track[]): Track {
 		if (nonBlack.length > 0) return nonBlack[0];
 	}
 	return sortedV[0];
+}
+
+/** 轨是否可见（★ add-render-overlay-compositing）。严格布尔：只有字面 `true` 才算隐藏。 */
+const isHiddenTrack = (t: { hidden?: unknown }): boolean => t.hidden === true;
+
+/** 一层待叠加的视觉元素（overlay `video_track` 的 clip，或 `beat_track` 的颗粒）。 */
+export type OverlayLayer =
+	| {
+			kind: "clip";
+			trackIndex: number;
+			trackSt: number;
+			duration: number;
+			material: string | number;
+			clipSt: number;
+	  }
+	| {
+			kind: "particle";
+			trackIndex: number;
+			trackSt: number;
+			duration: number;
+			clipId: string;
+			opaque: boolean;
+	  };
+
+/**
+ * 收集**全部可见叠加层**并定序（★ add-render-overlay-compositing，纯函数，导出供单测与黄金向量）。
+ *
+ * **层序即契约**（infra `gtrk-contract`：`track_index` 最小者为底轨 main，越大越靠前）：
+ * 按 `track_index` **升序**由底向上叠。MUST NOT 按数组下标、车道名、素材前缀自行判定层序。
+ * ⚠️ 仓内有两处**过时注释**说反了（`src/lib/matrix-lay.ts:3955-3956` 写「黑底=最大号/越大越靠下」，
+ * 其正下方代码却是 `blackTrack = baseIndex` 最小号——`fix-broll-zorder-contract-drift` 改过、注释没跟）。
+ * 以契约与该文件 `:278` / `:3562` 的现行口径为准。
+ *
+ * **可见性只读 `hidden` 字段**：`hidden === true` 的轨整条跳过。渲染器 MUST NOT 因为
+ * 「它是候选轨 / 它是第几条」自行决定叠不叠——与既有铁律「叠加轨默认不发声由铺轨方经 `muted`
+ * 表达，MUST NOT 由渲染器另行猜测」是同一条纪律的视觉侧对应物。
+ *
+ * `video_track` 与 `beat_track` 共用同一个 `track_index` z 空间（`mg-lay` 落轨时取
+ * `max(9, 全部 video/audio/beat 轨号) + 1`，构造上不撞号）。真撞号时**视频在下、颗粒在上**——
+ * 颗粒是成片 SOP 的最后一层（⑤ 最后叠上），这个 tie-break 与制片定序一致。
+ */
+export function collectOverlayLayers(
+	gtrk: GtrkV1,
+	mainVideoTrack: Track,
+): { layers: OverlayLayer[]; hiddenSkipped: number } {
+	const layers: OverlayLayer[] = [];
+	let hiddenSkipped = 0;
+
+	for (const t of gtrk.video_track || []) {
+		if (t === mainVideoTrack) continue;
+		if (isHiddenTrack(t)) {
+			hiddenSkipped++;
+			continue;
+		}
+		const ti = typeof t.track_index === "number" ? t.track_index : 0;
+		for (const c of t.track_timeline || []) {
+			if (isGap(c)) continue;
+			const duration = Number(c.duration);
+			if (!(duration > 0)) continue;
+			layers.push({
+				kind: "clip",
+				trackIndex: ti,
+				trackSt: Number(c.track_st),
+				duration,
+				material: c.material as string | number,
+				clipSt: Number(c.clip_st) || 0,
+			});
+		}
+	}
+
+	for (const t of gtrk.beat_track || []) {
+		if (isHiddenTrack(t)) {
+			hiddenSkipped++;
+			continue;
+		}
+		const ti = typeof t.track_index === "number" ? t.track_index : 0;
+		for (const b of t.track_timeline || []) {
+			const trackSt = Number(b.track_st);
+			const duration = Number(b.duration) || Number(b.track_ed) - trackSt;
+			if (!Number.isFinite(trackSt) || !(duration > 0)) continue;
+			const clipId = typeof b.clip_id === "string" && b.clip_id ? b.clip_id : String(b.material ?? "");
+			if (!clipId) continue;
+			layers.push({ kind: "particle", trackIndex: ti, trackSt, duration, clipId, opaque: b.opaque === true });
+		}
+	}
+
+	// (track_index 升序, 同号视频在下颗粒在上, 轨内按 track_st 升序)
+	const kindRank = (l: OverlayLayer): number => (l.kind === "clip" ? 0 : 1);
+	layers.sort(
+		(a, b) => a.trackIndex - b.trackIndex || kindRank(a) - kindRank(b) || a.trackSt - b.trackSt,
+	);
+	return { layers, hiddenSkipped };
 }
 
 /** 时间线元素。`duration` 是源侧秒值（`trim` / `atrim` 寻址与 afade 用，不动）；`lineMs` 是它在成片时间线上
@@ -235,6 +365,13 @@ export interface RenderParams {
 	 * 生产路径恒经 `renderGtrk` 注入真值。
 	 */
 	materialHasAudio?: (materialId: string | number) => boolean;
+	/**
+	 * 颗粒 qtrle MOV 的本机绝对路径表（clip_id → path）。★ add-render-overlay-compositing。
+	 * 由 `renderGtrk` 在预渲之后注入（纯函数本身不碰网络/磁盘，保持可单测/可对拍）。
+	 * 缺省（不注入）= 一颗颗粒都不叠——`--no-particles` 与「预渲整体失败」共用这条路径；
+	 * 表里没有的 clip_id 同样只是不叠（该颗粒已在预渲阶段被点名，此处 MUST NOT 二次报错刷屏）。
+	 */
+	particlePaths?: Record<string, string>;
 }
 
 /** 成片音源覆盖面的实况（★ fix-render-bundled-clip-audio：零音源 MUST NOT 静默）。 */
@@ -247,6 +384,20 @@ export interface RenderAudioInfo {
 	audioTrackClips: number;
 	/** 工程零音源 ⇒ 成片无声。命令层 SHALL 打 INFO 并在 `--json` 标明。 */
 	silent: boolean;
+}
+
+/** 叠加层合成的实况（★ add-render-overlay-compositing：跳过了什么 MUST 说出来）。 */
+export interface RenderOverlayInfo {
+	/** 实际叠进成片的叠加元素数（clip + 颗粒）。 */
+	layers: number;
+	/** 其中颗粒数。 */
+	particles: number;
+	/** 因 `hidden: true` 整条跳过的轨数。 */
+	hiddenSkipped: number;
+	/** 因素材缺 path / 文件不存在而未叠的 clip 数（软消费：只降级不阻断）。 */
+	missingMaterialSkipped: number;
+	/** 因没有 qtrle 产物而未叠的颗粒数（`--no-particles` 或该颗预渲失败）。 */
+	particleUnavailable: number;
 }
 
 /**
@@ -283,7 +434,15 @@ export function buildFilterGraph(
 	gtrk: GtrkV1,
 	materialPaths: Record<string, string>,
 	params: RenderParams = {},
-): { inputs: string[]; graph: string; total: number; audio: RenderAudioInfo } {
+): {
+	inputs: string[];
+	graph: string;
+	total: number;
+	audio: RenderAudioInfo;
+	overlay: RenderOverlayInfo;
+	/** 成片视频流的最终标签：无叠加层时恒 `"vout"`（零回归），有叠加层时是收口后的新标签。 */
+	videoLabel: string;
+} {
 	const fadeMs = Math.trunc(params.audio_crossfade_ms ?? DEFAULT_AUDIO_CROSSFADE_MS);
 	const fade = Math.max(fadeMs, 0) / 1000;
 	const hasAudio = params.materialHasAudio ?? ((): boolean => true);
@@ -320,14 +479,18 @@ export function buildFilterGraph(
 
 	const inputs: string[] = [];
 	const inputIdx: Record<string, number> = {};
-	const inputOf = (materialId: string | number): number => {
-		const path = materialPaths[String(materialId)];
-		if (path === undefined) throw new Error(`gtrk 引用素材 ${materialId} 缺本地路径`);
+	/** 按**路径**去重的输入登记（同一素材多 clip 只占一个 `-i`；ffmpeg 对同一输入被多条链引用会自动 split）。 */
+	const inputOfPath = (path: string): number => {
 		if (!(path in inputIdx)) {
 			inputIdx[path] = inputs.length;
 			inputs.push(path);
 		}
 		return inputIdx[path];
+	};
+	const inputOf = (materialId: string | number): number => {
+		const path = materialPaths[String(materialId)];
+		if (path === undefined) throw new Error(`gtrk 引用素材 ${materialId} 缺本地路径`);
+		return inputOfPath(path);
 	};
 
 	const chains: string[] = [];
@@ -397,6 +560,114 @@ export function buildFilterGraph(
 	});
 	chains.push(vLabels.map((x) => `[${x}]`).join("") + `concat=n=${vLabels.length}:v=1:a=0[vout]`);
 
+	// ══ 叠加层合成（★ add-render-overlay-compositing）══════════════════════════════
+	//
+	// 🔴 **零回归门**：没有任何可叠元素时，本段**一个字节都不产**，`videoLabel` 仍是 `[vout]`
+	//    ——不含 beat_track 且只有一条 video_track 的工程，filter_complex 与本 change 之前逐字节一致。
+	//
+	// 🔴 **底轨 MUST NOT 被追加任何 pts 平移或起点归零**（design D4 · 后端「播放钟契约」同守）：
+	//    下面只对**叠加输入**做 `setpts` 偏移，`[vout]` 原样进 overlay 的第一路。
+	//
+	// 对拍口径：本段是 **CLI 独有扩展**，后端 `video_timeline_render.build_filter_graph` 结构性
+	// 不合成叠加层（明文「只渲 track_index 最小的一条 video_track」「beat_track 时间线渲染忽略」），
+	// **不存在**可对拍的后端向量；语义参照后端另一条链 `html_animate_render._ffmpeg_overlay`
+	// （`overlay=format=auto` 合成 alpha）。以 CLI 自有黄金向量对拍。
+	const particlePaths = params.particlePaths ?? {};
+	const { layers: allLayers, hiddenSkipped } = collectOverlayLayers(gtrk, mainVideoTrack);
+	let missingMaterialSkipped = 0;
+	let particleUnavailable = 0;
+	const layers = allLayers.filter((L) => {
+		if (L.kind === "particle") {
+			if (particlePaths[L.clipId] === undefined) {
+				particleUnavailable++;
+				return false;
+			}
+			return true;
+		}
+		// 软消费：overlay 素材缺 path / 文件缺失只降级不硬拒（既有条款「overlay-only 素材缺失
+		// 不阻断渲染」在本件 MUST 保持——B-roll 代理没下全，不该让一条 45 分钟的片子出不来）
+		if (materialPaths[String(L.material)] === undefined) {
+			missingMaterialSkipped++;
+			return false;
+		}
+		return true;
+	});
+
+	let videoLabel = "vout";
+	if (layers.length > 0) {
+		/** 叠加输入的公共几何链：**保 alpha**。
+		 *  · `format=rgba` 前置——qtrle 解码出的像素格式随源而异，不显式转就可能拿不到 alpha 通道；
+		 *    且 `pad` 要填**透明**必须先有 alpha。
+		 *  · `pad` 用 `color=black@0`（透明）**而非** `black`：叠加层按 contain-fit 缩放后，
+		 *    黑边区域必须露出底下的层。填不透明黑 = 给整片加黑边，是 NLE 语义的反面。
+		 *  · 🔴 链上 MUST NOT 提前 `format=yuv420p`（会把 alpha 直接压掉）；像素格式统一收口在末尾。 */
+		const fitAlpha =
+			`format=rgba,scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+			`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1`;
+		/** 落位 + 在场窗口都钉在**帧网格**上（与 `matrix lay` / `gtrk patch` 同一 `sec2frame`，
+		 *  MUST NOT 用裸秒——裸秒会让叠加层的起点落在两帧之间）。
+		 *  `enable` 取 `[st, ed)` 半开区间（`gte*lt`，非 `between` 的闭区间）：clip 占的就是半开区间，
+		 *  闭区间会让终点那一帧多显一帧。表达式含逗号，MUST 单引号包住，否则被当成滤镜参数分隔符。 */
+		const window = (trackSt: number, duration: number) => {
+			const stF = sec2frame(trackSt, rate);
+			const edF = sec2frame(trackSt + duration, rate);
+			return { stF, edF, st: stF / rate, ed: edF / rate, frames: edF - stF };
+		};
+
+		for (const L of layers) {
+			const w = window(L.trackSt, L.duration);
+			if (w.frames <= 0) continue;
+			const enable = `enable='gte(t\\,${f6(w.st)})*lt(t\\,${f6(w.ed)})'`;
+
+			// opaque 颗粒的黑背板：服务端 qtrle 生产链 `opaque_cover` 恒 False ⇒ 拿回的 qtrle 里
+			// opaque 颗粒的透明区**仍然透明**。不补即渲出「本该满屏盖住底轨却露着底轨」的成片。
+			if (L.kind === "particle" && L.opaque) {
+				const bg = label();
+				chains.push(
+					`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6(w.frames / rate)},` +
+						`trim=end_frame=${w.frames},setpts=PTS-STARTPTS+${f6(w.st)}/TB,format=rgba[${bg}]`,
+				);
+				const mid = label();
+				chains.push(`[${videoLabel}][${bg}]overlay=x=0:y=0:eof_action=pass:format=auto:${enable}[${mid}]`);
+				videoLabel = mid;
+			}
+
+			const lab = label();
+			if (L.kind === "particle") {
+				// 契约：颗粒**整段播、无源裁剪**（beat MUST NOT 含 clip_st/clip_ed）⇒ 不做 trim 源窗，
+				// 只落位 + 缩放；在场窗口由 `enable` 钳、尾部由 `eof_action=pass` 兜。
+				const idx = inputOfPath(particlePaths[L.clipId]!);
+				chains.push(`[${idx}:v]${fitAlpha},setpts=PTS-STARTPTS+${f6(w.st)}/TB[${lab}]`);
+			} else {
+				// overlay 视频 clip：与主轨**同一套** trim/fps/tpad/截帧语义（含 PAD_FRAMES 补帧——
+				// `fps` 出帧数随 trim 起点相位摆动，只截不补会少帧），只是 pad 透明且不转 yuv420p。
+				const idx = inputOf(L.material);
+				const st = L.clipSt;
+				const ed = L.clipSt + L.duration;
+				chains.push(
+					`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
+						`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
+						`trim=end_frame=${w.frames},${fitAlpha},setpts=PTS-STARTPTS+${f6(w.st)}/TB[${lab}]`,
+				);
+			}
+			const next = label();
+			chains.push(`[${videoLabel}][${lab}]overlay=x=0:y=0:eof_action=pass:format=auto:${enable}[${next}]`);
+			videoLabel = next;
+		}
+		// 像素格式在此统一收口（前面全程保 alpha）：libx264 要 yuv420p
+		const outLab = label();
+		chains.push(`[${videoLabel}]format=yuv420p[${outLab}]`);
+		videoLabel = outLab;
+	}
+
+	const overlay: RenderOverlayInfo = {
+		layers: layers.length,
+		particles: layers.filter((L) => L.kind === "particle").length,
+		hiddenSkipped,
+		missingMaterialSkipped,
+		particleUnavailable,
+	};
+
 	/** 一条音频 lane：逐元素 atrim/asetpts/aresample/aformat/[volume]/afade（空档 anullsrc），
 	 *  尾部补齐到 total 后 concat 成与时间线等长的连续 lane。lane A 与 audio_track 共用**同一套**
 	 *  滤镜语义（主规格钉死的音频链，本件逐字不改，只是把输入从哪来这一面补上）。 */
@@ -462,7 +733,7 @@ export function buildFilterGraph(
 		);
 	}
 
-	return { inputs, graph: chains.join(";"), total, audio };
+	return { inputs, graph: chains.join(";"), total, audio, overlay, videoLabel };
 }
 
 /** 从 gtrk.materials 建 {id: 本地绝对路径}。
@@ -490,9 +761,19 @@ export function materialPathsFromGtrk(
 			if (m != null) hard.add(String(m));
 		}
 	}
-	/** 软消费：只被 lane A 用到的叠加轨素材 —— 缺席只降级（该轨原声不进混音）。 */
+	/** 软消费：叠加面用到的素材 —— 缺席只降级（★ add-render-overlay-compositing 起含**视觉**叠加）。
+	 *  两支：① lane A（叠加轨内嵌音轨，缺席即该轨原声不进混音）；② 可见 overlay `video_track` 的画面
+	 *  （缺席即该 clip 不叠）。🔴 `hidden: true` 的轨**两支都不进** —— 它不进成片，也就不该被校验，
+	 *  与 spec 的「未消费素材缺失不阻断」同一条。 */
 	const soft = new Set<string>();
 	for (const id of audioSourceMaterialIds(gtrk)) if (!hard.has(id)) soft.add(id);
+	if (sortedV.length) {
+		for (const L of collectOverlayLayers(gtrk, pickPreviewMainTrack(gtrk, sortedV)).layers) {
+			if (L.kind !== "clip") continue;
+			const id = String(L.material);
+			if (!hard.has(id)) soft.add(id);
+		}
+	}
 
 	const map: Record<string, string> = {};
 	for (const m of gtrk.materials || []) {
@@ -501,7 +782,7 @@ export function materialPathsFromGtrk(
 		if (!isHard && !soft.has(id)) continue; // 谁都没消费：不校验不入表
 		if (!m.path) {
 			if (isHard) throw new Error(`gtrk 素材 ${m.id} 缺 path（source_path），无法本地渲染`);
-			log.warn(`叠加轨素材 ${id} 缺 path，其原声不进混音（画面本就不合成，渲染继续）`);
+			log.warn(`叠加轨素材 ${id} 缺 path：该 clip 不叠、其原声不进混音（渲染继续）`);
 			continue;
 		}
 		// 相对路径恒以 .gtrk 所在目录为基准（与 material-integrity 同一口径；按 CWD 裸测是历史坑，
@@ -509,7 +790,7 @@ export function materialPathsFromGtrk(
 		const abs = !isAbsolute(m.path) && opts.gtrkDir ? resolve(opts.gtrkDir, m.path) : m.path;
 		if (!existsSync(abs)) {
 			if (isHard) throw new Error(`gtrk 素材文件不存在：${m.path}`);
-			log.warn(`叠加轨素材 ${id} 的文件不存在（${m.path}），其原声不进混音（渲染继续）`);
+			log.warn(`叠加轨素材 ${id} 的文件不存在（${m.path}）：该 clip 不叠、其原声不进混音（渲染继续）`);
 			continue;
 		}
 		map[id] = abs;
@@ -565,8 +846,17 @@ export async function renderGtrk(
 		ffmpegPath?: string;
 		gtrkDir?: string;
 		onLine?: (l: string) => void;
+		/** 颗粒 qtrle 本机路径表（clip_id → path）。★ add-render-overlay-compositing：
+		 *  由命令层经 `prepareParticlesForRender` 备齐后注入——预渲的计费闸必须发生在
+		 *  渲染之前、且由命令层持有交互面，故本函数**只消费不编排**。 */
+		particlePaths?: Record<string, string>;
 	} = {},
-): Promise<{ outputPath: string; duration: number; audio: RenderAudioInfo }> {
+): Promise<{
+	outputPath: string;
+	duration: number;
+	audio: RenderAudioInfo;
+	overlay: RenderOverlayInfo;
+}> {
 	const codec = opts.codec ?? "h264";
 	if (codec !== "h264") throw new Error(`v1 仅支持 h264，实际 ${codec}`);
 	const crf = opts.crf ?? DEFAULT_CRF;
@@ -577,7 +867,11 @@ export async function renderGtrk(
 	const { ffmpeg, ffprobe } = requireFfmpeg(opts.ffmpegPath);
 	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });
 	const materialHasAudio = probeEmbeddedAudio(ffprobe, gtrk, materialPaths);
-	const { inputs, graph, total, audio } = buildFilterGraph(gtrk, materialPaths, { crf, materialHasAudio });
+	const { inputs, graph, total, audio, overlay, videoLabel } = buildFilterGraph(gtrk, materialPaths, {
+		crf,
+		materialHasAudio,
+		...(opts.particlePaths ? { particlePaths: opts.particlePaths } : {}),
+	});
 
 	// ★ fix-render-bundled-clip-audio：音源覆盖面**开口说话**——2026-09-04 事故正是
 	// 「人声整条没进混音，却一声不吭出了 −70 LUFS 的数字静音成片」。
@@ -592,6 +886,21 @@ export async function renderGtrk(
 		);
 	}
 
+	// ★ add-render-overlay-compositing：叠加面同样**开口说话**——铺了 65 颗颗粒却一颗没叠、
+	// 退出码 0、QC 全绿，正是本件要根治的形态。跳过了什么 MUST 逐类点名。
+	if (overlay.layers > 0) {
+		log.info(`叠加层：${overlay.layers} 段进片（其中颗粒 ${overlay.particles} 颗）`);
+	}
+	if (overlay.hiddenSkipped > 0) {
+		log.info(`叠加层：${overlay.hiddenSkipped} 条轨因在客户端被隐藏（hidden）整条未叠`);
+	}
+	if (overlay.missingMaterialSkipped > 0) {
+		log.warn(`叠加层：${overlay.missingMaterialSkipped} 段因素材本地缺失未叠（渲染继续，见上方逐条告警）`);
+	}
+	if (overlay.particleUnavailable > 0) {
+		log.warn(`叠加层：${overlay.particleUnavailable} 颗颗粒无 qtrle 产物未叠（--no-particles 或该颗预渲失败）`);
+	}
+
 	const filterFile = join(tmpdir(), `gtrk-filter-${process.pid}-${inputs.length}.txt`);
 	await writeFile(filterFile, graph, "utf8");
 	try {
@@ -599,7 +908,8 @@ export async function renderGtrk(
 		for (const p of inputs) args.push("-i", p);
 		args.push(
 			"-filter_complex_script", filterFile,
-			"-map", "[vout]", "-map", "[aout]",
+			// 无叠加层时 videoLabel 恒 "vout"（零回归：argv 与本 change 之前逐字节一致）
+			"-map", `[${videoLabel}]`, "-map", "[aout]",
 			"-c:v", "libx264", "-preset", "medium", "-crf", String(crf),
 			"-c:a", "aac", "-b:a", "192k",
 			"-movflags", "+faststart",
@@ -607,7 +917,7 @@ export async function renderGtrk(
 		);
 		await runFfmpeg(ffmpeg, args, opts.onLine);
 		// 零音源同样照常产出、退出码 0（成片不因无声而失败）——诚实体现在上面的 INFO 与 audio.silent 上
-		return { outputPath, duration: total, audio };
+		return { outputPath, duration: total, audio, overlay };
 	} finally {
 		await unlink(filterFile).catch(() => {});
 	}
