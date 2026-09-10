@@ -5,7 +5,8 @@
 import { Command } from "commander";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readUserConfig, configPath, DEFAULT_API_BASE } from "../lib/user-config";
+import { readUserConfig, configPath } from "../lib/user-config";
+import { resolveApiBase } from "../lib/config";
 import { columnsDir } from "../lib/column-config";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
@@ -51,9 +52,9 @@ export async function runDoctor(): Promise<boolean> {
 
 	const uc = readUserConfig();
 	const apiKey = (process.env.GITRUCK_API_KEY ?? uc.apiKey ?? "").trim();
-	const apiBase = (process.env.GITRUCK_API_BASE ?? uc.apiBase ?? DEFAULT_API_BASE)
-		.trim()
-		.replace(/\/+$/, "");
+	// ⚠️ 走 config.ts 的单一解析口，MUST NOT 在这里再抄一份三行
+	//（change link-enum-catalog-cli §1.1：两份会分头漂，而「我在打哪个 base」是排障第一问）。
+	const apiBase = resolveApiBase();
 	rows.push({
 		name: "API Key",
 		status: apiKey ? "ok" : "fail",
