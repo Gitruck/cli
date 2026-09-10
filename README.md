@@ -34,7 +34,7 @@
 | ⚙️ | `gtrk init` | 引导式一次性配置（API Key + 剪映草稿目录），之后免管 |
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
 | 📦 | `gtrk deps` | 运行时资产：`status` 查 ffmpeg/字体的来源与授权，`install` 从同合云镜像装（**须显式触发，绝不静默自动下载**） |
-| 🤖 | `gtrk skills install` | 通过通用 `skills` 适配器和 gtrk 补充层，把 14 个 CLI 自带 skill 装进本机检测到的主流 Agent；`--all` 可覆盖全部已登记宿主；`gtrk skills recommend --scene <id>` 查第三方 skill 推荐目录（随包快照、不联网、只推荐不打包），`gtrk skills add <owner/repo>` 透传安装并登记进栏目配置 `style.skills` |
+| 🤖 | `gtrk skills install` | 通过通用 `skills` 适配器和 gtrk 补充层，把 18 个 CLI 自带 skill 装进本机检测到的主流 Agent；`--all` 可覆盖全部已登记宿主；`gtrk skills recommend --scene <id>` 查第三方 skill 推荐目录（随包快照、不联网、只推荐不打包），`gtrk skills add <owner/repo>` 透传安装并登记进栏目配置 `style.skills` |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
 | 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg）；按契约 z 序合成**全部可见叠加层**（B-roll 等 overlay 视频轨 + MG 颗粒，`hidden` 的轨不进片）；输出帧按时间线**累计对齐**（逐段取整误差不累加，画面不会对配音渐进失步）；渲完自动质检并落 `.qc.json`（`--no-qc` 跳过）。⚠️ 未命中缓存的 MG 颗粒要云渲**有计费**（先预估要确认；`--no-particles` 零计费出无颗粒版） |
 | 🔬 | `gtrk qc <成片>` | 成片质检：单趟扫全片查闪帧/黑帧/冻结/爆音/静音/音画不同步，带时码定位；`--gtrk <工程>` 开工程感知识别**段内跳切**，`--fail-on error\|warn\|never` 供管线门控 |
@@ -230,7 +230,7 @@ irm https://api.ai-mcn.tv:9000/broadcast/exe/install.ps1 | iex
 | ![在 Agent 中调用 gtrk 示例 1](assets/agent-example-1.png) | ![在 Agent 中调用 gtrk 示例 2](assets/agent-example-2.png) |
 | ![在 Agent 中调用 gtrk 示例 3](assets/agent-example-3.png) | ![在 Agent 中调用 gtrk 示例 4](assets/agent-example-4.png) |
 
-`gtrk install` 会把 14 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`·`gtrk-talking-head`)装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
+`gtrk install` 会把 18 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`·`gtrk-talking-head`·`gtrk-narration`·`gtrk-voiceover`·`gtrk-food-recap`·`gtrk-vlog-docu`）装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
 
 默认使用 `~/.agents/skills` 作为统一正本，再链接到各 Agent 的兼容目录（Windows 使用 junction）；链接不可用时适配器会回退复制。这样更新只有一份正本，不会让多份副本逐渐漂移。常用命令：
 
@@ -275,9 +275,16 @@ gtrk skills install --copy
 | 🧰 | `/gtrk-tools` | `gtrk tool <name>` | 单点工具族（图转运镜 / 图片·视频抠像…）——单发单收，**不在成片 SOP 序列内**、随时可独立用 |
 | 🎵 | `/gtrk-music-visualizer` | `gtrk music-visualizer` | 一首歌 → 频谱可视化成片（模板 + 可选背景/封面 + 配色样式），**不在成片 SOP 序列内**、独立引流用 |
 | 🖼️ | `/gtrk-cover` | （无命令，纯创作） | 封面工作台两阶段：设计诊断 + 三尺寸中英双版文生图 Prompt → 用户外部平台抽图 → H5 排字工作台（拖拽/滚轮微调、一键导出多尺寸 PNG）。栏目封面审美经栏目配置 `style.skills`（`produces:"cover"`）注入；**不在成片 SOP 序列内**（投放配套的「第 0 阶段」） |
+| 🧭 | `/gtrk-talking-head` | 编排 `gtrk audio` → `oralcut` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **口播链图纸**：一条或一组真人出镜毛片 → 外录音轨对齐换轨、多段拼接、粗剪、拆分派单、B-roll/MG 字卡、BGM、字幕 → 客户端可出片工程 |
+| 🧭 | `/gtrk-travel-recap` | 编排 `gtrk tool audio_tts_clone` → `project init` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **旅拍解说图纸**：旅拍素材夹 → AI 理解素材、写三段式解说稿、一次确认 → 配音/建工程/拆分/B-roll/字卡/BGM/字幕全自动跑完 → 客户端可出片工程 |
+| 🧭 | `/gtrk-live-slicing` | 编排 `gtrk long2short`（超长回放先分段） | **直播切片图纸**：数小时直播回放 → 分段（服务端 2h 硬闸）→ 选题清单确认 → 一批逐 clip 粗剪工程（gtrk + 剪映 + PR），按画面形态配分屏 |
+| 🧭 | `/gtrk-narration` | 编排 `gtrk transcript` → `project init` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **通用解说图纸（解说链正本）**：素材自带时序的长东西（影视长片/游戏实况/探店记录…）→ 提炼梗概与看点 → 精简叙述重讲成解说成片工程；旅拍解说与美食解说是它的垂类实例 |
+| 🧭 | `/gtrk-voiceover` | 编排 `gtrk tool audio_tts_clone` → `project init` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **配音链快速成片预设**：写好的稿（或 AI 代写）→ 配音 → 自动配画面 → 字卡/BGM/字幕 → 客户端可出片工程；适用科普/情感电台/观点/带货/盘点等无自带时序的题材 |
+| 🧭 | `/gtrk-food-recap` | 沿 `/gtrk-narration` 链路 | **美食解说垂类图纸（解说链示例）**：探店/密着纪实长片或做饭流程记录 → 提炼看点重述成中文美食解说成片工程 |
+| 🧭 | `/gtrk-vlog-docu` | 编排 `gtrk transcript` → `tool audio_tts_clone` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **Vlog 纪实图纸**：一批现场素材 → 素材理解、选档写稿、一次拍板 → 同期声骨架 + 旁白配音 + B-roll + 字幕层 + BGM 全自动 → 客户端可出片工程；「现场同期声 × 后期旁白」双声道交替，区别于纯口播链与纯配音链 |
 
 > **skill 与命令的区别**：`/gtrk-mg` 是**脑**——懂它在 SOP 第 ⑤ 步（B-roll 三源全齐、构图核过才铺 MG）、带用户确认、按栏目配置解析该产哪种颗粒；`gtrk mg` 是**手**——纯确定性 lint + 铺轨。你对话触发 skill，skill 替你跑命令。
-> 上面 11 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装）——`/gtrk-long2short` 独立驱动长剪短，`/gtrk-transcript` 独立驱动视频/音频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，四者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
+> 上面 18 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装；名单与「给 AI Agent 用」一节、「结构」一节完全一致）——其中 🧭 标记的 7 张是**组合图纸**（一句话跑全链，只编排上面的单命令 skill、本身不新增命令）；`/gtrk-long2short` 独立驱动长剪短，`/gtrk-transcript` 独立驱动视频/音频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，四者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
 
 **各车道的具体视觉/内容怎么产**——MG 动态图长什么样、AI 再现什么调性——不写死在 CLI 里，而由**你自己栏目的生产 skill** 提供（用 `/gtrk-style-maker` 访谈式产出、留本地）。它们经**栏目配置 `style.skills[].produces`**（值 = 车道名）绑定，`gtrk mg` / `gtrk matrix` 等**通用驱动器**据此消费。**驱动方向 = CLI 驱动栏目 skill**：栏目 skill 只供风格/内容、不含任何「跑哪条命令」的编排职责；框架只认车道与管线接口，画面风格永远归你的栏目。不建栏目就用内置默认，端到端照常跑。
 
@@ -815,7 +822,7 @@ gtrk-cli/
 ├── src/index.ts              # commander 入口
 ├── src/commands/             # 子命令：install / init / oralcut / long2short / transcript / split / matrix / mg / project / audio / tool / render / doctor / upgrade / skills / …
 ├── src/lib/                  # cloud / column-config / splitdoc / projection / user-config / jianying / …
-├── skills/                   # 打包的框架 skills：oralcut / splitter / matrix / mg / ai-drama / style-maker / transcript / tools / music-visualizer / cover
+├── skills/                   # 打包的框架 skills（18 个，名单 = src/commands/skills.ts 的 SKILL_NAMES）：oralcut / long2short / splitter / matrix / mg / ai-drama / style-maker / transcript / tools / music-visualizer / cover / travel-recap / live-slicing / talking-head / narration / voiceover / food-recap / vlog-docu
 ├── contracts/                # 框架契约库正本（gsap-emit v1 + handoff→契约映射表）
 ├── assets/                   # README 配图（介绍图 / Agent 调用示例 / 剪映草稿目录指引图）
 └── AGENT.md                  # 可移植 agent playbook（skill 底座）

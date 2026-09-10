@@ -59,6 +59,8 @@ export const SKILL_NAMES = [
 	"gtrk-voiceover",
 	// 解说链垂类示例（add-food-recap-skill）：探店/密着/做饭流程 → 美食解说成片
 	"gtrk-food-recap",
+	// Vlog 纪实类组合图纸（add-vlog-docu-skill）：现场同期声 × 后期旁白双声道交替 → 纪实成片工程；主理人 2026-09-10 拍板入清单
+	"gtrk-vlog-docu",
 ] as const;
 
 export interface InstallSkillOptions {
