@@ -40,7 +40,26 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 **车道 → 栏目生产 skill 的解析（照此，别猜）**：读**有效栏目配置**的 `style.skills[]`（配置文件 `~/.gitruck/columns/<id>.json`；栏目 id 由 `--column <id>` 或 config `defaultColumn` 选取；零配置 = L0 内置默认栏目，**不携带 style 清单** → 必然走下方「无匹配」分支）。在 `style.skills[]` 里取 **`produces` 归一后（旧 `RRV_MG` → `MG`）等于 `MG`** 的条目 → 触发它 `ref` 指向的 skill 产颗粒。
 - 命中多条 → 按栏目约定取其一（一般栏目只登记一个 MG 生产 skill）。
 - 条目带 `routing:"none"`（管线外产物，如封面）→ 跳过，不当 MG 生产 skill。
-- **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺；告诉用户「本栏目还没有 MG 生产 skill，先用 `/gtrk-style-maker` 建一个，或换个已配置的栏目（`--column`）」。也可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene mg-explainer` 列第三方 MG 生产 skill，装完 `gtrk skills add <owner/repo> --produces MG` 登记即被本节解析到——本 skill 正文不点名任何仓。
+- **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺，给用户**三选一**（都不替他选）：
+  1. **建栏目**：`/gtrk-style-maker` 沉淀自己的 MG 生产 skill（一次性，长期资产）；
+  2. **换栏目**：`--column <id>` 指向已配置的栏目；
+  3. **用中性块**：Hyperframes registry 的中性颗粒骨架（`gtrk mg fetch`，见下节「中性块工作流」）——没建栏目也能当场出 MG，但**骨架不是成品**，内容与审美 MUST 改写。
+  另可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene mg-explainer` 列第三方 MG 生产 skill，装完 `gtrk skills add <owner/repo> --produces MG` 登记即被本节解析到——本 skill 正文不点名任何仓、不点名任何块。
+- **有匹配时中性块缺省不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物）时可**提议**「这一槽用中性块」，用户点头才用。
+
+## 中性块工作流（registry 骨架 → 改内容审美 → lint → 铺）
+
+> 快照随包（钉 commit，候选态离线可用）；取块走三源（我方镜像优先，大陆可达）并校 sha256；改写八条是机械活（template 包裹 / 改 id / 去 data-start 贴坑位 / 实心底下沉 / GSAP 源 / 字体 / 时长贴坑位 / 信箱缩放），**内容与审美不在机械活里**。
+
+逐槽位：
+
+1. **候选**：`gtrk mg fetch "<按 handoff.theme 与 beat 语义组的检索词>" --top 3 --json`（中文词可用：数据 / 图表 / 标题 / 字幕 / 转场 / 通知 / 代码 / 地图 / 手写 / 卡片 / 片头 …）。把 2–3 件候选连**海报链接**给用户选（**候选选择是检查点**，形状同 matrix 的 B-roll 候选）；快速成片模式取首选、铺完在抽帧检查里一并给用户看。`[review]` 件可选但 MUST 真渲验收（多为 canvas / 铁律 8 高危形态）；`[excluded]` 不在可取范围，命令会拒。
+2. **取块改写**：`gtrk mg fetch --pick <块名> --slot <beatId> --project <目录> --json`——从派单取 composition_id / 坑位包络 / category，产物直接落 `<产物目录>/mg/<composition_id>.html`。返回里的 `editable`（文案 / 数值数组 / 色值）就是你下一步要改的地方。
+3. **改内容与审美（你的活，MUST 做）**：按 beat 语义改文案与数据；色板与字体——有栏目 skill 按栏目的，没有按公约 §三「内容驱动的临场泛化」全片自洽一套；**MUST NOT 把块的示例文案 / 示例数据 / 默认色板原样铺进成片**。字体缺省已换成运行时镜像可证的 CJK 字体，要换用 `--font`。
+4. **lint → 铺**：`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`（与栏目产颗粒同门槛）。
+5. **竖屏工程**：契约当前只收 1920×1080 颗粒（lint 铁律 1），中性块不适用；提示用户走栏目 skill，MUST NOT 拉伸。
+
+独立模式（脱离派单补一颗）：`gtrk mg fetch --pick <块名> --as <composition_id> --duration <坑位秒> [--category overlay|fullscreen] [--out <目录>]`，随后同 `gtrk mg render` 的独立颗粒路。
 
 > **生产 skill 是栏目的纯净资产**：它只懂本栏目的视觉语法、只产 html-particle 颗粒，**不知道 gtrk 命令、不知道产物落哪**。由本 skill 驱动它、并**由本 skill 负责让它以 `gtrk mg` 要读的路径为写入路径**：颗粒 SHALL **直接写到** `<产物目录>/mg/<composition_id>.html`，MUST NOT 先写 agent 自有目录再拷入（中转本身即违规，见上「产物落点纪律」第 5 条）。举例（仅示意解析机制，非硬编）：`real-roam-guide` 栏目配置里 `style.skills` 有一条 `{produces:"MG", ref:"…/real-roam-viz"}` → 驱动它产颗粒；换个栏目、换个 ref，产颗粒的就是另一个生产 skill。**本 skill 正文里不绑死任何栏目的生产 skill。**
 

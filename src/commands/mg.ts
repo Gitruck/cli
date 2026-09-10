@@ -24,12 +24,15 @@ import { videoRateOf } from "../lib/gtrk-patch";
 import { r3 } from "../lib/frame-domain";
 import { lintParticle, parseCompositionId } from "../lib/mg-lint";
 import { isInsideDir } from "../lib/outdir-guard";
-import { renderParticle, CID_SHAPE } from "../lib/mg-render";
+import { renderParticle, CID_SHAPE, assertNotJianyingDraftDir } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
 import type { Dispatch, MgDispatch } from "../lib/splitdoc";
 import { reportReprojection, reprojectDispatchWindows, withTimecodeSource } from "../lib/reproject";
 import { reportMaterialIntegrity, safeCheckMaterialIntegrity } from "../lib/material-integrity";
 import { log, routeLogsToStderr } from "../lib/log";
+import { writeFile } from "node:fs/promises";
+import { adoptBlock, AdoptError, DEFAULT_FONT, PARTICLE_H, PARTICLE_W } from "../lib/mg-adopt";
+import { fetchBlockFile, findBlock, loadSnapshot, primaryFile, searchBlocks, type SnapshotItem } from "../lib/mg-registry";
 
 const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
 // 源目录双探（读旧兼容）：写侧 mg/，读侧并集 mg/ ∪ rrv/（既有工程零迁移）
@@ -51,6 +54,22 @@ interface MgOpts {
 	out?: string;
 	/** render 模式：跳过计费预估确认。 */
 	yes?: boolean;
+	/** fetch 模式（add-mg-registry-neutral-source）：取块并改写；缺省为候选态。 */
+	pick?: string;
+	/** fetch 候选态：列前 N 件（缺省 3）。 */
+	top?: string;
+	/** fetch 派单模式：目标 beat id（如 B03）或 composition_id；配 --project / --dispatch。 */
+	slot?: string;
+	/** fetch 独立模式：目标 composition_id（配 --duration）。 */
+	as?: string;
+	/** fetch：画布 WxH；契约当前只收 1920x1080，其余拒绝。 */
+	canvas?: string;
+	/** fetch：overlay / fullscreen；缺省按块底色推断（派单模式取派单 category）。 */
+	category?: string;
+	/** fetch：替换块内 font-family 的字体名；缺省为运行时镜像可证的 CJK 字体。 */
+	font?: string;
+	/** fetch：候选态也列 excluded 件（缺省只列 ok / review）。 */
+	all?: boolean;
 }
 
 export function registerMg(program: Command): void {
@@ -69,6 +88,14 @@ export function registerMg(program: Command): void {
 		.option("--format <fmt>", "render 模式产物格式：首发仅 qtrle（剪映可读透明 MOV；webm 剪映不吃、明确拒绝）")
 		.option("--out <dir>", "render 模式落盘目录（缺省 ./mg-render/<composition_id>/；绝不写剪映草稿目录）")
 		.option("--yes", "render 模式：跳过计费预估确认")
+		.option("--pick <name>", "fetch 模式：取 registry 块 <name> 改写成颗粒（缺省不给 = 候选态只列不取）")
+		.option("--top <n>", "fetch 候选态：列前 N 件（缺省 3）")
+		.option("--slot <beat>", "fetch 派单模式：目标 beat id（如 B03）——从 dispatch.mg 取 composition_id / 坑位包络 / category，产物落 <project>/mg/")
+		.option("--as <composition_id>", "fetch 独立模式：目标 composition_id（配 --duration），产物落 --out（缺省 ./mg-fetch/）")
+		.option("--canvas <WxH>", "fetch：画布尺寸；契约当前只收 1920x1080")
+		.option("--category <c>", "fetch：overlay / fullscreen（缺省派单值或按块底色推断）")
+		.option("--font <name>", "fetch：替换块内字体名（缺省运行时镜像可证的 CJK 字体）")
+		.option("--all", "fetch 候选态：连 excluded 件一起列")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MgOpts) => {
 			if (process.argv[2] === "rrv") log.warn("`gtrk rrv` 已更名为 `gtrk mg`（去品牌化），别名仍可用但建议改用 `gtrk mg`。");
@@ -83,6 +110,7 @@ export async function runMg(words: string[], opts: MgOpts): Promise<MgResult> {
 	if (sub === "lint") return runLint(words.slice(1), opts);
 	if (sub === "status") return runStatus(opts);
 	if (sub === "render") return runRender(words.slice(1), opts);
+	if (sub === "fetch") return runFetch(words.slice(1), opts);
 	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>`);
 	return runLay(opts);
 }
@@ -123,7 +151,7 @@ async function readMgQueue(dispatchPath: string): Promise<MgDispatch[]> {
 
 interface MgResult {
 	ok: boolean;
-	mode: "lay" | "lint" | "status";
+	mode: "lay" | "lint" | "status" | "fetch";
 	[k: string]: unknown;
 }
 
@@ -557,6 +585,152 @@ async function runStatus(opts: MgOpts): Promise<MgResult> {
 	log.step(`▶ MG 看板：${queue.length} beat · ${authored} 已产 · ${laid} 已铺`);
 	for (const r of rows) log.info(`${r.beat}（${r.composition_id}）→ ${r.state}`);
 	return done(opts, { ok: true, mode: "status", total: queue.length, authored, laid, rows });
+}
+
+/**
+ * fetch 模式（add-mg-registry-neutral-source）：registry 中性块 → 候选态（离线）/ 取块态（三源 + sha256 → 机械改写八条 → lint → 落盘）。
+ * 产物只落 `<project>/mg/<composition_id>.html`（派单模式）或 `--out`（独立模式，缺省 ./mg-fetch/）；lint 致命项不过 MUST NOT 落盘。
+ */
+async function runFetch(args: string[], opts: MgOpts): Promise<MgResult> {
+	const snap = loadSnapshot();
+	const query = args.join(" ").trim();
+	const top = Math.max(1, Number(opts.top ?? 3) || 3);
+	const pickName = opts.pick ?? (query && findBlock(query, snap) ? query : undefined);
+
+	// ── 候选态（零网络）──
+	if (!pickName) {
+		if (!query) {
+			throw new Error(
+				"用法：gtrk mg fetch <检索词|块名> [--top 3] [--all]（候选态）；取块：gtrk mg fetch --pick <块名> --slot <beat> --project <dir>，或 --pick <块名> --as <composition_id> --duration <sec> [--out <dir>]",
+			);
+		}
+		const cands = searchBlocks(query, snap, { top, includeExcluded: Boolean(opts.all) });
+		log.step(`▶ registry 候选：「${query}」→ ${cands.length} 件（快照 ${snap.source.snapshot_date} @ ${snap.source.commit.slice(0, 12)}，离线）`);
+		for (const c of cands) {
+			const it = c.item;
+			log.info(`${it.name}  ${it.title}  [${it.compat}]  ${it.duration ?? "?"}s  ${it.width}×${it.height}  tags=${it.tags.join(",")}`);
+			log.info(`   海报：${it.preview.poster ?? "-"}${it.preview.video ? `  视频：${it.preview.video}` : ""}`);
+			if (it.compat !== "ok") log.info(`   ⚠ ${it.compat_reasons.join("；")}`);
+		}
+		if (cands.length === 0) log.warn("无候选——换个检索词（中文可用：数据 / 图表 / 标题 / 字幕 / 转场 / 通知 / 代码 / 地图 / 手写 / 卡片 / 片头 …）");
+		return done(opts, {
+			ok: true,
+			mode: "fetch",
+			stage: "candidates",
+			query,
+			snapshot: snap.source,
+			candidates: cands.map((c) => ({
+				name: c.item.name,
+				title: c.item.title,
+				description: c.item.description,
+				compat: c.item.compat,
+				compat_reasons: c.item.compat_reasons,
+				duration: c.item.duration,
+				width: c.item.width,
+				height: c.item.height,
+				tags: c.item.tags,
+				preview: c.item.preview,
+				score: c.score,
+				hits: c.hits,
+			})),
+		});
+	}
+
+	// ── 取块态 ──
+	const item: SnapshotItem | undefined = findBlock(pickName, snap);
+	if (!item) throw new Error(`快照里没有块「${pickName}」（先用候选态检索：gtrk mg fetch <检索词>）`);
+	if (item.compat === "excluded") {
+		throw new Error(`块「${item.name}」被预筛排除，不在可取范围：${item.compat_reasons.join("；")}。要用请自行去 registry 取（那是你的选择，不经本命令）`);
+	}
+	if (item.compat === "review") log.warn(`块「${item.name}」标 review（${item.compat_reasons.join("；")}）——可取，但 MUST 真渲验收后再交付`);
+	if (opts.canvas) {
+		const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(opts.canvas.trim());
+		if (!m) throw new Error(`--canvas 格式应为 WxH：${opts.canvas}`);
+		if (Number(m[1]) !== PARTICLE_W || Number(m[2]) !== PARTICLE_H) {
+			throw new Error(`契约当前只收 ${PARTICLE_W}×${PARTICLE_H} 颗粒（lint 铁律 1）：竖屏 / 异形画布请走栏目 skill，或等契约开口；registry 中性块不适用`);
+		}
+	}
+	if (opts.category !== undefined && opts.category !== "overlay" && opts.category !== "fullscreen") {
+		throw new Error(`--category 只收 overlay / fullscreen：${opts.category}`);
+	}
+
+	let cid: string;
+	let slotSec: number;
+	let category: "overlay" | "fullscreen" | undefined = opts.category as "overlay" | "fullscreen" | undefined;
+	let outPath: string;
+	if (opts.slot) {
+		const { dispatchPath, baseDir } = resolveDispatch(opts);
+		const queue = await readMgQueue(dispatchPath);
+		const q = queue.find((x) => x.beat === opts.slot || x.composition_id === opts.slot);
+		if (!q) {
+			throw new Error(`派单里没有 beat「${opts.slot}」；现有：${[...new Set(queue.map((x) => x.beat))].slice(0, 12).join("、") || "（空）"}`);
+		}
+		cid = q.composition_id;
+		slotSec = r3(q.track_ed - q.track_st);
+		if (!(slotSec > 0)) throw new Error(`派单条目 ${cid} 的坑位包络非正（track_st=${q.track_st} track_ed=${q.track_ed}）`);
+		if (!category && typeof q.category === "string" && (q.category === "overlay" || q.category === "fullscreen")) category = q.category;
+		outPath = join(baseDir, "mg", `${cid}.html`);
+	} else {
+		if (!opts.as || !opts.duration) {
+			throw new Error("取块需指明落点：派单模式 --slot <beat> --project <dir>；独立模式 --as <composition_id> --duration <sec> [--out <dir>]");
+		}
+		cid = opts.as;
+		slotSec = Number(opts.duration);
+		if (!(slotSec > 0)) throw new Error(`--duration 必须为正数秒：${opts.duration}`);
+		const outDir = resolve(opts.out ?? "./mg-fetch");
+		assertNotJianyingDraftDir(outDir);
+		outPath = join(outDir, `${cid}.html`);
+	}
+
+	const file = primaryFile(item);
+	log.step(`▶ 取块 ${item.name}（${file.path}，${file.bytes} B，sha256 ${file.sha256.slice(0, 12)}…）`);
+	const got = await fetchBlockFile(snap, item, file);
+	for (const a of got.attempts) log.info(`[${a.id}] ${a.ok ? "✓" : "✗"} ${a.url}${a.reason ? `（${a.reason}）` : ""} ${a.ms}ms`);
+
+	let adopted;
+	try {
+		adopted = adoptBlock(got.html, {
+			compositionId: cid,
+			slotSec,
+			...(category ? { category } : {}),
+			font: opts.font ?? DEFAULT_FONT,
+			blockWidth: item.width,
+			blockHeight: item.height,
+			...(typeof item.duration === "number" ? { declaredDurationSec: item.duration } : {}),
+		});
+	} catch (e) {
+		if (e instanceof AdoptError) throw new Error(`改写失败（${e.reason}）：${e.message}`);
+		throw e;
+	}
+	log.step("▶ 机械改写");
+	for (const l of adopted.log) log.info(l);
+
+	const lint = lintParticle(adopted.html, { compositionId: cid, slotDuration: slotSec, category: adopted.category });
+	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
+	const base = {
+		mode: "fetch" as const,
+		stage: "adopted",
+		name: item.name,
+		compat: item.compat,
+		source: got.source,
+		url: got.url,
+		composition_id: cid,
+		slot_sec: slotSec,
+		category: adopted.category,
+		timing: adopted.timing,
+		editable: adopted.editable,
+		log: adopted.log,
+		lint: { ok: lint.ok, opaque: lint.opaque, violations: lint.violations },
+	};
+	if (!lint.ok) {
+		log.err(`lint 致命项未过（${lint.violations.filter((v) => v.fatal).length} 项），不落盘`);
+		return done(opts, { ...base, ok: false });
+	}
+	await mkdir(dirname(outPath), { recursive: true });
+	await writeFile(outPath, adopted.html, "utf8");
+	log.ok(`已落 ${outPath}（${adopted.category}；时长处置 ${adopted.timing.action}${adopted.timing.factor ? ` ×${adopted.timing.factor}` : ""}）`);
+	log.warn(`这是中性骨架：文案 ${adopted.editable.texts.length} 处 / 数值数组 ${adopted.editable.numberArrays.length} 处 / 色值 ${adopted.editable.colors.length} 个 MUST 按 beat 与栏目改写后再 lint、再铺，MUST NOT 原样铺`);
+	return done(opts, { ...base, ok: true, stage: "written", path: outPath });
 }
 
 function done(opts: MgOpts, result: MgResult): MgResult {
