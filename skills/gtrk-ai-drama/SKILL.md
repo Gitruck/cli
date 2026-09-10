@@ -208,7 +208,7 @@ face / hair / eyes / wardrobe / signature prop + do-not-change + one line on how
 > **中性 Style Lock**：影视级自然主义画面，真实可信的光源（窗光 / 实用光 / 自然天光，不炫技），克制稳定的镜头语言（固定或缓慢推拉摇，无手持抖动 / 无广告级动态运镜 / 无无人机炫技），近单色到低饱和的克制调色（不追 HDR、不追霓虹），胶片颗粒质感。忌塑料 3D 渲染、忌动漫二次元、忌过度戏剧化打光。
 > **EN**: Cinematic naturalism, believable practical light sources (window / practical / natural daylight, no showing off), restrained stable camera language (locked or slow dolly/pan/tilt, no handheld shake, no ad-grade dynamic moves, no drone stunts), near-monochrome to low-saturation restrained grade (no HDR, no neon), visible film grain. Avoid plastic 3D render, anime, and over-dramatic lighting.
 
-中性默认下**不设单点强调色 / 不指定影视导演锚点**（那些是栏目资产）。用完顺带提醒用户：**想要这条栏目有自己的 AI 再现视觉 DNA，去 `/gtrk-style-maker` 沉淀一套 AI_DRAMA 风格资产并登记进 `style.skills`**，之后每次生成都会自动注入。
+中性默认下**不设单点强调色 / 不指定影视导演锚点**（那些是栏目资产）。用完顺带提醒用户：**想要这条栏目有自己的 AI 再现视觉 DNA，去 `/gtrk-style-maker` 沉淀一套 AI_DRAMA 风格资产并登记进 `style.skills`**，之后每次生成都会自动注入。分镜稿与提示词层也可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene ai-drama`，装完用 `gtrk skills add <owner/repo>` 登记；本 skill 正文不点名任何仓。
 
 **禁忌行**（写进 ①）分两层：
 - **通用 AI slop 兜底（本 skill 自带，任何栏目都写）**：glossy 3D render / plastic skin、HDR look / oversaturated、generic AI anime / saccharine、deformed face / extra fingers / mutated limbs、text overlay / captions / 字幕（字幕剪辑阶段另做）、heavy lens flare / chromatic aberration、cartoon / low-res / unfinished。

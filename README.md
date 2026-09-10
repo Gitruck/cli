@@ -34,7 +34,7 @@
 | ⚙️ | `gtrk init` | 引导式一次性配置（API Key + 剪映草稿目录），之后免管 |
 | 🩺 | `gtrk doctor` | 体检：配置 / 云端连通 / 剪映目录 / 运行时一键自检 |
 | 📦 | `gtrk deps` | 运行时资产：`status` 查 ffmpeg/字体的来源与授权，`install` 从同合云镜像装（**须显式触发，绝不静默自动下载**） |
-| 🤖 | `gtrk skills install` | 通过通用 `skills` 适配器和 gtrk 补充层，把 14 个 CLI 自带 skill 装进本机检测到的主流 Agent；`--all` 可覆盖全部已登记宿主 |
+| 🤖 | `gtrk skills install` | 通过通用 `skills` 适配器和 gtrk 补充层，把 14 个 CLI 自带 skill 装进本机检测到的主流 Agent；`--all` 可覆盖全部已登记宿主；`gtrk skills recommend --scene <id>` 查第三方 skill 推荐目录（随包快照、不联网、只推荐不打包），`gtrk skills add <owner/repo>` 透传安装并登记进栏目配置 `style.skills` |
 | ⬆️ | `gtrk upgrade` | 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装 |
 | 🎞️ | `gtrk render` | 本地渲染 gtrk 工程（EDL）→ 成片 mp4（需 ffmpeg）；输出帧按时间线**累计对齐**（逐段取整误差不累加，画面不会对配音渐进失步）；渲完自动质检并落 `.qc.json`（`--no-qc` 跳过） |
 | 🔬 | `gtrk qc <成片>` | 成片质检：单趟扫全片查闪帧/黑帧/冻结/爆音/静音/音画不同步，带时码定位；`--gtrk <工程>` 开工程感知识别**段内跳切**，`--fail-on error\|warn\|never` 供管线门控 |
@@ -725,7 +725,9 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
   - 字体落 `~/.gitruck/fonts`，烧录时经 ffmpeg `ass` 滤镜的 `fontsdir` 供给——**不装进系统字体表、不写注册表、不要管理员权限**。
   - 分发的 ffmpeg 为 GPLv3 构建，对应源码与二进制同处提供（见分发点 `SOURCE.md`）；**下载不附加任何使用限制**。
 - `gtrk upgrade [--check]` — 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装。
-- `gtrk skills install [--agents codex,workbuddy,comate,…] [--all] [--copy] [--dir <skills 目录>]` — 单独安装/刷新 Agent Skills；缺省由通用适配器与 gtrk 补充层自动检测。
+- `gtrk skills install [--agents codex,workbuddy,comate,…] [--all] [--copy] [--dir <skills 目录>]` — 单独安装/刷新 Agent Skills；缺省由通用适配器与 gtrk 补充层自动检测。
+- `gtrk skills recommend [--scene <id>] [--json]` — 第三方 skill 推荐目录：不带 `--scene` 列九个场景（hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles），带场景按 tier 给条目（用途 / 安装命令 / 许可与依赖 / 登记命令）。**只推荐不打包**：目录随包分发、带快照日期、不联网不留痕；star 与许可以仓库页为准，装不装是你的选择。GPL / AGPL / 非商用 / 无许可证 / 只能经 MCP-SaaS 运行的不入目录。
+- `gtrk skills add <owner/repo> [--skill <name>]... [--produces MG|AI_DRAMA|FILM_BROLL|script|none] [--column <id>] [--agents ...] [--all] [--copy]` — 透传通用 `skills` 适配器安装第三方 skill，成功后把 `{id, ref: "<owner/repo>#<skill>", produces, status: "third-party"}` **追加**进栏目配置 `style.skills`（同 ref 幂等、失败不登记；`--produces` 缺省取目录值，目录外仓登记为 `routing:"none"`），之后 `gtrk mg` / `/gtrk-ai-drama` 按 `produces` 即可解析到它。
 
 ---
 

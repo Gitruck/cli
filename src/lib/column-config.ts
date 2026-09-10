@@ -9,7 +9,7 @@
  * 零配置 = 只评 L0（《实在界漫游指南》全套词表），split 链路行为与词表化前逐字节等价。
  */
 import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { gitruckHome } from "./paths";
 import { BASE_TRACKS, CONTAINER_STAGES, LANES, NARRATIVES } from "./splitdoc";
 
@@ -346,4 +346,69 @@ export function effectiveVocab(config: ColumnConfig): {
 		base_track: config.vocab?.base_track ?? [...BASE_TRACKS],
 		unknown_narrative: config.fallback?.unknown_narrative,
 	};
+}
+
+// ── 第三方 skill 登记（change add-third-party-skill-catalog）────────────────────────────
+
+export interface AppendStyleSkillResult {
+	/** 写入（或已存在）的栏目配置文件绝对路径。 */
+	path: string;
+	/** true = 本次追加了一条；false = 同 ref 已存在，一字未改。 */
+	appended: boolean;
+	/** 文件原不存在、本次按最小骨架新建。 */
+	created: boolean;
+}
+
+/**
+ * 把一条 skill 登记**追加**进本地栏目配置的 `style.skills`（column-style-manifest「不透明引用清单」射程内）。
+ *
+ * 纪律（spec「gtrk skills add SHALL 透传上游安装并把条目追加进栏目配置」）：
+ *  - **追加不清空**：读改写，其余键原样保留（JSON.parse/stringify 不重排键序）；
+ *  - **同 `ref` 幂等**：已存在则不重复追加、不改动原条目；
+ *  - 文件不存在 ⇒ 建最小骨架 `{ meta: { id }, style: { skills: [entry] } }`（与 style-maker §登记 同口径）；
+ *  - 文件存在但**损坏**（非 JSON 对象）⇒ 抛错、**不覆盖**——登记不能以毁掉用户栏目配置为代价；
+ *  - 框架零解析：只碰清单条目自身，MUST NOT 读 `ref` 指向的内容。
+ */
+export function appendStyleSkillEntry(
+	entry: StyleSkillEntry,
+	opts: { columnId: string; columnsDir?: string } = { columnId: "default" },
+): AppendStyleSkillResult {
+	if (!entry.ref || typeof entry.ref !== "string") throw new Error("登记条目缺 ref");
+	if (!entry.id || typeof entry.id !== "string") throw new Error("登记条目缺 id");
+	const dir = opts.columnsDir ?? columnsDir();
+	const path = join(dir, `${opts.columnId}.json`);
+	let root: Record<string, unknown>;
+	let created = false;
+	if (existsSync(path)) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(readFileSync(path, "utf8"));
+		} catch (e) {
+			throw new Error(`栏目配置损坏（JSON 解析失败），拒绝覆盖：${path}（${e instanceof Error ? e.message : String(e)}）`);
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error(`栏目配置格式异常（非 JSON 对象），拒绝覆盖：${path}`);
+		}
+		root = parsed as Record<string, unknown>;
+	} else {
+		root = { meta: { id: opts.columnId } };
+		created = true;
+	}
+	const styleRaw = root.style;
+	const style: Record<string, unknown> =
+		typeof styleRaw === "object" && styleRaw !== null && !Array.isArray(styleRaw)
+			? (styleRaw as Record<string, unknown>)
+			: {};
+	const skillsRaw = style.skills;
+	const skills: unknown[] = Array.isArray(skillsRaw) ? skillsRaw : [];
+	const exists = skills.some(
+		(s) => typeof s === "object" && s !== null && (s as { ref?: unknown }).ref === entry.ref,
+	);
+	if (exists) return { path, appended: false, created: false };
+	skills.push({ ...entry });
+	style.skills = skills;
+	root.style = style;
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+	return { path, appended: true, created };
 }
