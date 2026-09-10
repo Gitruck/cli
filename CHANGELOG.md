@@ -2,6 +2,15 @@
 
 ## 未发布
 
+### 枚举清单：校验取值改由服务端下发，服务端加一种样式不用等 CLI 发版（link-enum-catalog-cli）
+
+此前 `--subtitle-type` / `--subtitle-color` 的可选值被**抄在 CLI 本地常量**里：服务端新增一种字幕样式，CLI 会当场拒掉那个**合法值**；服务端临时下架一个能力，CLI 还在往外发。两种都不报错，只是行为不对。
+现在启动云端命令时向 `GET /catalog`（公开只读口）拉一份枚举清单，落 `~/.gitruck/catalog.json`：新鲜期 24 h 内**零网络**，过期走条件请求（304 只推进时刻、200 整体替换），拉不到就沿用旧快照并打**一行**降级提示。
+`--subtitle-type` / `--subtitle-color` / `gtrk oralcut` 的 `--lang` / `--preset` / `--formats` 都改按快照在**上传之前**校验并列出可用集；`gtrk tool list` 与直调按服务端下架名单标「暂停服务」并拒绝提交（**只降不升、且只在快照新鲜时生效**）。
+`gtrk doctor` 新增「枚举清单」行（版本 / 拉取时间 / 落点）与 `--refresh-catalog`。
+三条硬性质：① **拉不到 MUST NOT 让命令失败**——任何失败分支都放行，交服务端白名单裁决；② **`--help` 路径零网络**（注册期只读快照文件，有真进程 fetch 计数守卫）；③ 服务端白名单**恒为唯一真相源**，本地校验只是「早点告诉用户」，所以无快照是放行而不是拒绝。
+本地清单有可能比服务端旧 ⇒ 报错文案一并告知逃生口：`--refresh-catalog` 立刻刷新，`--param` 绕过本地校验。与 infra `add-enum-catalog-api` 联动（该端点 2026-09-10 已上生产）。
+
 ### `gtrk` 装完即可敲：install 自持全局副本 + Windows 用户级 PATH + doctor「命令可达」+ upgrade 沿自己的通道升级（add-gtrk-command-availability）
 
 此前 `npx @gitruck/cli@latest install`（官网默认路线、全套 `install.ps1` 第三步）只装 skill 与配置，**从不安装 gtrk 本体**——npx 跑完把包丢掉，新开终端敲 `gtrk` 不是命令；`npm i -g` 路线则要靠 npm 全局目录恰好在 PATH 上。
