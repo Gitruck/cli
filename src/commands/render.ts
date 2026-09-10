@@ -127,6 +127,8 @@ export function registerRender(program: Command): void {
 						// 「铺了颗粒却没叠进去」MUST 有机读通路，不能只靠人读日志。
 						particles: particles.summary,
 						overlay: result.overlay,
+						// 滤镜图规模（adjust-local-render-clip-ceiling）：clips 不含叠加元素
+						scale: result.scale,
 						...(qc ? { qc: qc.summary } : {}),
 					}),
 				);

@@ -38,7 +38,34 @@ const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_LAYOUT = "stereo";
 const DEFAULT_CRF = 18;
 const DEFAULT_AUDIO_CROSSFADE_MS = 8;
-const MAX_CLIPS = 500;
+/**
+ * 本地渲染的滤镜图规模自保闸（★ adjust-local-render-clip-ceiling，2026-09-10 拍板 2000）。
+ *
+ * 🔴 **与后端 `video_timeline_render.py` 的同名常量已不再同源，MUST NOT 为「对齐」改回 500。**
+ * 那个 500 是**云端多租户资源保护**（防单任务吃掉渲染机，API 层同步校验）；本地渲染没有多租户、
+ * 输入按路径去重（593 clip / 1 素材 = 1 个 `-i`），代价只是本机自己变慢、由本机用户自己承担。
+ * 沿用 500 等于把**别人机器的保护阈值**当成**自己机器的能力上限**——实测 45 分钟口播经
+ * `oralcut` 逐停顿切出 593 clip 就撞线，即给本地渲染判了「口播不得超过约 38 分钟」。
+ *
+ * **取值依据（2026-09-10 本机实测，台架见 change design D1）**——`-t 0.04` 只出 1 帧，
+ * 隔离出 ffmpeg 构建 filtergraph 的成本：
+ *
+ * | N(clip) | 滤镜链 | 初始化墙钟 | 峰值内存 |
+ * |---|---|---|---|
+ * | 500  | 1003  | 1.25 s   | 151 MB  |
+ * | 1000 | 2003  | 5.2 s    | 264 MB  |
+ * | 2000 | 4003  | 20.3 s   | 476 MB  |
+ * | 5000 | 10003 | 167.9 s  | 1138 MB |
+ *
+ * 时间近 **O(N²)**（N 翻倍墙钟 ×4 上下），内存线性约 0.23 MB/clip；且这只是**开渲之前**的等待。
+ * ⇒ 曾推荐的 5000 被自己的实测否掉（干等 2.8 分钟 + 1.1 GB）。2000 = 20 s / 476 MB，
+ * 慢得看得见但等得起，按 13 clip/分钟折算 ≈ 2.5 小时口播（45 min 口播只用掉 30%）。
+ * 要再调，**先重测上表**并把新读数写进来，MUST NOT 凭「听起来合理」改。
+ */
+const MAX_CLIPS = 2000;
+/** 规模告知阈值：超过即 INFO 一行。按**绝对成本**定档（不是「上限的百分比」——
+ *  相对量说不出用户要等多久）：1000 条起初始化已 5 秒往上，再往上是平方增长。 */
+const CLIP_SCALE_NOTICE = 1000;
 /** 母带收口（★ fix-render-bundled-clip-audio；口径原样取自客户端
  *  `gitruck-opencut-rewrite/.../audio-mastering.ts:1-6`——CLI 与客户端出同一工程须同响度，
  *  两套母带口径会让同一工程出两种听感）：−1 dBFS 限幅 + 2% 余量的总音量。
@@ -442,6 +469,10 @@ export function buildFilterGraph(
 	overlay: RenderOverlayInfo;
 	/** 成片视频流的最终标签：无叠加层时恒 `"vout"`（零回归），有叠加层时是收口后的新标签。 */
 	videoLabel: string;
+	/** 滤镜图规模（★ adjust-local-render-clip-ceiling）：`clips` = 计入闸值的 clip 总数
+	 *  （⚠️ **叠加元素不计入**，见 design D2——闸值与计数口径一次只动一个，保住可回滚性；
+	 *  叠加规模看 `overlay`）。`notice` = 是否已越过规模告知阈值。 */
+	scale: { clips: number; notice: boolean };
 } {
 	const fadeMs = Math.trunc(params.audio_crossfade_ms ?? DEFAULT_AUDIO_CROSSFADE_MS);
 	const fade = Math.max(fadeMs, 0) / 1000;
@@ -468,7 +499,17 @@ export function buildFilterGraph(
 		[mainVideoTrack, ...audioTracks].reduce((n, t) => n + (t.track_timeline?.length || 0), 0) +
 		// lane A 里**非主轨**那部分是新增的图规模（主轨的 clip 已在上面数过一遍）
 		laneAInputs.reduce((n, x) => n + (x.t === mainVideoTrack ? 0 : x.audible), 0);
-	if (totalClips > MAX_CLIPS) throw new Error(`clip 总数 ${totalClips} 超过上限 ${MAX_CLIPS}`);
+	// 超限话术三件事缺一不可（spec「本地渲染规模闸」）：这是**本机**的闸 / 当前多少 / 有哪些出路。
+	// MUST NOT 退回成一句干巴巴的「超过上限 N」——用户无从判断该改工程还是换机器。
+	if (totalClips > MAX_CLIPS) {
+		throw new Error(
+			`clip 总数 ${totalClips} 超过本地渲染上限 ${MAX_CLIPS}。` +
+				"这是 CLI 为**本机**滤镜图规模设的闸（不是云端限制，也不是工程有问题）——" +
+				`ffmpeg 构建滤镜图的耗时随 clip 数近平方增长，${MAX_CLIPS} 条时开渲前已要等约 20 秒。` +
+				"出路：① 用 `gtrk patch` 把工程拆成两段分别渲染后再拼；" +
+				"② 若这是正常形态，来提 issue（`gtrk feedback`），闸值可以按实测再调。",
+		);
+	}
 
 	const width = Math.trunc(gtrk.video_size[0]);
 	const height = Math.trunc(gtrk.video_size[1]);
@@ -733,7 +774,15 @@ export function buildFilterGraph(
 		);
 	}
 
-	return { inputs, graph: chains.join(";"), total, audio, overlay, videoLabel };
+	return {
+		inputs,
+		graph: chains.join(";"),
+		total,
+		audio,
+		overlay,
+		videoLabel,
+		scale: { clips: totalClips, notice: totalClips > CLIP_SCALE_NOTICE },
+	};
 }
 
 /** 从 gtrk.materials 建 {id: 本地绝对路径}。
@@ -856,6 +905,8 @@ export async function renderGtrk(
 	duration: number;
 	audio: RenderAudioInfo;
 	overlay: RenderOverlayInfo;
+	/** 滤镜图规模（★ adjust-local-render-clip-ceiling）：叠加元素不计入 `clips`。 */
+	scale: { clips: number; notice: boolean };
 }> {
 	const codec = opts.codec ?? "h264";
 	if (codec !== "h264") throw new Error(`v1 仅支持 h264，实际 ${codec}`);
@@ -867,7 +918,7 @@ export async function renderGtrk(
 	const { ffmpeg, ffprobe } = requireFfmpeg(opts.ffmpegPath);
 	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });
 	const materialHasAudio = probeEmbeddedAudio(ffprobe, gtrk, materialPaths);
-	const { inputs, graph, total, audio, overlay, videoLabel } = buildFilterGraph(gtrk, materialPaths, {
+	const { inputs, graph, total, audio, overlay, videoLabel, scale } = buildFilterGraph(gtrk, materialPaths, {
 		crf,
 		materialHasAudio,
 		...(opts.particlePaths ? { particlePaths: opts.particlePaths } : {}),
@@ -883,6 +934,17 @@ export async function renderGtrk(
 	} else {
 		log.info(
 			`音源：${audio.lanes} 条发声轨（视频内嵌音轨 ${audio.embeddedClips} 段 / 音频轨 ${audio.audioTrackClips} 段）`,
+		);
+	}
+
+	// ★ adjust-local-render-clip-ceiling：大工程在**开渲之前**要先等 ffmpeg 建滤镜图，
+	// 那段没有任何输出、极易被读成卡死（实测 1000 clip≈5s、2000≈20s，近平方增长）。
+	// 先开口说清「这段是正常的」，只给量级不给精确秒数——机器差异大，假精度不如说清性质。
+	if (scale.notice) {
+		log.info(
+			`本片 ${scale.clips} 个 clip` +
+				(overlay.layers > 0 ? ` + ${overlay.layers} 个叠加元素` : "") +
+				`：ffmpeg 构建滤镜图约需${scale.clips > 1500 ? "十几到几十秒" : "数秒"}（不是卡死），之后才开始渲。`,
 		);
 	}
 
@@ -917,7 +979,7 @@ export async function renderGtrk(
 		);
 		await runFfmpeg(ffmpeg, args, opts.onLine);
 		// 零音源同样照常产出、退出码 0（成片不因无声而失败）——诚实体现在上面的 INFO 与 audio.silent 上
-		return { outputPath, duration: total, audio, overlay };
+		return { outputPath, duration: total, audio, overlay, scale };
 	} finally {
 		await unlink(filterFile).catch(() => {});
 	}
