@@ -1662,6 +1662,7 @@ const videoLong2ShortPro: ToolDescriptor = {
 			renderProReport(clips, (out.report ?? {}) as Record<string, unknown>, {
 				source: ctx.inputAbs ?? ctx.baseName,
 				clipFiles: byIndex,
+				splitScreen: ctx.opts.splitScreen === true, // 请求态，与 buildPayload 的判据同源
 			}),
 			"utf8",
 		);

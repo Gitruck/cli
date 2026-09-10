@@ -177,6 +177,12 @@ export interface ProReportContext {
 	taskId?: string;
 	/** 逐条成片的落地文件名（按 clip 序），缺则该行不渲文件名。 */
 	clipFiles?: Array<string | undefined>;
+	/**
+	 * 分屏**请求态**（CLI 侧是否带了 `--split-screen`）；缺席则该行整行省略。
+	 * 只回显请求态：精剪 report 无 split_manifest，CLI 无从得知实际做了几处，
+	 * MUST NOT 用「无 split_screen 降级」反推「做了」（adjust-long2short-pro-split-screen-default）。
+	 */
+	splitScreen?: boolean;
 }
 
 /**
@@ -193,6 +199,10 @@ export function renderProReport(clips: ClipMeta[], report: ClipMeta, ctx: ProRep
 	out.push(`- 成片：${clips.length} 条`);
 	const jc = report?.jump_cut;
 	if (typeof jc === "boolean") out.push(`- 跳剪：${jc ? "开" : "关"}`);
+	// 分屏由 skill 层开工问询决定、agent 代用户带 flag——用户拿到自己没亲手要过的分屏画面，报告必须说
+	if (typeof ctx.splitScreen === "boolean") {
+		out.push(ctx.splitScreen ? "- 分屏：开（只对多人同框段生效，单人素材通常无分屏画面）" : "- 分屏：关");
+	}
 	if (ctx.taskId) out.push(`- task_id：\`${ctx.taskId}\``);
 	out.push("");
 
