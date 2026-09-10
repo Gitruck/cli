@@ -329,6 +329,21 @@ gtrk init --api-key <KEY> --jianying-draft-dir auto -y
 ✅ 剪映草稿目录：C:\Users\…\com.lveditor.draft
 ```
 
+### 枚举清单（`--refresh-catalog`）
+
+`gtrk doctor` 里有一行「枚举清单」：CLI 从服务端拉一份**对外枚举的全集**（字幕样式与颜色、语种码、
+工程文件格式、节奏预设、任务可用性等），落在 `~/.gitruck/catalog.json`，24 小时自动刷新。
+
+有了它，`--subtitle-type` 这类参数传错时**在上传之前**就告诉你，并列出当前可用值；
+服务端新增一种样式，你不必升级 CLI 就能用上。
+
+```bash
+gtrk doctor --refresh-catalog          # 立刻重拉（无视 24 小时新鲜期）
+```
+
+**拉不到清单不影响使用**：CLI 会沿用上一次的快照；完全没有快照时**跳过本地校验、直接提交**，
+由服务端裁决——服务端白名单永远是唯一真相源。要彻底关掉这次拉取，设 `GITRUCK_CATALOG_OFFLINE=1`。
+
 ### 崩溃报告与关闭方式
 
 gtrk 崩溃时（未捕获异常 / 未处理的 Promise 拒绝 / 顶层出口的程序缺陷）会自动上报一条报告，帮我们定位缺陷。**默认开启，首次配置时会告知一次。**

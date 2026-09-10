@@ -13,6 +13,7 @@ import { dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
 import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, probeGeometry } from "./media";
 import { renderProReport } from "./clip-brief";
+import { assertEnum, catalogEnumSync } from "./enum-catalog";
 
 // ---------------------------------------------------------------- 类型
 
@@ -1225,8 +1226,16 @@ export const IMAGE_TO_LIVE_FORMATS = new Set(["mp4", "motion_photo"]);
 
 /** image_to_live —— 智能 LivePhoto（图 → 约 4 秒短视频，或直出安卓动态照片）。
  *  2026-08-05 曾因上游供给停摆回收（adjust-gate-image-to-live），换供应商后经
- *  restore-tool-image-to-live 翻回启用态；服务端门控须先解除，否则直调会拿 6029/503。
- *  2026-08-26 经 link-image-to-live-motion-photo-cli 接上服务端既有的 output_format 交付格式。 */
+ *  restore-tool-image-to-live 翻回启用态。
+ *  2026-08-26 经 link-image-to-live-motion-photo-cli 接上服务端既有的 output_format 交付格式。
+ *
+ *  ⟲ **2026-09-10（link-enum-catalog-cli §2.5）：这里原先写着「服务端门控须先解除，
+ *  否则直调会拿 6029/503」——那条纪律要求两仓各改一处、且顺序不能错。现在不必了。**
+ *  可用性由服务端下发的枚举清单（`task_availability.offline`）**覆盖**：
+ *  服务端下架一个 task_type，CLI 拉到新清单就自动在上传前拦住并说明理由，
+ *  **无需 CLI 发版**。本 `enabled` 字段只表示「本版 CLI 认不认识这个工具」，
+ *  **不再**承担「服务端此刻可不可用」——后者恒以清单为准，且**只降不升**
+ *  （清单说下架就拦；清单没说、或压根没清单，一律照常放行交服务端裁决）。 */
 const imageToLive: ToolDescriptor = {
 	name: "image_to_live",
 	title: "智能 LivePhoto",
@@ -1282,10 +1291,21 @@ const imageToLive: ToolDescriptor = {
 
 // ---------------------------------------------------------------- 智能字幕识别（add-tool-video-ai-subtitle）
 
-/** 服务端 subtitle_type 样式枚举（7 种小稳集，bundle 校验；--param 可绕过作前向兼容逃生）。 */
-const AI_SUBTITLE_TYPES = ["default", "outline", "cinema_yellow", "immersive_box", "wide_spacing", "deep_shadow", "boxed"];
-/** 服务端 subtitle_color 颜色枚举（11 种）。 */
-const AI_SUBTITLE_COLORS = ["雅黑", "淡绿", "森林绿", "湖蓝", "道奇蓝", "钢蓝", "浅粉红", "深橙", "珊瑚橙", "橙红", "土豪金"];
+/**
+ * 帮助文案里的枚举渲染（change `link-enum-catalog-cli` §2.2）。
+ *
+ * ⟲ 这里原先是两个**硬编码常量** `AI_SUBTITLE_TYPES` / `AI_SUBTITLE_COLORS`。
+ * 服务端加一种样式，CLI 不发版就当场拒绝那个合法值——而两边都不报错，只是行为不对。
+ * 现在改读服务端下发的枚举清单快照。
+ *
+ * ⚠️ **注册期零网络**（`link-enum-catalog-cli` 红线②）：命令注册在**每次进程启动**都会跑，
+ * 在这里发请求等于给每一条命令（包括 `--help`）加一次往返。故只读盘上快照，
+ * 没有快照就退回一句不许诺具体取值的兜底文案。
+ */
+function enumHint(key: Parameters<typeof catalogEnumSync>[0], prefix: string, tail: string): string {
+	const vals = catalogEnumSync(key);
+	return vals ? `${prefix}：${vals.join("/")}（${tail}）` : `${prefix}：取值以服务端为准，\`gtrk doctor\` 可查当前清单（${tail}）`;
+}
 
 /**
  * video_ai_subtitle —— 智能字幕识别（原名「智能视频字幕」）。一进多出的混合能力：
@@ -1312,8 +1332,8 @@ const videoAiSubtitle: ToolDescriptor = {
 		{ flag: "--translate-language <code>", desc: "译文目标语种（未传则单语）" },
 		{ flag: "--need-render", desc: "把字幕烧录进视频（仅视频输入有效）" },
 		{ flag: "--need-pure", desc: "先去除原视频中的字幕" },
-		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（未传则用服务端默认）` },
-		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（未传则用服务端默认）` },
+		{ flag: "--subtitle-type <style>", desc: enumHint("subtitle.styles", "字幕样式", "未传则用服务端默认") },
+		{ flag: "--subtitle-color <color>", desc: enumHint("subtitle.colors", "字幕颜色", "未传则用服务端默认") },
 	],
 	/**
 	 * 默认只传抽出音频（毛片永不上传，对齐 oralcut / long2short）：字幕主产物是 .ass 文本，画面对
@@ -1354,12 +1374,12 @@ const videoAiSubtitle: ToolDescriptor = {
 		if (ctx.opts.needPure === true) payload.need_pure = true;
 		if (ctx.opts.subtitleType != null) {
 			const v = String(ctx.opts.subtitleType);
-			if (!AI_SUBTITLE_TYPES.includes(v)) throw new Error(`--subtitle-type 只支持 ${AI_SUBTITLE_TYPES.join("、")}`);
+			assertEnum("subtitle.styles", "--subtitle-type", v);
 			payload.subtitle_type = v;
 		}
 		if (ctx.opts.subtitleColor != null) {
 			const v = String(ctx.opts.subtitleColor);
-			if (!AI_SUBTITLE_COLORS.includes(v)) throw new Error(`--subtitle-color 只支持 ${AI_SUBTITLE_COLORS.join("、")}`);
+			assertEnum("subtitle.colors", "--subtitle-color", v);
 			payload.subtitle_color = v;
 		}
 		return payload;
@@ -1458,8 +1478,8 @@ const subtitleTranslate: ToolDescriptor = {
 			desc: `翻译粒度 ${SUBTITLE_LINE_MODES.join("/")}（缺省 resegment：先合并回自然句再翻，更通顺但行数与时码会变；keep 严格逐行、时码与输入逐条一致）`,
 		},
 		{ flag: "--bilingual", desc: "输出双语字幕（原文与译文同框；仅 ass 输出有效）" },
-		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（仅 ass 输出有效）` },
-		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（仅 ass 输出有效）` },
+		{ flag: "--subtitle-type <style>", desc: enumHint("subtitle.styles", "字幕样式", "仅 ass 输出有效") },
+		{ flag: "--subtitle-color <color>", desc: enumHint("subtitle.colors", "字幕颜色", "仅 ass 输出有效") },
 		{
 			flag: "--canvas <WxH>",
 			desc: "画布几何，决定译文按哪一档折行（未传则：.ass 用文件里的 PlayRes，.srt 无从推断、服务端按横屏 1920x1080）。竖屏务必显式传",
@@ -1500,12 +1520,12 @@ const subtitleTranslate: ToolDescriptor = {
 		if (ctx.opts.bilingual === true) payload.lingual_type = "bilingual";
 		if (ctx.opts.subtitleType != null) {
 			const v = String(ctx.opts.subtitleType);
-			if (!AI_SUBTITLE_TYPES.includes(v)) throw new Error(`--subtitle-type 只支持 ${AI_SUBTITLE_TYPES.join("、")}`);
+			assertEnum("subtitle.styles", "--subtitle-type", v);
 			payload.subtitle_type = v;
 		}
 		if (ctx.opts.subtitleColor != null) {
 			const v = String(ctx.opts.subtitleColor);
-			if (!AI_SUBTITLE_COLORS.includes(v)) throw new Error(`--subtitle-color 只支持 ${AI_SUBTITLE_COLORS.join("、")}`);
+			assertEnum("subtitle.colors", "--subtitle-color", v);
 			payload.subtitle_color = v;
 		}
 		if (ctx.opts.canvas != null) {

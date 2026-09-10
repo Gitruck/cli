@@ -421,6 +421,18 @@ gtrk oralcut "D:/素材/某条.mp4" --params-json '{"punctuation_breaks":{"。":
 | 任务很久不动 | 轮询有 30min 墙钟上限；超时 CLI 会报，稍后重试或查云端任务 |
 | 结果 JSON / 报告丢了（stdout 没接住、进程崩了） | 别重跑 → 读产物目录 `result.json`，或 `gtrk oralcut-result <taskId> --out <目录> --json` 按 task_id 取回 |
 | 想换机器再拉产物 / 补渲成片 | `gtrk oralcut-result <taskId> --out <目录> [--render]`（须同账号 key；产物约 60 天有效，过期仍可取报告） |
+| 报「`--subtitle-type` 只支持 …」但你确信服务端支持 | 本地枚举快照旧了 → `gtrk doctor --refresh-catalog` 刷一次；急用可加 `--param subtitle_type=<值>` 绕过本地校验 |
+| 报「已被服务端临时下架」 | 该 task_type 真的停了（提交会拿 6029）。恢复后 `--refresh-catalog` 即可，**无需升级 CLI** |
+
+### 枚举校验的口径（agent MUST 知道）
+
+枚举取值（字幕样式/颜色、语种码、工程格式、节奏预设、任务可用性）由**服务端下发的清单**裁定，
+CLI 只在本地存一份快照（`~/.gitruck/catalog.json`，24h 自动刷新）用来**提前报错**。
+
+- **本地无快照 ⇒ 放行**，直接提交交服务端裁决。**「CLI 没拦」不等于「值合法」。**
+- **本地拦了 ⇒ 报错里已经列出可用集**，直接照着改，别去翻文档。
+- 服务端加了新值而本地还没刷到 ⇒ `gtrk doctor --refresh-catalog`。
+- `GITRUCK_CATALOG_OFFLINE=1` 可彻底关掉拉取（离线环境用）。
 
 ---
 

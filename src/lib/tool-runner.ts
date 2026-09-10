@@ -523,8 +523,16 @@ export async function runCloudTool(
 	// 防撞射程与 resolveOutDir 的三支一一对应：只有「无输入文件 + 无 --out」那支是秒级时间戳候选名。
 	const antiCollision = !opts.out && !inputAbs;
 
-	// ①b 多文件必填参数前置干跑：payload 纯函数跑一遍占位 id，缺参（如 --main-title）在上传前即报错
-	if (isMulti) descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
+	// ①b 必填参数与枚举校验的**前置干跑**：payload 是纯函数，拿占位 id 先跑一遍，
+	// 缺参（如 --main-title）与传错枚举（--subtitle-type…）在**上传之前**就报错。
+	// ⟲ 单输入那支是 link-enum-catalog-cli §2.1 补的：此前只有多文件干跑，
+	//    而单输入工具的 buildPayload 跑在 submit 里、也就是**上传之后** ——
+	//    传错一个字幕样式要等几百 MB 传完才失败，正是本 change 要治的体验。
+	if (isMulti) {
+		descriptor.buildPayloadMulti!(inputList!.map(() => "__dry_run__"), ctx);
+	} else if (descriptor.kind === "cloud" && descriptor.buildPayload) {
+		descriptor.buildPayload("__dry_run__", ctx);
+	}
 
 	// ②b 零上传直提交（none + buildPayloadNone，add-tool-audio-tts-clone）：纯参数任务无上传物
 	const isNoneDirect = descriptor.input.kind === "none" && !!descriptor.buildPayloadNone;

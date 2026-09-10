@@ -334,6 +334,24 @@ Run `gtrk doctor` any time for a self-check:
 ✅ 剪映草稿目录：C:\Users\…\com.lveditor.draft
 ```
 
+### Enum catalog (`--refresh-catalog`)
+
+`gtrk doctor` shows an “enum catalog” row: the CLI fetches the **complete set of public enum values**
+from the server (subtitle styles and colours, language codes, project formats, rhythm presets,
+task availability, …), stores it at `~/.gitruck/catalog.json`, and refreshes it every 24 hours.
+
+With it, a bad `--subtitle-type` is rejected **before the upload starts**, with the currently valid
+values listed. When the server adds a new style, you get it without upgrading the CLI.
+
+```bash
+gtrk doctor --refresh-catalog          # refetch now, ignoring the 24h freshness window
+```
+
+**Failing to fetch it never blocks you**: the CLI falls back to the last snapshot; with no snapshot at
+all it **skips local validation and submits anyway**, letting the server decide — the server-side
+whitelist is always the single source of truth. Set `GITRUCK_CATALOG_OFFLINE=1` to disable the fetch
+entirely.
+
 ### Crash reports, and how to turn them off
 
 When gtrk crashes (uncaught exception / unhandled promise rejection / a program defect reaching the top-level exit) it automatically sends one report so we can locate the defect. **On by default; you are told once, when you first configure the CLI.**

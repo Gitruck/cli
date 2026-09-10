@@ -14,14 +14,24 @@ import { skillFreshnessDoctorRow } from "../lib/skill-freshness";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 import { commandReachDoctorRow } from "../lib/self-install";
 import { crashSwitchState, CRASH_REPORT_ENV } from "../lib/crash-report";
+import { catalogSnapshotPath, primeCatalog, readSnapshot as readCatalogSnapshot } from "../lib/enum-catalog";
 
 export function registerDoctor(program: Command): void {
 	program
 		.command("doctor")
 		.description("体检：配置 / 云端连通 / 剪映目录 / 运行时是否就绪")
-		.action(async () => {
-			await runDoctor();
+		.option("--refresh-catalog", "强制重拉服务端枚举清单（无视 24h 新鲜期）")
+		.action(async (opts: { refreshCatalog?: boolean }) => {
+			await runDoctor({ refreshCatalog: opts.refreshCatalog === true });
 		});
+}
+
+/** 快照年龄的人读化。只给量级——精确到分钟对排障没有增量价值。 */
+function catalogAge(ms: number): string {
+	const h = Math.floor(ms / 3_600_000);
+	if (h < 1) return "不到 1 小时";
+	if (h < 48) return `${h} 小时`;
+	return `${Math.floor(h / 24)} 天`;
 }
 
 type Status = "ok" | "warn" | "fail";
@@ -33,7 +43,7 @@ interface Row {
 	detail: string;
 }
 
-export async function runDoctor(): Promise<boolean> {
+export async function runDoctor(opts: { refreshCatalog?: boolean } = {}): Promise<boolean> {
 	const rows: Row[] = [];
 
 	// 后台查最新版（与下面的云端连通检查并行，不额外拖慢体检）
@@ -114,6 +124,19 @@ export async function runDoctor(): Promise<boolean> {
 		detail: col
 			? `${col}${colFile && existsSync(colFile) ? `（${colFile}）` : `（⚠ 配置文件缺失：${colFile}，将回落内置默认）`}`
 			: "内置默认 —— 想建自己栏目的风格体系，跑 /gtrk-style-maker（不建也能直接用默认）",
+	});
+
+	// 枚举清单（link-enum-catalog-cli §2.6）：三态如实呈现，**恒 ok 不挡路**。
+	// ⚠️ 拿不到清单**不是故障**——那条路径上 CLI 会跳过本地枚举校验、直接交服务端裁决，
+	// 功能完全可用，只是少了「上传前就告诉你传错了」这一层。判 fail 会误导用户去修一个不存在的问题。
+	await primeCatalog(opts.refreshCatalog ? { refresh: true } : {});
+	const catalogSnap = readCatalogSnapshot();
+	rows.push({
+		name: "枚举清单",
+		status: "ok",
+		detail: catalogSnap
+			? `v${catalogSnap.catalog_version.slice(0, 8)}｜${catalogAge(Date.now() - catalogSnap.fetched_at)}前拉取｜${catalogSnapshotPath()}`
+			: "无快照 —— 本地跳过枚举校验，取值由服务端裁决（联网后自动拉；`--refresh-catalog` 可立刻拉）",
 	});
 
 	// 崩溃自动上报（link-client-error-report-cli）：三态如实呈现，**恒 ok 不挡路**——

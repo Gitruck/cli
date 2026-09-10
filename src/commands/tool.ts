@@ -24,6 +24,7 @@ import {
 import { runCloudTool, downloadStream, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
 import { runMad, type MadOpts } from "../lib/mad/mad";
 import { currentVersion } from "../lib/version";
+import { isTaskTypeOffline, primeCatalog } from "../lib/enum-catalog";
 import {
 	fetchToolPrices,
 	resolveToolPricingFromMap,
@@ -118,8 +119,13 @@ export async function runList(
 	} catch {
 		prices = undefined;
 	}
+	// 枚举清单（link-enum-catalog-cli §2.4）：把服务端的**临时下架**状态叠上来。
+	// ⚠️ 只降不升——清单说下架就标暂停；清单没说、或压根没清单，一律沿用 descriptor.enabled。
+	// list 本来就是联网子模式（上面刚查过实时价格），这里顺带刷清单不新增往返性质。
+	await primeCatalog();
 	const rows = registry.map((d) => {
 		const resolved = resolveToolPricingFromMap(d.priceKey ?? d.name, prices, d.pricingContext);
+		const offline = !!d.taskType && isTaskTypeOffline(d.taskType);
 		return {
 		name: d.name,
 		title: d.title,
@@ -127,8 +133,13 @@ export async function runList(
 		output: d.outputHint,
 		billingHint: resolved.billingHint,
 		pricing: resolved.pricing,
-		enabled: d.enabled,
-		...(d.disabledReason ? { disabledReason: d.disabledReason } : {}),
+		enabled: d.enabled && !offline,
+		...(offline ? { offline: true as const } : {}),
+		...(offline
+			? { disabledReason: "服务端已临时下架（枚举清单 task_availability.offline）" }
+			: d.disabledReason
+				? { disabledReason: d.disabledReason }
+				: {}),
 		};
 	});
 	if (opts.json) {
@@ -137,7 +148,11 @@ export async function runList(
 	}
 	log.step("▶ gtrk 工具族（gtrk tool <name> [input]）：");
 	for (const r of rows) {
-		const status = r.enabled ? "已上线" : `未开放（${r.disabledReason ?? "无原因"}）`;
+		const status = r.enabled
+			? "已上线"
+			: "offline" in r && r.offline
+				? "暂停服务（服务端下架）"
+				: `未开放（${r.disabledReason ?? "无原因"}）`;
 		log.info(`${r.name} — ${r.title}｜输入 ${r.input}｜产物 ${r.output}｜${r.billingHint}｜${status}`);
 	}
 	log.info("agent 一律带 --json；缺 API Key 先跑 `gtrk init`；跑前把计费提示转述给用户。");
@@ -153,6 +168,20 @@ async function runTool(
 	// gated 门：直调即报错，零上传零提交零网络（先于 loadConfig）
 	if (!descriptor.enabled) {
 		throw new Error(`能力未开放：${descriptor.disabledReason ?? "（未提供原因）"}（用 gtrk tool list 查看全部工具）`);
+	}
+	// 枚举清单预热（link-enum-catalog-cli §1.2 / §2.4）：**只对云端工具**做，本地工具零网络。
+	// 预热之后：① 下面的下架门读到的是本次结果而非陈旧快照；
+	//           ② buildPayload（同步函数，没法 await）里的 assertEnum 读进程内缓存。
+	// 拉不到不阻断——getCatalog 任何分支都不抛，拿不到就放行交服务端裁决。
+	if (descriptor.kind !== "local") await primeCatalog();
+	// 服务端临时下架门（link-enum-catalog-cli §2.4）：**上传之前**拒，并给出服务端侧的理由。
+	// ⚠️ 与上面那道 `enabled` 门是两件事：那道是「本版 CLI 认不认识」，这道是「服务端此刻收不收」。
+	// 只降不升，且只在快照新鲜时生效（陈旧快照拦一个早已恢复的类型，比不拦更糟）。
+	if (descriptor.kind !== "local" && descriptor.taskType && isTaskTypeOffline(descriptor.taskType)) {
+		throw new Error(
+			`「${descriptor.title}」已被服务端临时下架，现在提交会拿 6029。` +
+				"恢复上架后 `gtrk doctor --refresh-catalog` 刷一次清单即可（无需升级 CLI）。",
+		);
 	}
 	if (descriptor.kind === "local") {
 		// local 型分派到工具自己的 handler（add-tool-mad D8 认可的族扩展：mad = 族内复杂度上限标尺）

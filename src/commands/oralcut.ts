@@ -26,6 +26,7 @@ import {
 	sourceRateInfo,
 } from "../lib/media";
 import { materializeResult } from "../lib/materialize";
+import { assertEnum, assertEnumIn } from "../lib/enum-catalog";
 import { log, routeLogsToStderr } from "../lib/log";
 import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
 
@@ -177,6 +178,7 @@ export async function runOralCut(
 
 	const projName = basename(inputAbs, extname(inputAbs));
 	const formats = opts.formats.split(",").map((s) => s.trim()).filter(Boolean);
+
 	// 本地渲染需要 gtrk EDL；用户没显式要 gtrk 也补上（否则无从渲染）
 	if (opts.render && !formats.includes("gtrk")) formats.push("gtrk");
 	const wantJianying = formats.some((f) => f === "jianying" || f === "capcut");
@@ -226,7 +228,22 @@ export async function runOralCut(
 	//   本地此刻已经知道时长，没有理由先花几分钟转码、再传几百 MB 才让服务端说不行。
 	assertWithinMediaDurationLimit(geo.duration, DURATION_LIMIT_HINT);
 
-	// ①b 落点可写性闸 Gate A（add-artifact-landing-gate · 裁决 D5）——MUST 排在抽取/上传/提交之前：
+	// ①b 枚举清单校验（link-enum-catalog-cli §2.3）——MUST 排在抽取/上传/提交之前：
+	//   别让用户压完 720p、传完几百 MB，才被服务端告知 `--preset` 是个拼写错误。
+	//
+	// ⚠️ **排在落点闸之前是刻意的**：落点闸是**交互式**的（写不进去就阻塞、拉用户去改目录），
+	//   而本处三行是纯本地、零成本、微秒级。先让用户改完目录、再告诉他参数拼错了，是更差的顺序。
+	//   两者都在抽取/上传之前，所以谁先谁后不产生任何实际开销差——只差在打扰用户的次数。
+	// ⚠️ **本处不 `primeCatalog`（不联网）**：oralcut 的失败路径 MUST NOT 依赖网络。
+	//   校验读的是盘上快照——它由 `gtrk doctor`（`gtrk init` 末尾就会跑一次）与
+	//   任一 `gtrk tool` 顺带刷新。没有快照 ⇒ 放行，交服务端裁决（fail-open 是本件的既定口径）。
+	// ⚠️ `--formats` 的**默认值** `gtrk,jianying,xml` 是产品决定不是枚举，本处不动它，只校验取值。
+	if (opts.lang != null) assertEnum("subtitle.languages", "--lang", String(opts.lang).trim());
+	assertEnum("oral_cut.rhythm_presets", "--preset", String(opts.preset));
+	// 并集校验：服务端**同时接受** aliases 里的旧细粒度值（jianying_draft 等），只按 public 判会误拒。
+	for (const f of formats) assertEnumIn(["project_formats.public", "project_formats.aliases"], "--formats", f);
+
+	// ①c 落点可写性闸 Gate A（add-artifact-landing-gate · 裁决 D5）——MUST 排在抽取/上传/提交之前：
 	//   此刻 outDir 与 draftDir 都已解析，且零抽取、零上传、零提交、零计费。
 	//   排在时长硬闸**之后**，是为了不让一个注定被 2h 上限拒掉的跑批先去打扰用户等待。
 	//   写不进去 ⇒ 阻塞拉用户处理到可写为止（非交互当场硬失败），MUST NOT 静默改投别的目录。
