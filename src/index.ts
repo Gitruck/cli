@@ -50,6 +50,7 @@ import { registerAudio } from "./commands/audio";
 import { registerSubtitle } from "./commands/subtitle";
 import { registerFeedback } from "./commands/feedback";
 import { registerAiDrama } from "./commands/ai-drama";
+import { registerPip } from "./commands/pip";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -128,6 +129,7 @@ registerAudio(program); // 音频轨零件：gtrk audio lay 往 .gtrk 追加 aud
 registerSubtitle(program); // 字幕零件：gtrk subtitle lay 把 transcript 投影成客户端契约字幕写进 cve text lane（快速成片直接带字幕）
 registerFeedback(program); // 用户摩擦上报：gtrk feedback <话> —— 告知式提交，非 TTY 且未声明已告知时拒绝上报（-y 不构成豁免）
 registerAiDrama(program); // AI Drama Desk return-v1 导出包 → 独立 AI video_track（纯本地、零计费）
+registerPip(program); // 双源画中画：gtrk pip lay 把口播粗剪切点镜像到同步录的屏录 / 第二机位，铺满幅轨 + 人像画中画副本轨（纯本地、零计费）
 
 // 顶层出口。⚠️ 三件事的**次序是契约**（change link-client-error-report-cli，design D2）：
 //   ① 先上报（最长 2 s 硬超时，只对判为「崩溃」的错误真发；其余立即 resolve）

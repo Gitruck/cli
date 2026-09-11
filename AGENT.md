@@ -347,6 +347,25 @@ gtrk patch set   --project <dir> --total max               # 改顶层总长（�
 
 ---
 
+## 2.5 双源画中画：`gtrk pip lay`（屏录 / 第二机位 · 纯本地零计费）
+
+讲软件 / 讲代码的口播多是**两条文件同步录**（屏幕一条、人像一条）。`oralcut` 只剪人像；本命令把粗剪的**每个切点镜像到屏录**，
+铺「屏录满幅轨（N+1，静音）+ 人像画中画副本轨（N+2，静音、带 `clip_transform` / `border_radius` / `clip_mask`）」，主轨与音轨**逐字节不动**。
+
+```bash
+gtrk pip lay --project <口播工程目录> --companion <屏录.mp4> [--shape ellipse|rectangle|heart|diamond|star|none] [--feather 10] [--border-radius 24] [--anchor bottom-right] [--scale 0.28] [--margin 40] [--offset <秒>] [--dry-run] [--json]
+```
+
+- **三分支偏移**：缺省互相关自动对齐（人像为参考、屏录为待对齐，阈值沿 `audio align`）；置信度不足 → 产 `<屏录名>_pip_align.gtrk` 让用户在客户端把「伴随源」轨拖齐后 `--resume <该工程>`；`--offset <秒>` 跳过检测。
+  偏移口径全库统一：正 = 屏录晚开录（`clip_st' = clip_st − offset`）。**屏录 MUST 带麦克风音轨**才能自动对齐，无音轨只剩后两条路——开工时就要提醒用户。
+- **钳位与留空**：屏录比人像短 / 晚开录 ⇒ 对应 beat 留空或只铺可用部分，回执逐颗点名毫秒数；MUST NOT 拉伸或变速。成片该段只见人像主轨，如实告诉用户。
+- **幂等 + 不覆盖用户改动**：改参数直接重跑，自产 clip（`producer=gtrk:pip@1`）剥旧重铺；用户在客户端动过的画中画 clip 失去身份 ⇒ 保留并在回执 `strip.keptForeign` 点名。
+- **位置**：`oralcut` → 检查点① → `pip lay` → `subtitle lay` / `audio lay` → 出片。**不新增必停点**，铺完让用户在客户端看一眼即可。
+- 出片：客户端本地导出 / `gtrk render`（本地合成几何与蒙版）/ 导剪映（菱形无对应会跳过并明示）。
+- 拒写口径同 `gtrk patch`（内容 revision 冲突回 `conflict`、写方自检违例硬拒零写）。
+
+---
+
 ## 3. 产物结构 + 三端打开
 
 ```

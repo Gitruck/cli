@@ -269,6 +269,7 @@ gtrk skills install --copy
 | ④ | （无 skill） | （无命令） | **全局抽帧检查画面构图**：对三源合并后的最终底轨抽帧，用户确认构图——这是 agent 纪律硬门，供 ⑤ 的排版避让决策使用 |
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG（含 ov）最后叠上**（叠在已定稿、构图已核的底轨之上） |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
+| ③′ | 「**屏录画中画**」 | `gtrk pip lay` | 把口播粗剪的切点镜像到同步录的屏录 / 第二机位，铺屏录满幅轨 + 人像画中画副本轨（圆 / 圆角方 / 爱心 / 菱形 / 星形蒙版，可圆角）；纯本地零计费；低置信时产对齐工程让客户端拖齐后 `--resume` |
 | — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4（含 overlay 与 MG 颗粒；颗粒未命中缓存时云渲计费，`--no-particles` 可跳过） |
 | ✂️ | `/gtrk-long2short` | `gtrk long2short` | 长剪短·粗剪：长视频语义选段+跳剪 → 逐 clip 出客户端/剪映/PR 三方工程（毛片不上传），**不在成片 SOP 序列内**、随时可独立用 |
 | 📝 | `/gtrk-transcript` | `gtrk transcript` | 本地视频/配音音频 → 一个含 Agent 总结、时码记录和纯文本的 Markdown，**不在成片 SOP 序列内** |
