@@ -33,6 +33,14 @@ import { requireFfmpeg, runFfmpeg, ffprobeJson } from "./ffmpeg";
 import { videoRateOf } from "./gtrk-patch";
 import { ms2sec, sec2frame, sec2ms } from "./frame-domain";
 import { log } from "./log";
+import {
+	type ClipMask,
+	type ClipTransform,
+	computeOverlayGeometry,
+	maskCachePath,
+	renderMaskPng,
+} from "./mask-raster";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_LAYOUT = "stereo";
@@ -93,6 +101,13 @@ interface Clip {
 	/** 客户端元素状态。`isSourceAudioEnabled === false` = 用户在客户端关掉了这条 clip 的**源声**
 	 *  （与 `muted` 是两个开关，任一为关即不发声）。缺省（缺键/undefined）视为「开」。 */
 	element_state?: { isSourceAudioEnabled?: boolean };
+	/** 契约既有字段（`docs/composition-contract-v1.md` §3）：静态变换。★ link-clip-mask-contract-render——
+	 *  CLI 渲染器首次消费（此前叠加层恒满幅平铺）。只作用于 overlay `video_track` clip；主轨不读。 */
+	clip_transform?: ClipTransform;
+	/** 契约字段（§3，2026-09-11）：元素显示矩形四角圆角，画布像素。 */
+	border_radius?: unknown;
+	/** 契约字段（§3.4，2026-09-11）：形状蒙版（封闭五形状、元素归一化中心原点坐标、一 clip 一蒙版）。 */
+	clip_mask?: ClipMask;
 }
 interface Track {
 	track_index?: number;
@@ -133,6 +148,10 @@ interface BeatTrack {
 interface GtrkMaterial {
 	id: string | number;
 	path?: string;
+	/** 契约 `materials[].video_size`（可选）。★ link-clip-mask-contract-render：叠加层 contain-fit 的分母——
+	 *  缺席时由 `renderGtrk` 以 ffprobe 补探（只探需要几何的叠加素材），纯函数 `buildFilterGraph` 经
+	 *  `params.materialSizes` 注入。 */
+	video_size?: unknown;
 }
 export interface GtrkV1 {
 	video_size: [number, number];
@@ -170,6 +189,10 @@ export type OverlayLayer =
 			duration: number;
 			material: string | number;
 			clipSt: number;
+			/** ★ link-clip-mask-contract-render：几何三字段原样携带（纯数据，几何结论在滤镜图构造时算）。 */
+			transform?: ClipTransform;
+			borderRadius?: unknown;
+			mask?: ClipMask;
 	  }
 	| {
 			kind: "particle";
@@ -222,6 +245,9 @@ export function collectOverlayLayers(
 				duration,
 				material: c.material as string | number,
 				clipSt: Number(c.clip_st) || 0,
+				...(c.clip_transform && typeof c.clip_transform === "object" ? { transform: c.clip_transform } : {}),
+				...(c.border_radius !== undefined ? { borderRadius: c.border_radius } : {}),
+				...(c.clip_mask && typeof c.clip_mask === "object" ? { mask: c.clip_mask } : {}),
 			});
 		}
 	}
@@ -399,6 +425,14 @@ export interface RenderParams {
 	 * 表里没有的 clip_id 同样只是不叠（该颗粒已在预渲阶段被点名，此处 MUST NOT 二次报错刷屏）。
 	 */
 	particlePaths?: Record<string, string>;
+	/**
+	 * 蒙版灰度 PNG 的本机路径表（内容寻址键 → path）。★ link-clip-mask-contract-render：
+	 * 由 `renderGtrk` 经 `prepareOverlayMasks` 光栅落盘后注入（纯函数不碰磁盘）。
+	 * 表里没有的键 = 该 clip 蒙版 / 圆角未合成（`overlay.maskSkipped` 计数、几何照常）。
+	 */
+	maskPaths?: Record<string, string>;
+	/** 素材尺寸表（material id → [w, h]）：叠加层 contain-fit 的分母。缺席按画布尺寸（fit = 1）。 */
+	materialSizes?: Record<string, [number, number]>;
 }
 
 /** 成片音源覆盖面的实况（★ fix-render-bundled-clip-audio：零音源 MUST NOT 静默）。 */
@@ -425,6 +459,12 @@ export interface RenderOverlayInfo {
 	missingMaterialSkipped: number;
 	/** 因没有 qtrle 产物而未叠的颗粒数（`--no-particles` 或该颗预渲失败）。 */
 	particleUnavailable: number;
+	/** ★ link-clip-mask-contract-render：按 `clip_transform` 做了缩放 / 落位 / 旋转 / 透明的叠加 clip 数。 */
+	transformed: number;
+	/** 合成了形状蒙版或圆角的叠加 clip 数。 */
+	masked: number;
+	/** 该带蒙版 / 圆角却没有蒙版纹理可用（光栅失败）而只按几何叠加的 clip 数——MUST 明示，不静默平铺。 */
+	maskSkipped: number;
 }
 
 /**
@@ -614,9 +654,14 @@ export function buildFilterGraph(
 	// **不存在**可对拍的后端向量；语义参照后端另一条链 `html_animate_render._ffmpeg_overlay`
 	// （`overlay=format=auto` 合成 alpha）。以 CLI 自有黄金向量对拍。
 	const particlePaths = params.particlePaths ?? {};
+	const maskPaths = params.maskPaths ?? {};
+	const materialSizes = params.materialSizes ?? {};
 	const { layers: allLayers, hiddenSkipped } = collectOverlayLayers(gtrk, mainVideoTrack);
 	let missingMaterialSkipped = 0;
 	let particleUnavailable = 0;
+	let transformed = 0;
+	let masked = 0;
+	let maskSkipped = 0;
 	const layers = allLayers.filter((L) => {
 		if (L.kind === "particle") {
 			if (particlePaths[L.clipId] === undefined) {
@@ -673,10 +718,12 @@ export function buildFilterGraph(
 				videoLabel = mid;
 			}
 
-			const lab = label();
+			let lab: string;
+			let place = "x=0:y=0";
 			if (L.kind === "particle") {
 				// 契约：颗粒**整段播、无源裁剪**（beat MUST NOT 含 clip_st/clip_ed）⇒ 不做 trim 源窗，
 				// 只落位 + 缩放；在场窗口由 `enable` 钳、尾部由 `eof_action=pass` 兜。
+				lab = label();
 				const idx = inputOfPath(particlePaths[L.clipId]!);
 				chains.push(`[${idx}:v]${fitAlpha},setpts=PTS-STARTPTS+${f6(w.st)}/TB[${lab}]`);
 			} else {
@@ -685,14 +732,66 @@ export function buildFilterGraph(
 				const idx = inputOf(L.material);
 				const st = L.clipSt;
 				const ed = L.clipSt + L.duration;
-				chains.push(
+				const trimHead =
 					`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
-						`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
-						`trim=end_frame=${w.frames},${fitAlpha},setpts=PTS-STARTPTS+${f6(w.st)}/TB[${lab}]`,
-				);
+					`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
+					`trim=end_frame=${w.frames},`;
+				const geo = computeOverlayGeometry({
+					canvas: [width, height],
+					materialSize: materialSizes[String(L.material)],
+					transform: L.transform,
+					borderRadius: L.borderRadius,
+					mask: L.mask,
+				});
+				if (geo === null) {
+					// 🔴 零回归门：三字段全缺省的 clip 走本 change 之前的满幅链，逐字节不变
+					lab = label();
+					chains.push(`${trimHead}${fitAlpha},setpts=PTS-STARTPTS+${f6(w.st)}/TB[${lab}]`);
+				} else {
+					// ★ link-clip-mask-contract-render：几何链替换满幅链——
+					//   · 元素显示尺寸 = contain-fit × |scale|（`displaySize` 单点，与蒙版纹理同一尺寸，design D2）；
+					//   · 负 scale → hflip / vflip；alpha → colorchannelmixer 只动 alpha 通道；
+					//   · rotation → `rotate`，画布按 rotw/roth 扩到旋转后包围盒、填透明；落点用 overlay 的 `(W-w)/2+px`
+					//     ——`w/h` 是**旋转后**的叠加尺寸，中心落点不因包围盒变大而漂（spec「旋转画中画落点不漂」）；
+					//   · 蒙版：灰度 PNG 单帧经 `loop=-1:size=1` 循环成流、`gblur` 羽化、`alphamerge=shortest=1` 并进 alpha
+					//     ——在 overlay 之前、yuv420p 收口之后**不得**出现（alpha 保真）。
+					if (geo.transformed) transformed++;
+					const geom =
+						`format=rgba,scale=${geo.dw}:${geo.dh}` +
+						(geo.flipH ? ",hflip" : "") +
+						(geo.flipV ? ",vflip" : "") +
+						",setsar=1";
+					const post =
+						(geo.alpha < 1 ? `,colorchannelmixer=aa=${f3(geo.alpha)}` : "") +
+						(geo.rotation !== 0 ? `,rotate=${g(geo.rotation)}*PI/180:c=black@0:ow=rotw(a):oh=roth(a)` : "");
+					const settle = `,setpts=PTS-STARTPTS+${f6(w.st)}/TB`;
+					const maskPath = geo.key !== null ? maskPaths[geo.key] : undefined;
+					if (geo.key !== null && maskPath === undefined) {
+						maskSkipped++;
+						log.warn(`叠加 clip（轨 ${L.trackIndex} @ ${f3(L.trackSt)}s）的蒙版 / 圆角纹理不可用，只按几何叠加（未合成蒙版）`);
+					}
+					if (maskPath !== undefined) {
+						masked++;
+						const la = label();
+						const lm = label();
+						lab = label();
+						chains.push(`${trimHead}${geom}[${la}]`);
+						chains.push(
+							`[${inputOfPath(maskPath)}:v]format=gray,loop=loop=-1:size=1:start=0` +
+								(geo.sigma > 0 ? `,gblur=sigma=${f6(geo.sigma)}` : "") +
+								`[${lm}]`,
+						);
+						chains.push(`[${la}][${lm}]alphamerge=shortest=1${post}${settle}[${lab}]`);
+					} else {
+						lab = label();
+						chains.push(`${trimHead}${geom}${post}${settle}[${lab}]`);
+					}
+					const sgn = (n: number): string => (n < 0 ? `-${f6(-n)}` : `+${f6(n)}`);
+					place = `x=(W-w)/2${sgn(geo.px)}:y=(H-h)/2${sgn(geo.py)}`;
+				}
 			}
 			const next = label();
-			chains.push(`[${videoLabel}][${lab}]overlay=x=0:y=0:eof_action=pass:format=auto:${enable}[${next}]`);
+			chains.push(`[${videoLabel}][${lab}]overlay=${place}:eof_action=pass:format=auto:${enable}[${next}]`);
 			videoLabel = next;
 		}
 		// 像素格式在此统一收口（前面全程保 alpha）：libx264 要 yuv420p
@@ -707,6 +806,9 @@ export function buildFilterGraph(
 		hiddenSkipped,
 		missingMaterialSkipped,
 		particleUnavailable,
+		transformed,
+		masked,
+		maskSkipped,
 	};
 
 	/** 一条音频 lane：逐元素 atrim/asetpts/aresample/aformat/[volume]/afade（空档 anullsrc），
@@ -885,6 +987,110 @@ function probeEmbeddedAudio(
 	return (id) => byId.get(String(id)) === true;
 }
 
+/** `materials[].video_size` 合法即取；否则对**需要几何**的叠加素材 ffprobe 补探（每路径一次）。 */
+function collectMaterialSizes(
+	ffprobe: string,
+	gtrk: GtrkV1,
+	materialPaths: Record<string, string>,
+	needed: Set<string>,
+): Record<string, [number, number]> {
+	const out: Record<string, [number, number]> = {};
+	for (const m of gtrk.materials || []) {
+		const vs = m.video_size;
+		if (Array.isArray(vs) && vs.length === 2 && vs.every((v) => typeof v === "number" && Number.isFinite(v) && v > 0)) {
+			out[String(m.id)] = [vs[0] as number, vs[1] as number];
+		}
+	}
+	for (const id of needed) {
+		if (out[id]) continue;
+		const path = materialPaths[id];
+		if (path === undefined) continue;
+		try {
+			const j = ffprobeJson(ffprobe, [
+				"-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", path,
+			]) as { streams?: Array<{ width?: unknown; height?: unknown }> };
+			const s = j.streams?.[0];
+			const w = Number(s?.width);
+			const h = Number(s?.height);
+			if (w > 0 && h > 0) out[id] = [w, h];
+		} catch (e) {
+			log.warn(`叠加素材 ${id} 尺寸探测失败，按画布尺寸计算画中画几何：${(e as Error).message}`);
+		}
+	}
+	return out;
+}
+
+/**
+ * 蒙版纹理准备（★ link-clip-mask-contract-render，编排层）：对每个带圆角 / 形状蒙版的叠加 clip，
+ * 算几何 → 内容寻址键 → 缓存命中即复用，否则光栅落盘 `<gtrkDir>/.tonghe-cache/masks/<key>.png`。
+ * 缓存目录不可写时退到系统临时目录（MUST NOT 阻断渲染）；两处都写不了才放弃该纹理（`maskSkipped` 由滤镜图构造计数）。
+ * 返回 {键 → 路径} 与需要几何的素材 id 集合。
+ */
+export function prepareOverlayMasks(
+	gtrk: GtrkV1,
+	materialSizes: Record<string, [number, number]>,
+	gtrkDir: string | undefined,
+): { maskPaths: Record<string, string>; hits: number; rendered: number } {
+	const sortedV = sortedTracks(gtrk.video_track || []);
+	if (sortedV.length === 0) return { maskPaths: {}, hits: 0, rendered: 0 };
+	const canvas: [number, number] = [Math.trunc(gtrk.video_size[0]), Math.trunc(gtrk.video_size[1])];
+	const { layers } = collectOverlayLayers(gtrk, pickPreviewMainTrack(gtrk, sortedV));
+	const maskPaths: Record<string, string> = {};
+	let hits = 0;
+	let rendered = 0;
+	for (const L of layers) {
+		if (L.kind !== "clip") continue;
+		const geo = computeOverlayGeometry({
+			canvas,
+			materialSize: materialSizes[String(L.material)],
+			transform: L.transform,
+			borderRadius: L.borderRadius,
+			mask: L.mask,
+		});
+		if (!geo || geo.key === null || geo.spec === null) continue;
+		if (maskPaths[geo.key]) continue;
+		const candidates = [
+			...(gtrkDir ? [maskCachePath(gtrkDir, geo.key)] : []),
+			join(tmpdir(), "gtrk-masks", `${geo.key}.png`),
+		];
+		let done = false;
+		for (const p of candidates) {
+			if (existsSync(p)) {
+				maskPaths[geo.key] = p;
+				hits++;
+				done = true;
+				break;
+			}
+		}
+		if (done) continue;
+		const png = renderMaskPng(geo.spec);
+		for (const p of candidates) {
+			try {
+				mkdirSync(p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))), { recursive: true });
+				writeFileSync(p, png);
+				maskPaths[geo.key] = p;
+				rendered++;
+				done = true;
+				break;
+			} catch (e) {
+				log.warn(`蒙版纹理写入失败（${p}）：${(e as Error).message}，尝试下一落点`);
+			}
+		}
+	}
+	return { maskPaths, hits, rendered };
+}
+
+/** 需要几何（contain-fit 分母）的叠加素材 id：带 `clip_transform` / `border_radius` / `clip_mask` 任一者。 */
+function overlayMaterialsNeedingSize(gtrk: GtrkV1): Set<string> {
+	const out = new Set<string>();
+	const sortedV = sortedTracks(gtrk.video_track || []);
+	if (sortedV.length === 0) return out;
+	for (const L of collectOverlayLayers(gtrk, pickPreviewMainTrack(gtrk, sortedV)).layers) {
+		if (L.kind === "clip" && (L.transform || L.borderRadius !== undefined || L.mask)) out.add(String(L.material));
+	}
+	return out;
+}
+
 /** 渲染 gtrk 工程为成片 mp4。返回 {outputPath, duration, audio}。 */
 export async function renderGtrk(
 	gtrk: GtrkV1,
@@ -918,9 +1124,14 @@ export async function renderGtrk(
 	const { ffmpeg, ffprobe } = requireFfmpeg(opts.ffmpegPath);
 	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });
 	const materialHasAudio = probeEmbeddedAudio(ffprobe, gtrk, materialPaths);
+	// ★ link-clip-mask-contract-render：几何分母 + 蒙版纹理都在开渲前备齐（纯函数只消费）
+	const materialSizes = collectMaterialSizes(ffprobe, gtrk, materialPaths, overlayMaterialsNeedingSize(gtrk));
+	const masks = prepareOverlayMasks(gtrk, materialSizes, opts.gtrkDir);
 	const { inputs, graph, total, audio, overlay, videoLabel, scale } = buildFilterGraph(gtrk, materialPaths, {
 		crf,
 		materialHasAudio,
+		materialSizes,
+		maskPaths: masks.maskPaths,
 		...(opts.particlePaths ? { particlePaths: opts.particlePaths } : {}),
 	});
 
@@ -961,6 +1172,19 @@ export async function renderGtrk(
 	}
 	if (overlay.particleUnavailable > 0) {
 		log.warn(`叠加层：${overlay.particleUnavailable} 颗颗粒无 qtrle 产物未叠（--no-particles 或该颗预渲失败）`);
+	}
+	// ★ link-clip-mask-contract-render：画中画几何与蒙版同样开口说话（合成了什么 / 跳过了什么）
+	if (overlay.transformed > 0) {
+		log.info(`叠加层：${overlay.transformed} 段按 clip_transform 缩放 / 落位（画中画几何）`);
+	}
+	if (overlay.masked > 0) {
+		log.info(
+			`叠加层：${overlay.masked} 段合成了形状蒙版 / 圆角` +
+				(masks.hits > 0 || masks.rendered > 0 ? `（纹理缓存命中 ${masks.hits}、新光栅 ${masks.rendered}）` : ""),
+		);
+	}
+	if (overlay.maskSkipped > 0) {
+		log.warn(`叠加层：${overlay.maskSkipped} 段的蒙版 / 圆角纹理不可用，只按几何叠加（未合成蒙版）`);
 	}
 
 	const filterFile = join(tmpdir(), `gtrk-filter-${process.pid}-${inputs.length}.txt`);

@@ -116,6 +116,8 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
 > ⚠️ **`render` 自 1.1.10 起分两种情形**：工程无 MG 颗粒（或带 `--no-particles`）时仍是纯本地、不出现这条；
 > 有未命中缓存的颗粒时，**颗粒 HTML 文本会上行**去云端烤（素材本体仍不上行），此时会打这条告知，
 > 且在它之前先出计费预估确认。
+> 另：`render` 会按叠加 clip 的 `clip_transform` / `border_radius` / `clip_mask` 本地合成画中画几何与形状蒙版
+> （纯本地、零计费，蒙版纹理缓存在工程旁 `.tonghe-cache/masks/`），`--json` 的 `overlay.transformed / masked / maskSkipped` 如实计数。
 
 5. **按需装运行时资产**（只有用到本地渲染/烧录才需要）：
 
