@@ -1,5 +1,77 @@
 # 更新日志
 
+## 1.2.0（2026-09-11）
+
+### `gtrk pip lay`：屏幕一条 + 人像一条同步录的口播，一句话合成画中画（add-pip-companion-lay）
+
+讲软件 / 讲课件 / 讲代码的口播多是**两条文件同步录**：屏录一条、人像一条。此前流水线只能剪其中一条——
+`gtrk oralcut` 粗剪的每个切点没法落到另一条上，画中画只能去客户端手工摆，圆角与蒙版只有客户端看得见。
+镜像切点是纯算术（每颗 clip 一个偏移），却是「每片必做、手工必错」的事，现在做成命令：
+
+```bash
+gtrk pip lay --project <口播工程目录> --companion <屏录.mp4> [--shape ellipse|rectangle|heart|diamond|star|none] [--feather 10] [--corner-radius 0.25] [--border-radius <px>] [--anchor bottom-right] [--scale 0.28] [--margin 40] [--offset <秒>] [--dry-run] [--expected-revision <sha256>] [--json]
+gtrk pip lay --resume <屏录名>_pip_align.gtrk
+```
+
+**测偏移三分支，与 `gtrk audio align` 同一套原语**：缺省互相关自动对齐（人像为参考、屏录为待对齐）；
+置信度不足 ⇒ 产 `<屏录名>_pip_align.gtrk`（人像整段 + 屏录整段按估测偏移摆好），用户在客户端把「伴随源」轨拖齐保存后 `--resume` 读回偏移再铺；
+`--offset <秒>` 显式给值跳过检测。偏移口径全库统一：**正 = 屏录晚开录**。
+⚠️ 屏录 **MUST 带麦克风音轨**才能自动对齐（互相关没有参照就没法算），只有系统音的屏录只剩后两条路——开工时就要提醒用户；
+本命令与 `audio align` 一样只做**恒定偏移**，两台设备采样钟差导致的长片渐飘不矫正。
+
+**镜像切点**：主轨每颗非空档 clip 的 `track_st / duration` 原样落到屏录轨，`clip_st′ = clip_st − offset`，整毫秒域、不累加游标；
+越过屏录素材上界 / 下界的部分**钳位 + 留空 + 回执逐颗点名毫秒数**，MUST NOT 拉伸或变速——
+屏录比人像短 / 晚开录的那几段成片只见人像主轨，如实告诉用户。
+
+**铺两条轨，主轨与音轨一字不动**：屏录满幅轨（`track_index` = 现存视频轨最大值 + 1，静音）+ 人像画中画副本轨（再 + 1，静音，
+带 `clip_transform` / `border_radius` / `clip_mask`）。人声仍由主轨镜像音轨承担，副本轨 MUST NOT 双声；
+主轨不动 ⇒ 下游 `split` / `subtitle lay` / `mg` 照旧按 main 对 transcript，零感知。
+形状缺省 `ellipse` = 以画中画短边内切的正圆；`rectangle` 满幅可带 `--corner-radius`；`heart` / `diamond` / `star` 短边内切；`none` 只摆位不遮。
+`--scale` 的语义是**画中画显示高度占画布高度的比例**（缺省 0.28），写进 `clip_transform` 时按 contain-fit 反算。
+
+**幂等 + 不覆盖用户改动**：改参数直接重跑，自产 clip（`producer = gtrk:pip@1`）先剥后铺、空轨删除；
+用户在客户端动过、被清掉身份的画中画 clip **保留并在回执 `strip.keptForeign` 点名**（与 `matrix lay` 同一条认领纪律）。
+写方自检（恒等式 / 接缝 / 素材上界）破了即抛零副作用；原子写回 + revision 断言，`--expected-revision` 跨命令拒写口径同 `gtrk patch`；`--dry-run` 只算不写。
+回执打印的是**数字**（每颗的偏移 / 钳位 / 留空毫秒），不是一句「已验证」。
+
+链路位置：`oralcut` 检查点① → **`pip lay`** → 拆分 / 字幕 → 出片，**不新增必停点**，铺完让用户在客户端看一眼即可；
+口播图纸（`gtrk-talking-head`）开工五问加第 ⑥ 问（有没有同步录的屏录或第二机位、画中画形状 / 位置 / 大小），屏录题材默认不铺 B-roll。
+出片三口：客户端本地导出 / `gtrk render`（见下一节）/ 导剪映（`diamond` 剪映无对应，跳过并明示）。
+纯本地**零计费**，素材不上行。一条伴随源起步，多机位切人另立。
+⚠️ 客户端预览里看到画中画的圆角与形状蒙版，要等客户端同步更新（消费这两个契约字段的那一半随客户端发版）。
+
+### `gtrk render`：画中画的缩放 / 落位 / 旋转 / 透明、圆角与五形状蒙版随工程本地合成（link-clip-mask-contract-render）
+
+1.1.10 把叠加层渲进了成片，但每一层的**几何**还没读：叠加输入一律 contain-fit 后贴满画布，
+客户端里摆好的画中画渲出来是**满幅信箱**，圆角与蒙版更是零支持。现在按契约逐 clip 消费：
+
+- **`clip_transform`**：`scale_x/y` 在 contain-fit 之后再乘（与客户端「先 contain 再乘 scale」同口径，负值 = 翻转）；
+  `position_x/y` 以画布中心为原点落位；`rotation` 旋转（落点按旋转后包围盒算）；`alpha` 透明。
+- **`border_radius`**（画布像素）与 **`clip_mask`** 五形状（`rectangle` + `corner_radius` / `ellipse` / `heart` / `diamond` / `star`，与契约枚举一字不差）：
+  支持 `invert` 反相、蒙版自身 `rotation`、`feather` 羽化（0..100 = 占蒙版短边百分比）；两者同时在场**叠乘**（元素圆角 ∩ 形状窗），不降级。
+- 颗粒（`beat_track`）不动：契约不给颗粒这两个字段，颗粒尺寸由 HTML 自带。
+
+**不引图形库**：五形状 + 圆角 + 反相 + 旋转都是闭合路径填充，用纯 JS 扫描线光栅成一张 8-bit 灰度 PNG（node 内置 `zlib` 编码，**零新依赖**——
+多一个原生依赖就多一条安装故障面），ffmpeg 只负责 `gblur`（羽化）+ `alphamerge` + `overlay`。确定性、离线、**零计费**。
+蒙版纹理按参数 + 尺寸内容寻址落 `<工程目录>/.tonghe-cache/masks/<sha256>.png`，可复用、丢了重生；
+缓存目录不可写退系统临时目录，两处都写不了才放弃该纹理——此时该 clip **只按几何叠加并明示**（`maskSkipped`），MUST NOT 阻断渲染。
+
+**零回归门**：`clip_transform` 缺席或恒等、且无圆角 / 蒙版的 clip，滤镜链与 1.1.10 **逐字节相同**，既有黄金向量原样通过。
+`--json` 的 `overlay` 段新增 `transformed` / `masked` / `maskSkipped` 三个计数，完成话术逐类点名
+「几段按 clip_transform 落位 / 几段合成了蒙版或圆角 / 几段纹理不可用只按几何叠加」。
+两条口径：羽化是高斯近似，与客户端的距离场羽化**观感等价、不逐像素等价**；
+客户端专有蒙版形态（钢笔 / 文字 / 分屏 / 黑边 / 描边 / 多蒙版）只在客户端状态里，本地渲染不读。
+
+### `gtrk oralcut --lang`：按识别源语种分档校验，切点线不支持的码在抽取前就拒（link-enum-catalog-cli §7）
+
+1.1.10 的枚举清单把 `--lang` 改成按快照校验，但拿的是 `subtitle.languages`——那是翻译目标语与识别源语种的 **11 项共同范围**，
+会放行 `es-ES` / `pt-PT` / `ru-RU` / `vi-VN`，让用户抽完音频、传完文件，才被服务端 6015 拒。
+现在 `/catalog` 下发 `subtitle.source_languages`，**按 task_type 分档**（切点三线 7 项：`en-US` / `fr-FR` / `ja-JP` / `ko-KR` / `zh-CHS` / `zh-CHT` / `zh-CN`；
+`video_ai_subtitle` / `subtitle_translate` 11 项），`oralcut --lang` 改按 `video_oral_cut` 那一档在**抽取之前**校验，报错只列本线 7 项。
+退回规则不破 1.1.10 的两条既定口径：分档整体缺失（老服务端 / 旧快照）/ 缺该线 / 形态不合 ⇒ 退回 11 项共同范围；
+共同范围也拿不到或无快照 ⇒ 放行交服务端裁决——**fail-open、只降不升**。
+`long2short --language` / `transcript --lang` / `gtrk tool` 的翻译语种参数本来就不做本地取值校验，这次一格不动。
+
 ## 1.1.10（2026-09-10）
 
 ### `gtrk render` 现在会把 MG 颗粒与 overlay 真的渲进成片（add-render-overlay-compositing）
