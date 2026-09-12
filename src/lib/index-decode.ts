@@ -80,10 +80,13 @@ const BLACK_TAP = `blackdetect=d=${BLACK_MIN_DUR_SEC}:pic_th=${BLACK_PIC_TH}:pix
  *
  * ⚠️ **正则与 `qc.ts` 的 `parseBlackDetect` 逐字一致**，这是本函数存在的全部约束：
  * 同一个 ffmpeg 输出格式被两处解析，写歪一处就是「索引说没黑、QC 说有黑」的静默分叉。
- * 现状是**两份实现 + 一条等价闸**（`test/black-detect-parse.test.mjs` 拿同一份语料对拍两边），
- * 而不是一份实现——因为 `qc.ts` 反向 import 了 `local-index.ts`（`parseSceneScores`），
- * 让本模块（零 I/O 纯函数层）去 import qc 会既成环、又把 spawn/ffmpeg 依赖拖进 CI 无卡路径。
- * 正解是 qc 侧改为 import 本函数，那一步落在别人的文件里（见本 change 的 handoff）。
+ * **2026-09-02 已合流**：唯一实现就在本文件，`qc.ts` 改为 `import { parseBlackSpans } from "./index-decode"`，
+ * `parseBlackDetect` 降为导出别名。原来那条「拿同一份语料对拍两边」的等价闸合流后成了同义反复，
+ * 已换成**身份闸**（`test/black-detect-parse.test.mjs` 断言 qc 导出的就是本函数）。
+ *
+ * ⚠️ **方向不可反过来**：`qc.ts` 带 spawn/ffmpeg 依赖，且反向 import 了 `local-index.ts`（`parseSceneScores`），
+ * 让本模块（零 I/O 纯函数层）去 import qc 会既成环、又把 spawn/ffmpeg 拖进 CI 无卡路径。
+ * 这条理由留着，是防后人把方向改回去的唯一说明。
  *
  * 行形态（真机 ffmpeg n8.1 实测，含被 `\r` 进度行粘在前面的情形）：
  * `frame=  247 ... [blackdetect @ 0000020c2fe9dec0] black_start:6.083333 black_end:6.366667 black_duration:0.283333`
