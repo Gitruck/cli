@@ -1277,6 +1277,11 @@ export interface MatrixDescribeResult {
 	cached: number;
 	/** 实际调服务端张数（计费口径：1 积分/张，异步任务计费——提交预扣→完成结算，失败自动退款）。 */
 	called: number;
+	/** 其中**因服务端判据升级而重跑**的张数（`fix-describe-window-coverage` §10）。
+	 * 是 `called` 的子集，不是额外开销。分栏出来是为了让「上轮明明理解过、这轮怎么又扣」有答案：
+	 * 这些帧的旧产物出自更早的判据版本（`DESCRIBE_CRITERIA_VERSION`），不再作数。
+	 * 旧行**不删**，只是在新版本键下不算命中。 */
+	cached_stale_criteria: number;
 	/** 取帧失败被跳过数（局部化，不拖垮整轮）。 */
 	failed: number;
 	/** **实耗口径**（fix-describe-billing-report-honesty）：豁免时为 0。原价读 `credits_would_be`。
@@ -1566,6 +1571,7 @@ async function runDescribeMode(
 			described: run.described,
 			cached: run.cached,
 			called: 0,
+			cached_stale_criteria: run.staleCriteria,
 			failed: run.failed,
 			credits_estimated: run.estimatedCredits,
 			credits_would_be: run.creditsWouldBe,
@@ -1676,6 +1682,7 @@ async function runDescribeMode(
 		described: run.described,
 		cached: run.cached,
 		called: run.called,
+		cached_stale_criteria: run.staleCriteria,
 		failed: run.failed,
 		credits_estimated: run.estimatedCredits,
 		credits_would_be: run.creditsWouldBe,

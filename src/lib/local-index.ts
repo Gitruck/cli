@@ -408,6 +408,9 @@ export async function openLocalIndexDb(dbPath: string = localIndexDbPath()): Pro
 			["shot_size", "TEXT"],
 			["highlight", "REAL"],
 			["rubric_hash", "TEXT"],
+			// 判据版本列（fix-describe-window-coverage §10）：旧行 NULL = 本列引入之前写下的，
+			// 判据版本**不可知** ⇒ 一律按「旧口径」处理（未命中、但保留可读，见 describe.ts）。
+			["criteria_version", "TEXT"],
 		] as const) {
 			if (!descCols.includes(col)) db.exec(`ALTER TABLE describes ADD COLUMN ${col} ${type}`);
 		}

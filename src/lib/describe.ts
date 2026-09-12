@@ -385,6 +385,30 @@ export async function describeImages(
 
 // ── 索引库 describes 缓存（D1：键=(材料 id, ts_ms)，同帧免重复调用）──────────
 
+/**
+ * **服务端判据版本**（fix-describe-window-coverage §10，主理人 2026-09-09「按建议来」）。
+ *
+ * 缓存键实际上是 `(material_id, ts_ms, criteria_version)` —— 列没进主键，而是**读时比对**：
+ * 行还在、版本对不上就算未命中。这样旧行既不被删也不被静默当成新口径用。
+ *
+ * ## 为什么必须有它
+ *
+ * `describes` 缓存的是「这一帧长什么样」，其中 `usable_flags` 四维是**服务端判据**的产物。
+ * 判据一改（例如把取景器 HUD 纳入 `text_overlay` 正例、把被拍物体上的印字排除出 `watermark`），
+ * 同一帧的正确读数就变了 —— 而缓存键里没有判据版本的话，旧口径条目**永不重跑**，
+ * 用户拿到的还是旧判据的产物，且完全无感。
+ *
+ * ## MUST 同批 bump
+ *
+ * 服务端判据一改就在这里 bump，**同批发版**。首值对应 infra `link-describe-overlay-flag-recall`
+ * 的判据枚举化（2026-09-12 上线：叠加物两维扩枚举 + 按维分级）。
+ *
+ * ⚠️ bump 的代价是真金白银：旧口径帧在下一轮会**重新调用、重新计费**。这是有意的 ——
+ * 判据变了还端旧产物，比多花一次钱坏得多。`--json` 里 `cached_stale_criteria` 会如实把这批数报出来，
+ * 用户看得见自己为什么又被扣了一次。
+ */
+export const DESCRIBE_CRITERIA_VERSION = 'overlay-enum@2026-09-12';
+
 /** 客观层行（[fix-highlight-rubric-wiring] 起不含 highlight——看点层已迁 describe_highlights）。 */
 interface DescribeRow {
 	desc_text: string;
@@ -394,6 +418,8 @@ interface DescribeRow {
 	subject: string | null;
 	action: string | null;
 	shot_size: string | null;
+	/** 本行产出时的服务端判据版本；NULL = 本列引入之前写下的（判据不可知，按旧口径处理）。 */
+	criteria_version: string | null;
 }
 
 /**
@@ -413,10 +439,13 @@ export function getCachedDescribe(
 	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
 ): MaterialDescribe | undefined {
 	const row = db.get<DescribeRow>(
-		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size FROM describes WHERE material_id = ? AND ts_ms = ?",
+		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size, criteria_version FROM describes WHERE material_id = ? AND ts_ms = ?",
 		[materialId, tsMs],
 	);
 	if (!row) return undefined;
+	// 判据版本闸（§10）：行在、版本对不上 ⇒ 未命中。旧行（NULL）同此路。
+	// MUST NOT 在这里删行——旧产物保留可读，是「用户上一轮看到的是什么」的唯一凭据。
+	if (row.criteria_version !== DESCRIBE_CRITERIA_VERSION) return undefined;
 	const hl = db.get<{ highlight: number | null }>(
 		"SELECT highlight FROM describe_highlights WHERE material_id = ? AND ts_ms = ? AND rubric_hash = ?",
 		[materialId, tsMs, rubricHash],
@@ -499,6 +528,21 @@ export function getNearestCachedHighlight(
  * 看点分进 `describe_highlights` 的 `rubricHash` 桶（一帧 × N 套准则 N 份，互不覆盖）。
  * ⚠️ `describes.highlight` / `describes.rubric_hash` **不再写**（冻结列，理由见 local-index 迁移块）。
  */
+/**
+ * 该帧在库里**有行、但判据版本是旧的**吗（§10 报数分栏用）。
+ *
+ * `getCachedDescribe` 对这种行返回 undefined（未命中），于是它会进 pending 被重新调用。
+ * 但「第一次见这一帧」与「上轮见过、判据变了要重跑」对用户是两件事：后者要被扣的钱
+ * 是判据升级的代价，MUST 报得出来，别混进「新调用」里看着像凭空多花。
+ */
+export function hasStaleCriteriaRow(db: SqlDb, materialId: string, tsMs: number): boolean {
+	const row = db.get<{ criteria_version: string | null }>(
+		"SELECT criteria_version FROM describes WHERE material_id = ? AND ts_ms = ?",
+		[materialId, tsMs],
+	);
+	return !!row && row.criteria_version !== DESCRIBE_CRITERIA_VERSION;
+}
+
 export function putCachedDescribe(
 	db: SqlDb,
 	materialId: string,
@@ -512,8 +556,17 @@ export function putCachedDescribe(
 	//    REPLACE 从来没真的覆盖过任何一行。本件新增了「客观层在、看点桶不在 ⇒ 重新调用」这条路径，
 	//    继续用 REPLACE 就会让 VLM 每次的措辞漂移悄悄改写已落库的 desc（下游 at_sec / 叠加物交叉校验
 	//    读的都是它）。客观层的刷新口径不变：仍只由素材指纹变化的级联清除触发。
+	// ⟲ §10：**判据版本不同则整行刷新**，相同则维持上面那条 OR IGNORE 语义。
+	//    换准则（rubric）时版本不变 ⇒ 不覆盖，措辞漂移进不来，上面那条理由原样成立；
+	//    换判据时版本变 ⇒ 必须覆盖，否则新口径的 flags 永远落不进来、每轮重复计费还读到旧值。
+	//    `IS NOT` 在 SQLite 里对 NULL 也成立，旧行（NULL）照样被刷新。
 	db.run(
-		"INSERT OR IGNORE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, created_at, criteria_version)" +
+			" VALUES (?,?,?,?,?,?,?,?,?,?,?)" +
+			" ON CONFLICT(material_id, ts_ms) DO UPDATE SET desc_text=excluded.desc_text, tags_json=excluded.tags_json," +
+			" mark=excluded.mark, flags_json=excluded.flags_json, subject=excluded.subject, action=excluded.action," +
+			" shot_size=excluded.shot_size, created_at=excluded.created_at, criteria_version=excluded.criteria_version" +
+			" WHERE describes.criteria_version IS NOT excluded.criteria_version",
 		[
 			materialId,
 			tsMs,
@@ -525,6 +578,7 @@ export function putCachedDescribe(
 			d.action || null,
 			d.shot_size,
 			now,
+			DESCRIBE_CRITERIA_VERSION,
 		],
 	);
 	// 看点分缺席（旧服务端不给这一维）时不落桶——落一行 NULL 会让「本桶已打过分」与
@@ -791,6 +845,10 @@ export interface DescribeRunResult {
 	described: number;
 	/** 缓存命中数（零调用零计费）。 */
 	cached: number;
+	/** pending 里**因判据版本变更而重跑**的张数（§10）。
+	 * 它是 `called` 的子集，不是额外开销 —— 分出来是为了让「这笔钱为什么又花一次」看得见：
+	 * 这些帧上一轮理解过，只是服务端判据升级了、旧产物不再作数。 */
+	staleCriteria: number;
 	/** 实际调服务端张数（= 计费张数口径）。 */
 	called: number;
 	/** 抽帧/读文件失败数（局部化：单帧失败不拖垮整轮）。 */
@@ -824,6 +882,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 	// [fix-highlight-rubric-wiring] 命中判据带桶：缺省桶与本件之前逐字节一致；
 	// 非缺省桶要求该桶已有看点分，否则按未命中重新打分（换准则的必然代价，见 getCachedDescribe）。
 	const pending: DescribeWorkItem[] = [];
+	let staleCriteria = 0;
 	for (const it of items) {
 		const key = keyOf(it);
 		if (resolved.has(key)) continue;
@@ -831,6 +890,8 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 		if (hit) resolved.set(key, hit);
 		else {
 			resolved.set(key, null); // 占位（防同键重复进 pending）
+			// §10：未命中里再分一栏——「这一帧上轮理解过、只是判据版本变了」。
+			if (hasStaleCriteriaRow(deps.db, it.materialId, it.tsMs)) staleCriteria++;
 			pending.push(it);
 		}
 	}
@@ -871,6 +932,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 					declined: true,
 					described: cached,
 					cached,
+					staleCriteria,
 					called: 0,
 					failed: 0,
 					estimatedCredits,
@@ -925,6 +987,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 		ok: true,
 		described: cached + called,
 		cached,
+		staleCriteria,
 		called,
 		failed,
 		estimatedCredits,
