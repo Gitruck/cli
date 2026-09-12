@@ -245,6 +245,9 @@ gtrk matrix lay --project "<工程>" --mark-weight 0.3 --highlight-weight 0.2 --
 # BGM 是带人声歌曲（audio_type:"song"）→ MUST 下载 accompaniment_url 伴奏版上轨，
 # 不得用 download_url 原曲（人声与配音打架，260827 美食批踩坑）
 gtrk mg --project "<工程>" --json
+# --beat-align 的高潮点取自 split.beats 的 narrative / container_stage（升华段 → 容器转折 → 回扣段）；
+# 拆分稿没带这两个字段 ⇒ 落 0.75×全片兜底档，**CLI 会明示那是猜的**。不接受就用 --climax <轨秒> 指定。
+# 两侧都够长时零平铺（恰好 1 个 clip）；不够长才按小节线平铺补齐、接缝吸附 downbeat。
 gtrk audio lay --project "<工程>" --file "<bgm>" --volume 0.1 --beat-align --json
 gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
 ```

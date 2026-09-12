@@ -41,7 +41,7 @@
 | 🔎 | `gtrk matrix` | B-roll 检索+**候选铺轨**：消费 FILM_BROLL 派单 → 产候选清单 + 下载 preview 代理铺 N 条候选轨（`--lay N` 默认 1，opencut 打开即可用轨道小眼睛对比；`--lay 0` 只出清单）；`matrix search "<词>"` 单条 ad-hoc；`matrix fetch <clip_id...>` 精剪期拉原片（已授予素材免费重签+下载落盘，直接拖进剪映）；**本地素材模式**：`matrix index --dirs <素材夹>` 免切片建索引 → `--local --dirs` 检索铺轨（**素材本体不上云**）→ `matrix lay` 消费（可编辑的）plan；`matrix describe` 按需理解候选 |
 | 🎨 | `gtrk mg` | MG 动态图颗粒铺轨：消费 MG 派单 → 把 html-particle 颗粒（透明叠加 / 满屏底层，由你栏目的 MG 生产 skill 所产）铺进 `.gtrk` 的 beat_track；`mg lint <颗粒.html>` 铁律静态子集校验、`mg status --project <dir>` 编排看板（缺 HTML / 已产未铺 / 已铺）；`mg render <颗粒.html> --duration <sec>` 脱离工程独立云渲单颗颗粒为剪映可读 qtrle 透明 MOV（精剪补给口）；aux 叠层颗粒同段多铺（一 beat 派生主 + `-aux<n>`）。旧名 `gtrk rrv` 保留为弃用别名；`gtrk mg fetch` 从 Hyperframes registry 取中性块骨架（快照随包离线候选、三源取块我方镜像优先、机械改写后过 lint） |
 | 🎙️ | `gtrk project init` | 音频驱动工程起盘：从一条配音建 `.gtrk` 工程——主路 `--tts-task <task_id>` 引用已完成的 TTS 配音任务（直取产物音频+句级时码，零 ASR）；兜底 `--audio`+`--transcript` 自备配音成对给。落好即可 `gtrk split --project` 接成片流水线 |
-| 🎼 | `gtrk audio lay` / `tighten` | 音频轨零件：`lay` 往 `.gtrk` 工程追加一条音频轨（BGM/配乐上轨，同源幂等替换不堆轨）；`--beat-align` 云端节拍分析把入点吸附最近 downbeat（计费一次，无 Key/失败自动降级不失败）。`tighten` 收紧配音的句间停顿（纯本地零计费，只压跨句界的静音、句内换气不动） |
+| 🎼 | `gtrk audio lay` / `tighten` | 音频轨零件：`lay` 往 `.gtrk` 工程追加一条音频轨（BGM/配乐上轨，同源幂等替换不堆轨）；`--beat-align` 云端分析把 **BGM 的情绪峰值压到成片的高潮点上**，锚点前后按小节线平铺补齐、两侧都够长时零平铺（计费一次；高潮点取自 `split.beats` 的判据链，可用 `--climax <轨秒>` 覆盖；`--no-loop` 只放锚点那一段、头尾留白；无 Key / 失败 / 曲子缺高潮点自动降级为不锚定，命令不失败）。`tighten` 收紧配音的句间停顿（纯本地零计费，只压跨句界的静音、句内换气不动） |
 | 🎯 | `gtrk audio align` | 音画对轨零件（纯本地零计费）：外录音轨（领夹麦/录音笔）与视频互相关测偏移+置信度；高置信直接换轨（视频流零像素改动），低置信产对齐工程交客户端拖齐后 `--resume` 读回；`--offset` 显式偏移直换 |
 | 🧰 | `gtrk tool <name>` | 单点工具族：图转运镜、图片/视频抠像、图片去黑边/比例转换/净化/转方图/LivePhoto、智能拼图封面/拼长图（多图输入）、视频去黑边/比例转换/防抖/蒸汽波滤镜/机械·智能分镜/运镜高光/智能字幕、人声伴奏分离/说话人分轨/变调变速、钢琴转MIDI/修复、音视频降噪、静音移除、MAD 等；`gtrk tool list` 查全部输入/产物/实时价格/状态。单发单收、共享 runner，接新工具只加一个 descriptor |
 | 💬 | `gtrk feedback` | 把用得不顺手的地方反馈给我们：`gtrk feedback "<一句话>" --command <命令名>`。**告知式提交**——助手代提时必须先把要发的内容原样念给你、得到同意后才加 `--disclosed` 重跑；管道/非交互环境下没有这句声明会直接拒发。发送前内容会先做一遍脱敏（本机路径、凭据、邮箱、手机号等按形态替换），你看到的就是将要发出的那一份 |
@@ -641,10 +641,15 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 | `gtrk project init --tts-task <task_id>` | **主路**：引用一个已完成的 `audio_tts_clone` 配音任务——服务端直取产物音频与句级时码（零 ASR、零额外计费），音频下载落工程 `audio/` |
 | `gtrk project init --audio <配音> --transcript <transcript.json>` | **兜底路**：自备配音音频 + 句级时码稿成对给（时码稿由 `gtrk transcript <配音音频> --json` 产出；TTS 合成的配音请走主路，别重跑 ASR） |
 | `gtrk audio lay --project <目录> --file <bgm.mp3>` | 往工程追加一条音频轨；**同源幂等替换**（同一来源重跑替换不堆轨、零引用保护剥旧）；`--volume <0..1>`（默认 0.1 垫底音量——契约 volume 只写线性增益、不写 dB；客户端音量面板显示 -20.0，两侧同一标尺）、`--offset <ms>` 定入点 |
-| `gtrk audio lay … --beat-align` | 云端节拍分析（`audio_music_analyze`，计费一次）把入点吸附最近 downbeat；无 Key / 分析失败 / 出界一律自动降级为不对齐，命令不失败 |
+| `gtrk audio lay … --beat-align` | **高潮点锚定**（`audio_music_analyze`，计费一次）：把 BGM 的情绪峰值 `H`（服务端 `highlight.time`）压到成片高潮点 `A` 上，映射恒为 `轨秒 = A + (BGM 秒 − H)`；**两侧都够长就零平铺**（恰好 1 个 clip），不够长才按小节线平铺补齐、接缝吸附 downbeat（轨的两个硬边界处的截断不吸附）。`A` 取自 `struct_meta.split.beats` 的判据链：升华段 → 容器转折 → 回扣段 → `0.75×全片`兜底，**命中哪一档 CLI 如实报出，兜底档会明示是猜的**。无 Key / 分析失败 / 曲子缺高潮点一律降级为不锚定，命令不失败 |
+| `gtrk audio lay … --beat-align --climax <轨秒>` | 高潮点**逃生门**：一律覆盖上面那条判据链。越界（≤ `--offset` 或 ≥ 工程末尾）或非数**直接报错**，不静默回落 —— 显式给错了值要当场知道。须与 `--beat-align` 同用 |
+| `gtrk audio lay … --no-loop` | 不平铺补齐：开了 `--beat-align` 时只放锚点那一段、头尾留白（**留白秒数如实报出**）；未开 `--beat-align` 时保留单次、不循环叠满至工程末尾 |
 | `gtrk audio tighten --project <目录>` | 收紧配音轨的**句间**停顿（**纯本地、零计费**）：只压跨句界的静音，**句内换气与原声引用段不动**，出参如实报「跳过句内换气 N 处」。`--keep <秒>` 收紧后保留的静音、`--min-silence <秒>` 短于此不动、`--boundary-tol <秒>` 判「贴着句界」的容差、`--dry-run` 只报会压几处共几秒、不写盘。三个缺省值见 `gtrk audio tighten --help`（实测认可值，换题材/音色可调） |
 
 `project init` 另有 `--canvas <WxH>`（默认 1080x1920）、`-o/--out`、`--reupload`、`--no-open`、`--json`，语义与 `oralcut` 一致；两命令 `--json` 恒出单行结果 JSON（人读日志走 stderr）。
+
+> ⚠️ **`--beat-align` 的语义在 2026-09-02 整套换过**（change `redesign-beat-align-climax-anchor`，主理人拍板）。旧实现是「把整条 BGM 后推 `firstDownbeat` 秒」—— 分析的是 **BGM 自己的时间轴**，工程时间轴里根本没有它的消费方，净效果只是**付一次云端分析的钱换来片头一段等长静音**。
+> ⇒ **开过 `--beat-align` 的旧产物不再逐字节可复现**；没开这个 flag 的缺省路径产物**字节零变化**。
 
 > **`tighten` 该在铺轨之前跑**：它会改配音轨时长，`gtrk split` / `gtrk matrix` 的 beat 时码按当刻工程重投影——先收紧再铺轨，省一次返工。想要合成时就对，自训音色可在 TTS 阶段直接传 `--fragment-interval`（见下节 `audio_tts_clone`）；云引擎音色不支持该参数，才用本命令在合成之后收。
 

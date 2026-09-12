@@ -311,6 +311,9 @@ gtrk mg --project "<工程目录>" --json
 # BGM 是带人声歌曲（audio_type:"song"）→ MUST 下载 accompaniment_url 伴奏版上轨，
 # 不得用 download_url 原曲（人声与配音打架，260827 美食批踩坑）；"pure" 取 download_url。
 # 文件名 bgm-<曲名>[-伴奏].<扩展名>：跨片避让按**标题归一化键**记账（剥 bgm- 前缀与伴奏/instrumental/off-vocal 后缀），乱命名=下一轮 --exclude-recent 失准
+# --beat-align 的高潮点取自 split.beats 的 narrative / container_stage（升华段 → 容器转折 → 回扣段）；
+# 拆分稿没带这两个字段 ⇒ 落 0.75×全片兜底档，**CLI 会明示那是猜的**。不接受就用 --climax <轨秒> 指定。
+# 两侧都够长时零平铺（恰好 1 个 clip）；不够长才按小节线平铺补齐、接缝吸附 downbeat。
 gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-align --json
 
 # ⑪ 字幕（样式/颜色 = 检查点①拍板值；用户没选用 default/雅黑；零计费——拆行走云端 subtitle_line_split 0 积分留痕，离线可加 --offline 用本地拆窗、重跑幂等替换）

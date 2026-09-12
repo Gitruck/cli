@@ -240,6 +240,9 @@ gtrk mg lint "<工程目录>/mg/<composition_id>.html" --dispatch "<工程目录
 gtrk mg --project "<工程目录>" --json
 
 # ⑪ BGM（-20dB = 线性 0.10）
+# --beat-align 的高潮点取自 split.beats 的 narrative / container_stage（升华段 → 容器转折 → 回扣段）；
+# 拆分稿没带这两个字段 ⇒ 落 0.75×全片兜底档，**CLI 会明示那是猜的**。不接受就用 --climax <轨秒> 指定。
+# 两侧都够长时零平铺（恰好 1 个 clip）；不够长才按小节线平铺补齐、接缝吸附 downbeat。
 gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-align --json
 
 # ⑫ 字幕
