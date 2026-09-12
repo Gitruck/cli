@@ -40,6 +40,15 @@ const CODE_INPUT_LIMIT_EXCEEDED = 6034;
  * Default / Outline / CinemaYellow / ImmersiveBox / WideSpacing / DeepShadow / Boxed，
  * 传 `immersive_box` 被拒「subtitle_type 未知」。同一枚举在 infra 两个接口上口径不一致，
  * 待 infra 对齐前由消费方适配；未知 id 原样透传（服务端会给可读错误 ⇒ fail-open）。
+ *
+ * ⟲ 2026-09-13：infra 已对齐（`add-subtitle-line-split-api` §9）—— 服务端把写法归一
+ * 收进零依赖轻模块 `subtitle_styles.canonical_subtitle_type_name`，两个口同源，
+ * snake_case / PascalCase / 无分隔 / 任意大小写四种写法同解。
+ *
+ * 🔴 **本表现在不能删** —— 删表直传 snake_case 的前提是那个服务端改动**已部署**。
+ * 部署前删 = 线上直接回到 2026-09-06 那个缺陷（`immersive_box` 被拒）。
+ * 部署后本表也只是**冗余**而非有害（PascalCase 仍然收），所以删它不急。
+ * 删除登记在联动件 `link-subtitle-lay-cloud-line-split`，待部署后才可动。
  */
 export const CLOUD_SUBTITLE_TYPE_BY_PRESET: Readonly<Record<string, string>> = {
 	default: "Default",
