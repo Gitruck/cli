@@ -19,13 +19,13 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `image_matting` | 「给图片抠像 / 抠出主体 / 去背景 / 出透明 png」 | 单张图片 | 透明背景 png | 运行前实时查询 | 已上线 |
 | `image_blackborder_remove` | 「图片去黑边 / 裁掉四周黑边 / 保留有效画面」 | 单张本地图片 | 去黑边图片 | 运行前实时查询 | 已上线 |
 | `image_canvas_adapt` | 「图片比例转换 / 调整画布尺寸 / 转成矩形或方形裁剪」 | 单张本地图片；模式只支持 `normal` / `rectangle` / `square` | 比例适配图片 | 运行前实时查询 | 已上线 |
-| `image_purify` | 「清理我有权处理的图片水印 / 去掉 Logo 或叠加元素 / 图片净化」 | 单张本地图片（仅处理你有权处理的素材） | 净化图片 | 运行前实时查询 | 已上线 |
+| `image_purify` | 「清理我有权处理的图片水印 / 去掉 Logo 或叠加元素 / 图片净化 / 按我圈的框去掉台标」 | 单张本地图片（仅处理你有权处理的素材）；可选按框直接去除 | 净化图片 | 运行前实时查询 | 已上线 |
 | `video_matting` | 「视频抠像 / 视频去背景 / 出透明背景视频」 | 单条视频（≤10 分钟） | 透明背景 webm | 运行前实时查询 | 已上线 |
 | `video_blackborder_remove` | 「视频去黑边 / 裁掉视频四周黑边 / 保留有效画面」 | 单条本地视频 | 去黑边视频 | 运行前实时查询 | 已上线 |
 | `video_canvas_adapt` | 「视频比例转换 / 横竖屏适配 / 截取片段并转换画布」 | 单条本地视频；模式只支持 `normal` / `rectangle` / `square` | 比例适配视频 | 运行前实时查询 | 已上线 |
 | `video_stabilizer` | 「视频防抖 / 稳定手持画面 / 去抖」 | 单条本地视频；方式 `fast` / `exp` / `turbo` | 防抖视频 | 运行前实时查询 | 已上线 |
 | `video_vaporwave` | 「给视频加蒸汽波滤镜 / 复古滤镜 / 使用某个滤镜预设」 | 单条本地视频；滤镜名需精确 | 蒸汽波滤镜视频 | 运行前实时查询 | 已上线 |
-| `video_purify` | 「清理我有权处理的视频水印 / 去字幕 / 只净化指定区域」 | 单条本地视频（仅处理你有权处理的素材）；可选范围、方式和归一化 ROI | 一条净化视频 | 运行前实时查询 | 已上线 |
+| `video_purify` | 「清理我有权处理的视频水印 / 去字幕 / 只净化指定区域 / 只抹我圈的这块 / 只抹片头几秒的角标」 | 单条本地视频（仅处理你有权处理的素材）；可选范围、方式、归一化 ROI 和带时间段的区域框 | 一条净化视频 | 运行前实时查询 | 已上线 |
 | `video_upscale` | 「视频超分 / 低清视频放大 / 动漫视频变清晰」 | 单条本地视频（≤1 分钟）；倍数 `2` / `3` / `4`，类型 `Reality` / `Anime` | 一条超分视频 | 运行前实时查询 | 已上线 |
 | `video_interpolate` | 「视频补帧 / 提高帧率 / 让画面更流畅」 | 单条本地视频；倍数 `2` / `3` / `4`，不附加 1 分钟限制 | 一条插帧视频 | 运行前实时查询 | 已上线 |
 | `video_segment` | 「机械分镜 / 按画面变动切分镜区间 / 场景切分」 | 单条本地视频；可选 `--detector content\|adaptive`、`--threshold` | 分镜区间结构 `result-output.json`（非下载文件） | 运行前实时查询 | 已上线 |
@@ -135,6 +135,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - 视频防抖：`gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo --json`。支持 `fast`、`exp`、`turbo`；未传时由服务端使用 `turbo`，`exp` 只按实验方式转述，不承诺观感。
 - 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
 - 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method ffmpeg --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
+- 按框直接去除：`gtrk tool video_purify ./clip.mp4 --purify-scope region --purify-region 0.8,0.02,0.18,0.08,0,5 --json`（图片把工具换成 `image_purify`、框只写 `x,y,w,h`）。`--purify-region` 可重复，最多 16 个框，视频框后可带 `start,end` 秒。`custom` 只去除框内识别到的文字；`region` 不做识别、**框内全部内容都会被处理（包括画面主体）**——用户要去的是图形台标、半透明图案或只在某段时间出现的角标时选 `region`，并提醒框越小越贴边效果越好。
 - 视频超分：`gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime --json`。输入最多 60 秒，放大后任一边超过 4000 px 会由服务端拒绝；这是实验性增强，不能承诺主观画质一定提升。
 - 视频插帧：`gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 --json`。支持 `2`、`3`、`4`，不套用旧总览里的 1 分钟限制；原视频任一边超过 4000 px 时由服务端拒绝。
 

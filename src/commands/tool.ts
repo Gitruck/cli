@@ -66,7 +66,8 @@ export function configureToolCommand(cmd: Command, registry: ToolDescriptor[] = 
 		for (const o of d.options ?? []) {
 			if (seen.has(o.flag)) continue;
 			seen.add(o.flag);
-			cmd.option(o.flag, o.desc);
+			if (o.repeatable) cmd.option(o.flag, o.desc, collectParam, []);
+			else cmd.option(o.flag, o.desc);
 		}
 	}
 	cmd.action(async (words: string[] | undefined, opts: ToolOpts) => {

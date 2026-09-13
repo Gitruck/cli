@@ -40,7 +40,26 @@ export const MULTI_INPUT_KINDS: ReadonlySet<ToolInputKind> = new Set(["images", 
 export interface ToolOption {
 	flag: string;
 	desc: string;
+	/**
+	 * 可重复出现：注册时挂收集器、缺省 `[]`（add-purify-region-scope）。
+	 * ⚠️ 缺省是空数组而非 undefined —— 描述符里判「用户给没给」MUST 看长度。
+	 */
+	repeatable?: true;
 }
+
+/**
+ * 去水印两个工具共用的选项（link-add-purify-region-scope-cli §1.2）。
+ * 注册器按完整 flag 串去重、先注册者的 desc 生效 ⇒ 两个描述符 MUST 引同一个对象，不许各写一份。
+ */
+const PURIFY_SCOPE_OPTION: ToolOption = {
+	flag: "--purify-scope <scope>",
+	desc: "净化范围：video_purify 支持 full_screen / subtitle / custom / region，image_purify 支持 full_screen / region；未传时使用服务端 full_screen 默认值",
+};
+const PURIFY_REGION_OPTION: ToolOption = {
+	flag: "--purify-region <box>",
+	desc: "region 模式要直接去除的区域框，可重复（最多 16 个）：视频 x,y,w,h[,start[,end]]（秒，end 省略即到结尾），图片 x,y,w,h；框内全部内容都会被处理",
+	repeatable: true,
+};
 
 /** 输入声明：类别 + 扩展名白名单（缺省按类别取默认）+ 视频类可选硬时长上限（上传前 ffprobe 前置）。 */
 export interface ToolInputSpec {
@@ -452,8 +471,17 @@ const imagePurify: ToolDescriptor = {
 	outputHint: "净化图片",
 	enabled: true,
 	taskType: "image_purify",
-	buildPayload(fileId) {
-		return { file_id: fileId };
+	options: [PURIFY_SCOPE_OPTION, PURIFY_REGION_OPTION],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		const scopeRaw = ctx.opts.purifyScope;
+		const scope = scopeRaw == null ? undefined : String(scopeRaw);
+		if (scope != null && scope !== "full_screen" && scope !== "region") {
+			throw new Error("image_purify 的 --purify-scope 只支持 full_screen 或 region");
+		}
+		if (scope != null) payload.purify_scope = scope;
+		applyPurifyRegions(scope, ctx, false, payload);
+		return payload;
 	},
 	mapOutputs(out, ctx) {
 		const url = pickUrl(out, ["download_url"]);
@@ -634,6 +662,87 @@ export function parseNormalizedRoi(value: unknown): NormalizedRoi {
 	return { x, y, w, h };
 }
 
+/** region 模式单次最多几个框（与服务端 `purify_roi.MAX_PURIFY_REGIONS` 同值，add-purify-region-scope design D1）。 */
+export const MAX_PURIFY_REGIONS = 16;
+
+export type PurifyRegion = NormalizedRoi & { start?: number; end?: number };
+
+/**
+ * 解析一个区域框：命令行 `x,y,w,h[,start[,end]]` 串，或 params-json 里的 `{x,y,w,h,start?,end?}` 对象。
+ * 空间四元组复用 `parseNormalizedRoi` 的边界与报错；时间两元为秒（`start ≥ 0`、`end > start`）。
+ * `withTime=false`（图片）时带时间字段直接拒 —— 服务端会忽略它们，CLI 让用户当场知道没生效。
+ */
+export function parsePurifyRegion(value: unknown, opts: { withTime: boolean }): PurifyRegion {
+	let spatial: unknown;
+	let start: unknown;
+	let end: unknown;
+	let fromString = false;
+	if (typeof value === "string") {
+		fromString = true;
+		const parts = value.split(",");
+		if (parts.length < 4 || parts.length > 6 || parts.some((part) => !part.trim())) {
+			throw new Error(
+				opts.withTime ? "--purify-region 必须是 x,y,w,h[,start[,end]]" : "--purify-region 必须是 x,y,w,h 四个归一化数字",
+			);
+		}
+		spatial = parts.slice(0, 4).join(",");
+		start = parts[4];
+		end = parts[5];
+	} else if (value && typeof value === "object" && !Array.isArray(value)) {
+		const box = value as Record<string, unknown>;
+		spatial = { x: box.x, y: box.y, w: box.w, h: box.h };
+		start = box.start;
+		end = box.end;
+	} else {
+		throw new Error("区域框必须包含归一化数字 x、y、w、h");
+	}
+	if (!opts.withTime && (start != null || end != null)) {
+		throw new Error("图片的区域框只接受 x,y,w,h，不支持 start/end 时间段");
+	}
+	const region: PurifyRegion = { ...parseNormalizedRoi(spatial) };
+	const toNumber = (item: unknown): number =>
+		typeof item === "number" ? item : fromString && typeof item === "string" ? Number(item) : Number.NaN;
+	if (start != null) {
+		const s = toNumber(start);
+		if (!Number.isFinite(s) || s < 0) throw new Error("区域框的 start 必须是 ≥0 的秒数");
+		region.start = s;
+	}
+	if (end != null) {
+		const e = toNumber(end);
+		if (!Number.isFinite(e) || e <= (region.start ?? 0)) throw new Error("区域框的 end 必须是大于 start 的秒数");
+		region.end = e;
+	}
+	return region;
+}
+
+/**
+ * region 作用域的框收集与校验（视频 / 图片共用）。组合矛盾一律前置报错（主件 design D7 的 CLI 侧口径）：
+ * 非 region 作用域给了 `--purify-region`、region 作用域一个框都没给、超过上限。
+ * 命令行给了框 ⇒ 写进 payload；只走 params-json ⇒ 只校验不改写，由 runner 的 mergeParams 合入（与 custom 的 roi 同款）。
+ */
+function applyPurifyRegions(
+	scope: string | undefined,
+	ctx: ToolContext,
+	withTime: boolean,
+	payload: Record<string, unknown>,
+): void {
+	const raw = ctx.opts.purifyRegion;
+	const fromCli: unknown[] = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+	if (scope !== "region") {
+		if (fromCli.length > 0) throw new Error("--purify-region 只能与 --purify-scope region 一起使用");
+		return;
+	}
+	const fromParams = ctx.extraParams.regions;
+	if (fromCli.length === 0 && fromParams == null) {
+		throw new Error("--purify-scope region 必须同时提供 --purify-region 或 params-json.regions");
+	}
+	const boxes = fromCli.length > 0 ? fromCli : fromParams;
+	if (!Array.isArray(boxes) || boxes.length === 0) throw new Error("params-json.regions 必须是非空数组");
+	if (boxes.length > MAX_PURIFY_REGIONS) throw new Error(`区域框最多 ${MAX_PURIFY_REGIONS} 个`);
+	const parsed = boxes.map((box) => parsePurifyRegion(box, { withTime }));
+	if (fromCli.length > 0) payload.regions = parsed;
+}
+
 /** video_purify —— 净化用户有权处理的视频中的水印、字幕或指定区域。 */
 const videoPurify: ToolDescriptor = {
 	name: "video_purify",
@@ -647,22 +756,20 @@ const videoPurify: ToolDescriptor = {
 	taskType: "video_purify",
 	pollTimeoutMs: 4 * 60 * 60 * 1000,
 	options: [
-		{
-			flag: "--purify-scope <full_screen|subtitle|custom>",
-			desc: "净化范围；未传时使用服务端 full_screen 默认值",
-		},
+		PURIFY_SCOPE_OPTION,
 		{
 			flag: "--purify-method <ffmpeg|raft>",
 			desc: "净化方式；未传时使用服务端 ffmpeg 默认值，raft 仅支持 20 分钟以内视频",
 		},
 		{ flag: "--purify-roi <x,y,w,h>", desc: "custom 模式的归一化矩形区域" },
+		PURIFY_REGION_OPTION,
 	],
 	buildPayload(fileId, ctx) {
 		const payload: Record<string, unknown> = { file_id: fileId };
 		const scopeRaw = ctx.opts.purifyScope;
 		const scope = scopeRaw == null ? undefined : String(scopeRaw);
-		if (scope != null && scope !== "full_screen" && scope !== "subtitle" && scope !== "custom") {
-			throw new Error("--purify-scope 只支持 full_screen、subtitle 或 custom");
+		if (scope != null && scope !== "full_screen" && scope !== "subtitle" && scope !== "custom" && scope !== "region") {
+			throw new Error("--purify-scope 只支持 full_screen、subtitle、custom 或 region");
 		}
 		if (scope != null) payload.purify_scope = scope;
 
@@ -685,6 +792,7 @@ const videoPurify: ToolDescriptor = {
 			}
 			parseNormalizedRoi(ctx.extraParams.roi);
 		}
+		applyPurifyRegions(scope, ctx, true, payload);
 		return payload;
 	},
 	mapOutputs(out, ctx) {
@@ -2043,11 +2151,23 @@ export function findTool(name: string, registry: ToolDescriptor[] = TOOL_REGISTR
  */
 export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): void {
 	const seen = new Set<string>();
+	// 同一长选项在多个工具里 MUST 同 flag 串、同 repeatable（link-add-purify-region-scope-cli §1.3）：
+	// 注册器按完整 flag 串去重，写法不一致会各注册一次、在 commander 里撞名，挡在发版门前。
+	const optionByLong = new Map<string, ToolOption>();
 	for (const d of registry) {
 		if (!d.name) throw new Error("descriptor 缺 name");
 		if (RESERVED_NAMES.has(d.name)) throw new Error(`descriptor 名与保留字冲突：「${d.name}」`);
 		if (seen.has(d.name)) throw new Error(`descriptor 名重复：「${d.name}」`);
 		seen.add(d.name);
+		for (const o of d.options ?? []) {
+			const long = /--[a-z0-9-]+/i.exec(o.flag)?.[0];
+			if (!long) throw new Error(`工具选项缺长选项名：「${o.flag}」（${d.name}）`);
+			const prev = optionByLong.get(long);
+			if (prev && (prev.flag !== o.flag || Boolean(prev.repeatable) !== Boolean(o.repeatable))) {
+				throw new Error(`工具选项 ${long} 在多个工具里声明不一致：「${prev.flag}」与「${o.flag}」（${d.name}）`);
+			}
+			optionByLong.set(long, o);
+		}
 		if (!d.enabled && !d.disabledReason) throw new Error(`未启用工具缺 disabledReason：「${d.name}」`);
 		if (d.kind === "cloud" && !d.taskType) throw new Error(`cloud 型工具缺 taskType：「${d.name}」`);
 		if (d.kind === "cloud" && !d.priceKey) throw new Error(`cloud 型工具缺 priceKey：「${d.name}」`);
