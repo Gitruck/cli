@@ -279,6 +279,19 @@
 - **④ 根治后的处置预案**：若渲染侧将来换掉光栅路径并经真机复测确认成本塌陷，本节由 MUST NOT/SHOULD **降为提示**，
   并保留「本节曾于 2026-07-30、本证据锚所载版本口径下作为降本规范所必需」的历史记录。
 
+## Alpha 交付口径（2026-09-14 增补 · 真机事故沉淀）
+
+> **一句话**：颗粒内**一律直通 alpha**（浏览器语义），半透明是合法且鼓励的手段；把直通换成预乘是**渲染管线在剪映交付面上的义务**，不是颗粒作者或 CLI 的事。本节是该主题的唯一口径来源，`gtrk mg lint` 的 `x-soft-alpha` 文案指向这里。
+
+**事故**：文字特效模板库首批颗粒（径向渐变星芒 + `text-shadow` 软晕）经云端 qtrle 交付拖进剪映，软光晕塌成实心白多边形、50% 黄晕成满强度橙边。根因 = 剪映按**预乘** alpha 合成 qtrle（`dst×(1−α)+src`），而管线交付的是**直通** alpha；此前颗粒几乎全实心只有抗锯齿边，错配只在 1px 边缘上、看不出。修法落在 infra `html-render-qtrle-layer`（`fix-qtrle-premultiplied-alpha-for-jianying`）：qtrle 编码前 `format=rgba,premultiply=inplace=1`。
+
+### 条款
+
+1. **颗粒侧（MUST）**：颗粒里的一切颜色按**直通 alpha** 写（`rgba(r,g,b,a)` / `#RRGGBBAA` / `opacity` / 渐变里的 `transparent`），作者 **MUST NOT** 为迁就任何 NLE 自行"预乘"（把半透明色改暗）或回避半透明。软光晕、渐变、`text-shadow` 软晕、`opacity<1` 图层都是合法手段；真卷积滤镜另见「渲染成本」节。
+2. **交付面（事实，作者应知）**：客户端预览、本地 webm 层、云端 overlay 合成 = **直通**；剪映 qtrle 交付 = **管线预乘**（唯一一处）。颗粒与 CLI **MUST NOT** 再做第二次预乘（双重预乘会把软边压暗）。
+3. **验收纪律（MUST）**：凡颗粒含**半透明面积**（软光晕 / 渐变到 transparent / `text-shadow` 带 blur / `opacity<1` 图层，半透明像素占比 ≥1%），剪映路径的真机格 **MUST 用这颗本身或同类颗粒**验，**MUST NOT** 拿实心 + 抗锯齿边的颗粒代验——后者对预乘错配结构性失明。抽帧判据：解出的 qtrle 帧里半透明像素满足 `RGB ≈ 直通色 × α`。
+4. **哨兵**：`gtrk mg lint` 对含半透明面积的颗粒给**非致命**信息项 `x-soft-alpha`，只提醒「本颗粒的剪映交付依赖管线预乘配方（infra ≥ fix-qtrle-premultiplied-alpha-for-jianying），旧渲染服务会把软边渲成实心」，不拦铺轨、不要求作者改写。
+
 ## 颗粒骨架（中性模板）
 
 ```html
