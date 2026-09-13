@@ -33,37 +33,15 @@ export const CLOUD_LINE_SPLIT_BATCH_CHARS = 8000;
 const CODE_INPUT_LIMIT_EXCEEDED = 6034;
 
 /**
- * CLI / 客户端预设 id（snake_case，= 云端 `video_ai_subtitle` 的 `subtitle_type` 入参口径）
- * → 本接口的 `subtitle_type`（infra `SubtitleType` 枚举**值**，PascalCase）。
+ * `subtitle_type` 直传 CLI / 客户端预设 id（snake_case，与云端 `video_ai_subtitle` 的 `subtitle_type` 同口径）。
  *
- * 2026-09-06 生产实测：本接口用 `SubtitleType(name)` 校验，只认
- * Default / Outline / CinemaYellow / ImmersiveBox / WideSpacing / DeepShadow / Boxed，
- * 传 `immersive_box` 被拒「subtitle_type 未知」。同一枚举在 infra 两个接口上口径不一致，
- * 待 infra 对齐前由消费方适配；未知 id 原样透传（服务端会给可读错误 ⇒ fail-open）。
- *
- * ⟲ 2026-09-13：infra 已对齐（`add-subtitle-line-split-api` §9）—— 服务端把写法归一
- * 收进零依赖轻模块 `subtitle_styles.canonical_subtitle_type_name`，两个口同源，
- * snake_case / PascalCase / 无分隔 / 任意大小写四种写法同解。
- *
- * 🔴 **本表现在不能删** —— 删表直传 snake_case 的前提是那个服务端改动**已部署**。
- * 部署前删 = 线上直接回到 2026-09-06 那个缺陷（`immersive_box` 被拒）。
- * 部署后本表也只是**冗余**而非有害（PascalCase 仍然收），所以删它不急。
- * 删除登记在联动件 `link-subtitle-lay-cloud-line-split`，待部署后才可动。
+ * ⟲ 2026-09-13 删表：这里原有一张「预设 id → infra `SubtitleType` 枚举值（PascalCase）」映射表
+ * `CLOUD_SUBTITLE_TYPE_BY_PRESET`，缘由是 2026-09-06 生产实测本接口只认 PascalCase、传 `immersive_box` 被拒。
+ * infra `add-subtitle-line-split-api` §9 已把写法归一（`subtitle_styles.canonical_subtitle_type_name`，两个口同源）；
+ * 2026-09-13 部署后生产实测 `immersive_box` / `ImmersiveBox` / `cinema_yellow` / `cinemayellow` 四种写法均 200、
+ * 拆行结果逐条一致，未知值 6016 且可选集以 snake_case 列出 ⇒ 映射表退化为恒等，按联动件
+ * `link-subtitle-lay-cloud-line-split` §6.2 收尾删除。未知 id 仍原样透传（服务端给可读错误 ⇒ fail-open 口径不变）。
  */
-export const CLOUD_SUBTITLE_TYPE_BY_PRESET: Readonly<Record<string, string>> = {
-	default: "Default",
-	outline: "Outline",
-	cinema_yellow: "CinemaYellow",
-	immersive_box: "ImmersiveBox",
-	wide_spacing: "WideSpacing",
-	deep_shadow: "DeepShadow",
-	boxed: "Boxed",
-};
-
-export function toCloudSubtitleType(presetId: string | undefined): string | undefined {
-	if (!presetId) return undefined;
-	return CLOUD_SUBTITLE_TYPE_BY_PRESET[presetId] ?? presetId;
-}
 
 /** 云端拆行不可用（无 key / 网络 / 超时 / 信封非 200 / 解析失败）：调用方据此 fail-open。 */
 export class CloudLineSplitUnavailable extends Error {
@@ -158,7 +136,6 @@ export async function splitLinesViaCloud(
 ): Promise<CloudLineSplitResult> {
 	const fetchFn = deps.fetchFn ?? fetch;
 	const timeoutMs = deps.timeoutMs ?? CLOUD_LINE_SPLIT_TIMEOUT_MS;
-	const cloudSubtitleType = toCloudSubtitleType(subtitleType);
 	const out: SplitLine[] = [];
 	let degraded = false;
 	let degradeMessage: string | null = null;
@@ -175,7 +152,7 @@ export async function splitLinesViaCloud(
 					lines: batch,
 					canvas,
 					language,
-					...(cloudSubtitleType ? { subtitle_type: cloudSubtitleType } : {}),
+					...(subtitleType ? { subtitle_type: subtitleType } : {}),
 					// 标点清洗在本地按 08-21 规则做（buildCaptionElement → stripSubtitlePunctuation，与客户端同一份），
 					// 服务端只管拆行：一处规则、两侧同源，也让 --keep-punctuation 真能保住原文标点。
 					strip_punctuation: false,
