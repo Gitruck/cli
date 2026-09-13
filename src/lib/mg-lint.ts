@@ -1253,6 +1253,27 @@ export interface SeekSignals {
  * `window.__timelines[…] = <非裸标识符>`（合规注册恒为 `__timelines[id] = tl`，故裸标识符 RHS **不报**，
  * 真机 21/21 与全部 exemplar 均为该形 → 零误伤）。
  */
+/**
+ * 半透明面积探测（契约「Alpha 交付口径」哨兵 `x-soft-alpha`）。静态正则只认"写法"，不算真实面积：
+ * rgba/hsla 末位在 (0,1) 开区间、#RRGGBBAA 末两位既非 ff 也非 00、渐变里的 transparent、
+ * 带 blur 的 text-shadow/box-shadow（偏移量可为不带单位的 0）、**CSS 声明里**的 opacity 在 (0,1) 开区间。
+ * 刻意不认 GSAP 补间参数里的 `opacity:0`（淡入淡出的端点是 0/1，不是驻留的半透明面积）。
+ * 全部按 GSAP 与 CSS 的直通语义理解；命中项只用于提醒文案，不进 ok 判定。
+ */
+export function detectSoftAlpha(html: string): string[] {
+	const hits: string[] = [];
+	if (/\b(rgba|hsla)\(\s*[^)]*?,\s*0?\.\d*[1-9]\d*\s*\)/.test(html)) hits.push("rgba/hsla 半透明色");
+	const hex8 = html.match(/#[0-9a-fA-F]{8}\b/g) || [];
+	if (hex8.some((c) => !/(ff|00)$/i.test(c))) hits.push("#RRGGBBAA 半透明色");
+	if (/(linear|radial|conic)-gradient\([^)]*transparent/i.test(html)) hits.push("渐变到 transparent");
+	if (/(text-shadow|box-shadow)\s*:[^;"]*?(?:-?\d+(?:px)?)\s+(?:-?\d+(?:px)?)\s+([1-9]\d*)px/.test(html)) hits.push("带 blur 的 text-shadow/box-shadow");
+	// 只认 CSS 声明（style="…" 属性或 <style> 块），且取值落在 (0,1) 开区间
+	const cssOpacity = /(?:style="[^"]*|[{;]\s*)\bopacity\s*:\s*0?\.\d*[1-9]\d*\b/;
+	const styleBlocks = (html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || []).join("\n");
+	if (cssOpacity.test(html.replace(/<script[\s\S]*?<\/script>/gi, "")) || /\bopacity\s*:\s*0?\.\d*[1-9]\d*\b/.test(styleBlocks)) hits.push("静态 opacity<1");
+	return hits;
+}
+
 export function detectSeekSignals(html: string): SeekSignals {
 	// (a) 回调体内的 DOM 写入
 	const hooks = new Set<string>();
@@ -1880,6 +1901,18 @@ export function lintParticle(
 			false,
 			`含 ${timers.join(" 与 ")}——这类自有时钟**不被 seek 驱动**，逐帧渲染时等于冻结（契约：所有视觉变化必须挂在 tl 上）。` +
 				`静态正则分不清「驱动画面」与其它用途（如一次性布局测量），故只提醒、不拦`,
+		);
+
+	// 契约「Alpha 交付口径」（2026-09-14 增补）：含半透明面积的颗粒，剪映交付依赖管线预乘配方——
+	// **恒非致命**、不要求改写；只提醒「剪映真机格 MUST 用这颗验，实心颗粒验不出预乘错配」。
+	const soft = detectSoftAlpha(html);
+	if (soft.length)
+		push(
+			"x-soft-alpha",
+			false,
+			`含半透明面积（${soft.join("、")}）——合法且不必改写。但剪映 qtrle 交付依赖渲染管线在编码前**预乘 alpha**` +
+				`（infra fix-qtrle-premultiplied-alpha-for-jianying；剪映按预乘合成，直通 alpha 的软边会塌成实心，2026-09-14 真机）。` +
+				`剪映路径的真机格 MUST 用这颗本身验，MUST NOT 拿实心颗粒代验；颗粒与 CLI MUST NOT 自行预乘（会双重压暗）`,
 		);
 
 	// 派生：composition_id 对齐 dispatch。**用 HTML 内解析出的 cid** 比对——
