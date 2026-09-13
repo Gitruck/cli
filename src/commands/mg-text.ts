@@ -1,0 +1,309 @@
+/**
+ * gtrk mg 的文字模板三口（change add-text-template-source）：
+ *
+ *   gtrk mg fetch --source text <检索词>        候选态（离线可用）/ 取块态
+ *   gtrk mg compile <ir.json> [--out <dir>]     改 IR 重编译（L0，0 积分）
+ *   gtrk mg edit <particle.html> --say "<要求>"  自然语言改写（2 积分/候选）
+ *
+ * 与中性块 registry 那条路**刻意不同的一点**：文字模板 MUST NOT 走机械改写。
+ * 中性块来自第三方、要替字体换色板才合规；文字模板是我方 clean-room 重写的，
+ * 一旦改 HTML 字节，它就从 `ir` 态掉到 `detached`——云端再也调不动了。
+ * 改内容只有两条路：改 IR 后 `compile`，或者 `edit` 让云端改。
+ */
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import { log } from "../lib/log";
+import { lintParticle } from "../lib/mg-lint";
+import { assertNotJianyingDraftDir } from "../lib/mg-render";
+import { describeState, identifyParticle } from "../lib/particle-identity";
+import {
+	compileIr,
+	generateParticle,
+	GENERATE_PRICE_KEY,
+	type GenerateCandidate,
+} from "../lib/text-ir-client";
+import { resolveToolPricing } from "../lib/tool-pricing";
+import {
+	describeCatalog,
+	fetchTemplateHtml,
+	findTemplate,
+	resolveCatalog,
+	searchTemplates,
+	type ResolvedCatalog,
+} from "../lib/text-templates";
+
+export interface TextCmdOpts {
+	pick?: string;
+	top?: string;
+	as?: string;
+	out?: string;
+	slot?: string;
+	project?: string;
+	dispatch?: string;
+	say?: string;
+	n?: string;
+	yes?: boolean;
+	json?: boolean;
+	offline?: boolean;
+}
+
+/** 候选数只有两档：确认框的金额就只有两种，用户不必在 1/2/3 之间做无意义的权衡。 */
+const ALLOWED_N = [1, 3];
+
+function parseN(raw: string | undefined): number {
+	if (raw === undefined) return 1;
+	const n = Number(raw);
+	if (!ALLOWED_N.includes(n)) {
+		throw new Error(`--n 只接受 ${ALLOWED_N.join(" 或 ")}（收到 ${raw}）——候选数是计费单位数，n=1 与 n=3 分别对应一次和三次独立的模型调用`);
+	}
+	return n;
+}
+
+/** 目录来源一律明示：静默用旧目录，用户会以为新模板没发布。 */
+function announceCatalog(resolved: ResolvedCatalog): void {
+	const line = describeCatalog(resolved);
+	if (resolved.origin === "remote") log.step(`▶ ${line}`);
+	else log.warn(`▶ ${line}`);
+}
+
+// ─────────────────────────── fetch --source text ───────────────────────────
+
+export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<Record<string, unknown>> {
+	const query = args.join(" ").trim();
+	const top = Math.max(1, Number(opts.top ?? 3) || 3);
+	const resolved = await resolveCatalog({ ...(opts.offline ? { offline: true } : {}) });
+	const catalog = resolved.catalog;
+	const pickId = opts.pick ?? (query && findTemplate(query, catalog) ? query : undefined);
+
+	// ── 候选态：网络不可达也要能列（spec「候选离线可列」）──
+	if (!pickId) {
+		announceCatalog(resolved);
+		const cands = searchTemplates(query ? query.split(/\s+/) : [], catalog, top);
+		log.step(`▶ 文字模板候选：「${query || "（全部）"}」→ ${cands.length} 件`);
+		for (const { item } of cands) {
+			log.info(`${item.id}  ${item.title}  [${item.family}]  ${item.duration}s  槽位=${item.slots.join(",") || "-"}`);
+			if (item.poster) log.info(`   预览：${item.poster}`);
+		}
+		if (cands.length === 0) log.warn("无候选——换个检索词（中文可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）");
+		return {
+			ok: true,
+			mode: "fetch",
+			source: "text",
+			stage: "candidates",
+			query,
+			catalog: { version: catalog.version, origin: resolved.origin, ...(resolved.reason ? { reason: resolved.reason } : {}) },
+			candidates: cands.map(({ item, score }) => ({ ...item, score })),
+		};
+	}
+
+	// ── 取块态 ──
+	const item = findTemplate(pickId, catalog);
+	if (!item) {
+		throw new Error(`模板目录里没有「${pickId}」（目录 v${catalog.version}，${catalog.items.length} 件；先用候选态检索：gtrk mg fetch --source text <检索词>）`);
+	}
+	const { cid, outPath } = resolveTextOutPath(item.id, opts);
+
+	log.step(`▶ 取模板 ${item.id}（${item.file.path}，${item.file.bytes} B，sha256 ${item.file.sha256.slice(0, 12)}…）`);
+	const got = await fetchTemplateHtml(catalog, item);
+	for (const a of got.attempts) log.info(`[${a.id}] ${a.ok ? "✓" : "✗"} ${a.url}${a.reason ? `（${a.reason}）` : ""} ${a.ms}ms`);
+
+	const identity = identifyParticle(got.html);
+	const lint = lintParticle(got.html, { compositionId: cid, slotDuration: item.duration, identity: identity.state });
+	for (const v of lint.violations) (v.fatal ? log.err : log.warn)(`${v.fatal ? "✗" : "·"} ${v.law}: ${v.msg}`);
+	const base = {
+		mode: "fetch" as const,
+		source: "text",
+		id: item.id,
+		composition_id: cid,
+		catalog: { version: catalog.version, origin: resolved.origin },
+		fetched_from: got.source,
+		url: got.url,
+		identity: identity.state,
+		lint: { ok: lint.ok, opaque: lint.opaque, violations: lint.violations },
+	};
+	if (!lint.ok) {
+		log.err(`lint 致命项未过（${lint.violations.filter((v) => v.fatal).length} 项），不落盘`);
+		return { ...base, ok: false, stage: "lint-failed" };
+	}
+	await mkdir(dirname(outPath), { recursive: true });
+	await writeFile(outPath, got.html, "utf8");
+	log.ok(`已落 ${outPath}（${describeState(identity.state)}；${item.duration}s；槽位 ${item.slots.join("、") || "无"}）`);
+	log.warn("改内容走 `gtrk mg compile`（改 IR 重编译）或 `gtrk mg edit --say`（云端改写）——直接改 HTML 会让它脱离模板，云端就调不动了。");
+	return { ...base, ok: true, stage: "written", path: outPath };
+}
+
+/** 取块落点：派单模式取 beat 的 composition_id，独立模式用 --as，都没有就用模板 id。 */
+function resolveTextOutPath(templateId: string, opts: TextCmdOpts): { cid: string; outPath: string } {
+	if (opts.slot) {
+		if (!opts.project && !opts.dispatch) throw new Error("--slot 需要配 --project <dir>（或 --dispatch <path>）");
+		const baseDir = resolve(opts.project ?? dirname(resolve(opts.dispatch as string)));
+		// 派单模式沿用工程内落点；composition_id 用槽位名，与 dispatch.mg 对齐
+		return { cid: opts.slot, outPath: join(baseDir, "mg", `${opts.slot}.html`) };
+	}
+	const cid = opts.as ?? templateId;
+	const outDir = resolve(opts.out ?? "./mg-fetch");
+	assertNotJianyingDraftDir(outDir);
+	return { cid, outPath: join(outDir, `${cid}.html`) };
+}
+
+// ─────────────────────────── mg compile ───────────────────────────
+
+export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Record<string, unknown>> {
+	const file = args[0];
+	if (!file) throw new Error("用法：gtrk mg compile <ir.json | particle.html> [--out <dir>]");
+	const inputPath = resolve(file);
+	if (!existsSync(inputPath)) throw new Error(`文件不在：${inputPath}`);
+	const raw = await readFile(inputPath, "utf8");
+
+	// 入参两收：`.ir.json` 是常规改法；**给颗粒 HTML 就是「重置回模板」**——
+	// 取它内嵌的那份 IR 重编一次，被手改掉的字节全部回到模板原样。
+	// 这条对 `detached` 颗粒尤其有用，那是它唯一的回头路。
+	let ir: Record<string, unknown>;
+	let reset = false;
+	if (/^\s*</.test(raw)) {
+		const embedded = identifyParticle(raw).ir;
+		if (!embedded) throw new Error(`这颗没有内嵌 IR，重置不了（${inputPath}）——它不是模板颗粒，请改用本地 AI 修改`);
+		ir = embedded;
+		reset = true;
+		log.step("▶ 从颗粒里取出内嵌 IR，按它重编（重置回模板）");
+	} else {
+		try {
+			ir = JSON.parse(raw);
+		} catch (e) {
+			throw new Error(`IR 不是合法 JSON（${inputPath}）：${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	log.step("▶ 云端编译（0 积分）");
+	const res = await compileIr(ir);
+	const outDir = resolve(opts.out ?? dirname(inputPath));
+	assertNotJianyingDraftDir(outDir);
+	const outPath = join(outDir, `${res.composition_id}.html`);
+
+	const identity = identifyParticle(res.html);
+	if (identity.state !== "ir") {
+		// 服务端产物自证不过 = 双方算法漂了，比落一个坏颗粒更该当场停
+		throw new Error(`服务端产物自证失败（identity=${identity.state}）——本地与服务端的哈希口径可能已不一致，请报 issue，不落盘`);
+	}
+	await mkdir(outDir, { recursive: true });
+	// 恒 LF：哈希是三态身份的判据，CRLF 会让这颗在别的机器上被判 detached
+	await writeFile(outPath, res.html, "utf8");
+	log.ok(`已落 ${outPath}（${describeState(identity.state)}；${res.duration}s；html_sha256 ${res.html_sha256.slice(0, 12)}…）`);
+	return {
+		ok: true,
+		mode: "compile",
+		composition_id: res.composition_id,
+		path: outPath,
+		duration: res.duration,
+		ir_sha256: res.ir_sha256,
+		html_sha256: res.html_sha256,
+		identity: identity.state,
+		reset,
+	};
+}
+
+// ─────────────────────────── mg edit ───────────────────────────
+
+export async function runEdit(args: string[], opts: TextCmdOpts, deps: { confirm?: (q: string) => Promise<boolean> } = {}): Promise<Record<string, unknown>> {
+	const file = args[0];
+	if (!file) throw new Error('用法：gtrk mg edit <particle.html> --say "<自然语言要求>" [--n 1|3] [--pick <k>] [--yes]');
+	if (!opts.say?.trim()) throw new Error("--say 必填：一句话说清要改成什么（如「打字机快一倍，副标改成青色」）");
+	const n = parseN(opts.n);
+	const particlePath = resolve(file);
+	const html = await readFile(particlePath, "utf8");
+
+	// ── 三态判定：本地就能拒的，不要发去云端花钱 ──
+	const identity = identifyParticle(html);
+	if (identity.state !== "ir") {
+		const hint =
+			identity.state === "detached"
+				? `这颗已脱离模板（HTML 被直接改过），云端调不动了。重置回模板：\`gtrk mg compile ${file}\`（按它内嵌的 IR 重编一次，手改的字节全部回到原样）；或就这么留着，改用本地 AI 直接改。`
+				: "这颗没有内嵌 IR（不是模板颗粒），云端调不动。请改用本地 AI 直接改，或换一颗文字模板。";
+		log.err(`${describeState(identity.state)}：${hint}`);
+		return { ok: false, mode: "edit", reason: identity.state, path: particlePath, identity: identity.state };
+	}
+
+	// ── 计费确认（--yes 跳过；拒绝 = 零云端调用）──
+	const { billingHint } = await resolveToolPricing(GENERATE_PRICE_KEY, "文字颗粒自然语言改写");
+	log.warn(`计费提示：${billingHint}`);
+	log.warn(`本次请求 ${n} 个候选 ⇒ 计费 ${n} 个单位（候选数就是计费单位数；首次与改写同价，无免费次数）。`);
+	if (!opts.yes) {
+		if (opts.json) throw new Error("--json 下不弹交互确认，请显式加 --yes 承认计费");
+		const go = await (deps.confirm ?? confirmViaStdin)("确认提交改写？");
+		if (!go) {
+			log.warn("已取消：零云端调用、零计费。");
+			return { ok: false, mode: "edit", reason: "declined", declined: true, path: particlePath };
+		}
+	}
+
+	log.step(`▶ 提交改写：「${opts.say.trim()}」（n=${n}）`);
+	const { result, taskId } = await generateParticle(
+		{ html, instruction: opts.say.trim(), n },
+		(s, p) => log.info(`${s}${typeof p === "number" ? ` ${p}%` : ""}`),
+	);
+
+	// ── 拒绝：如实打印，非 0 退出码，但与网络错误区分 ──
+	if (result.refusal) {
+		log.warn(`服务端拒绝了这次改写：${result.refusal}`);
+		log.info("这不是故障——IR 词表里没有对应的表达。换个说法，或者把这颗当底子用本地 AI 做。");
+		return { ok: false, mode: "edit", reason: "refusal", refusal: result.refusal, task_id: taskId, path: particlePath };
+	}
+	if (result.candidates.length === 0) throw new Error(`任务完成但既无候选也无拒绝说明（task_id=${taskId}）`);
+
+	// ── 候选落盘 ──
+	const cid = basename(particlePath).replace(/\.html?$/i, "");
+	const outDir = dirname(particlePath);
+	const landed: { index: number; path: string; cand: GenerateCandidate }[] = [];
+	for (const [index, cand] of result.candidates.entries()) {
+		const candPath = join(outDir, `${cid}.cand${index}.html`);
+		const body = await downloadText(cand.html_download_url);
+		await writeFile(candPath, body, "utf8");
+		landed.push({ index, path: candPath, cand });
+	}
+	log.step(`▶ ${landed.length} 个候选：`);
+	for (const { index, path, cand } of landed) {
+		const dup = cand.duplicate_of != null ? `  ⟲ 与候选 ${cand.duplicate_of} 相同` : "";
+		log.info(`[${index}] ${cand.scope}  ${cand.html_sha256.slice(0, 12)}…  ${basename(path)}${dup}`);
+		if (cand.note) log.info(`    ${cand.note}`);
+	}
+
+	// ── 选一替换（--pick 给了就直接替换，没给就只落候选让人看）──
+	const base = {
+		mode: "edit" as const,
+		task_id: taskId,
+		path: particlePath,
+		billable_units: result.billable_units ?? n,
+		candidates: landed.map(({ index, path, cand }) => ({ index, path, ...cand })),
+	};
+	if (opts.pick === undefined) {
+		log.warn(`未选定：候选已落在 ${outDir}。看过之后用 \`gtrk mg edit ${file} --say "…" --pick <k>\` 重跑会再计一次费——建议直接手动把选中的候选改名覆盖原文件（原文件请先自行备份）。`);
+		return { ...base, ok: true, stage: "candidates" };
+	}
+	const pick = Number(opts.pick);
+	const chosen = landed.find((l) => l.index === pick);
+	if (!chosen) throw new Error(`--pick ${opts.pick} 不在候选范围（0–${landed.length - 1}）`);
+	const bakPath = join(outDir, `${cid}.bak.html`);
+	await writeFile(bakPath, html, "utf8");
+	await writeFile(particlePath, await readFile(chosen.path, "utf8"), "utf8");
+	log.ok(`已用候选 ${pick} 替换 ${particlePath}（原件备份 ${basename(bakPath)}）`);
+	return { ...base, ok: true, stage: "replaced", picked: pick, backup: bakPath };
+}
+
+async function downloadText(url: string): Promise<string> {
+	const r = await fetch(url);
+	if (!r.ok) throw new Error(`候选下载失败 HTTP ${r.status}：${url}`);
+	return r.text();
+}
+
+/** stdin 计费确认（与 mg render 的确认闸同款姿势）。 */
+async function confirmViaStdin(question: string): Promise<boolean> {
+	const { createInterface } = await import("node:readline/promises");
+	const rl = createInterface({ input: process.stdin, output: process.stderr });
+	try {
+		const a = (await rl.question(`${question} [y/N] `)).trim().toLowerCase();
+		return a === "y" || a === "yes";
+	} finally {
+		rl.close();
+	}
+}

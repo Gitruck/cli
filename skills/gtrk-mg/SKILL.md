@@ -40,12 +40,32 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 **车道 → 栏目生产 skill 的解析（照此，别猜）**：读**有效栏目配置**的 `style.skills[]`（配置文件 `~/.gitruck/columns/<id>.json`；栏目 id 由 `--column <id>` 或 config `defaultColumn` 选取；零配置 = L0 内置默认栏目，**不携带 style 清单** → 必然走下方「无匹配」分支）。在 `style.skills[]` 里取 **`produces` 归一后（旧 `RRV_MG` → `MG`）等于 `MG`** 的条目 → 触发它 `ref` 指向的 skill 产颗粒。
 - 命中多条 → 按栏目约定取其一（一般栏目只登记一个 MG 生产 skill）。
 - 条目带 `routing:"none"`（管线外产物，如封面）→ 跳过，不当 MG 生产 skill。
-- **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺，给用户**三选一**（都不替他选）：
+- **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺，给用户**四选一**（都不替他选）：
   1. **建栏目**：`/gtrk-style-maker` 沉淀自己的 MG 生产 skill（一次性，长期资产）；
   2. **换栏目**：`--column <id>` 指向已配置的栏目；
   3. **用中性块**：Hyperframes registry 的中性颗粒骨架（`gtrk mg fetch`，见下节「中性块工作流」）——没建栏目也能当场出 MG，但**骨架不是成品**，内容与审美 MUST 改写。
+  4. **用文字模板**：同合云自家的文字特效模板库（`gtrk mg fetch --source text`，见下节「文字模板工作流」）——**开箱即成品**（配色与排版已做过），改字走 `gtrk mg compile`、改效果走 `gtrk mg edit --say`。派单槽位 `theme` 落在 `opening-hook` / 字卡 / 强调 / `caption` 这几类时，它通常比中性块更省事。
   另可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene mg-explainer` 列第三方 MG 生产 skill，装完 `gtrk skills add <owner/repo> --produces MG` 登记即被本节解析到——本 skill 正文不点名任何仓、不点名任何块。
-- **有匹配时中性块缺省不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物）时可**提议**「这一槽用中性块」，用户点头才用。
+- **有匹配时中性块与文字模板缺省都不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物 / 纯文字入场）时可**提议**「这一槽用中性块」或「这一槽用文字模板」，用户点头才用。
+
+## 文字模板工作流（同合云自家模板 → 改字/改效果 → lint → 铺）
+
+> 与中性块是**两条路，别混**。中性块来自第三方、是骨架，要改字体换色板才合规（机械改写八条）；
+> 文字模板是我方 clean-room 重写的**成品**，**MUST NOT 做机械改写、MUST NOT 直接改 HTML**。
+
+**为什么不能直接改 HTML**：每颗文字模板都内嵌了产生它的 IR 与两个哈希，颗粒因此自带
+「我是由这份 IR 编出来的」的证明（三态：`ir` 可云调 / `detached` 已脱离 / `html` 普通颗粒）。
+手改一个字节，它就从 `ir` 掉到 `detached`——`gtrk mg edit` 和客户端属性面板都会拒绝它，
+云端再也调不动。`gtrk mg lint` 会报非致命的 `x-ir-detached` 提醒你这件事。
+
+逐槽位：
+
+1. **候选**：`gtrk mg fetch --source text "<检索词>" --top 3 --json`（中文词可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）。候选态**离线可用**；目录走远端择新、随包兜底，命令会明示这次用的是哪一版、从哪来的。
+2. **取块**：`gtrk mg fetch --source text --pick <模板 id> --slot <beatId> --project <目录> --json`，或独立模式 `--as <composition_id> [--out <目录>]`。落盘即可铺，**不需要改写**。
+3. **改字（L0，0 积分）**：把内嵌的 IR 存成 `<id>.ir.json`，改 `slots` 里的文字（也可改 `colors` / `font` / `stroke` / `shadow` / `canvas.duration`），然后 `gtrk mg compile <id>.ir.json --out <目录>`。
+4. **改效果（2 积分/候选）**：`gtrk mg edit <particle.html> --say "打字机快一倍，副标改成青色" [--n 1|3]`。`--n` 只收 1 或 3，**它就是计费单位数**。返回的候选带 `scope`：`L1` = 在模板可调范围内，`L2` = 越界了、等于新生成（**不是失败**）。服务端说做不到时会给一句 `refusal`，**如实转述给用户**——他要的是「为什么不能」，不是一个没有解释的错误。
+5. **lint → 铺**：同中性块，`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`。
+6. **竖屏工程**：同中性块，契约当前只收 1920×1080。
 
 ## 中性块工作流（registry 骨架 → 改内容审美 → lint → 铺）
 

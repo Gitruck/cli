@@ -37,6 +37,8 @@ import { log, routeLogsToStderr } from "../lib/log";
 import { writeFile } from "node:fs/promises";
 import { adoptBlock, AdoptError, DEFAULT_FONT, PARTICLE_H, PARTICLE_W } from "../lib/mg-adopt";
 import { fetchBlockFile, findBlock, loadSnapshot, primaryFile, searchBlocks, type SnapshotItem } from "../lib/mg-registry";
+import { runCompile, runEdit, runFetchText } from "./mg-text";
+import { describeState, identifyParticle } from "../lib/particle-identity";
 
 const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
 // 源目录双探（读旧兼容）：写侧 mg/，读侧并集 mg/ ∪ rrv/（既有工程零迁移）
@@ -74,6 +76,14 @@ interface MgOpts {
 	font?: string;
 	/** fetch：候选态也列 excluded 件（缺省只列 ok / review）。 */
 	all?: boolean;
+	/** fetch 来源：`registry`（中性块，缺省）或 `text`（我方文字模板库）。 */
+	source?: string;
+	/** edit 模式：一句话说清要改成什么。 */
+	say?: string;
+	/** edit 模式：候选数，只收 1 或 3（缺省 1）。它就是计费单位数。 */
+	n?: string;
+	/** fetch --source text：跳过目录更新，只用本地（离线/内网）。 */
+	offline?: boolean;
 }
 
 export function registerMg(program: Command): void {
@@ -100,6 +110,10 @@ export function registerMg(program: Command): void {
 		.option("--category <c>", "fetch：overlay / fullscreen（缺省派单值或按块底色推断）")
 		.option("--font <name>", "fetch：替换块内字体名（缺省运行时镜像可证的 CJK 字体）")
 		.option("--all", "fetch 候选态：连 excluded 件一起列")
+		.option("--source <s>", "fetch 来源：registry（中性块，缺省）| text（我方文字模板库，块自带 IR 可云端改写）")
+		.option("--say <text>", "edit 模式：一句话说清要改成什么（如「打字机快一倍，副标改成青色」）")
+		.option("--n <n>", "edit 模式：候选数，只收 1 或 3（缺省 1）——它就是计费单位数")
+		.option("--offline", "fetch --source text：不更新模板目录，直接用本地那份")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MgOpts) => {
 			if (process.argv[2] === "rrv") log.warn("`gtrk rrv` 已更名为 `gtrk mg`（去品牌化），别名仍可用但建议改用 `gtrk mg`。");
@@ -114,8 +128,16 @@ export async function runMg(words: string[], opts: MgOpts): Promise<MgResult> {
 	if (sub === "lint") return runLint(words.slice(1), opts);
 	if (sub === "status") return runStatus(opts);
 	if (sub === "render") return runRender(words.slice(1), opts);
-	if (sub === "fetch") return runFetch(words.slice(1), opts);
-	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>`);
+	if (sub === "fetch") {
+		// 文字模板是**第二个来源**，不是 registry 的一种过滤：它的块自带 IR、不做机械改写、
+		// 改内容走 compile / edit。两条路的取块与改写语义都不同，故在这里分流而非塞进 runFetch。
+		if ((opts.source ?? "registry") === "text") return done(opts, (await runFetchText(words.slice(1), opts)) as MgResult);
+		if (opts.source && opts.source !== "registry") throw new Error(`--source 只收 registry | text：${opts.source}`);
+		return runFetch(words.slice(1), opts);
+	}
+	if (sub === "compile") return done(opts, (await runCompile(words.slice(1), opts)) as MgResult);
+	if (sub === "edit") return done(opts, (await runEdit(words.slice(1), opts)) as MgResult);
+	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>；文字模板：gtrk mg fetch --source text <检索词> / gtrk mg compile <ir.json> / gtrk mg edit <file> --say "…"`);
 	return runLay(opts);
 }
 
@@ -497,6 +519,8 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	const file = args[0];
 	if (!file) throw new Error('用法：gtrk mg lint <particle.html> [--dispatch <path>]');
 	const html = await readFile(resolve(file), "utf8");
+	// 三态由 particle-identity 算好传进 lint——lint 自身零 import，算不了 sha256
+	const particleState = identifyParticle(html).state;
 	const nameId = basename(file).replace(/\.html?$/i, "");
 	let dispatchIds: string[] | undefined;
 	let slotDuration: number | undefined;
@@ -559,9 +583,10 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 		...(dispatchIds ? { dispatchIds } : {}),
 		...(compositionId ? { compositionId } : {}),
 		...(slotDuration ? { slotDuration } : {}),
+		identity: particleState,
 	});
 	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
-	if (lint.ok) log.ok(`lint 通过（${basename(file)}；opaque=${lint.opaque}）`);
+	if (lint.ok) log.ok(`lint 通过（${basename(file)}；opaque=${lint.opaque}；${describeState(particleState)}）`);
 	else log.err(`lint 未过（${lint.violations.filter((v) => v.fatal).length} 项致命）`);
 	const result: MgResult = { mode: "lint", ...lint, ok: lint.ok };
 	if (opts.json) console.log(JSON.stringify(result));

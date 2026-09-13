@@ -50,6 +50,12 @@ export interface LintResult {
 	 * 有非透明底=true(满屏盖底) / 两处皆无或皆 transparent=false(透明叠加)。
 	 */
 	opaque: boolean;
+	/**
+	 * 颗粒三态身份（add-text-template-source）：`ir` = 模板颗粒且未被改过、云端可调；
+	 * `detached` = 被直接改过、云端调不动；`html` = 普通颗粒（绝大多数）。
+	 * 调用方没传 `opts.identity` 时为 `undefined`——**本文件算不了它**（要 sha256，而本文件零 import）。
+	 */
+	identity?: "ir" | "detached" | "html";
 	/** 解析到的 data-composition-id（拿不到=undefined） */
 	compositionId?: string;
 }
@@ -1760,6 +1766,11 @@ export function lintParticle(
 		 * 契约明令「逐帧与总长只有真渲染引擎能判」，故本项**恒非致命**、只做提醒。
 		 */
 		slotDuration?: number;
+		/**
+		 * 颗粒三态身份，由调用方用 `particle-identity.ts` 算好传进来（本文件零 import 算不了）。
+		 * 给 `detached` 时报非致命哨兵 `x-ir-detached`；不给则整项跳过。
+		 */
+		identity?: "ir" | "detached" | "html";
 	} = {},
 ): LintResult {
 	const v: LintViolation[] = [];
@@ -1903,6 +1914,23 @@ export function lintParticle(
 				`静态正则分不清「驱动画面」与其它用途（如一次性布局测量），故只提醒、不拦`,
 		);
 
+	// 三态身份（add-text-template-source）：**由调用方传入**，本文件不自己算——
+	// 判定要 sha256，而本文件是**零 import 自足**的（见文件头注：它要能被内嵌到别处，
+	// 连 node: 内置也不引）。正本算法在 `particle-identity.ts`。
+	//
+	// 顺带记一笔免得后人"顺手"加免检分支：内嵌的 `<script type="application/json" data-gtrk-ir>`
+	// 本就不在任何检查射程内——铁律4 的自包含只查 `<script src>`，确定性那批只查可执行代码，
+	// 内嵌 JSON 既没有 src 也不执行。
+	if (opts.identity === "detached")
+		push(
+			"x-ir-detached",
+			false,
+			"这颗带内嵌 IR 但 HTML 已被改过——它**不再是模板颗粒**，`gtrk mg edit` 与客户端属性面板的" +
+				"云端改写会拒绝它。颗粒本身照常能渲能铺，故非致命。" +
+				"想恢复云端可调：把内嵌的 IR 取出存成 .ir.json，改完跑 `gtrk mg compile` 重编；" +
+				"想继续手改：可以，但从此只能靠本地 AI 改",
+		);
+
 	// 契约「Alpha 交付口径」（2026-09-14 增补）：含半透明面积的颗粒，剪映交付依赖管线预乘配方——
 	// **恒非致命**、不要求改写；只提醒「剪映真机格 MUST 用这颗验，实心颗粒验不出预乘错配」。
 	const soft = detectSoftAlpha(html);
@@ -2015,5 +2043,5 @@ export function lintParticle(
 				"若是，按 `c-filter-animated` 的改法处理。本项恒非致命、不拦铺轨",
 		);
 
-	return { ok: !v.some((x) => x.fatal), violations: v, opaque, compositionId: cid };
+	return { ok: !v.some((x) => x.fatal), violations: v, opaque, ...(opts.identity ? { identity: opts.identity } : {}), compositionId: cid };
 }
