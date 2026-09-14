@@ -66,6 +66,27 @@ const EPS = 1e-6;
 
 export class TextIrCompileError extends Error {}
 
+/** IR 正文里出现了会截断内嵌载体的字面量（对应正本的 `IrCarrierConflict`）。 */
+export class IrCarrierConflict extends TextIrCompileError {}
+
+/**
+ * 内嵌 IR 块。与正本 `identity.ir_script_block` 同口径。
+ *
+ * `</template>` 会把载体提前截断（与旧载体怕 `</script>` 同一类风险）。槽位文本与
+ * `note` 都是自由文本，用户完全可以敲出这串。**当场报错，不静默转义**：转义会让内嵌的
+ * 字节与 `canonicalJson` 的字节不再一致，而 `ir_sha256` 正是按后者算的——一转义三态就开始骗人。
+ *
+ * ⚠️ 编译搬到客户端之后这条路径从「服务端兜底」变成**用户输入直达**，
+ * 少了它就是：用户在槽位里敲了 `</template>` → 颗粒静默截断、渲染出半截、不报错。
+ */
+function irCarrierBlock(ir: Dict): string {
+	const payload = canonicalJson(ir);
+	if (payload.includes("</template>")) {
+		throw new IrCarrierConflict("IR 正文含 `</template>` 字面量，会截断内嵌载体；请改写该文本（多半在槽位或 note 里）");
+	}
+	return `<template data-gtrk-ir>${payload}</template>`;
+}
+
 type Json = unknown;
 // biome-ignore lint/suspicious/noExplicitAny: IR 是开放形状的字典，正本也是 dict
 type Dict = Record<string, any>;
@@ -610,7 +631,7 @@ export function compileIrBody(irInput: Dict): string {
 		`  })();</script>${nl}` +
 		// 内嵌 IR 收在两个 <script> **之后**：载体是 <template> 而非 <script>（前者不会让
 		// 渲染引擎产静帧），位置在脚本后则不触发 lint 铁律 1b 的「第一个 </template>」朴素切法。
-		`  <template data-gtrk-ir>${canonicalJson(ir)}</template>${nl}` +
+		`  ${irCarrierBlock(ir)}${nl}` +
 		`</div>${nl}` +
 		`</template>${nl}`
 	);

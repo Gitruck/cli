@@ -84,6 +84,8 @@ interface MgOpts {
 	n?: string;
 	/** fetch --source text：跳过目录更新，只用本地（离线/内网）。 */
 	offline?: boolean;
+	/** compile 模式：走服务端而不是本地（排查与对拍用，不是默认路径）。 */
+	remote?: boolean;
 }
 
 export function registerMg(program: Command): void {
@@ -114,6 +116,7 @@ export function registerMg(program: Command): void {
 		.option("--say <text>", "edit 模式：一句话说清要改成什么（如「打字机快一倍，副标改成青色」）")
 		.option("--n <n>", "edit 模式：候选数，只收 1 或 3（缺省 1）——它就是计费单位数")
 		.option("--offline", "fetch --source text：不更新模板目录，直接用本地那份")
+		.option("--remote", "compile 模式：改走服务端编译（默认本地，零请求）——留给排查与两侧对拍")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MgOpts) => {
 			if (process.argv[2] === "rrv") log.warn("`gtrk rrv` 已更名为 `gtrk mg`（去品牌化），别名仍可用但建议改用 `gtrk mg`。");

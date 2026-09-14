@@ -1,11 +1,17 @@
 /**
  * 文字模板两口的云端客户端（change add-text-template-source）。
  *
- * - `POST /task/cli/text_ir_compile`  —— 同步，0 积分。改 IR 重编译（L0）
+ * - `POST /task/cli/text_ir_compile`  —— 同步，0 积分。**已不是默认路径**，见下
  * - `POST /task/cli/text_particle_generate` + 轮询 —— 异步，2 积分/候选。自然语言改写
  *
- * **本地没有编译器**（主理人拍板 L0 永远走后端）。第二份编译器意味着第二套产物字节，
- * 而颗粒的三态身份判的就是字节——本地编出来的东西在服务端眼里会是 `detached`。
+ * ## L0 编译默认走本地（change `move-text-ir-compiler-to-client`）
+ *
+ * `gtrk mg compile` 默认调 `text-ir/compile-local.ts`：零请求、零计费、断网可用。
+ * 原先「L0 永远走后端」的顾虑是「第二份编译器 = 第二套字节 ⇒ 本地产物被判 detached」，
+ * 现在换成由 93 份金样的**逐字节等价闸**守着（`parity.yml`）——字节一致，三态就一致。
+ *
+ * `compileIr`（下面这个）**保留**，`--remote` 显式走它。调用量降到零 MUST NOT 被当作
+ * 下线理由：它是 L2 的内部依赖、无 Node 环境时的兜底入口，以及等价闸的**参照系**。
  */
 import type { CloudConfig } from "./config";
 import { loadConfig } from "./config";

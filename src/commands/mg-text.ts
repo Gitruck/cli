@@ -2,7 +2,7 @@
  * gtrk mg 的文字模板三口（change add-text-template-source）：
  *
  *   gtrk mg fetch --source text <检索词>        候选态（离线可用）/ 取块态
- *   gtrk mg compile <ir.json> [--out <dir>]     改 IR 重编译（L0，0 积分）
+ *   gtrk mg compile <ir.json> [--out <dir>]     改 IR 重编译（L0，本地跑、0 积分、零请求）
  *   gtrk mg edit <particle.html> --say "<要求>"  自然语言改写（2 积分/候选）
  *
  * 与中性块 registry 那条路**刻意不同的一点**：文字模板 MUST NOT 走机械改写。
@@ -18,11 +18,12 @@ import { lintParticle } from "../lib/mg-lint";
 import { assertNotJianyingDraftDir } from "../lib/mg-render";
 import { describeState, identifyParticle } from "../lib/particle-identity";
 import {
-	compileIr,
+	compileIr as compileIrRemote,
 	generateParticle,
 	GENERATE_PRICE_KEY,
 	type GenerateCandidate,
 } from "../lib/text-ir-client";
+import { compileIrLocal } from "../lib/text-ir/compile-local";
 import { resolveToolPricing } from "../lib/tool-pricing";
 import {
 	describeCatalog,
@@ -47,6 +48,8 @@ export interface TextCmdOpts {
 	yes?: boolean;
 	json?: boolean;
 	offline?: boolean;
+	/** `mg compile` 走服务端而不是本地。排查与对拍用（§4.1），不是默认路径。 */
+	remote?: boolean;
 }
 
 /** 候选数只有两档：确认框的金额就只有两种，用户不必在 1/2/3 之间做无意义的权衡。 */
@@ -155,7 +158,7 @@ function resolveTextOutPath(templateId: string, opts: TextCmdOpts): { cid: strin
 
 export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Record<string, unknown>> {
 	const file = args[0];
-	if (!file) throw new Error("用法：gtrk mg compile <ir.json | particle.html> [--out <dir>]");
+	if (!file) throw new Error("用法：gtrk mg compile <ir.json | particle.html> [--out <dir>] [--remote]");
 	const inputPath = resolve(file);
 	if (!existsSync(inputPath)) throw new Error(`文件不在：${inputPath}`);
 	const raw = await readFile(inputPath, "utf8");
@@ -179,16 +182,28 @@ export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Rec
 		}
 	}
 
-	log.step("▶ 云端编译（0 积分）");
-	const res = await compileIr(ir);
+	// 默认本地编译：零请求、零计费、断网可用（change move-text-ir-compiler-to-client）。
+	// `--remote` 留给排查与对拍——服务端那条路 MUST NOT 下线，它是等价闸的参照系。
+	const remote = Boolean(opts.remote);
+	let res;
+	if (remote) {
+		log.step("▶ 云端编译（0 积分，--remote 显式指定）");
+		res = await compileIrRemote(ir);
+	} else {
+		log.step("▶ 本地编译（0 积分、零请求）");
+		res = compileIrLocal(ir);
+	}
 	const outDir = resolve(opts.out ?? dirname(inputPath));
 	assertNotJianyingDraftDir(outDir);
 	const outPath = join(outDir, `${res.composition_id}.html`);
 
 	const identity = identifyParticle(res.html);
 	if (identity.state !== "ir") {
-		// 服务端产物自证不过 = 双方算法漂了，比落一个坏颗粒更该当场停
-		throw new Error(`服务端产物自证失败（identity=${identity.state}）——本地与服务端的哈希口径可能已不一致，请报 issue，不落盘`);
+		// 产物自证不过 = 编译器与三态判定的口径漂了，比落一个坏颗粒更该当场停。
+		// 本地编译之后这道自证更值钱：它是「等价闸放过去了但产物其实坏了」的现场信号。
+		throw new Error(
+			`${remote ? "服务端" : "本地"}产物自证失败（identity=${identity.state}）——编译器与三态判定的哈希口径可能已不一致，请报 issue，不落盘`,
+		);
 	}
 	await mkdir(outDir, { recursive: true });
 	// 恒 LF：哈希是三态身份的判据，CRLF 会让这颗在别的机器上被判 detached
@@ -204,6 +219,8 @@ export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Rec
 		html_sha256: res.html_sha256,
 		identity: identity.state,
 		reset,
+		// 对拍时要能一眼看出这一份是谁编的——两份 html_sha256 摆在一起才有意义
+		compiledBy: remote ? "remote" : "local",
 	};
 }
 
