@@ -1,7 +1,7 @@
 {
 	"schema": 1,
-	"version": "2026-09-14.7",
-	"generated_at": "2026-09-14T11:34:41.639Z",
+	"version": "2026-09-14.8",
+	"generated_at": "2026-09-14T14:24:00.294Z",
 	"mirrors": [
 		{
 			"id": "tonghe",
@@ -38,10 +38,10 @@
 			"poster": "posters/tfx-beat-swap.webp",
 			"file": {
 				"path": "tfx-beat-swap.html",
-				"sha256": "a28e7a2898b86adcbc6219b789a1db81e85071f7e2097849bfab4741e720ee13",
-				"bytes": 5839
+				"sha256": "040107ce2f15ea0a2c5e1e0c4236abb6837fc94f4b398564971f0e5e975745b9",
+				"bytes": 5810
 			},
-			"ir_sha256": "41e1445571573e65f052a5e47d34b6576daf471c444a4b8635f8967570d0a8f6",
+			"ir_sha256": "7bf953826e829a43b3aadc1bac7ad5f59fbb3833894a42212f1cc372295397ae",
 			"category": "标题"
 		},
 		{
@@ -63,10 +63,10 @@
 			"poster": "posters/tfx-biz-bar.webp",
 			"file": {
 				"path": "tfx-biz-bar.html",
-				"sha256": "c11134d5ac81f7c56543aaee448113dc628d9070ad77cec84fcd5231c4071872",
-				"bytes": 5116
+				"sha256": "1864b96256a032167866968543a8894592bc048a9e1dfe52bc85b31253a06c0c",
+				"bytes": 5084
 			},
-			"ir_sha256": "9886e804eabdacdbf4893dedb52449ecaadddf23243a0b0acf0b09d51b5d8c9e",
+			"ir_sha256": "118941af8ba672a4db1fcb3972736add06b0c9d76e0309ff656bcfbe0fa460ec",
 			"category": "商务排版"
 		},
 		{
@@ -88,10 +88,10 @@
 			"poster": "posters/tfx-biz-corner.webp",
 			"file": {
 				"path": "tfx-biz-corner.html",
-				"sha256": "925229b5f54ede8aa0ffe2b6b3a3644f11b0584c0efaa96c6b79612ca2d8110d",
-				"bytes": 6965
+				"sha256": "d4be4be29358a52eb540212f492b51d182b98b69f6d83fed1a6a185aaaac1e78",
+				"bytes": 6933
 			},
-			"ir_sha256": "c30dbd4f14bb6387963f592f83764f220e4328908f16eda470086dad876a3404",
+			"ir_sha256": "fecf6a1676d4d8ba4d4dd77e969695287c7b1e3a22582fe8549b84877dce8ead",
 			"category": "商务排版"
 		},
 		{
@@ -117,10 +117,10 @@
 			"poster": "posters/tfx-biz-note.webp",
 			"file": {
 				"path": "tfx-biz-note.html",
-				"sha256": "840d648a76ce6d950d2d392377893da71c88a6e3fa4931b6efee9df9e38e05ec",
-				"bytes": 10684
+				"sha256": "3c93f44df689d4cb087643ae53b9539b92e8fb7ea97884fe5c3ceb01f67455c4",
+				"bytes": 10655
 			},
-			"ir_sha256": "03a7002656ce31facfa67646c592ec8edcfd645962f2327f77e4a83766f8e68b",
+			"ir_sha256": "3f77d277ab15833d131989cac853e5b8459d2daf6157781366e5188728f12946",
 			"category": "商务排版"
 		},
 		{
@@ -142,10 +142,10 @@
 			"poster": "posters/tfx-biz-rules.webp",
 			"file": {
 				"path": "tfx-biz-rules.html",
-				"sha256": "ded6b8b4ac5fb6d94305eea097fb1d78830da0412352b4f250a98a1263032dfb",
-				"bytes": 5216
+				"sha256": "5d627d477ae83b974754b37a82b03845a41109835ad02072024b4d7b039ff09c",
+				"bytes": 5187
 			},
-			"ir_sha256": "dbb7578cb0baa6f0131d2380c2703a3a3d8b85871d980b80e111da3663f48365",
+			"ir_sha256": "e9830ac06511fb5515bc30bb30b2b34659da4b83e034a4a3a233d126f11f621f",
 			"category": "商务排版"
 		},
 		{
@@ -171,10 +171,10 @@
 			"poster": "posters/tfx-biz-stack.webp",
 			"file": {
 				"path": "tfx-biz-stack.html",
-				"sha256": "438f46fd875b947ab572303a3eca5cf022264ebcc4e3ce450062993ed22764b9",
-				"bytes": 7359
+				"sha256": "5405bacd178123ecdcd0ebeec34b7058620f41f0a9b6c15585d1532e50b8b3d7",
+				"bytes": 7327
 			},
-			"ir_sha256": "d5089e905676338951ee51414453ee79e2fa307944142e91cd02999549228b51",
+			"ir_sha256": "1cbcee3193f75ebb97cb44119acc46f0b496478e59c71139cea317266fc37071",
 			"category": "商务排版"
 		},
 		{
@@ -200,10 +200,10 @@
 			"poster": "posters/tfx-brush-title.webp",
 			"file": {
 				"path": "tfx-brush-title.html",
-				"sha256": "b3605e799661fe48174d422b9acdff2e41fb2e1c481cb0ba73f119b5848e9ffe",
-				"bytes": 4833
+				"sha256": "f8b49c51e8b3b919aaecfe5371c7375c1221ad7d24671572ab4e064c0a6e204b",
+				"bytes": 4849
 			},
-			"ir_sha256": "48f20a00ffbaedd9da4dbd60e9602dc2c15314f12101cc3b739a62a8cf0be4e6",
+			"ir_sha256": "f74612dcfacd93468854081b10f2a545fea97cf98586bbbfabe75a2f21945057",
 			"category": "字幕"
 		},
 		{
@@ -227,10 +227,10 @@
 			"poster": "posters/tfx-bubble-chat.webp",
 			"file": {
 				"path": "tfx-bubble-chat.html",
-				"sha256": "8ce5e4758b70fdc735e10e319699c09e3e29cec03a9f7dd8b0af683e48113f5f",
-				"bytes": 6205
+				"sha256": "bf7bca63bbcc38b1bd97772af90a46f84740e412faecf61dbd8eaa6149372b27",
+				"bytes": 6200
 			},
-			"ir_sha256": "947a631e2258274a76fe2408c76a087571620a9d1890ea4bd7d68ee76ef602e5",
+			"ir_sha256": "6faa664bd011c8b926d96da331c7f9d305d0326ecf841993eb1502ae44685894",
 			"category": "对话气泡"
 		},
 		{
@@ -250,10 +250,10 @@
 			"poster": "posters/tfx-bubble-checkline.webp",
 			"file": {
 				"path": "tfx-bubble-checkline.html",
-				"sha256": "ede16366b74e000f77fd3e31e28155ae7b3cb1a0b3d610332a0ed574449fde03",
-				"bytes": 6199
+				"sha256": "243b46b50defdd8f929fe1e0b180b83da5f5ee5c5c4fb430a103e3b981cf6f5d",
+				"bytes": 6167
 			},
-			"ir_sha256": "1145b49e423f3c72c1e350f6307cc9423702ba3d09fe1c092feb8ff55e8ccd94",
+			"ir_sha256": "b7f78fceb2e0f6e6e061470b1b91505bf5d612b1b373b0c0cdf9650dfe9e0703",
 			"category": "对话气泡"
 		},
 		{
@@ -276,10 +276,10 @@
 			"poster": "posters/tfx-bubble-quote-box.webp",
 			"file": {
 				"path": "tfx-bubble-quote-box.html",
-				"sha256": "1507b323cab6e10aabaf4e79365bdd224f9bf05dfc06064bbba578d761bf4293",
-				"bytes": 7249
+				"sha256": "3424d2499b79f2103017e8301a8164bcf454811f93d276905b74541ed025a3ee",
+				"bytes": 7217
 			},
-			"ir_sha256": "2386d2080c85f43b19cd2ba2f92a0dc6d8e34572f4d02890277de8c7371c2066",
+			"ir_sha256": "9c5b6b265850d0c682fbe39c0f97ef0e782d84d84a404270983416e63c9792bd",
 			"category": "对话气泡"
 		},
 		{
@@ -299,10 +299,10 @@
 			"poster": "posters/tfx-bubble-speech.webp",
 			"file": {
 				"path": "tfx-bubble-speech.html",
-				"sha256": "ffd9e98674462f8d1c4c2944cab8531445646511ab9365fbbb3539165026f26e",
-				"bytes": 6645
+				"sha256": "8cda7714859fe626c8b7571a706ec198b5cf36a57ba0427a179da62c9352f444",
+				"bytes": 6661
 			},
-			"ir_sha256": "09c9fe4efd53205c12726804e23f259e589894b9cfec1ef9f8bd9118537f4d9e",
+			"ir_sha256": "1331bc4ee0652c7c04f35c29e08e4298171b05667ee39cc09572994059cd9dee",
 			"category": "对话气泡"
 		},
 		{
@@ -322,10 +322,10 @@
 			"poster": "posters/tfx-bubble-tag.webp",
 			"file": {
 				"path": "tfx-bubble-tag.html",
-				"sha256": "7f843599398a879f1f3db6f6e7e6f2e0070ab96b6641b6d8bee7694a7af25472",
-				"bytes": 5107
+				"sha256": "3099c9ec0ec1c6c0930d2951efd68d100254aed20aac30c521db8d286ab4f458",
+				"bytes": 5078
 			},
-			"ir_sha256": "52f2ce4a864c8bf8c0617c02ad7da22aca3c0e803a33f2e81ece54f422dac540",
+			"ir_sha256": "3ed13751d5c692c5a165e0cf4e8fae6b070d0c2add982827a040d094ba95ce10",
 			"category": "对话气泡"
 		},
 		{
@@ -349,10 +349,10 @@
 			"poster": "posters/tfx-button-emoji.webp",
 			"file": {
 				"path": "tfx-button-emoji.html",
-				"sha256": "83545be4d6e109509b399e67b459bb8a713189b91ce36f308dcd68de14d477fd",
-				"bytes": 6317
+				"sha256": "717ff2d1d463e15209451f877037591a3f2b0069f7a566e4cfd1ce00f9bccc9f",
+				"bytes": 6312
 			},
-			"ir_sha256": "29843745c442ede69b0861d5a0c3294f5c0b3d2f5a86d560b76211d093e723a2",
+			"ir_sha256": "da2f5c0d8e1fefbebcbdde9bd67231db406cb6ae4d00534fb9b8a589f56413a7",
 			"category": "对话气泡"
 		},
 		{
@@ -376,10 +376,10 @@
 			"poster": "posters/tfx-callout-badge.webp",
 			"file": {
 				"path": "tfx-callout-badge.html",
-				"sha256": "997c651dc55508ae6b25e2cbf111d5abaf89630a33a497f46730db9f49bf1574",
-				"bytes": 7375
+				"sha256": "7ac72d45637471ce431cad02042c3c6756318b5708f1dfcfa40a64d54ea7b805",
+				"bytes": 7346
 			},
-			"ir_sha256": "d8c8a14205535e774ec2102bcbda57a62e780d534f1f684ccef98ee8fa606b32",
+			"ir_sha256": "89199936f0f86162e5f2796525c96181a940bd1e75c55214ed03b05230312039",
 			"category": "标注引用"
 		},
 		{
@@ -401,10 +401,10 @@
 			"poster": "posters/tfx-callout-box.webp",
 			"file": {
 				"path": "tfx-callout-box.html",
-				"sha256": "796ac31a4f8cbd73d030e78d1e86f0b63b7e40148a320f067e5faef4dfbeeb61",
-				"bytes": 6982
+				"sha256": "1c2c16957d34420e9cceb45e53a04470dcf31d8f252e29ef3efdc519bdefc87c",
+				"bytes": 6950
 			},
-			"ir_sha256": "a48bf6c86711b570ac8832a110ef7976e4f92248ee5ed8be170d792d9c225bfb",
+			"ir_sha256": "b250606b7a89806038248cc1241302b0c670583c89237e6a5f554dba2fa241f5",
 			"category": "标注引用"
 		},
 		{
@@ -424,10 +424,10 @@
 			"poster": "posters/tfx-callout-corners.webp",
 			"file": {
 				"path": "tfx-callout-corners.html",
-				"sha256": "783ae1e058cd80d397f27a35ed10dc36c987244d3b46c5b01dc795a94fd0c33d",
-				"bytes": 6642
+				"sha256": "f0503b25088b6582e894c98174db5d7b9d01ab2a0292940fc3b1bb7d6cf73798",
+				"bytes": 6637
 			},
-			"ir_sha256": "a518c05f058c593d5dd92ba67b13480686adad5b366b09c77ec240fc8a5f1bb0",
+			"ir_sha256": "619def3ce9bcc9059023bb12f1a7dd3dfa0615c60c4e256a19552d5189a36576",
 			"category": "标注引用"
 		},
 		{
@@ -449,10 +449,10 @@
 			"poster": "posters/tfx-callout-dotline.webp",
 			"file": {
 				"path": "tfx-callout-dotline.html",
-				"sha256": "227ce247076fa4bde4e8172af0df11211c927f552afa2f09b5463c8ccb54cdff",
-				"bytes": 6914
+				"sha256": "a4011af3240bf8a0649dc38200d216fc1bfffe59ef57e9b030f42060c476c6f5",
+				"bytes": 6909
 			},
-			"ir_sha256": "f2b003bdf66b55b8f13b45424fdfc3d1322e214cfc63d6461ea51184e6c110df",
+			"ir_sha256": "083596bb02d683d28a2be8588161e311dfa25c0f6b2fd0ec1ef40a528769e7c9",
 			"category": "标注引用"
 		},
 		{
@@ -474,10 +474,10 @@
 			"poster": "posters/tfx-callout-step.webp",
 			"file": {
 				"path": "tfx-callout-step.html",
-				"sha256": "9399f0ea90370970731576fb5d389c2e98f96d896691c47efacfe4b84cd182e3",
-				"bytes": 7256
+				"sha256": "117c7ee2e64a7aad4d1b96dcf78512d88f17bdc445e88cb31a8caee0d3652974",
+				"bytes": 7227
 			},
-			"ir_sha256": "fcbf6b01893061390d3e12926b3027c919d10678aa77b6055ab35a71499b47b3",
+			"ir_sha256": "9708d0c31e173f8c22b910954c4c68460e37de5c78945a7c5d236e8f7da0d474",
 			"category": "标注引用"
 		},
 		{
@@ -504,10 +504,10 @@
 			"poster": "posters/tfx-caption-emoji-arrow.webp",
 			"file": {
 				"path": "tfx-caption-emoji-arrow.html",
-				"sha256": "fcddad34c24ab8673b973b5e09de16d82d8f913c5f3b3162230ea7164d58fad9",
-				"bytes": 5451
+				"sha256": "657021a290d6e82c5c7937f6ba61695253ae3ec8e382f6f06cbc341af4b4cb2c",
+				"bytes": 5470
 			},
-			"ir_sha256": "af0ff19e2d8029013cdd735959ff5ea0340d1ac537f62271c800fec2150a0bfe",
+			"ir_sha256": "d4a2b97015fd88f597b45af75b2b16da5f81a981cfed08cc0cc8437bcdb5c139",
 			"category": "字幕"
 		},
 		{
@@ -531,10 +531,10 @@
 			"poster": "posters/tfx-caption-highlight.webp",
 			"file": {
 				"path": "tfx-caption-highlight.html",
-				"sha256": "15b9599985cca0eb709da73d8e8e341b42693faa187f876112ce1cb9af1244d8",
-				"bytes": 5645
+				"sha256": "bcdaf07ac6efaae4596b0790633e156553f7408796b652fab3ba09be97cdde56",
+				"bytes": 5640
 			},
-			"ir_sha256": "20e8dce99667571ec52cac875f51d885b30d4bff64b98edb13edd514e26ad7d5",
+			"ir_sha256": "ef3d55f978f112e5d08429037381479fbc7fff589a8969b605377b9bc6391a0f",
 			"category": "字幕"
 		},
 		{
@@ -560,10 +560,10 @@
 			"poster": "posters/tfx-caption-keyword.webp",
 			"file": {
 				"path": "tfx-caption-keyword.html",
-				"sha256": "6a3d4dd0b3edea484c97cffd932197ad5d3afa643c2da67db1fec4335ed9106f",
-				"bytes": 4020
+				"sha256": "c2aa8a76325e060a3164c8dcd40b4a6d75e4cbead16205b37234071c3cb1a5f1",
+				"bytes": 4039
 			},
-			"ir_sha256": "561773de4003f82923807fc2a75714a52fdd6ceb321473cdbebd79249967ca19",
+			"ir_sha256": "bafeaf48b2e1cad20b65cd93ae7e937c5f52ea07099ab1eac3d9d1283f38b62c",
 			"category": "字幕"
 		},
 		{
@@ -587,10 +587,10 @@
 			"poster": "posters/tfx-caption-markword.webp",
 			"file": {
 				"path": "tfx-caption-markword.html",
-				"sha256": "54042bbb2252604d9efbfbbb9014d6755d74b561dccb549bbbe31e01426ba954",
-				"bytes": 5411
+				"sha256": "5b61861af95c65b3451775109b2fb908a2bfc6d593a239878287078f70f976cb",
+				"bytes": 5382
 			},
-			"ir_sha256": "0877eb264b0496c2315f4be10facbfbbf6128b1b5bc0ade83bd0939202d44dc4",
+			"ir_sha256": "1a7ed7e36e78d7210db6033f833ae7618da2363624a7ca9d15f8e1fe8b789bfc",
 			"category": "字幕"
 		},
 		{
@@ -612,10 +612,10 @@
 			"poster": "posters/tfx-card-caption.webp",
 			"file": {
 				"path": "tfx-card-caption.html",
-				"sha256": "8ee594efbf25611323a7fc4dbec9d69e43fb1b86250e39ecf1160bde3c833512",
-				"bytes": 6141
+				"sha256": "d0267bfcf174bc692159c2955a59e74f29baa4743e808aa46e4bf231ef526762",
+				"bytes": 6109
 			},
-			"ir_sha256": "4e3819a9a3fd01e0e508c73b453278e799f30cd319884b8bcb26f5ebf1e1d089",
+			"ir_sha256": "3ede5c8994591d8d299d9b83c00022e4963fee08c96c248da8dcf07b9c5f2196",
 			"category": "字幕"
 		},
 		{
@@ -641,10 +641,10 @@
 			"poster": "posters/tfx-char-relay.webp",
 			"file": {
 				"path": "tfx-char-relay.html",
-				"sha256": "590e672be390b18b4cf1385bf074c0b211793ed0cf0484d81cbfb09899de24a9",
-				"bytes": 6872
+				"sha256": "9f3ccc795a83a5629d001ef00fb944346e5766ac46bb2ff3e78b7dcb30ed7c3e",
+				"bytes": 6843
 			},
-			"ir_sha256": "6574e48ca96f1b735db4ca6f0ed778f91d08778c586ecf0294f759343006f0ab",
+			"ir_sha256": "c0e7e0f59e5ccb97b4dd24f506e11e24793d648ecac8ed5b44e4860040dc064c",
 			"category": "标题"
 		},
 		{
@@ -667,10 +667,10 @@
 			"poster": "posters/tfx-checklist.webp",
 			"file": {
 				"path": "tfx-checklist.html",
-				"sha256": "530b39d93a8212c6ec9eda0ab341fc24ecbd413aa69c0ab1232cb22519d9a841",
-				"bytes": 9042
+				"sha256": "d324113f75cb7cfc90e42d84598e2f1e9f1a4fbd800f70aa91e2dbccef391942",
+				"bytes": 9037
 			},
-			"ir_sha256": "d4aa0902c045e5931b096cbd22e90bf3bd655945e154f15927ec48fcb60df2c3",
+			"ir_sha256": "e2242a1e3dc90c45fa27baf1ac764a31aee10f6c081d467fedd7e81970cf765e",
 			"category": "其他"
 		},
 		{
@@ -694,10 +694,10 @@
 			"poster": "posters/tfx-cine-title.webp",
 			"file": {
 				"path": "tfx-cine-title.html",
-				"sha256": "998a402332ac16aa50ba961a9ab88c895fc012865b84e12476efc2ba3dd61b10",
-				"bytes": 5572
+				"sha256": "1ee7db7b286b658237b1412dc0b2b668dfb73a7b9bb07189c4411e41dd16ae97",
+				"bytes": 5540
 			},
-			"ir_sha256": "c46f0b78888b1f50d8fe600abf330a4b8e2816a66e433b3be4075bfa6db3989f",
+			"ir_sha256": "fc07765e31d0d3df765487da4e7bace1a89ad66248b3b0de4006426b9696b16b",
 			"category": "商务排版"
 		},
 		{
@@ -719,10 +719,10 @@
 			"poster": "posters/tfx-cjk-banner.webp",
 			"file": {
 				"path": "tfx-cjk-banner.html",
-				"sha256": "cb6b8675dda38184aba8a842ec25beca54ad04527de396ae268ec4f92c438449",
-				"bytes": 5725
+				"sha256": "948815ef2ecc72e71c6e2e22eb8b65829a82a617cdb0889722caf345f497fb39",
+				"bytes": 5693
 			},
-			"ir_sha256": "7a33f4ac18454759298f4a7db2f2b193d23e55ab7130fbdba9f9020f9ce03f99",
+			"ir_sha256": "ba50b2ae5c9d55d723fbc37647d62e31313dd1c2fad32d8f152b61336bc499fd",
 			"category": "其他"
 		},
 		{
@@ -742,10 +742,10 @@
 			"poster": "posters/tfx-cjk-vertical.webp",
 			"file": {
 				"path": "tfx-cjk-vertical.html",
-				"sha256": "90db42a093ed8d19b81302c73d05eb5e2589088058abc045689e19b975499170",
-				"bytes": 4603
+				"sha256": "89aeaa5cff35776512dbc6602363ca7af2ebdd40cf65e42d42291814ae827c50",
+				"bytes": 4619
 			},
-			"ir_sha256": "9e39fb6c1cca5c2631e43111432261c9c26ab16ccadbc2c8b5e63e8d3f638236",
+			"ir_sha256": "92578a9d80a35bdee5ce843fd08ba83f799157d2f425fccd94d4cad05231ea75",
 			"category": "其他"
 		},
 		{
@@ -769,10 +769,10 @@
 			"poster": "posters/tfx-clock-card.webp",
 			"file": {
 				"path": "tfx-clock-card.html",
-				"sha256": "ebee0e247c22672a6df2a9d110d1c0b767dd125442d8173888b20b05077d65d6",
-				"bytes": 5796
+				"sha256": "e06a51194889e3b1fe3b91dfa18ab98d759d289a0c910b4c5ab340b6c2fb8329",
+				"bytes": 5837
 			},
-			"ir_sha256": "a991961904f0f29ef0164b6100a475768bc54eb5541acfb7350b24705663bf4a",
+			"ir_sha256": "5bc7a68b7cebfdd9a87eb6fc42c58516dfa832b788dd5890406ae47955369388",
 			"category": "其他"
 		},
 		{
@@ -792,10 +792,10 @@
 			"poster": "posters/tfx-confetti-pop.webp",
 			"file": {
 				"path": "tfx-confetti-pop.html",
-				"sha256": "c5105bf84fd5b11c5e4bc6f110c8920a48fb1b5db855907f043f7e0b73ff10b0",
-				"bytes": 13045
+				"sha256": "12eb31bf8df3041f7bb11745cb727664dfcf29eb452aa469167951045149f9de",
+				"bytes": 13016
 			},
-			"ir_sha256": "26fe7e935abb5a64ce6c7fa66d0bfb346a67966275b5bd8cec18e666a303acaa",
+			"ir_sha256": "b09579c86705ad69c33fdbf170d0267849929cd7e321376d79d7621002f0d097",
 			"category": "其他"
 		},
 		{
@@ -819,10 +819,10 @@
 			"poster": "posters/tfx-counter-bar.webp",
 			"file": {
 				"path": "tfx-counter-bar.html",
-				"sha256": "936a89c19b828f02b881e4e7523c8e5c385134b7e35c6694f1e197f7d4325d18",
-				"bytes": 10965
+				"sha256": "475e891d428f6a1988bc37d7a8798d454ed6860feabee28bd0faa88d2e0ceff1",
+				"bytes": 10984
 			},
-			"ir_sha256": "07bcd3c59f40c82ea7759679268d151888d0353ee7ee215d216325ff7e78d58c",
+			"ir_sha256": "fd12bbbfbf122b0ab3338984bdcb8d67987393ed18f9bac5023213c2529c160d",
 			"category": "其他"
 		},
 		{
@@ -846,10 +846,10 @@
 			"poster": "posters/tfx-date-card.webp",
 			"file": {
 				"path": "tfx-date-card.html",
-				"sha256": "bbc5d5e11a3d5827ccefea238e5e7bf169485f635e380fa030ee942126b68c38",
-				"bytes": 5835
+				"sha256": "4e6100b038bc687c98a0db42662e8890090ff31500ebbe38fda609378c3f3d90",
+				"bytes": 5803
 			},
-			"ir_sha256": "8c4b5d11081dd11d118ad880d0edc659df184a0ea1006aa7ee6a62aca3099fef",
+			"ir_sha256": "44493302437183c4d59a9811816fc566872d38aaea3fee88a7a7e22f2e5209a8",
 			"category": "其他"
 		},
 		{
@@ -869,10 +869,10 @@
 			"poster": "posters/tfx-glitch-rgb.webp",
 			"file": {
 				"path": "tfx-glitch-rgb.html",
-				"sha256": "f0a6c707e1a1903bc421b94165385c1652e036a5b277e3cbf27f491d60f1f3c0",
-				"bytes": 7204
+				"sha256": "bf37bca2beb62ca4daf6b5b9277be023c48978c6f12c1dd8644355d2e0ff4c86",
+				"bytes": 7175
 			},
-			"ir_sha256": "47f2399219a93f3aa752f1e5c1817a0de7d3a2491dcc9090b5b19ae313d371a2",
+			"ir_sha256": "1f7750b583933beb4a968d8b01446f81247372547406065401bb30a731710ab7",
 			"category": "其他"
 		},
 		{
@@ -894,10 +894,10 @@
 			"poster": "posters/tfx-hud-lowerthird.webp",
 			"file": {
 				"path": "tfx-hud-lowerthird.html",
-				"sha256": "393a39fda0596fe88e5d5db4bce7fac539b92aae6d5c6b3fc6def0ac27b1927a",
-				"bytes": 7966
+				"sha256": "d9244edb3396ba71c0773cc5a4781fca9cb1a03342246288295cdb6623f6ea4c",
+				"bytes": 7934
 			},
-			"ir_sha256": "8593d4c7803acba892b6122fc01809af0b8b4cb8ab51a84ccf343d2e71777695",
+			"ir_sha256": "48b5eb4c364d23eee17800068f91d79a4ace4785162099197c11b6eb35d19551",
 			"category": "人名条"
 		},
 		{
@@ -919,10 +919,10 @@
 			"poster": "posters/tfx-lowerthird-bar.webp",
 			"file": {
 				"path": "tfx-lowerthird-bar.html",
-				"sha256": "10cc9026f42ba06bfc309640dcde8f079979030d3560b21dbcff29262d0b4ca6",
-				"bytes": 5335
+				"sha256": "c32e2e94a923d3550ecf09c5d2cf68579613b591d7e4109594508f98f65dbfe5",
+				"bytes": 5306
 			},
-			"ir_sha256": "a2209b6fdae06813b869b44555e6f2ffa9ad03cd08211438ffe2a98971e1f8ee",
+			"ir_sha256": "1b4ffadcbcf3af03974a3aefbafa32721e8d345844a6858e4994a769879e4bc0",
 			"category": "人名条"
 		},
 		{
@@ -942,10 +942,10 @@
 			"poster": "posters/tfx-lowerthird-frame.webp",
 			"file": {
 				"path": "tfx-lowerthird-frame.html",
-				"sha256": "e4b0387712af728f4a7a89178c98a988490ed6d42ec4180e2a83ad874d73e244",
-				"bytes": 8963
+				"sha256": "a3b3b909a67896d9d10434f2258f737b294e146f7f6147bb5f0d6e2f43e7876b",
+				"bytes": 8955
 			},
-			"ir_sha256": "635dfc50b7f76a50f6f7437354e63630705b68c369d859ef095e825b320a8e12",
+			"ir_sha256": "1ea32e51dc0886ba92fa86f5320dfebee58c2029fd9dc9fdf485b19dd5d45ee8",
 			"category": "人名条"
 		},
 		{
@@ -967,10 +967,10 @@
 			"poster": "posters/tfx-lowerthird-hang.webp",
 			"file": {
 				"path": "tfx-lowerthird-hang.html",
-				"sha256": "7c8c221e358f903a9cce5fa18bb5de213744834c29e192a4fe44ba62b486ccfa",
-				"bytes": 5789
+				"sha256": "58525e2e1dfe2cdfb17dcac97e5547cb6e6ae40c72f45d10dfd62b6599e47324",
+				"bytes": 5760
 			},
-			"ir_sha256": "78cbebc4cb0257294963797506f65ecf5169a7935e7845429851dde80edc183b",
+			"ir_sha256": "3d396d2ce3890801cfad438b65ac5200a552cca56fbd90a66605f64f40f20d3c",
 			"category": "人名条"
 		},
 		{
@@ -992,10 +992,10 @@
 			"poster": "posters/tfx-lowerthird-lines.webp",
 			"file": {
 				"path": "tfx-lowerthird-lines.html",
-				"sha256": "4a67fd06e7b58ddcc8e58351efc0b11a8fd00fb0ce2d9eeb6f94e026d042e139",
-				"bytes": 4624
+				"sha256": "fa10e205ca85e42cd25d56ba46145263e620e10e407b14c726e6637d7cc9fab6",
+				"bytes": 4619
 			},
-			"ir_sha256": "efbaf6d534039f1c4f2213ec582184ea614aa9d437574560987c993ffec6960e",
+			"ir_sha256": "a7e44110a4d21b2db7d1ca4aaf3cc79b7753ee73772bbab0370f6e56066a1330",
 			"category": "人名条"
 		},
 		{
@@ -1017,10 +1017,10 @@
 			"poster": "posters/tfx-lowerthird-pill.webp",
 			"file": {
 				"path": "tfx-lowerthird-pill.html",
-				"sha256": "3569ec648b09055ce13f3305ec9568995181fc298fc46aa2f1aaa9212e19b66c",
-				"bytes": 7341
+				"sha256": "546a0efe3d7ed1f1844206c52b37d3dc45261c50f92c167b2410c7410ee968eb",
+				"bytes": 7309
 			},
-			"ir_sha256": "cf26bb808a8b741f927ab3e157df496fb67413bd11ecafe1ab574dac1e872a39",
+			"ir_sha256": "93301fd472c778299d76a53943d6fe0f9f4a5ce85c836b34519d3108aa725e2a",
 			"category": "人名条"
 		},
 		{
@@ -1044,10 +1044,10 @@
 			"poster": "posters/tfx-lowerthird-tech.webp",
 			"file": {
 				"path": "tfx-lowerthird-tech.html",
-				"sha256": "83440981565547efbd7f406814e92662d7cc667661df61676005ba58aec815dd",
-				"bytes": 10258
+				"sha256": "100ac9cb4198665492f09327782bd00b6e9866e658c088abc68a67a0bdb1ee03",
+				"bytes": 10226
 			},
-			"ir_sha256": "7866dfabecd2cc204fd98a2692a134b6f62e093d4755c19bf2b0ff982c8a504b",
+			"ir_sha256": "481faf55fe54b646741e93e2da9a5a7676d704c5d7b33a50b191de9588ce6396",
 			"category": "人名条"
 		},
 		{
@@ -1067,10 +1067,10 @@
 			"poster": "posters/tfx-lyric-stagger.webp",
 			"file": {
 				"path": "tfx-lyric-stagger.html",
-				"sha256": "c47a91323c3fa2f37f45bea704a920cf070166932cbb122866138582e3ab55c5",
-				"bytes": 4220
+				"sha256": "da22e7f5081a59622770f14d25ba2a718c63eb8bacfb0c51f1a0dcd20931e6e3",
+				"bytes": 4188
 			},
-			"ir_sha256": "460699b258d124676d6ad2f2595ad9791da4334e67ce5e3fddd3a6183dd2101e",
+			"ir_sha256": "4fd48865650d837f2bf2b9a468324d384f20ee7cbb3d2d585a2172020e413bd8",
 			"category": "字幕"
 		},
 		{
@@ -1094,10 +1094,10 @@
 			"poster": "posters/tfx-mag-cover.webp",
 			"file": {
 				"path": "tfx-mag-cover.html",
-				"sha256": "f179837e54870ea040a0606ea497770552172b1986fc884d03d18ba3adf50257",
-				"bytes": 6677
+				"sha256": "ae02b71180bb99b2e3c40f06cfe0b334227f7c789a8297a660a3d4e9ddf15fed",
+				"bytes": 6645
 			},
-			"ir_sha256": "208bd994d7321434392f6088ba06007ccde97c47390051c9bb7cfc8c9823c4b4",
+			"ir_sha256": "5d99ce23fad08d5e4ad6dc611b5be784d23e2e6f5ba746c0c5e3427feb3169f2",
 			"category": "商务排版"
 		},
 		{
@@ -1121,10 +1121,10 @@
 			"poster": "posters/tfx-news-band.webp",
 			"file": {
 				"path": "tfx-news-band.html",
-				"sha256": "07437e0129953664a02304085a3cb147e291577b5abc14b87ba8244838e8794a",
-				"bytes": 6660
+				"sha256": "855aac7e5e9ca2bd6819e69ffc93e6948ca1ea58b3b57b6b3f4e328368eda107",
+				"bytes": 6628
 			},
-			"ir_sha256": "054b11e23438612606ec3b4eb129e852d121957c9f49b59602dde0081d4e2da2",
+			"ir_sha256": "731860f032ca513901e34ca4c1ca9d3482e7a5efa6df9fe5b603a24a8f3b39a1",
 			"category": "商务排版"
 		},
 		{
@@ -1148,10 +1148,10 @@
 			"poster": "posters/tfx-pixel-window.webp",
 			"file": {
 				"path": "tfx-pixel-window.html",
-				"sha256": "22ed5a972fd25d260caf4c68b2474ef1dea7db35ea6b0c7220130ccc093b560e",
-				"bytes": 10175
+				"sha256": "2d760393a7ef38af532a7796bf0929ec2b1fe3b2cb9ce1e84fb730b9d8513d8e",
+				"bytes": 10143
 			},
-			"ir_sha256": "86695a8387fb6116dd87a67fb7e5bc3616b738c209bd847a682442c1c96a2446",
+			"ir_sha256": "a9b102d297c0c8e37e3c5b9b1cbd5cbb8c6311746928c800daec2b9f22f1dea0",
 			"category": "其他"
 		},
 		{
@@ -1172,10 +1172,10 @@
 			"poster": "posters/tfx-quote-corner.webp",
 			"file": {
 				"path": "tfx-quote-corner.html",
-				"sha256": "7467c8befe5bb23564707a3d646fdbb02ef8f57bce4375df569e3382cd029014",
-				"bytes": 7097
+				"sha256": "c8020555e3d72090f5c324a1c0d6e522a9fe50e05cb44a2e7b14ef3ccc4ab274",
+				"bytes": 7065
 			},
-			"ir_sha256": "e0969a4f45ecd02e74e2d8d47c91f10582e590f536c25e811723cc106c51c64a",
+			"ir_sha256": "9b5974a5bc673de17f206fa7878f7fcfa48761a83240dfc38a376c101c0b7d35",
 			"category": "标注引用"
 		},
 		{
@@ -1197,10 +1197,10 @@
 			"poster": "posters/tfx-quote-frame.webp",
 			"file": {
 				"path": "tfx-quote-frame.html",
-				"sha256": "0fd141c1de28e695c2aa57a10a341e9d09cb9f15792467f0ec5ea3d1eea2d3cb",
-				"bytes": 8265
+				"sha256": "01d64b744e46bb94f9bea3da04304b496cb9282ceb2241978b08c9dc26daa850",
+				"bytes": 8257
 			},
-			"ir_sha256": "4c4fed45eef6c1f4037c2d25227529e3afb7542e1db7430ef19e86b36abe4abc",
+			"ir_sha256": "ba446b803cc1caab1e8f711d27ef4934f08231025ea2f8e75d8363f843203b01",
 			"category": "标注引用"
 		},
 		{
@@ -1221,10 +1221,10 @@
 			"poster": "posters/tfx-quote-mark.webp",
 			"file": {
 				"path": "tfx-quote-mark.html",
-				"sha256": "46c4e1b465d3f527596cb5bd9d281af9f1895efd70042deff9947dda17acb4fc",
-				"bytes": 5924
+				"sha256": "f1ca43e8c5cdd4b86af0dc55b94c7f6285aafcb0b1e8573e3cac145013fbc35b",
+				"bytes": 5892
 			},
-			"ir_sha256": "e7a10ef8dabe76d73f6e1cc0929334ea5221c5ac05ece8301abbb64942bbc66b",
+			"ir_sha256": "170ba41a5ffcc5045ab788e09bb09170ab7d73bb6a6d315000e7d8eb582a6494",
 			"category": "标注引用"
 		},
 		{
@@ -1244,10 +1244,10 @@
 			"poster": "posters/tfx-sparkle-title.webp",
 			"file": {
 				"path": "tfx-sparkle-title.html",
-				"sha256": "f5eea71c6a6424829e2373bdba522dfa6085affde8911ce6c092ec08f65b77dc",
-				"bytes": 11714
+				"sha256": "de6bc61d67c77cc62130ce0d262072d2052c57fe79b6e600259b5c1d85ab0c1a",
+				"bytes": 11682
 			},
-			"ir_sha256": "9c3ecafda9a4193384ce9e2348d548c786e48cb2f92a89f18420a12af108a693",
+			"ir_sha256": "a94eadac6c8817f884febdbfbbf9c75e815597a0da809d130b8533a4181e9e85",
 			"category": "其他"
 		},
 		{
@@ -1266,10 +1266,10 @@
 			"poster": "posters/tfx-supernova.webp",
 			"file": {
 				"path": "tfx-supernova.html",
-				"sha256": "da19a5dd1bb20241fd240e097d634d0dc8099fe8d4de870ded7df8eebbdedb18",
-				"bytes": 7887
+				"sha256": "6d7ae89c22808027c4a750b0a1e50f946edb912efbf7d3151d35ce1b266c1517",
+				"bytes": 7901
 			},
-			"ir_sha256": "437fb779f130d0831a3fbea49a6c3b7ec74f828d5d3f0fadb3e67f6a5727878d",
+			"ir_sha256": "cee03544b88a8502f9a15636d5203e7726812d2009488888fbaa4e536cf6bffc",
 			"category": "其他"
 		},
 		{
@@ -1290,10 +1290,10 @@
 			"poster": "posters/tfx-tag-pill.webp",
 			"file": {
 				"path": "tfx-tag-pill.html",
-				"sha256": "b5855db1b4350ceebf3a8f8ac9606aed3732ab49aca379b37d876776e317fdd1",
-				"bytes": 3815
+				"sha256": "b0e70a5a91cef4a0bc57d7824fdf798b7a24f0441f9c0355df7e9470bf9b574d",
+				"bytes": 3810
 			},
-			"ir_sha256": "6a355068d36f9f07b8f72a96b48d6fa88984ee44aa694ea76d695ff3c12acf72",
+			"ir_sha256": "41d97172a9b01b775cf93543c71d5dbef96a1c4849f5f712562796bd4b317786",
 			"category": "人名条"
 		},
 		{
@@ -1317,10 +1317,10 @@
 			"poster": "posters/tfx-title-3line.webp",
 			"file": {
 				"path": "tfx-title-3line.html",
-				"sha256": "76e6c84c62b167105a1e04c6d4a44f41d09b38e8cbe31efdb1920a58687e44ff",
-				"bytes": 5736
+				"sha256": "0c6e15d22ada69a881ce1b4a7a59c988b926528111602de6d6b5f6c67709b92f",
+				"bytes": 5707
 			},
-			"ir_sha256": "0b4b2e9290b271faf47870efa4e6836a9d91fb27ec5fa235543eb9f1ac6dbc49",
+			"ir_sha256": "76b4c9aec188817de24301c97c59853c51f30edf7b760cf7d4b875d9d0fe8938",
 			"category": "标题"
 		},
 		{
@@ -1340,10 +1340,10 @@
 			"poster": "posters/tfx-title-arrows.webp",
 			"file": {
 				"path": "tfx-title-arrows.html",
-				"sha256": "c051d6d74d25d492516b500d195bdff2e1999ea552b9d2ebd38c123f45465e27",
-				"bytes": 5284
+				"sha256": "e49fd74489a52941c85415677ea23663d05a0250f40eb3a3bb85066caf5c29ea",
+				"bytes": 5252
 			},
-			"ir_sha256": "d9142f63a1a84a61f014b20ec373a6f3077c72d600e347c7276335687fd4f452",
+			"ir_sha256": "7d58851688a1fdfa3a8b12461368a1980cae0edb30c88ae12e31da370f532ae6",
 			"category": "标题"
 		},
 		{
@@ -1363,10 +1363,10 @@
 			"poster": "posters/tfx-title-block.webp",
 			"file": {
 				"path": "tfx-title-block.html",
-				"sha256": "123b364b9efdb585488ffc831d71ede6192ef331722d36a95bafaf9606920de8",
-				"bytes": 3585
+				"sha256": "73849c1bc6d8d206a24720c77bce86d3ea6eb9ada4153d51e88a8524ead098ab",
+				"bytes": 3580
 			},
-			"ir_sha256": "eb84a0ec0bb1ecbfd92ed489fd56fe09493e1019e3934ae94383983d5c783517",
+			"ir_sha256": "4fcd1252ea49336e4f57cb36ec7f691c1cb41898d2723e546449fc98dac492e7",
 			"category": "标题"
 		},
 		{
@@ -1386,10 +1386,10 @@
 			"poster": "posters/tfx-title-blockslide.webp",
 			"file": {
 				"path": "tfx-title-blockslide.html",
-				"sha256": "cf4feb70e06bdc1b74d82f5ebab3bdae6f871c4625fdc33a21364be6bce385fa",
-				"bytes": 5130
+				"sha256": "d13c5580d004b97f7a41f196694c083d498f697832ba43881be8053fae8b6465",
+				"bytes": 5098
 			},
-			"ir_sha256": "8a7c2375d0f9df06068932f14861a707dd8e889dbfc1ac338fb2120c137ea934",
+			"ir_sha256": "f1f872b054fe44004327beaf67cdf21bbeb12afe8b8c2b22501f7f582bc95012",
 			"category": "标题"
 		},
 		{
@@ -1411,10 +1411,10 @@
 			"poster": "posters/tfx-title-bounce.webp",
 			"file": {
 				"path": "tfx-title-bounce.html",
-				"sha256": "aa71affa8c87fc72e9612bc72b8f992cb1e8deeb92b3a3323cb5cc707c667d82",
-				"bytes": 4887
+				"sha256": "4dd00c65faaf903dde8e7a70ff20ae19a43527153ca01c11a0837f1323f6520b",
+				"bytes": 4855
 			},
-			"ir_sha256": "eed070ee334a8045928e7e36dcb010da331e3930db5d0fa24ee76ee8caa472ff",
+			"ir_sha256": "f526042e5b8816e18a8ed478045774e1d48292358465df9a24969a185b8e24eb",
 			"category": "标题"
 		},
 		{
@@ -1434,10 +1434,10 @@
 			"poster": "posters/tfx-title-brackets.webp",
 			"file": {
 				"path": "tfx-title-brackets.html",
-				"sha256": "a1d81ba2b7c083f5bac4c37adda3048ccfff98df19f287e69ef080adfe69fd27",
-				"bytes": 7774
+				"sha256": "879417a0ba13974dfa2634184c6df0d166f5207ca34f06568f9a0a9bab87c702",
+				"bytes": 7769
 			},
-			"ir_sha256": "b021971554d11b0933cf6e66f499d01d90d1c5a7244220afe5154caec43c082d",
+			"ir_sha256": "0257208615361e9fdf2d5dd12fe86510309789bb9be45fc518196680370a0e1a",
 			"category": "标题"
 		},
 		{
@@ -1459,10 +1459,10 @@
 			"poster": "posters/tfx-title-cinematic.webp",
 			"file": {
 				"path": "tfx-title-cinematic.html",
-				"sha256": "d309886d7b346c92d6d7452405fc09f08286deb37602e960add58fd022a6fe34",
-				"bytes": 4685
+				"sha256": "a4aa0e88568749d1365cfcb9e9d1d1e23da4062cef2509ced88746d0a7158371",
+				"bytes": 4656
 			},
-			"ir_sha256": "c7902c11aa7b85354c3342a8eb63a667b6f608028eb1e545f954bbcc631aef7e",
+			"ir_sha256": "a3789ac4cafb13f3af11255ca7cafaeb610c687c81068e8cee623c0fefa734c8",
 			"category": "标题"
 		},
 		{
@@ -1484,10 +1484,10 @@
 			"poster": "posters/tfx-title-dualfont.webp",
 			"file": {
 				"path": "tfx-title-dualfont.html",
-				"sha256": "721616db08b9ead64f505acecc7a130d5a064391a0d130457bf359ba985fc885",
-				"bytes": 5062
+				"sha256": "1a6a56a1c31a910143212c2f5ea25007ec5ef0e266214621fd7263b5c4717c08",
+				"bytes": 5030
 			},
-			"ir_sha256": "b3aa0e4facf02d6314cd950a58c2ef23ce77782e0a2d4b3fcd87251e2dcfe531",
+			"ir_sha256": "c7ef485d4a451e1671ac657a271b904a63c2833696b4e63241c95a581e77dddb",
 			"category": "标题"
 		},
 		{
@@ -1507,10 +1507,10 @@
 			"poster": "posters/tfx-title-echo.webp",
 			"file": {
 				"path": "tfx-title-echo.html",
-				"sha256": "569ad3ca14c94d7a2da8d489f00277a8187bd0977ec1ca7fda47e479e49e0897",
-				"bytes": 5219
+				"sha256": "f061f2a3ad366eb7575f3f74143a0117e28474d841291123283b5dccb947e046",
+				"bytes": 5187
 			},
-			"ir_sha256": "1a45a1a8f31d323060a0fdc4087a15255c57778c4568afebcf7d11159dc162eb",
+			"ir_sha256": "c178e29f9c28e0b628faed52c62dc2d069bdb2a4793976d18ac224f2fdea27ff",
 			"category": "标题"
 		},
 		{
@@ -1530,10 +1530,10 @@
 			"poster": "posters/tfx-title-extrude.webp",
 			"file": {
 				"path": "tfx-title-extrude.html",
-				"sha256": "e3df6cc8330364fa56d03284b9de047a97ed1f0fd3f5b149323255320b6595f3",
-				"bytes": 4978
+				"sha256": "fe33ba001eb8d5027652de9b4ef183a001326ad28c5f1fdff8fd9a89eedf5738",
+				"bytes": 4949
 			},
-			"ir_sha256": "19eeba11e261a8ffc38b0c922c2773d93fb5dec2eeebc8ae1593b83d775699f8",
+			"ir_sha256": "07e813ae6b023ca839ad378d0a014064de238a50a21b8ff05ce5ba1c29a49bd4",
 			"category": "标题"
 		},
 		{
@@ -1553,10 +1553,10 @@
 			"poster": "posters/tfx-title-flip.webp",
 			"file": {
 				"path": "tfx-title-flip.html",
-				"sha256": "09f6e1eeb4f9e258265e89778cabdf5397dacee38f91251b445835ad7e6848d1",
-				"bytes": 3197
+				"sha256": "4f5a4fbb7e5d1c161fea343902f36aa3846708163a7959e37334411fe8fda2d0",
+				"bytes": 3194
 			},
-			"ir_sha256": "139683345715151c27258ad5d392c34023f3716c782da8b1580165497272122f",
+			"ir_sha256": "d8e67b5f42a5de2ca356f1ed5f2fedf26f33dbf4bff1d58f24339c97731f9cbf",
 			"category": "标题"
 		},
 		{
@@ -1578,10 +1578,10 @@
 			"poster": "posters/tfx-title-flipcard.webp",
 			"file": {
 				"path": "tfx-title-flipcard.html",
-				"sha256": "aa18e591db5f019e630266b4d031414856ff214d8c369536aebfa08c42782e9b",
-				"bytes": 5048
+				"sha256": "dad8f71be1e8dc43644210f2284a4457f9596c422a437ecb0aa3f5d701542641",
+				"bytes": 5019
 			},
-			"ir_sha256": "02f64f9706774dcd8489bb1c135b025af08c9c12919635f23e1fcce4fd4da20d",
+			"ir_sha256": "56da92062de730830d57173d1e05a58e4dd8a4d2856334ea446536bd8b626490",
 			"category": "标题"
 		},
 		{
@@ -1603,10 +1603,10 @@
 			"poster": "posters/tfx-title-framereveal.webp",
 			"file": {
 				"path": "tfx-title-framereveal.html",
-				"sha256": "4dbed7a30ed867ee378cb38220d85513ae2c33c99ba720d34c5b1c55832c9d82",
-				"bytes": 6691
+				"sha256": "8472415051556429a274730bacab90b4bb79476f2c53adf52672044df28adc17",
+				"bytes": 6686
 			},
-			"ir_sha256": "6b3a85b7f9946a9dbed563b7106dd56a43c4b507454849a90f3a9f779df4be2e",
+			"ir_sha256": "e9503ea28fcbbdadb574cb783a9fc07187d9d86da71a0cdd2549f64a5233a8c4",
 			"category": "标题"
 		},
 		{
@@ -1626,10 +1626,10 @@
 			"poster": "posters/tfx-title-gather.webp",
 			"file": {
 				"path": "tfx-title-gather.html",
-				"sha256": "f30e6f403ea602eb84148d6d3b4767c0335440810c1b34159ddf249146196fed",
-				"bytes": 3431
+				"sha256": "ffbdfc61d53d73c4d6f7ddaa9d524a8cb0b44c2e844be936fd4d7f41a3e1a10d",
+				"bytes": 3423
 			},
-			"ir_sha256": "ad3b40d0a6aacc92e1c350bbb480377885b9085ccdf7e930f0c585eb822f57b7",
+			"ir_sha256": "7bdc5e4d97d3edce722e252fb2cd536b2f2da57a799faea0fbf9050189df50eb",
 			"category": "标题"
 		},
 		{
@@ -1649,10 +1649,10 @@
 			"poster": "posters/tfx-title-glow.webp",
 			"file": {
 				"path": "tfx-title-glow.html",
-				"sha256": "dca2cca195ce2b8f556955fd36f01f302b87bb3ea5e6fbb2bb3967e5e57d2144",
-				"bytes": 4258
+				"sha256": "626f02f3bea861c18e19aa03a1a8a4a5d2c43d737bf4eb968dc7d28c3b349912",
+				"bytes": 4253
 			},
-			"ir_sha256": "e2b0d04045feb42c766b4f874fdfb4992a2e744eaa66ec12be7957b22ccf1796",
+			"ir_sha256": "1daae0cf8c03adb45acb07a63af0e0ef3b4aaf78a4ff3e8fbe733f4f1c1dfcea",
 			"category": "标题"
 		},
 		{
@@ -1674,10 +1674,10 @@
 			"poster": "posters/tfx-title-linereveal.webp",
 			"file": {
 				"path": "tfx-title-linereveal.html",
-				"sha256": "130b32148f9ce8b2eb8f46e08557491124ed52831c130ac2c302abb2f5eae5ba",
-				"bytes": 4536
+				"sha256": "56852b4d791daeec7ceed409d9e24c9f959c3149d3ef7c112edd7c146d8db44d",
+				"bytes": 4507
 			},
-			"ir_sha256": "e194b99183d07aa149a0556f65c77e4c53de8d407875b4fb6aa8f85902979a80",
+			"ir_sha256": "a022dc434056cb1065aff0364b847eada195e31d1188f2fa0c81fc207f7ad173",
 			"category": "标题"
 		},
 		{
@@ -1697,10 +1697,10 @@
 			"poster": "posters/tfx-title-linewipe.webp",
 			"file": {
 				"path": "tfx-title-linewipe.html",
-				"sha256": "8e2294c2ba7f741b671333013be2cae127c419a297aac4c5f790fe393d586b21",
-				"bytes": 5262
+				"sha256": "c9e27ea3a73147509f280c1d49db3382ab8719c047fba4fecfeedb538079caca",
+				"bytes": 5230
 			},
-			"ir_sha256": "8aa1c503e4fc4d5d550efed7a4fb5693c988c77ab67750a7af766140b8fd299b",
+			"ir_sha256": "11922d6c96a92242a307e262071cd29cb6bf71cf2a0b897e077f39897df998b6",
 			"category": "标题"
 		},
 		{
@@ -1720,10 +1720,10 @@
 			"poster": "posters/tfx-title-lsfade.webp",
 			"file": {
 				"path": "tfx-title-lsfade.html",
-				"sha256": "e206bf9ef56c811f020ea2784b1421f0732d043c4954df8e818db82a6966f6ab",
-				"bytes": 3581
+				"sha256": "f3b60e29b56de999d8d77498c58ee5a62930d89ac702d2ef51daed2c1181e029",
+				"bytes": 3552
 			},
-			"ir_sha256": "b1ac91589dd3be55dde2a6e381b3b694634a0885310baaa0e3a211eed84b247b",
+			"ir_sha256": "08825489c8100fe6b6eaa9da350d224b7bf515eeb888be968f6e69781f2e1db0",
 			"category": "标题"
 		},
 		{
@@ -1745,10 +1745,10 @@
 			"poster": "posters/tfx-title-slab.webp",
 			"file": {
 				"path": "tfx-title-slab.html",
-				"sha256": "37035ba9f6c24288e4b75294fe1f64109e726d4e9a19b4014ac9d148db3adb31",
-				"bytes": 5706
+				"sha256": "46fc48f97dc722f4c99ec31adbcf8175feb8b46aab2838f8c1a319665c1a58c8",
+				"bytes": 5674
 			},
-			"ir_sha256": "64ec30673b5284bb78be74cff914cb02c228f603c7f83ced1e172c822636ee3e",
+			"ir_sha256": "80d2a3f5790595220af5e5d60e9d5c894b99cda48dfc4bf2f3263a4675d0fd60",
 			"category": "标题"
 		},
 		{
@@ -1770,10 +1770,10 @@
 			"poster": "posters/tfx-title-softfocus.webp",
 			"file": {
 				"path": "tfx-title-softfocus.html",
-				"sha256": "00b7e38306fe31ed68a8455a8c95710e0218e57d30d25c17a88fd39f62b9755b",
-				"bytes": 6245
+				"sha256": "906465f26a3ab806379c0c253e8dc71fbf1373cef92ed9dd7f62e087b3835771",
+				"bytes": 6216
 			},
-			"ir_sha256": "0749a37f7b3d4674c833314adddc7621047239652062edb6a30dc81663915336",
+			"ir_sha256": "39cd8611c5cbb2290894bad161a83621e59567caf927a2ab3b1ba3a27e0c360a",
 			"category": "标题"
 		},
 		{
@@ -1797,10 +1797,10 @@
 			"poster": "posters/tfx-title-stack.webp",
 			"file": {
 				"path": "tfx-title-stack.html",
-				"sha256": "780eb7e80921f75de515e540a1a316261717f17df2ec8ea62be3931141bfd7e8",
-				"bytes": 4962
+				"sha256": "e129b64d2c947aa8bdfdd40630740a6dae6a9263533750c608b386ee8af63890",
+				"bytes": 4957
 			},
-			"ir_sha256": "3ff951cc92c871b71533c8b87c5b6743535de3820841ee87e5cb38e2330fb8d1",
+			"ir_sha256": "861a52e9b41f63a4e973d5ad5047fc5c19803400c7c13b1d15e5b99cfb01f6d5",
 			"category": "标题"
 		},
 		{
@@ -1822,10 +1822,10 @@
 			"poster": "posters/tfx-title-subrise.webp",
 			"file": {
 				"path": "tfx-title-subrise.html",
-				"sha256": "4a929994c0217270128d7070360abb456b130cbb027cb010a79fb7c850b5f4a4",
-				"bytes": 4548
+				"sha256": "6699534f08087aace9da91249f6e7126303903116df3b59a75776387eb0e58c3",
+				"bytes": 4543
 			},
-			"ir_sha256": "540cc500a66473003c21ac8a1fbdf0276e5aaf7e23a29e86e380ff8451108853",
+			"ir_sha256": "1cb42527057a8e673263d78a18b62ee739620865f7fd4797fff7f1ffab5aded3",
 			"category": "标题"
 		},
 		{
@@ -1847,10 +1847,10 @@
 			"poster": "posters/tfx-title-typeline.webp",
 			"file": {
 				"path": "tfx-title-typeline.html",
-				"sha256": "5210ab828d12b68a67a2e35df6204206c37c5afc8e437719282ce8431005c807",
-				"bytes": 6605
+				"sha256": "71afe0b7be5549dacacf53917e1d07dcfa806928415dae174923c970b864ecba",
+				"bytes": 6573
 			},
-			"ir_sha256": "be0ebe41a5d420e10ea05265ba62da853280a3a0b61a4722d1ec747ea427f17a",
+			"ir_sha256": "7f33bde5f7831186625cfa5996a519f16581cbc771800626ed4007ec9e883f26",
 			"category": "打字机"
 		},
 		{
@@ -1870,10 +1870,10 @@
 			"poster": "posters/tfx-title-wave.webp",
 			"file": {
 				"path": "tfx-title-wave.html",
-				"sha256": "aa3f449649c851aeb98e3614f74c2d3e73d9ac82f80e9efdcf59515463652067",
-				"bytes": 4265
+				"sha256": "2bd69b7ba440585480e98ae7f2912dc8418c576ba5752b2a8def71a4d313bab7",
+				"bytes": 4262
 			},
-			"ir_sha256": "d7a63ec6c76b145fe39212f130d26c13406b2f8bb597b9e913ba652541fab8fc",
+			"ir_sha256": "cb1ba3dc2553433cb8b36ccff07108ffce16eef4f249497ee4a69ae9b99ab3bd",
 			"category": "标题"
 		},
 		{
@@ -1893,10 +1893,10 @@
 			"poster": "posters/tfx-title-wordfade.webp",
 			"file": {
 				"path": "tfx-title-wordfade.html",
-				"sha256": "8d76e5e2f58ad7168488af5afdad98e898fc853a6f15c2c68fa59bf99cf59c29",
-				"bytes": 3999
+				"sha256": "2616f769e6271c633659cc1c3dfd3ec0a46387c654524343186fefc457f2492c",
+				"bytes": 3967
 			},
-			"ir_sha256": "feb7e819f7b8c989b1713fbdc909dfd7cf8d6fdb447834fbec84853e4bbf649f",
+			"ir_sha256": "05bc6e133611aa637c0c38680eddd6752e36bb5e56be4315d133fb7461277b3a",
 			"category": "标题"
 		},
 		{
@@ -1916,10 +1916,10 @@
 			"poster": "posters/tfx-title-zipper.webp",
 			"file": {
 				"path": "tfx-title-zipper.html",
-				"sha256": "5609fb4945fa45176074f3292b1773ba182a4fe3087c255d626851fefa308c0c",
-				"bytes": 3906
+				"sha256": "8e62f806001c1cbf838e6633e22a66603f97d1f954f197ead1e582dbc4fffc0c",
+				"bytes": 3877
 			},
-			"ir_sha256": "98e8df8dfea7e6ebd0b30995ac01e8da80bbda2d953f86f7bfebb8252aecf875",
+			"ir_sha256": "7f0898c10166be34073a7986dcdd5d185a86ce27ed13fefe4400ec62dd7580d0",
 			"category": "标题"
 		},
 		{
@@ -1941,10 +1941,10 @@
 			"poster": "posters/tfx-travel-place.webp",
 			"file": {
 				"path": "tfx-travel-place.html",
-				"sha256": "6760e752a642305b30026a5449126620fbc8082c8644356d5ae56fccbdb7352d",
-				"bytes": 5922
+				"sha256": "eb9ef048070fcd0dd68504f106367010925f1c5a6a9c0e160858798d35eb48c4",
+				"bytes": 5890
 			},
-			"ir_sha256": "aa96100313a9faaa7fc6e830127d7a9cbc631143db08489da118b22b92d85aba",
+			"ir_sha256": "4d7d8539508776ab81a09a2f5fdf2e4a2d0ab04768676bbe9adde4564a54a925",
 			"category": "其他"
 		},
 		{
@@ -1967,10 +1967,10 @@
 			"poster": "posters/tfx-travel-stamp.webp",
 			"file": {
 				"path": "tfx-travel-stamp.html",
-				"sha256": "1f3946aeccbaae3a4a483b4e81ebfc4de4151822638063786013aa5e2d1cea69",
-				"bytes": 7157
+				"sha256": "416699de6bb7670cf5b1006356a07a3b37ab0fc65bf303e739bda155a0431c21",
+				"bytes": 7125
 			},
-			"ir_sha256": "81fd16de7c724723547b5358bd91791580e79868a65f74dc81bd649929e6d5d4",
+			"ir_sha256": "b5cb275467d80dd855127c90aac04440e6a7f923c5031f001d1d30af6c6c92bf",
 			"category": "其他"
 		},
 		{
@@ -1992,10 +1992,10 @@
 			"poster": "posters/tfx-type-backspace.webp",
 			"file": {
 				"path": "tfx-type-backspace.html",
-				"sha256": "91348f69f04680ee213e60515f014259f639b7f53f9bc743f78fad9b7d16b404",
-				"bytes": 11178
+				"sha256": "0887a4bcb7413d7be3cde003a0531b6a29fbcf812b4d7acedfe3c2c4b412aa0d",
+				"bytes": 11146
 			},
-			"ir_sha256": "a8caa4128c4a29a608c258619bbff58fb93e01b58ec5772b6a84c5c762894d86",
+			"ir_sha256": "dd334091f99b6f2b1bdcb00784ffc28b54b50cd54bb1045be185215040cfdc5d",
 			"category": "打字机"
 		},
 		{
@@ -2015,10 +2015,10 @@
 			"poster": "posters/tfx-type-boxed.webp",
 			"file": {
 				"path": "tfx-type-boxed.html",
-				"sha256": "da88ee2f7548fde5767f5512756466a479725294ebc2b952b87405523c6c03fb",
-				"bytes": 5648
+				"sha256": "6488f7d85aed8bd3ca57610ea1da1850e1cc0a8a577255d209a7adf8d440f935",
+				"bytes": 5616
 			},
-			"ir_sha256": "9349b5de739d5e0037b925764607866185510a40a3e64bc01796b1db72beb58e",
+			"ir_sha256": "5d30fd787bd67bf1d9e3eb126a138870853053c590074990dd27aa83b2c9d312",
 			"category": "打字机"
 		},
 		{
@@ -2040,10 +2040,10 @@
 			"poster": "posters/tfx-type-center.webp",
 			"file": {
 				"path": "tfx-type-center.html",
-				"sha256": "d987fc70cf913a4e1a2c12d3df1fc7aff6af40b6d5c2d0de6b8aa46289acda14",
-				"bytes": 5018
+				"sha256": "65496a245426f2931a6773190e1e10a41f24d31efbc26516e36717b1ddc98a14",
+				"bytes": 4986
 			},
-			"ir_sha256": "05cf333eb69d265d84e1dc423e0c591c91b8ec9c6535b48322866ffaa56ee46a",
+			"ir_sha256": "347238a173d090faf160b6e73efe332099a7ad8a1e3ea41bc99564278f92e250",
 			"category": "打字机"
 		},
 		{
@@ -2066,10 +2066,10 @@
 			"poster": "posters/tfx-type-kicker.webp",
 			"file": {
 				"path": "tfx-type-kicker.html",
-				"sha256": "cb1c37db68d2a2e38688c79f166265ce57ac3a12a3632ce54c4e6f1f41bc5888",
-				"bytes": 7307
+				"sha256": "217ba9bfd3370470790dbdb25f1a14461674ae72191f858745a3bd143d91f70f",
+				"bytes": 7275
 			},
-			"ir_sha256": "46c5bed1e2dfcf969213ed38ae7b0fd7010e6076ff5551e3667cc11d34d10f6e",
+			"ir_sha256": "49997d3ec9c0bf563102a9f105977141df348dbeecdf0bc18a0c9c98c85e5cd2",
 			"category": "打字机"
 		},
 		{
@@ -2089,10 +2089,10 @@
 			"poster": "posters/tfx-type-line.webp",
 			"file": {
 				"path": "tfx-type-line.html",
-				"sha256": "8795a750cc266b81444ed8043b828a62d2d8a1e79dec4e20ff73b1e9e66dafb6",
-				"bytes": 5154
+				"sha256": "3c7c74000ac6e2bfc52a2f85c7ef1945fd797629215ac179acba7d9db04868b4",
+				"bytes": 5125
 			},
-			"ir_sha256": "62ee836442b3909c98da7898f814bf2d6bafb311fc8fa2893f5a1431020c2e46",
+			"ir_sha256": "e67d853853e76a5fb441872627109340efb20673293d051b3601fadcab4276e4",
 			"category": "打字机"
 		},
 		{
@@ -2116,10 +2116,10 @@
 			"poster": "posters/tfx-type-lines.webp",
 			"file": {
 				"path": "tfx-type-lines.html",
-				"sha256": "958527209484c41c87148da156428d756d0622a612d9ed41804afb22ad3483ae",
-				"bytes": 11487
+				"sha256": "28f8162e7d4d15470e99c0214516dafc7293e34cd7142a925f7668528d2beaa3",
+				"bytes": 11458
 			},
-			"ir_sha256": "a7249966474b78c19c09a348ab187e2335289e93bbafcdf281b06f2e56d499b9",
+			"ir_sha256": "412493eb03891b20297e4317fce97fe912fc1eb3a1ada8cec74dc691d7c5cbf3",
 			"category": "打字机"
 		},
 		{
@@ -2141,10 +2141,10 @@
 			"poster": "posters/tfx-type-loading.webp",
 			"file": {
 				"path": "tfx-type-loading.html",
-				"sha256": "d44124b8bc5a6498066e4e775fa6e82559d08e5224076f2dadb66e812c2f5974",
-				"bytes": 6899
+				"sha256": "3fd95d3de84c450a618b469c6a47f8fefdff5b50d16fdcc82c315b9f4b762893",
+				"bytes": 6891
 			},
-			"ir_sha256": "dfbfe1cf23680408142ebf3cd4511796d45ec7d32b428876f7e5aed744849ee0",
+			"ir_sha256": "8c6372f6a046d979bc8b73afdaf42d196ca68dbdc7114cea3dfc315320c76501",
 			"category": "打字机"
 		},
 		{
@@ -2166,10 +2166,10 @@
 			"poster": "posters/tfx-type-relay.webp",
 			"file": {
 				"path": "tfx-type-relay.html",
-				"sha256": "155c408c1b8490061c1960e0dfb3700c81cc6490394906e319d2d1b25178c1ab",
-				"bytes": 8370
+				"sha256": "7bbeee4fc0da4545ab80d883eaec0e8a628f77914a606a02abe74c3835a78524",
+				"bytes": 8338
 			},
-			"ir_sha256": "590014464b3ce55456efa1eb60a8c76e9b34d4b84bff7a5f6eea2736b5de1358",
+			"ir_sha256": "00529840bf6a39fb31926f09193c56051ca503a5c495bdb04efcd7ec44f7c8c7",
 			"category": "打字机"
 		},
 		{
@@ -2189,10 +2189,10 @@
 			"poster": "posters/tfx-type-scramble.webp",
 			"file": {
 				"path": "tfx-type-scramble.html",
-				"sha256": "fa1c07a04c6187aa0df9fdf6620c6d05e357c2f4fce962f255a5c69b0cd351a0",
-				"bytes": 4821
+				"sha256": "5e5e09b940b59bb7611c49bf8f6ad71e9a9b06e3a305bdc425c2e9d1cf7eb188",
+				"bytes": 4818
 			},
-			"ir_sha256": "ad08c0f42191382d60726067fd76e7c814968ac83560bf6884681e1a86f1b04a",
+			"ir_sha256": "24840be8e2c73a98c1ac9421c8303db08e54f61c7b6f28d1c02778cbb5847bfa",
 			"category": "打字机"
 		},
 		{
@@ -2212,10 +2212,10 @@
 			"poster": "posters/tfx-type-terminal.webp",
 			"file": {
 				"path": "tfx-type-terminal.html",
-				"sha256": "caf6f267313178e59e88b164f0ac998cd097e7217b60e6abb8fbb3143bbfb244",
-				"bytes": 7514
+				"sha256": "877a9c04513db717bd7756f91506a2fef69733a8d9dc23c7be0e706cdaf75c05",
+				"bytes": 7482
 			},
-			"ir_sha256": "66cc83c553bedd9a9bc392f2fe00ecfdf784f5f8b2e31815af641670a77c41ef",
+			"ir_sha256": "0b8d2ef56424668627a7b6c752d3274fc053e5f9103b700b70ee015c1f217d7e",
 			"category": "打字机"
 		},
 		{
@@ -2235,10 +2235,10 @@
 			"poster": "posters/tfx-type-twoline.webp",
 			"file": {
 				"path": "tfx-type-twoline.html",
-				"sha256": "4164339d6d1aa18e28a05c7e67b02b51c496165908aea7a007d195e754e454bf",
-				"bytes": 6294
+				"sha256": "418bdd702b75360ef63b08fe1a958bd94b7af2efe4d1eed0124e3f7d5df28729",
+				"bytes": 6291
 			},
-			"ir_sha256": "e0e64a9de34fd949a464401bcd72f99d7bcbaff5e8f62af1a9f625f67fe13f12",
+			"ir_sha256": "3bc6b574f2a136c46312101fdeb4fd0d247b90d77b7c522de0195391d0d92530",
 			"category": "打字机"
 		},
 		{
@@ -2260,10 +2260,10 @@
 			"poster": "posters/tfx-type-underline.webp",
 			"file": {
 				"path": "tfx-type-underline.html",
-				"sha256": "6309e2e54bdef3719ea5450e2876c757232906cd089825178e4f32ba25d4fc82",
-				"bytes": 6693
+				"sha256": "6387a852354f52e586991cad99ac06814c32337b38afe24470e4416c2be3d909",
+				"bytes": 6661
 			},
-			"ir_sha256": "81898416782ba143937b451ffd54631edb8480f3da4997033838aff331aa2eca",
+			"ir_sha256": "dba8576292f095d711e69c214e8ab8402b04270da9ddd40fd8af4bc909a94248",
 			"category": "打字机"
 		},
 		{
@@ -2285,10 +2285,10 @@
 			"poster": "posters/tfx-ui-toast.webp",
 			"file": {
 				"path": "tfx-ui-toast.html",
-				"sha256": "c74b58d4a42a022a1d162caa8a5274c6e31461bd1084eea2a0657f424e9f06cf",
-				"bytes": 6959
+				"sha256": "74381055af24d0bd28b86a77d706e8dad73caf71debd6a985dd3397dbc2756fd",
+				"bytes": 6930
 			},
-			"ir_sha256": "763b5cdd52002c4486369efb53cf7da613360d0521a2208f45c8d65bd741577a",
+			"ir_sha256": "31e0c06aaf608e36c3720ba88f3c73413ee998fe887749e6cd615e97104959fc",
 			"category": "对话气泡"
 		},
 		{
@@ -2310,10 +2310,10 @@
 			"poster": "posters/tfx-variety-subtitle.webp",
 			"file": {
 				"path": "tfx-variety-subtitle.html",
-				"sha256": "c1e41c04fab057f5c361ea9418fc42ad46530e162ee8a6429598464b4e69167f",
-				"bytes": 4000
+				"sha256": "d7e660800f265ae7a1bf1cc0aa5ce12c5608d84f74c44fc243bf2e0dafdc55b1",
+				"bytes": 3995
 			},
-			"ir_sha256": "d15c66c11d48b6266a3333dc7a9b933b25514b3b2d920c986d4e831c3ce5e7e7",
+			"ir_sha256": "0654a2dd4253f7cd2d90c2b47966061389411a289d2e6ebcaa88bc1cd707a4ed",
 			"category": "字幕"
 		},
 		{
@@ -2333,10 +2333,10 @@
 			"poster": "posters/tfx-word-relay.webp",
 			"file": {
 				"path": "tfx-word-relay.html",
-				"sha256": "8adf5987f4f887320c2c4c663cf63a3ef5e70a037b8b86310368f37869f06d7d",
-				"bytes": 4648
+				"sha256": "81d3322367e742bb07c6421cbd0c6fcf1fefe4f366139dc7419b396cc2b5800c",
+				"bytes": 4616
 			},
-			"ir_sha256": "ecf31ec95cc3556ad100a68c825b3e018e277ade29b50406f7891b0a06f8fcb5",
+			"ir_sha256": "1c8787f7b865d9dea2f53327916a938fd1f0b8b1eafbf546df503005927e68d0",
 			"category": "字幕"
 		}
 	]
