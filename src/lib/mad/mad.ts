@@ -20,7 +20,14 @@ import { madJsx, type MadWindow, type FootageMap, type BeatMarker } from "../con
 import { scanFolder, masterCanvas, type ProbeFn } from "./scan";
 import { selectWindows } from "./selector";
 import { fixedRhythm, beatQuantized, MIN_WIN, type BeatAnalysis } from "./beat";
-import { ensureMadData, madCacheDir, type DataDeps } from "./data";
+import { ensureMadCatalog, ensureMadData, madCacheDir, type DataDeps } from "./data";
+import {
+	formatCandidate,
+	parseTechniqueList,
+	poolWindowCounts,
+	resolveTechniques,
+	searchTechniques,
+} from "./techniques";
 import { makeIrLoader, type IRProject } from "./pool";
 import { analyzeBgm, type BeatCloudDeps } from "./cloud-beat";
 import type { DegradeLevel } from "./types";
@@ -59,6 +66,10 @@ export interface MadOpts {
 	out?: string;
 	ffmpegPath?: string;
 	json?: boolean;
+	/** 技法白名单原样输入（逗号分隔的技法名/别名/pid；add-mad-technique-whitelist）。 */
+	technique?: string;
+	/** 查询态关键词（只查目录不出片；走 runMadSearch，不进 runMad）。 */
+	search?: string;
 }
 
 export interface RunMadDeps {
@@ -84,6 +95,20 @@ export interface MadResult {
 	dataVersion: number;
 	degradeLevel: DegradeLevel;
 	techniques: { uid: string; pid: string; cat: string; t0: number; t1: number }[];
+	/** 用户 `--technique` 的原样回显（未点名时为空数组）。 */
+	techniques_requested: string[];
+	/** 解析成功且池内有窗口的技法（windows = 本片里它占了几个窗口）。 */
+	techniques_resolved: { pid: string; name: string; cat: string; windows: number }[];
+	/** 解析成功但池内无窗口的技法（点了也用不上，如实交代）。 */
+	techniques_unavailable: { input: string; reason: string }[];
+}
+
+/** 查询态结果（`--search`：不出片、不落 result.json）。 */
+export interface MadSearchResult {
+	ok: true;
+	tool: "mad";
+	query: string;
+	matches: { pid: string; name: string; cat: string; n_seen: number; windows: number }[];
 }
 
 /** 收集 IR 里的 image/video 素材位 layerId（递归 group，保序）。 */
@@ -105,6 +130,38 @@ const SLOT_STAGGER = 0.3; // 窗内各 slot srcOffset 错开（秒）
 function timestamp(now: Date): string {
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${p(now.getFullYear() % 100)}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+}
+
+/**
+ * 查询态（`--search`）：只查技法目录，不要素材文件夹、不产 .jsx、不落 result.json、不碰选择器。
+ * 与出片态同属免鉴权公开只读面：不要 API Key、零计费。无命中不算失败（退出码 0）。
+ */
+export async function runMadSearch(keyword: string, opts: MadOpts, deps: RunMadDeps = {}): Promise<MadSearchResult> {
+	const warn = deps.warn ?? ((m: string) => process.stderr.write(`\x1b[2m   ${m}\x1b[0m\n`));
+	const dataDeps: DataDeps = { fetchFn: deps.fetchFn ?? fetch, cacheRoot: deps.cacheRoot ?? madCacheDir(), warn };
+	const data = await ensureMadData({ refresh: opts.refresh }, dataDeps);
+	const catalog = await ensureMadCatalog(data, { refresh: opts.refresh }, dataDeps);
+	const counts = poolWindowCounts(data.pool);
+	const hits = searchTechniques(catalog.patterns, keyword, counts);
+	if (hits.length === 0) {
+		warn(`没有技法名、别名或类目包含「${keyword}」。换个词试试，或用更短的词。`);
+	} else {
+		warn(`命中 ${hits.length} 个技法（按收录次数降序）：`);
+		for (const h of hits) warn(`  ${formatCandidate(h.pattern, h.windows)}`);
+		warn("点名出片：gtrk tool mad <素材文件夹> --technique <技法名[,技法名…]>");
+	}
+	return {
+		ok: true,
+		tool: "mad",
+		query: keyword,
+		matches: hits.map((h) => ({
+			pid: h.pattern.pid,
+			name: h.pattern.pattern,
+			cat: h.pattern.cat,
+			n_seen: h.pattern.n_seen,
+			windows: h.windows,
+		})),
+	};
 }
 
 /**
@@ -147,7 +204,52 @@ export async function runMad(inputArg: string | undefined, opts: MadOpts, deps: 
 	if (!data.online && selectablePool.length === 0) {
 		throw new Error("当前离线且无已缓存的技法数据分片。请连网重跑首拉，或加 --refresh 预热。");
 	}
-	const chosen = selectWindows({ pool: selectablePool, videos, durationSec, orientation, seed });
+
+	// ③′ 技法点名（--technique）：目录懒下载 → 解析 → 收窄子池。歧义/未命中一律报错退出，零落盘。
+	const requested = opts.technique ? parseTechniqueList(opts.technique) : [];
+	let allowPids: Set<string> | undefined;
+	let resolvedNames: { pid: string; name: string; cat: string }[] = [];
+	const unavailable: { input: string; reason: string }[] = [];
+	if (requested.length > 0) {
+		const catalog = await ensureMadCatalog(data, { refresh: opts.refresh }, dataDeps);
+		const { resolved, ambiguous, missing } = resolveTechniques(catalog.patterns, requested);
+		const counts = poolWindowCounts(selectablePool);
+		if (ambiguous.length > 0 || missing.length > 0) {
+			const lines: string[] = [];
+			for (const a of ambiguous) {
+				lines.push(`「${a.input}」命中多个技法，说清楚是哪一个：`);
+				for (const c of a.candidates) lines.push(`    ${formatCandidate(c, counts.get(c.pid) ?? 0)}`);
+			}
+			for (const m of missing) {
+				lines.push(`「${m.input}」没有对应的技法。相近的有：`);
+				for (const c of m.candidates) lines.push(`    ${formatCandidate(c, counts.get(c.pid) ?? 0)}`);
+			}
+			lines.push("先用 `gtrk tool mad --search <关键词>` 查一下名字，再点名。");
+			throw new Error(lines.join("\n"));
+		}
+		const usable = resolved.filter((p) => (counts.get(p.pid) ?? 0) > 0);
+		for (const p of resolved) {
+			if ((counts.get(p.pid) ?? 0) > 0) continue;
+			unavailable.push({
+				input: p.pattern,
+				reason: data.online
+					? "技法目录里有它，但技法池里没有可用窗口（池只收 conf=high、动作强度 live/full、时间窗有效且含素材位的实例）"
+					: "当前离线，它的数据分片还没缓存到本地",
+			});
+			warn(`技法「${p.pattern}」本次用不上：${unavailable[unavailable.length - 1].reason}`);
+		}
+		if (usable.length === 0) {
+			throw new Error(
+				`点名的技法在技法池里都没有可用窗口：${resolved.map((p) => p.pattern).join("、")}。` +
+					"换几个再试（`gtrk tool mad --search <关键词>` 的清单里会标出哪些池内有窗口）。",
+			);
+		}
+		allowPids = new Set(usable.map((p) => p.pid));
+		resolvedNames = usable.map((p) => ({ pid: p.pid, name: p.pattern, cat: p.cat }));
+		warn(`技法白名单：${usable.map((p) => p.pattern).join("、")}（共 ${usable.length} 个）`);
+	}
+
+	const chosen = selectWindows({ pool: selectablePool, videos, durationSec, orientation, seed, allowPids });
 	if (chosen.length === 0) {
 		throw new Error("技法池为空或无可用条目（数据版本可能异常，可加 --refresh 重拉）。");
 	}
@@ -261,6 +363,12 @@ export async function runMad(inputArg: string | undefined, opts: MadOpts, deps: 
 		dataVersion: data.version,
 		degradeLevel: level,
 		techniques: chosen.map((c) => ({ uid: c.entry.uid, pid: c.entry.pid, cat: c.entry.cat, t0: c.entry.t0, t1: c.entry.t1 })),
+		techniques_requested: requested,
+		techniques_resolved: resolvedNames.map((r) => ({
+			...r,
+			windows: chosen.filter((c) => String(c.entry.pid) === r.pid).length,
+		})),
+		techniques_unavailable: unavailable,
 	};
 	await writeFile(join(outDir, "result.json"), JSON.stringify({ ...result, finishedAt: now.toISOString() }, null, 2));
 

@@ -22,7 +22,7 @@ import {
 	type ToolDescriptor,
 } from "../lib/tool-descriptors";
 import { runCloudTool, downloadStream, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
-import { runMad, type MadOpts } from "../lib/mad/mad";
+import { runMad, runMadSearch, type MadOpts } from "../lib/mad/mad";
 import { currentVersion } from "../lib/version";
 import { isTaskTypeOffline, primeCatalog } from "../lib/enum-catalog";
 import {
@@ -214,7 +214,12 @@ async function runTool(
 
 /** local 型 mad 分派：runMad 编排 → 适配为 RunToolResult（--json 输出 mad 富结果）。 */
 async function runMadInTool(inputArg: string | undefined, opts: ToolOpts): Promise<RunToolResult> {
-	log.step("▶ 一键剪 MAD（mad）…");
+	const technique = typeof opts.technique === "string" ? opts.technique : undefined;
+	const search = typeof opts.search === "string" ? opts.search : undefined;
+	// 出片态与查询态互斥：一个要素材、一个不要，混在一起只会让人猜命令到底干了什么。
+	if (technique && search) {
+		throw new Error("`--technique` 是按名单出片、`--search` 是查技法目录，两件事分两次跑。");
+	}
 	const madOpts: MadOpts = {
 		bgm: typeof opts.bgm === "string" ? opts.bgm : undefined,
 		duration: opts.duration != null ? Number(opts.duration) : undefined,
@@ -223,7 +228,16 @@ async function runMadInTool(inputArg: string | undefined, opts: ToolOpts): Promi
 		out: opts.out,
 		ffmpegPath: opts.ffmpegPath,
 		json: !!opts.json,
+		technique,
+		search,
 	};
+	if (search) {
+		log.step("▶ 查技法目录（mad --search）…");
+		const s = await runMadSearch(search, madOpts);
+		if (opts.json) console.log(JSON.stringify(s));
+		return { ok: true, tool: "mad", outDir: "", files: [] };
+	}
+	log.step("▶ 一键剪 MAD（mad）…");
 	const r = await runMad(inputArg, madOpts, { cliVersion: currentVersion() });
 	if (opts.json) console.log(JSON.stringify(r));
 	if (r.ok) log.ok(`完成。产物目录：${r.outDir}`);
