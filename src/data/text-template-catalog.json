@@ -1,7 +1,7 @@
 {
 	"schema": 1,
-	"version": "2026-09-14.9",
-	"generated_at": "2026-09-14T15:27:24.726Z",
+	"version": "2026-09-14.10",
+	"generated_at": "2026-09-14T15:49:03.217Z",
 	"mirrors": [
 		{
 			"id": "tonghe",
@@ -185,25 +185,19 @@
 				"R1",
 				"brush",
 				"title",
-				"a",
-				"b",
-				"big",
-				"kw"
+				"big"
 			],
 			"duration": 6,
 			"slots": [
-				"a",
-				"b",
-				"big",
-				"kw"
+				"big"
 			],
 			"poster": "posters/tfx-brush-title.webp",
 			"file": {
 				"path": "tfx-brush-title.html",
-				"sha256": "486fae6f5bba0f77bfb4036483b16d3245feb917cb73cf193bd901c935785a64",
-				"bytes": 4756
+				"sha256": "12d4848561606c3a4561cfc71d9da2c8819e264de5a08ffa5cc90bcbd0eb23b0",
+				"bytes": 4689
 			},
-			"ir_sha256": "35b37e67c825c21059cc181bebf3b75d497569f95018a7a2c111c2728a80d246",
+			"ir_sha256": "e385f293b4a6521c0478355f278321e4da16deb8af223c78d7a400b22ca6987c",
 			"category": "字幕"
 		},
 		{
@@ -488,26 +482,19 @@
 				"R7",
 				"caption",
 				"emoji",
-				"arrow",
-				"a",
-				"b",
-				"kw"
+				"arrow"
 			],
 			"duration": 6,
 			"slots": [
-				"a",
-				"arrow",
-				"b",
-				"emoji",
-				"kw"
+				"arrow"
 			],
 			"poster": "posters/tfx-caption-emoji-arrow.webp",
 			"file": {
 				"path": "tfx-caption-emoji-arrow.html",
-				"sha256": "1fcf3a694200beeaa69e050c42bdff411e6dd2464d1e1a87631b31a37bea8e05",
-				"bytes": 5383
+				"sha256": "ea4c2d5890f76e645828fc47410d8d6911759817ccf5818eab359906143bb730",
+				"bytes": 5319
 			},
-			"ir_sha256": "f8a0687eee3fd032e2b847b736f4367b650a33f8af634cde953f6c72685bcaa6",
+			"ir_sha256": "246108c92eba458651d3a5474bfcbbb207c6ee24bef4a601407d3a7941e7efab",
 			"category": "字幕"
 		},
 		{
@@ -544,26 +531,17 @@
 			"tags": [
 				"R2",
 				"caption",
-				"keyword",
-				"a",
-				"b",
-				"kw1",
-				"kw2"
+				"keyword"
 			],
 			"duration": 6,
-			"slots": [
-				"a",
-				"b",
-				"kw1",
-				"kw2"
-			],
+			"slots": [],
 			"poster": "posters/tfx-caption-keyword.webp",
 			"file": {
 				"path": "tfx-caption-keyword.html",
-				"sha256": "d121e40949e392a899864c7115a8beb63298eb766383b7a846912cef9bd39e3a",
-				"bytes": 3942
+				"sha256": "853c5e7474e27a3aca539c65e7b7520ca8fdaf2d6aa9daee24cc5913a44d8134",
+				"bytes": 3839
 			},
-			"ir_sha256": "9180e6dacdb91873670b9a415f6471732eda90244590a4df0773dec35c5000d8",
+			"ir_sha256": "58a382c7687fb2b3d56cd7ad0b01857e18fd31a449a6811a875bddb2ffb5f70a",
 			"category": "字幕"
 		},
 		{
