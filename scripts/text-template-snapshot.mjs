@@ -3,8 +3,15 @@
  *
  * 从一批 IR 与编译产物产出两样东西：
  *   ① `src/data/text-template-catalog.json` —— 随包的**离线兜底**目录
- *   ② `dist/text-templates-mirror/` —— 上传到镜像的目录与块（`catalog.json` +
- *      不可变副本 `catalog-<version>.json` + `blocks/<id>/<id>.html` + `posters/`）
+ *   ② 镜像目录本身 —— `catalog.json` + 不可变副本 `catalog-<version>.json`
+ *      + `blocks/<id>/<id>.html` + `posters/`
+ *
+ * ⚠️ **②直接写生效的镜像目录，不再经 `dist/` 中转**（主理人 2026-09-14 拍板：
+ * 「以后直接改 T:\web\broadcast\text-templates 就好，dist 那份不用了」）。那个盘
+ * 即公网 `MIRROR_ROOT` 的落地面（见 static-assets 映射），**写进去就是发布**。
+ * 因此本脚本按「先块、后不可变副本、最后才切 `catalog.json` 指针」的次序写：
+ * 指针是唯一的生效开关，它最后落地，中途失败也不会出现「目录声明了某块、块还没上去」。
+ * 回滚 = 把某个 `catalog-<旧版本>.json` 覆盖成 `catalog.json`（块是只增不删的）。
  *
  * 目录走「远端择新、随包兜底」（主理人 2026-09-14 拍板）：扩批是零代码的纯写 IR 轮次，
  * 不该被 CLI 与客户端各发一次版卡住。所以随包那份**会过期，这是设计**——
@@ -12,8 +19,12 @@
  *
  * 用法：
  *   node scripts/text-template-snapshot.mjs --src <产物目录> --version 2026-09-14.1
+ *   node scripts/text-template-snapshot.mjs --src <产物目录> --version … --mirror <目录>
  *
  * `--src` 目录里要有 `ir/<id>.ir.json` 与 `out/<id>.html`（或 `out-prod/`）。
+ * `--mirror` 默认 `MIRROR_DIR`，也可用环境变量 `GITRUCK_TEXT_TEMPLATE_MIRROR_DIR` 顶掉
+ * （换机器 / 演练时用）。**盘不在就报错退出，不偷偷落到别处** —— 静默换落点等于
+ * 「以为发了、其实没发」，而目录的失败形态本来就是「悄悄少一件」。
  * 每件的 `sha256` 取**编译产物 HTML 的字节**——取块时逐字节校它，版本错位与篡改在那里被拒。
  */
 import { createHash } from "node:crypto";
@@ -23,6 +34,8 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MIRROR_ROOT = "https://api.ai-mcn.tv:9000/broadcast/text-templates";
+/** `MIRROR_ROOT` 的落地目录（本机 T: 盘即公网静态资源根）。 */
+const MIRROR_DIR = "T:\\web\\broadcast\\text-templates";
 const MIRRORS = [
 	{ id: "tonghe", base: MIRROR_ROOT },
 	{ id: "jsdelivr", base: "https://cdn.jsdelivr.net/gh/Gitruck/text-templates@main" },
@@ -76,7 +89,14 @@ function tagsOf(ir, id) {
 }
 
 const items = [];
-const blocksOut = join(ROOT, "dist", "text-templates-mirror");
+const blocksOut = resolve(arg("mirror", process.env.GITRUCK_TEXT_TEMPLATE_MIRROR_DIR?.trim() || MIRROR_DIR));
+// 盘/父目录不在就停，别 mkdir 出一个无人会去取的影子镜像——
+// 那种「跑完了、公网没变」的失败最难发现（表现是目录悄悄停在旧版本）。
+if (!existsSync(dirname(blocksOut))) {
+	console.error(`镜像目录的上级不存在：${dirname(blocksOut)}`);
+	console.error(`  这通常是 T: 盘没挂上。换机器请用 --mirror <目录> 或 GITRUCK_TEXT_TEMPLATE_MIRROR_DIR。`);
+	process.exit(2);
+}
 mkdirSync(join(blocksOut, "blocks"), { recursive: true });
 mkdirSync(join(blocksOut, "posters"), { recursive: true });
 
@@ -125,9 +145,11 @@ const json = JSON.stringify(catalog, null, "\t") + "\n";
 writeFileSync(join(ROOT, "src", "data", "text-template-catalog.json"), json, "utf8");
 // 镜像上放两份：`catalog.json` 是运行时读的，`catalog-<version>.json` 是不可变副本，
 // 方便出问题时钉回某一版看当时到底发了什么。
-writeFileSync(join(blocksOut, "catalog.json"), json, "utf8");
+// **次序有意义**：块在上面的循环里已经落地，这里先写不可变副本、最后才切 `catalog.json`——
+// 指针是唯一的生效开关，落在最后，中途挂掉线上仍是上一版的自洽状态。
 writeFileSync(join(blocksOut, `catalog-${version}.json`), json, "utf8");
+writeFileSync(join(blocksOut, "catalog.json"), json, "utf8");
 
 console.log(`目录 v${version}：${items.length} 件`);
 console.log(`  随包兜底 → src/data/text-template-catalog.json`);
-console.log(`  镜像包   → dist/text-templates-mirror/（上传到 ${MIRROR_ROOT}/）`);
+console.log(`  镜像     → ${blocksOut}（即 ${MIRROR_ROOT}/，写完即生效）`);
