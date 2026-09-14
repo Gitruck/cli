@@ -88,6 +88,52 @@ function tagsOf(ir, id) {
 	return [...tags];
 }
 
+// ── 分类（change add-text-template-category）──────────────────────────────
+// `family` 是**内部来源编号**（F=喵影家族 / M=MAD 技法图鉴技法号 / R=参考视频序号），
+// 93 件摊出 37 组、其中 16 组只有 1 件。它从来不是给用户看的字段。
+// 分类按**用户想干什么**归，判据是规则不是手工名单：满 MIN_MEMBERS 件才配独立，
+// 其余进「其他」，总数（含「其他」）≤ MAX_CATEGORIES。扩批时按同一把尺重算——
+// 手工名单会让「上次怎么分的」只存在于某个人的记忆里。
+const OTHER = "其他";
+const MIN_MEMBERS = 7;
+const MAX_CATEGORIES = 8;
+/** 组名 → 判定（收 id 去掉 `tfx-` 前缀后的短名）。顺序即优先级，先命中先归。 */
+const GROUPS = [
+	["打字机", (s) => s.startsWith("type-") || s === "title-typeline"],
+	["字幕", (s) =>
+		s.startsWith("caption-") ||
+		["word-relay", "lyric-stagger", "variety-subtitle", "card-caption", "brush-title"].includes(s)],
+	["人名条", (s) => s.startsWith("lowerthird-") || ["hud-lowerthird", "tag-pill"].includes(s)],
+	["对话气泡", (s) => s.startsWith("bubble-") || ["button-emoji", "ui-toast"].includes(s)],
+	["标注引用", (s) => s.startsWith("callout-") || s.startsWith("quote-")],
+	["商务排版", (s) =>
+		s.startsWith("biz-") || ["mag-cover", "news-band", "cine-title"].includes(s)],
+	// 标题放最后：`title-*` 是最泛的前缀，前面那些更具体的先挑走
+	["标题", (s) => s.startsWith("title-") || ["beat-swap", "char-relay"].includes(s)],
+];
+
+function groupOf(id) {
+	const s = id.replace(/^tfx-/, "");
+	for (const [name, hit] of GROUPS) if (hit(s)) return name;
+	return OTHER;
+}
+
+/** 先分组，再把不够 MIN_MEMBERS 的整组降级进「其他」。返回 id → 分类。 */
+function assignCategories(ids) {
+	const buckets = new Map();
+	for (const id of ids) {
+		const g = groupOf(id);
+		if (!buckets.has(g)) buckets.set(g, []);
+		buckets.get(g).push(id);
+	}
+	const out = new Map();
+	for (const [name, members] of buckets) {
+		const keep = name !== OTHER && members.length >= MIN_MEMBERS;
+		for (const id of members) out.set(id, keep ? name : OTHER);
+	}
+	return out;
+}
+
 const items = [];
 const blocksOut = resolve(arg("mirror", process.env.GITRUCK_TEXT_TEMPLATE_MIRROR_DIR?.trim() || MIRROR_DIR));
 // 盘/父目录不在就停，别 mkdir 出一个无人会去取的影子镜像——
@@ -131,6 +177,26 @@ for (const name of readdirSync(irDir).sort()) {
 	writeFileSync(join(blocksOut, "blocks", id, `${id}.html`), html, "utf8");
 	const poster = join(srcDir, "posters", `${id}.webp`);
 	if (existsSync(poster)) copyFileSync(poster, join(blocksOut, "posters", `${id}.webp`));
+}
+
+// 分类要看全量才能判「这组够不够 MIN_MEMBERS」，所以在收集完之后统一赋。
+const categories = assignCategories(items.map((it) => it.id));
+for (const it of items) it.category = categories.get(it.id) ?? OTHER;
+
+// 自检：静默产一份分类超标/漏分的目录，在客户端那边只表现为「chip 怎么又变多了」，
+// 没人会知道是哪一步放的水。宁可不产。
+{
+	const used = [...new Set(items.map((it) => it.category))];
+	const missing = items.filter((it) => !it.category);
+	if (missing.length) {
+		console.error(`有 ${missing.length} 件没分到类：${missing.slice(0, 5).map((i) => i.id).join(", ")}`);
+		process.exit(1);
+	}
+	if (used.length > MAX_CATEGORIES) {
+		console.error(`分类 ${used.length} 个，超过上限 ${MAX_CATEGORIES}：${used.join(" / ")}`);
+		console.error(`  调 GROUPS 或抬 MIN_MEMBERS（现 ${MIN_MEMBERS}），别抬上限。`);
+		process.exit(1);
+	}
 }
 
 const catalog = {

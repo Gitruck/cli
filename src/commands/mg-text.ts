@@ -31,6 +31,7 @@ import {
 	resolveCatalog,
 	searchTemplates,
 	type ResolvedCatalog,
+	categoryOf,
 } from "../lib/text-templates";
 
 export interface TextCmdOpts {
@@ -82,7 +83,10 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 		const cands = searchTemplates(query ? query.split(/\s+/) : [], catalog, top);
 		log.step(`▶ 文字模板候选：「${query || "（全部）"}」→ ${cands.length} 件`);
 		for (const { item } of cands) {
-			log.info(`${item.id}  ${item.title}  [${item.family}]  ${item.duration}s  槽位=${item.slots.join(",") || "-"}`);
+			// 列分类不列 family——F/M/R 是内部来源编号，用户看不懂（主理人 260914）。
+			log.info(
+				`${item.id}  ${item.title}  [${categoryOf(item)}]  ${item.duration}s  槽位=${item.slots.join(",") || "-"}`,
+			);
 			if (item.poster) log.info(`   预览：${item.poster}`);
 		}
 		if (cands.length === 0) log.warn("无候选——换个检索词（中文可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）");

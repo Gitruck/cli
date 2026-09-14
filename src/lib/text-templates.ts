@@ -33,8 +33,15 @@ export interface TextTemplateItem {
 	/** composition_id，同时是块目录名。 */
 	id: string;
 	title: string;
-	/** 家族号，如 F02。 */
+	/** 家族号，如 F02。**内部溯源字段，MUST NOT 上界面**（见 `category`）。 */
 	family: string;
+	/**
+	 * 面向用户的分类（如「打字机」）。由目录下发，消费方只读不算——
+	 * 客户端与 CLI 各算一份会漂，而漂了不报错。
+	 *
+	 * 可选：远端可能还是旧版目录（没有这个字段），那时回落「其他」而不是报错。
+	 */
+	category?: string;
 	tags: string[];
 	duration: number;
 	/** 槽位键（用户可改的文字位）。 */
@@ -243,10 +250,19 @@ export interface ScoredTemplate {
 	score: number;
 }
 
+/** 分类；旧版目录没有这个字段时回落「其他」，MUST NOT 抛错。 */
+export function categoryOf(item: TextTemplateItem): string {
+	return item.category?.trim() || "其他";
+}
+
 export function searchTemplates(words: string[], catalog: TextTemplateCatalog, top = 3): ScoredTemplate[] {
 	const terms = tokenize(words);
 	const scored = catalog.items.map((item) => {
-		const hay = [item.id, item.title, item.family, ...item.tags].join(" ").toLowerCase();
+		// `family` 不上界面，但**照样进检索干草堆**——内部编号搜起来偶尔有用，
+		// 而且不进的话老用户按 F02 搜会突然搜不到。
+		const hay = [item.id, item.title, item.family, categoryOf(item), ...item.tags]
+			.join(" ")
+			.toLowerCase();
 		let score = 0;
 		for (const t of terms) if (hay.includes(t)) score += 1;
 		return { item, score };
