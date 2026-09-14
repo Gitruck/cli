@@ -1,7 +1,7 @@
 {
 	"schema": 1,
-	"version": "2026-09-14.2",
-	"generated_at": "2026-09-14T04:14:11.695Z",
+	"version": "2026-09-14.3",
+	"generated_at": "2026-09-14T04:44:13.638Z",
 	"mirrors": [
 		{
 			"id": "tonghe",
@@ -1681,6 +1681,30 @@
 				"bytes": 5726
 			},
 			"ir_sha256": "64ec30673b5284bb78be74cff914cb02c228f603c7f83ced1e172c822636ee3e"
+		},
+		{
+			"id": "tfx-title-softfocus",
+			"title": "大字虚焦聚拢淡入",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"softfocus",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-softfocus.webp",
+			"file": {
+				"path": "tfx-title-softfocus.html",
+				"sha256": "1ffe5682b403c63f4eb65debce3ae9dc84f50c729050661c0170760134b33e2e",
+				"bytes": 6267
+			},
+			"ir_sha256": "bf0e9bc6e20df8874b21de47a768b6d564a011f21823031ae2a15e2e7c7d9767"
 		},
 		{
 			"id": "tfx-title-stack",
