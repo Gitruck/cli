@@ -17,7 +17,30 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { compileIr } from "../.test-build/text-ir-compile.mjs";
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// ⚠️ **先重建再对拍**。`.test-build/` 只由 `npm test` 产出，单独跑本脚本会拿**旧构建**去比——
+// 2026-09-14 实撞：改完 TS 编译器直接跑闸，10 份新金样判红，查了半天才发现红的是陈旧产物。
+// 闸拿旧东西比出来的绿是假绿，比判红更危险。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+// 走 `node <esbuild 的 js 入口>` 而不是 `.bin/esbuild.cmd`：
+// Windows 上 `.cmd` 壳需要 shell 才 spawn 得起来，而开 shell 又要处理带空格的路径转义。
+execFileSync(
+	process.execPath,
+	[
+		join(ROOT, "node_modules", "esbuild", "bin", "esbuild"),
+		join(ROOT, "src", "lib", "text-ir", "compile.ts"),
+		"--bundle",
+		"--platform=node",
+		"--format=esm",
+		`--outfile=${join(ROOT, ".test-build", "text-ir-compile.mjs")}`,
+	],
+	{ stdio: "pipe" },
+);
+
+const { compileIr } = await import("../.test-build/text-ir-compile.mjs");
 
 const DEFAULT_GOLDEN = "D:/file/gitruck-infra/utils/test/fixtures/text_ir";
 const dir = process.argv[2] ?? process.env.GTRK_TEXT_IR_GOLDENS ?? DEFAULT_GOLDEN;

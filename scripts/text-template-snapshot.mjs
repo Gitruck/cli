@@ -216,6 +216,31 @@ writeFileSync(join(ROOT, "src", "data", "text-template-catalog.json"), json, "ut
 writeFileSync(join(blocksOut, `catalog-${version}.json`), json, "utf8");
 writeFileSync(join(blocksOut, "catalog.json"), json, "utf8");
 
+// opencut 的随包兜底是**同一份字节**（两仓各自打包，客户端三源不可达时顶上）。
+// 原先靠人记得手工复制一次——这正是本线反复栽的那类坑：同一条规则落在两处、只改了一处。
+// 所以在这里一并刷。仓不可达 **不** 静默跳过：那会让「我发了」与「客户端随包还是旧的」
+// 悄悄分叉，而分叉只有在三源全断的极端场景才暴露，届时没人会想到是这里。
+// 演练 / 换机可用 `--no-opencut` 明示放弃（明示的漏刷不是静默的漏刷）。
+const skipOpencut = process.argv.includes("--no-opencut");
+const ocRoot = arg("opencut", process.env.GTRK_OPENCUT_ROOT ?? "D:/file/gitruck-opencut-rewrite");
+if (skipOpencut) {
+	console.warn("⚠️ 按 --no-opencut 跳过随包兜底同步；opencut 那份仍是上一版");
+} else {
+	const ocDst = join(ocRoot, "apps", "web", "src", "data", "text-template-catalog.json");
+	if (!existsSync(dirname(ocDst))) {
+		console.error(`❌ opencut 随包目录不可达：${ocDst}`);
+		console.error("   传 --opencut <仓根> 或设 GTRK_OPENCUT_ROOT；确实不想刷就传 --no-opencut");
+		process.exit(1);
+	}
+	writeFileSync(ocDst, json, "utf8");
+	if (readFileSync(ocDst, "utf8") !== json) {
+		console.error("❌ 写完读回不一致——别当成功");
+		process.exit(1);
+	}
+}
+
 console.log(`目录 v${version}：${items.length} 件`);
 console.log(`  随包兜底 → src/data/text-template-catalog.json`);
+if (!skipOpencut) console.log(`  opencut  → ${join(ocRoot, "apps/web/src/data/text-template-catalog.json")}`);
 console.log(`  镜像     → ${blocksOut}（即 ${MIRROR_ROOT}/，写完即生效）`);
+console.log(`  ⚠️ 两仓的 CATALOG_COUNT / 件数用例会红——那是闸在响，同批改成 ${items.length}`);

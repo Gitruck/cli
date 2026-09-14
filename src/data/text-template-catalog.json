@@ -1,7 +1,7 @@
 {
 	"schema": 1,
-	"version": "2026-09-14.10",
-	"generated_at": "2026-09-14T15:49:03.217Z",
+	"version": "2026-09-14.11",
+	"generated_at": "2026-09-14T16:32:26.262Z",
 	"mirrors": [
 		{
 			"id": "tonghe",
@@ -185,19 +185,25 @@
 				"R1",
 				"brush",
 				"title",
-				"big"
+				"big",
+				"c1",
+				"c2",
+				"c3"
 			],
 			"duration": 6,
 			"slots": [
-				"big"
+				"big",
+				"c1",
+				"c2",
+				"c3"
 			],
 			"poster": "posters/tfx-brush-title.webp",
 			"file": {
 				"path": "tfx-brush-title.html",
-				"sha256": "12d4848561606c3a4561cfc71d9da2c8819e264de5a08ffa5cc90bcbd0eb23b0",
-				"bytes": 4689
+				"sha256": "9a1d1f90fc8e90559e43838340c852ae4946a6f8b20dbeb65d9a840728506068",
+				"bytes": 4728
 			},
-			"ir_sha256": "e385f293b4a6521c0478355f278321e4da16deb8af223c78d7a400b22ca6987c",
+			"ir_sha256": "eff17e6e932422d4eff83dc327e78391e64cb8022694004ed75c1dbfb1670d3c",
 			"category": "字幕"
 		},
 		{
@@ -482,19 +488,27 @@
 				"R7",
 				"caption",
 				"emoji",
-				"arrow"
+				"arrow",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
 			],
 			"duration": 6,
 			"slots": [
-				"arrow"
+				"arrow",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
 			],
 			"poster": "posters/tfx-caption-emoji-arrow.webp",
 			"file": {
 				"path": "tfx-caption-emoji-arrow.html",
-				"sha256": "ea4c2d5890f76e645828fc47410d8d6911759817ccf5818eab359906143bb730",
-				"bytes": 5319
+				"sha256": "4d17f79418942dd2b9e909087517afd31bc163237539bd6c172eae882766e27f",
+				"bytes": 5371
 			},
-			"ir_sha256": "246108c92eba458651d3a5474bfcbbb207c6ee24bef4a601407d3a7941e7efab",
+			"ir_sha256": "c4a3826fbd0e811e8563dc372b5c7a3eabf8f212d6b5ca5c0174e6468ec73439",
 			"category": "字幕"
 		},
 		{
@@ -531,17 +545,26 @@
 			"tags": [
 				"R2",
 				"caption",
-				"keyword"
+				"keyword",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
 			],
 			"duration": 6,
-			"slots": [],
+			"slots": [
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
 			"poster": "posters/tfx-caption-keyword.webp",
 			"file": {
 				"path": "tfx-caption-keyword.html",
-				"sha256": "853c5e7474e27a3aca539c65e7b7520ca8fdaf2d6aa9daee24cc5913a44d8134",
-				"bytes": 3839
+				"sha256": "02f5d2e5c577251aa0d190e49c4d27ee07c1dbeecdec2716d518148e02586032",
+				"bytes": 3901
 			},
-			"ir_sha256": "58a382c7687fb2b3d56cd7ad0b01857e18fd31a449a6811a875bddb2ffb5f70a",
+			"ir_sha256": "5b0506287861553fb400b2035a16e340ff3be88720a45848939fc3c5fca43a20",
 			"category": "字幕"
 		},
 		{
@@ -801,6 +824,31 @@
 				"bytes": 10940
 			},
 			"ir_sha256": "85101d69a40111e34065efa085732070a8e75b518b1d8c0e438796d637b51103",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-cyber-slash",
+			"title": "赛博斜切条 · 主块 + 细条 + 碎块",
+			"family": "F05",
+			"tags": [
+				"F05",
+				"cyber",
+				"slash",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-cyber-slash.webp",
+			"file": {
+				"path": "tfx-cyber-slash.html",
+				"sha256": "f40f5b074b31d03963ac2d55443e647f063358959442035d96979a453a5f1a99",
+				"bytes": 7472
+			},
+			"ir_sha256": "e614ec15aebf30ba4d9b0224d1b823b7267c340686b4b092883e7ce8010fd136",
 			"category": "其他"
 		},
 		{
@@ -1079,6 +1127,54 @@
 			"category": "商务排版"
 		},
 		{
+			"id": "tfx-neon-frame",
+			"title": "霓虹圆角框 + 文字点亮",
+			"family": "F20",
+			"tags": [
+				"F20",
+				"neon",
+				"frame",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-neon-frame.webp",
+			"file": {
+				"path": "tfx-neon-frame.html",
+				"sha256": "950bec379dcc076b49ddb28206708b600f99353d11669d035dd4fb3b5daa8879",
+				"bytes": 7156
+			},
+			"ir_sha256": "590f7ee0da7fd3317ac44a1b733979b8dde5cfdab1ddfea0afc0b045cdf47425",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-neon-title",
+			"title": "霓虹描边发光标题 · 乱序闪烁点亮",
+			"family": "F20",
+			"tags": [
+				"F20",
+				"neon",
+				"title",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-neon-title.webp",
+			"file": {
+				"path": "tfx-neon-title.html",
+				"sha256": "714df50bb8f6f1844d5126a64a52e540dab106ee2741b69d41567579270fc908",
+				"bytes": 5924
+			},
+			"ir_sha256": "8956e2a8494680ddb8ecc4d845d41ab9e1cf1e217adb6a7b4211873a62ac15e2",
+			"category": "其他"
+		},
+		{
 			"id": "tfx-news-band",
 			"title": "报纸头条 · 双横线夹持 + 标签",
 			"family": "F21",
@@ -1104,6 +1200,32 @@
 			},
 			"ir_sha256": "0c0b2e71680e30414f693634c25e7d41a0a96d527c957b2ee560063bb0944edd",
 			"category": "商务排版"
+		},
+		{
+			"id": "tfx-num-roll",
+			"title": "数值滚动落定数据卡",
+			"family": "M143",
+			"tags": [
+				"M143",
+				"num",
+				"roll",
+				"cap",
+				"unit"
+			],
+			"duration": 6,
+			"slots": [
+				"cap",
+				"num",
+				"unit"
+			],
+			"poster": "posters/tfx-num-roll.webp",
+			"file": {
+				"path": "tfx-num-roll.html",
+				"sha256": "816991525b330253de67293e5f907ccf2343a3fb59cc96826c1010986d8b327a",
+				"bytes": 12827
+			},
+			"ir_sha256": "f5d3b21ddc7fb8800e6b70cb2738fccbadd7c5f18cd10e770e37b9acd9276f63",
+			"category": "其他"
 		},
 		{
 			"id": "tfx-pixel-window",
@@ -1206,6 +1328,32 @@
 			"category": "标注引用"
 		},
 		{
+			"id": "tfx-scroll-split-type",
+			"title": "滚词翻页 → 中线劈开 → 打字机落句",
+			"family": "R11",
+			"tags": [
+				"R11",
+				"scroll",
+				"split",
+				"type",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-scroll-split-type.webp",
+			"file": {
+				"path": "tfx-scroll-split-type.html",
+				"sha256": "23ab4d5ad7a2a9584ceaf1d8bbeab61c6f373591e7f761b9ebffc4a6200479d2",
+				"bytes": 10277
+			},
+			"ir_sha256": "7e41fcc1555d2d4da1f379c8f721a570a5ecc3c0544f9ed4943ae3302069f6e8",
+			"category": "其他"
+		},
+		{
 			"id": "tfx-sparkle-title",
 			"title": "标题 + 三颗星芒错峰闪",
 			"family": "F19",
@@ -1226,6 +1374,31 @@
 				"bytes": 11633
 			},
 			"ir_sha256": "fe2ba384e6d0f2b705a58328a76bb1e3a07f80b07690a6a156849483449ea133",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-sports-band",
+			"title": "斜切赛事条 · 主块 + 强调斜条",
+			"family": "F24",
+			"tags": [
+				"F24",
+				"sports",
+				"band",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-sports-band.webp",
+			"file": {
+				"path": "tfx-sports-band.html",
+				"sha256": "4ecd635f82ece9601ed64ec7d608421d8e6fb492d02a6d05cbde2f11891b8d76",
+				"bytes": 6491
+			},
+			"ir_sha256": "63e87f39d247d7ead7d36d1f737d4ca9b32dbf2ffaacf72b173589b2df351ca9",
 			"category": "其他"
 		},
 		{
@@ -1441,6 +1614,31 @@
 				"bytes": 4629
 			},
 			"ir_sha256": "00c2dec2771c0aba59fd6e3872aaa9475a974753beed53a214e5229f0a7185fd",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-decode",
+			"title": "逐字乱码滚动落定（AE 经典解码）",
+			"family": "M124",
+			"tags": [
+				"M124",
+				"title",
+				"decode",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-decode.webp",
+			"file": {
+				"path": "tfx-title-decode.html",
+				"sha256": "1938cb94083fba727a58ced7015ec473d2b4b00c2b803597ddfa416c10424424",
+				"bytes": 20755
+			},
+			"ir_sha256": "ec6c65c23dff709f68027181d51824ce2aa06a8cd1c72bc342c94a4c745ca1fe",
 			"category": "标题"
 		},
 		{
@@ -1705,6 +1903,31 @@
 			"category": "标题"
 		},
 		{
+			"id": "tfx-title-maskrise",
+			"title": "文字自遮罩后整体升起",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"maskrise",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-maskrise.webp",
+			"file": {
+				"path": "tfx-title-maskrise.html",
+				"sha256": "c03564a6d98573dfa25986326c63a71ffe1c3ea75ebb738015a2abe8c0bc455f",
+				"bytes": 4778
+			},
+			"ir_sha256": "d16a48ea5056f9f10bf121900019f46142ea92418b511819ad62f38d193811cd",
+			"category": "标题"
+		},
+		{
 			"id": "tfx-title-slab",
 			"title": "大色块标题 + 反白副条",
 			"family": "F10",
@@ -1752,6 +1975,31 @@
 				"bytes": 6189
 			},
 			"ir_sha256": "c2e4bfdc0ff757303f2becc7084054dd76eae9990e263705f3c13003b2d1aa02",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-splitrise",
+			"title": "上下两半自中线合拢",
+			"family": "F09",
+			"tags": [
+				"F09",
+				"title",
+				"splitrise",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-splitrise.webp",
+			"file": {
+				"path": "tfx-title-splitrise.html",
+				"sha256": "033ae86fe09a471b03eb46fea3769235e03799820a0d8e595b5c10ef1841ef51",
+				"bytes": 4911
+			},
+			"ir_sha256": "d2be3a311c546037fc14332babc0bc90f72aa21021921fff2af38b952c00e221",
 			"category": "标题"
 		},
 		{
@@ -1804,6 +2052,31 @@
 				"bytes": 4516
 			},
 			"ir_sha256": "f8e8c84019a8070f182972f3558624675ad5c07ed28274a99e7248889d61cfe5",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-sweep",
+			"title": "标题扫光循环",
+			"family": "M144",
+			"tags": [
+				"M144",
+				"title",
+				"sweep",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-sweep.webp",
+			"file": {
+				"path": "tfx-title-sweep.html",
+				"sha256": "deb07439387808a5b9fb40b2d0e25ba9ecad310356dc65c303c043968327c937",
+				"bytes": 5164
+			},
+			"ir_sha256": "a11f76d56cdef6ca09cfb7fcdb0e5cbb1ca2cba9ba77608565d239c4513ba898",
 			"category": "标题"
 		},
 		{

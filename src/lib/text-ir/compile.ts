@@ -40,6 +40,9 @@ const CH: Record<string, string> = {
 	rotY: "rotationY",
 	opacity: "opacity",
 	ls: "letterSpacing",
+	// v0.2：斜切。纯 transform、零卷积。
+	skx: "skewX",
+	sky: "skewY",
 };
 
 /**
@@ -59,6 +62,9 @@ const ANIM_CHANNELS = [
 	"rotY",
 	"opacity",
 	"ls",
+	// v0.2 追加**恒在末尾**：本表是产物通道次序的唯一真相，往中间插会让既有金样整体位移。
+	"skx",
+	"sky",
 ] as const;
 
 const DEFAULT_FONT = "思源黑体";
@@ -172,6 +178,11 @@ function esc(s: string): string {
 		.replace(/'/g, "&#x27;");
 }
 
+/** 对齐正本的 `round(x, 6)`。时刻全按绝对秒算，两端必须同一个取整。 */
+function round6(x: number): number {
+	return Math.round(x * 1e6) / 1e6;
+}
+
 function isNum(v: unknown): boolean {
 	return typeof v === "number" && Number.isFinite(v);
 }
@@ -281,8 +292,15 @@ function textContentStyle(ir: Dict, L: Dict): string[] {
 		);
 	}
 	// 逐字 3D 翻转要在内容层建透视，否则每个字各自透视、看着是平的
+	if (L.sweep) s.push(sweepStyle(ir, L.sweep));
 	if (["rotX", "rotY"].includes((L.stagger ?? {}).prop)) s.push("perspective:900px");
 	return s;
+}
+
+/** v0.2：片段文字可来自槽位（`slot`）而不是字面量（`t`）。二者互斥（校验器保证）。 */
+function runText(ir: Dict, r: Dict): string {
+	if ("slot" in r) return (ir.slots ?? {})[r.slot] ?? "";
+	return r.t ?? "";
 }
 
 function textInner(ir: Dict, L: Dict, txt: string): string {
@@ -292,10 +310,13 @@ function textInner(ir: Dict, L: Dict, txt: string): string {
 			.map(
 				(r, k) =>
 					`<span class="rn" data-r="${k}" style="display:inline-block;` +
-					`color:${res(ir, r.c ?? L.color ?? "#ffffff")}">${esc(r.t)}</span>`,
+					`color:${res(ir, r.c ?? L.color ?? "#ffffff")}">` +
+					`${esc(runText(ir, r))}</span>`,
 			)
 			.join("");
 	}
+
+	if (L.charRoll) return charRollInner(L, txt);
 
 	const st: Dict | undefined = L.stagger;
 	if (!st) return esc(txt).replace(/\n/g, "<br>");
@@ -360,6 +381,58 @@ function star4Inner(ir: Dict, shape: Dict): string {
 	);
 }
 
+/** v0.2 扫光：渐变裁到字形，动 `background-position`（区间 0%–100%，校验器有闸）。 */
+function sweepStyle(ir: Dict, sw: Dict): string {
+	const base = res(ir, sw.base ?? "#ffffff");
+	const hi = res(ir, sw.hi ?? "#ffffff");
+	const grad = `linear-gradient(100deg,${base} 40%,${hi} 50%,${base} 60%)`;
+	return (
+		`background-image:${grad};background-size:300% 100%;background-repeat:no-repeat;` +
+		`background-position:0% 0;-webkit-background-clip:text;background-clip:text;` +
+		`color:transparent;-webkit-text-fill-color:transparent`
+	);
+}
+
+/** v0.2：形状发光走 `box-shadow`（合成期操作，不是真滤镜）。 */
+function shapeGlow(ir: Dict, L: Dict): string {
+	const g: Dict = (L.shape ?? {}).glow ?? {};
+	return `box-shadow:0 0 ${pyNum(g.blur ?? 12)}px ${res(ir, g.color ?? "#ffffff")}`;
+}
+
+/** 缺省候选字集。**不含空白**——空白位轮换会冒出实体字、把排版撑歪。 */
+const ROLL_POOL = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/** v0.2 charRoll 的内容 DOM：每字一枚 `.ch`，里面堆候选字形兄弟元素。 */
+function charRollInner(L: Dict, txt: string): string {
+	const cr: Dict = L.charRoll;
+	const pool: string = cr.pool || ROLL_POOL;
+	const steps = Math.trunc(cr.steps ?? 4);
+	const dim = cr.dim;
+	const out: string[] = [];
+	Array.from(txt).forEach((ch, k) => {
+		if (ch === "\n") {
+			out.push("<br>");
+			return;
+		}
+		if (!ch.trim()) {
+			out.push(`<span class="ch">${esc(ch)}</span>`);
+			return;
+		}
+		let cands = "";
+		for (let j = 0; j < steps; j++) {
+			const style = dim === undefined || dim === null ? "" : `;opacity:${pyNum(dim)}`;
+			cands +=
+				`<span class="cr" style="display:none${style}">` +
+				`${esc(pool[(k * 7 + j * 13) % pool.length])}</span>`;
+		}
+		out.push(
+			`<span class="ch" data-c="${k}">${cands}` +
+				`<span class="rl" style="display:none">${esc(ch)}</span></span>`,
+		);
+	});
+	return out.join("");
+}
+
 function shapeInner(ir: Dict, shape: Dict): string {
 	const kind = shape.kind ?? "rect";
 	if (kind === "star4") return star4Inner(ir, shape);
@@ -371,14 +444,23 @@ function shapeInner(ir: Dict, shape: Dict): string {
 	return `<div class="sh" style="${sh.join(";")}"></div>`;
 }
 
+/** v0.2：`mask` 可为数组（多条并存）。单对象老写法保持兼容——93 份金样在用。 */
+function maskStyles(m: Dict | Dict[], w: number, h: number): string[] {
+	const items = Array.isArray(m) ? m : [m];
+	return items.map((one) => maskStyle(one, w, h));
+}
+
 function maskStyle(m: Dict, w: number, h: number): string {
 	if (m.type === "feather-band") {
 		const f = m.feather;
+		// v0.2：`feather` 可为 [上端, 下端]（不等量）。单值语义不变（两端同量）。
+		const f0: number = Array.isArray(f) ? f[0] : f;
+		const f1: number = Array.isArray(f) ? f[1] : f;
 		const y0 = m.y;
 		const bh = m.h;
 		const grad =
-			`linear-gradient(to bottom,transparent 0%,#000 ${(f * 100).toFixed(1)}%,` +
-			`#000 ${(100 - f * 100).toFixed(1)}%,transparent 100%)`;
+			`linear-gradient(to bottom,transparent 0%,#000 ${(f0 * 100).toFixed(1)}%,` +
+			`#000 ${(100 - f1 * 100).toFixed(1)}%,transparent 100%)`;
 		return (
 			`-webkit-mask-image:${grad};mask-image:${grad};` +
 			`-webkit-mask-size:${pyNum(w)}px ${pyNum(bh)}px;mask-size:${pyNum(w)}px ${pyNum(bh)}px;` +
@@ -445,6 +527,58 @@ function emitRuns(el: string, L: Dict, js: string[]): void {
 				`immediateRender:false},${pyNum(pp.t)});`,
 		);
 	});
+}
+
+function emitCharRoll(el: string, L: Dict, idx: number, txt: string, js: string[]): void {
+	const cr: Dict = L.charRoll;
+	const start = Number(cr.start ?? 0);
+	const each = Number(cr.each ?? 0.06);
+	const step = Number(cr.step ?? 0.05);
+	const steps = Math.trunc(cr.steps ?? 4);
+	const order: string = cr.order ?? "forward";
+	const chars = Array.from(txt);
+	const units: number[] = [];
+	chars.forEach((ch, k) => {
+		if (ch !== "\n" && ch.trim()) units.push(k);
+	});
+	const pm = perm(units.length, order);
+	const rank = new Map<number, number>();
+	pm.forEach((posIdx, r) => rank.set(posIdx, r));
+	units.forEach((k, pos) => {
+		const t0 = start + (rank.get(pos) ?? 0) * each;
+		js.push(`var u_${idx}_${pos}=${el}.querySelector('[data-c="${k}"]');`);
+		for (let j = 0; j < steps; j++) {
+			js.push(
+				`tl.set(u_${idx}_${pos}.children[${j}],{display:'inline-block'},${pyNum(round6(t0 + j * step))});`,
+			);
+			js.push(
+				`tl.set(u_${idx}_${pos}.children[${j}],{display:'none'},${pyNum(round6(t0 + (j + 1) * step))});`,
+			);
+		}
+		const t1 = round6(t0 + steps * step);
+		js.push(`tl.set(u_${idx}_${pos}.children[${steps}],{display:'inline-block'},${pyNum(t1)});`);
+		const pop: Dict | undefined = cr.pop;
+		if (pop) {
+			js.push(
+				`tl.fromTo(u_${idx}_${pos}.children[${steps}],{scale:${pyNum(pop.scale ?? 1.3)}},` +
+					`{scale:1,duration:${pyNum(pop.dur ?? 0.18)},ease:${pyJson(pop.e ?? "power2.out")}},${pyNum(t1)});`,
+			);
+		}
+	});
+}
+
+function emitSweep(el: string, L: Dict, js: string[]): void {
+	const sw: Dict = L.sweep;
+	const start = Number(sw.start ?? 0);
+	const dur = Number(sw.dur ?? 1.2);
+	const repeat = Math.trunc(sw.repeat ?? 0);
+	const gap = Number(sw.gap ?? 0);
+	const tgt = `${el}.querySelector('.ct')`;
+	const extra = repeat ? `,repeat:${pyNum(repeat)},repeatDelay:${pyNum(gap)}` : "";
+	js.push(
+		`tl.fromTo(${tgt},{backgroundPosition:'100% 0'},` +
+			`{backgroundPosition:'0% 0',duration:${pyNum(dur)},ease:'none'${extra}},${pyNum(start)});`,
+	);
 }
 
 function emitStagger(el: string, L: Dict, idx: number, txt: string, js: string[]): void {
@@ -557,6 +691,8 @@ export function compileIrBody(irInput: Dict): string {
 		`${root} .ch{position:relative}`,
 		`${root} .cr{display:none;position:absolute;top:50%;transform:translateY(-50%)}`,
 	];
+	// 有没有 inner 层：决定要不要建 `.mv` 元素表
+	const needMv = layers.some((L: Dict) => L.animTarget === "inner");
 	const body: string[] = [];
 	const js: string[] = [];
 
@@ -568,7 +704,7 @@ export function compileIrBody(irInput: Dict): string {
 		const wrapStyle = [`transform-origin:${pyNum(px)}px ${pyNum(py)}px`];
 		if ((L.in ?? 0) > 0) wrapStyle.push("visibility:hidden");
 		if ("opacity" in L && isNum(L.opacity)) wrapStyle.push(`opacity:${pyNum(L.opacity)}`);
-		if (L.mask) wrapStyle.push(maskStyle(L.mask, w, h));
+		if (L.mask) wrapStyle.push(...maskStyles(L.mask, w, h));
 
 		const ctStyle = [
 			`left:${pyNum(px)}px`,
@@ -580,18 +716,36 @@ export function compileIrBody(irInput: Dict): string {
 		let inner: string;
 		if (L.type === "text") {
 			txt = "slot" in L ? slots[L.slot] : (L.text ?? "");
+			// v0.2 repeatText：滚动窗要同词多份做无缝回跳，而槽位仍只有一份——
+			// 在**取到槽位值之后**复制，用户改一次字 N 份一起变。
+			const rpt = L.repeatText;
+			if (typeof rpt === "number" && Number.isInteger(rpt) && rpt > 1) {
+				txt = Array(rpt).fill(txt).join("\n");
+			}
 			ctStyle.push(...textContentStyle(ir, L));
 			inner = textInner(ir, L, txt);
 		} else {
 			inner = shapeInner(ir, L.shape);
 		}
 
-		body.push(
-			`<div class="ly" data-l="${esc(lid)}" style="${wrapStyle.join(";")}">` +
-				`<div class="ct" style="${ctStyle.join(";")}">${inner}</div></div>`,
-		);
+		if (L.type === "shape" && (L.shape ?? {}).glow) ctStyle.push(shapeGlow(ir, L));
 
-		const el = `L[${pyJson(lid)}]`;
+		// v0.2 animTarget:"inner"：`.ly` 与 `.ct` 之间插一层 `.mv`，anim 打在 `.mv` 上。
+		// 蒙版留在 `.ly` 钉死在画布坐标，内容在蒙版后面滚。缺省 layer 分支一个字节不动。
+		if (L.animTarget === "inner") {
+			body.push(
+				`<div class="ly" data-l="${esc(lid)}" style="${wrapStyle.join(";")}">` +
+					`<div class="mv" data-m="${esc(lid)}">` +
+					`<div class="ct" style="${ctStyle.join(";")}">${inner}</div></div></div>`,
+			);
+		} else {
+			body.push(
+				`<div class="ly" data-l="${esc(lid)}" style="${wrapStyle.join(";")}">` +
+					`<div class="ct" style="${ctStyle.join(";")}">${inner}</div></div>`,
+			);
+		}
+
+		const el = L.animTarget === "inner" ? `M[${pyJson(lid)}]` : `L[${pyJson(lid)}]`;
 		if ((L.in ?? 0) > 0) js.push(`tl.set(${el},{visibility:'visible'},${pyNum(L.in)});`);
 		if ((L.out ?? duration) < duration - EPS) {
 			js.push(`tl.set(${el},{visibility:'hidden'},${pyNum(L.out)});`);
@@ -599,7 +753,9 @@ export function compileIrBody(irInput: Dict): string {
 
 		emitAnim(el, L, i, js);
 		if (L.type === "text" && L.runs) emitRuns(el, L, js);
+		else if (L.type === "text" && L.charRoll) emitCharRoll(el, L, i, txt, js);
 		else if (L.type === "text" && L.stagger) emitStagger(el, L, i, txt, js);
+		if (L.type === "text" && L.sweep) emitSweep(el, L, js);
 	});
 
 	let rootStyle =
@@ -621,6 +777,12 @@ export function compileIrBody(irInput: Dict): string {
 		`    var ROOT=document.querySelector('[data-composition-id="${cid}"]');${nl}` +
 		`    var L={};ROOT.querySelectorAll('.ly').forEach(` +
 		`function(e){L[e.getAttribute('data-l')]=e;});${nl}` +
+		// `.mv` 元素表**只在真有 inner 层时才建**：恒建会给每一份产物多两行，
+		// 而「默认分支逐字节不变」是硬门（正本同注，那边我第一版正是这么判红的）。
+		(needMv
+			? `    var M={};ROOT.querySelectorAll('.mv').forEach(` +
+				`function(e){M[e.getAttribute('data-m')]=e;});${nl}`
+			: "") +
 		`    var tl=gsap.timeline({paused:true});${nl}` +
 		js.map((s) => `    ${s}`).join(nl) +
 		nl +
