@@ -23,7 +23,20 @@ export type ParticleState = "ir" | "detached" | "html";
 
 /** 首行声明。两个哈希都在，但本地只核 html 那个（见模块头注）。 */
 const STAMP_RE = /^<!-- gtrk-ir-sha256=([0-9a-f]{64}) gtrk-html-sha256=([0-9a-f]{64}) -->\n/;
-const IR_SCRIPT_RE = /<script type="application\/json" data-gtrk-ir>([\s\S]*?)<\/script>/;
+/**
+ * 内嵌 IR 的载体。**两代都认**：
+ *
+ * - 新：`<template data-gtrk-ir>` —— 2026-09-14 起。旧载体是 `<script>`，而根元素内
+ *   只要存在 `type="application/json"` 的 script，渲染引擎产出的就是**静帧**
+ *   （同一份 IR，有它 180 帧只有 1 个不同画面，去掉后 36 个）。
+ * - 旧：`<script type="application/json" data-gtrk-ir>` —— **只读不写**。
+ *   已落进用户工程的旧颗粒若读不出 IR，会从 `ir` 掉成 `html` 态、云端改写入口
+ *   凭空消失——那比静帧更难排查。
+ */
+const IR_CARRIERS = [
+	/<template data-gtrk-ir>([\s\S]*?)<\/template>/,
+	/<script type="application\/json" data-gtrk-ir>([\s\S]*?)<\/script>/,
+] as const;
 
 export interface ParticleIdentity {
 	state: ParticleState;
@@ -49,14 +62,20 @@ export function stripStamp(html: string): string {
 
 /** 取出内嵌 IR；没有或解析失败返回 undefined（解析失败按「没有」处理，不抛）。 */
 export function extractEmbeddedIr(html: string): Record<string, unknown> | undefined {
-	const m = IR_SCRIPT_RE.exec(html);
-	if (!m) return undefined;
-	try {
-		const parsed = JSON.parse(m[1]);
-		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
-	} catch {
-		return undefined;
+	for (const re of IR_CARRIERS) {
+		const m = re.exec(html);
+		if (!m) continue;
+		try {
+			const parsed: unknown = JSON.parse(m[1]);
+			if (!parsed || typeof parsed !== "object") return undefined;
+			return parsed as Record<string, unknown>;
+		} catch {
+			// 载体在但内容坏了：**不再试另一种载体**。那会把「坏了」读成「没有」，
+			// 于是 detached 被误判成 html 态，用户失去「重置回模板」这条出路。
+			return undefined;
+		}
 	}
+	return undefined;
 }
 
 export function identifyParticle(html: string): ParticleIdentity {
