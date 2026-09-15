@@ -125,6 +125,7 @@
       "visual_task": "用训练集、噪音、测试集、错误预测的动态图把过拟合先讲清楚",
       "irreplaceability": "优先 MG",
       "handoff": {
+        "visual_job": "data",
         "slug_hint": "neural-overfit",
         "theme": "overfitting",
         "bg": "paper",
@@ -146,6 +147,8 @@
       "visual_task": "把 AI 过拟合映射到创伤、自动化防御、现实崩溃，完成 AI 到人类的翻译",
       "irreplaceability": "优先 MG",
       "handoff": {
+        "visual_job": "relation",
+        "visual_brief": "左右两栏同尺寸并置，中间一条竖线分开；同一个词在两栏里给出互斥的两种读法，右栏字重更重",
         "slug_hint": "dual-pane-map",
         "theme": "overfitting",
         "bg": "paper",
@@ -378,6 +381,8 @@
       "visual_task": "把神经递质、创伤印痕、代际传递、大他者压成一张逐步收紧的因果网",
       "irreplaceability": "优先 MG",
       "handoff": {
+        "visual_job": "relation",
+        "visual_brief": "一枚孤立的点与一张规整网格并置，网格逐格吞掉它周围的空白，最后点与网格再也分不出来",
         "slug_hint": "grid-captured",
         "theme": "overfitting",
         "bg": "paper",
@@ -430,6 +435,7 @@
       "visual_task": "用偏差-方差权衡、插值阈值、双重下降曲线完成过拟合到泛化的结构反转",
       "irreplaceability": "优先 MG",
       "handoff": {
+        "visual_job": "data",
         "slug_hint": "overfit-to-double-descent",
         "theme": "overfitting",
         "bg": "paper",
@@ -505,6 +511,7 @@
       "visual_task": "把前文幽灵堵车回调出来，用自动驾驶车辆吸收刹车波浪的系统动画做出解法",
       "irreplaceability": "优先 MG",
       "handoff": {
+        "visual_job": "statement",
         "slug_hint": "recall-image-question",
         "theme": "overfitting",
         "bg": "paper",

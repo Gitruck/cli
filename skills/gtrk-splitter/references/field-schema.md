@@ -45,12 +45,42 @@
 | `callback_of` | string | 回扣对象 beat id（如 `B07`）；前文意象后文重调时**不合并 beat**，在后文 beat 写此字段 |
 | `note` | string | 其他对制作有帮助的信息 |
 
+## 顶层 `mg_visual_job_note`（条件必填）
+
+全片 `visual_job` 为 `relation` 或 `data` 的槽位数为 **0** 时，顶层须具名
+`mg_visual_job_note`：一句话说明为什么这条片子通篇只有单一陈述。
+
+⚠️ **MUST NOT 实现成比例阈值。** 比例阈值（「模板占比 ≤ 60%」）是代理指标，两头都不成立：
+误伤合法形态（纯字卡包装的口播片本来就该全是模板），又可被「宣告一个例外槽位」绕过，
+且任何具体的 N 都给不出依据。「一个都不需要」是可以要求交代的**判断**；「不超过 N%」不是。
+
+纯字卡片是**合法**形态，本条只要求它是个有意识的选择。
+
 ## handoff 按 lane 分型（校验器硬查）
 
 ```jsonc
 // lane === "MG"（遗留 "RRV_MG" 读旧兼容）
-"handoff": { "category": "overlay", "slug_hint": "neural-overfit", "theme": "overfitting", "bg": "paper", "duration_hint": 12 }
-//   duration_hint（秒）必填；slug_hint / theme / bg / category 可选（bg 底色可由底轨态推导）
+"handoff": { "visual_job": "relation", "visual_brief": "两列并置、破折号连起来、右列更重",
+             "category": "overlay", "slug_hint": "neural-overfit", "theme": "overfitting", "bg": "paper", "duration_hint": 12 }
+//   duration_hint（秒）必填；visual_job 必填（见下）；slug_hint / theme / bg / category 可选（bg 底色可由底轨态推导）
+//
+//   ★ visual_job（必填，gate-mg-visual-job）：这段**为什么要动画**。四档：
+//     statement 单一陈述（一句话 / 一个词 / 一个标题）
+//     relation  有关系（对比 / 并置 / 因果 / 包含 / 递进 / 聚合 / 循环）—— 须同时填 visual_brief
+//     data      具体的量、步骤或拓扑
+//     decor     不承载信息（转场 / 角标）
+//   ⚠️ **判据是「这段的意思里有没有第二个东西与它并置」，不是「用不用文字」。**
+//     一块「温柔—坚定 / 和善—有立场」的并置面板是纯文字画的，但它表达的是对照关系
+//     ⇒ relation，**不是** statement。第一档刻意叫 statement 而不叫 text——
+//     叫 text 会让「它是文字做的」直接滑成「它是 text 档」，把结构化排版拍平成字卡。
+//   ⚠️ 本字段 MUST 必填、MUST NOT 有缺省值：可选字段在存量派单与偷懒路径上都会走缺省，闸等于没开。
+//
+//   visual_brief（relation 档必填）：一句话说清**这个关系靠什么视觉手段成立**。
+//   ⚠️ **MUST NOT 被要求是非文字的**：「两列并置、破折号连起来、右列更重」与「三个齿轮咬合」
+//     是同一类合格答案。要求「必须非文字」会把**用排版画关系**这条路堵死，而那恰恰是要保住的东西。
+//
+//   ⚠️ 派单阶段 MUST NOT 引用具体模板 id（`tfx-*`）：判「这段要什么」的那一步不该看见模板库，
+//     否则会从「库里有什么」倒推「这段需要什么」。产物里出现模板 id ⇒ 判红。
 //   ⚠️ duration_hint 语义（2026-07-24 主理人硬性规定）：只是「动画主叙事时长」参考，供生产 skill 排布节奏；
 //   落轨 clip 恒占满槽位包络（track_ed − track_st），颗粒 tl 总长须 ≥ 包络、终态定格或有限循环驻留、
 //   禁全局渐隐退场（gsap-emit v1 铁律⑦）。别把 duration_hint 当颗粒寿命写短。
@@ -129,7 +159,7 @@
   **谁负责重投影**：CLI 的消费方命令（`gtrk mg` / `gtrk matrix`）**每次消费都自己现场重投影**（`transcript × 当刻 .gtrk`，与 `gtrk split` 落地同一段代码），所以**用户在 split 之后继续微调口播轨是常态、无需重跑 split**；只有**拆分稿本身**变了才要重跑 `gtrk split`。快照只在重投影不可行时（transcript 缺失 / 工程定位不到 / 主轨查不到口播素材）作回退值，届时命令会显式告警并在 `--json` 里标注降级。
   - `material_id`：口播素材 id（= transcript.material_id），消费方脱离 transcript 文件即可定位素材。
   - `beats[].source_ranges`：`[{st, ed}]` 源时基秒（v1 恒单元素 = span 源包络，含句间静默与被剪词）——**源时基不随时间线编辑漂移**，消费方以「源区间 ∩ 当刻颗粒源窗口」投影可得实时覆盖（客户端色带跟随模式即此）。
-- **`split/dispatch.json`**：`{mg:[{beat, composition_id, duration, category?, theme, bg, slug_hint, track_st, track_ed, span}], film_broll:[{beat, queries, shots, per_shot_sec, exclude, track_st, track_ed, span}], ai_drama:[{beat, ...handoff, track_st, track_ed, span}]}`（去品牌化前 `mg` 键为 `rrv_mg`，消费方 `mg ?? rrv_mg` 双读）。
+- **`split/dispatch.json`**：`{mg:[{beat, composition_id, duration, visual_job, visual_brief?, category?, theme, bg, slug_hint, track_st, track_ed, span}], film_broll:[{beat, queries, shots, per_shot_sec, exclude, track_st, track_ed, span}], ai_drama:[{beat, ...handoff, track_st, track_ed, span}]}`（去品牌化前 `mg` 键为 `rrv_mg`，消费方 `mg ?? rrv_mg` 双读）。
   - **`span:{from,to}`**：该条目对应的 utterance 区间——派单**自述「派什么」**，消费方据它现场重投影，时码不再是派单唯一的权威内容。**aux 派生条目写的是 aux 自己的 span**（`mount` 为子区间时 ≠ 主 beat span）；注意 aux 条目的 `beat` 字段记的仍是**主 beat id**，所以按 `beat` 回查 `struct_meta.split` 会把 aux 错算成主 beat 的整段窗口——要回查一律用 `composition_id`。
   - **`track_st/track_ed` 是快照**：投影那一刻的值。老档（无 `span`）消费方会回落到 `struct_meta.split.beats[].span` 定位，照样重投影。`composition_id` = `<工程slug>-<beatId>`（MG 颗粒 `data-composition-id` 直接用它，打通 beat↔颗粒命名）；`overlay` aux 派生颗粒 = `<工程slug>-<beatId>-aux<n>`（`n` 从 1）——`composition_id` 全局唯一，一 beat 可派生主 + N 个 `-aux<n>` 颗粒。
 - **`split/visual-split.md`**（`--md`）：由机器 JSON 单向渲染的人读稿，不回读。

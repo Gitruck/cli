@@ -9,6 +9,7 @@
  * 本文件是**纯搬运**：`resolveDispatch` / `readMgQueue` 的行为与原实现逐字相同。
  */
 import { existsSync } from "node:fs";
+import { isVisualJob, type VisualJob } from "./mg-visual-job";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
@@ -47,6 +48,17 @@ export async function readMgQueue(dispatchPath: string): Promise<MgDispatch[]> {
 	return Array.isArray(queue) ? queue : [];
 }
 
+/**
+ * 源颗粒目录（读旧双探：去品牌化前是 `rrv/`）。
+ *
+ * ⚠️ 放在这个中立模块而不是 `commands/mg.ts`：`commands/mg-text.ts` 的排产顺序闸也要判
+ * 「源 HTML 在不在盘上」，而 `mg.ts` 本身 import 了 `mg-text.ts`（runFetchText）——
+ * 让 mg-text 反向 import mg 会造出**循环依赖**。它在 esbuild 下碰巧能跑，
+ * 但「碰巧能跑」不是可以依赖的性质：求值次序一变就是 undefined，而症状与拼错常量同形。
+ * 两处消费同一份口径，MUST NOT 各写一份。
+ */
+export const MG_SRC_DIRS = ["mg", "rrv"] as const;
+
 export interface SlotHit {
 	/** 派单条目的 composition_id —— 落点与期望 id 的**唯一**来源，MUST NOT 用 `--slot` 的值代替。 */
 	compositionId: string;
@@ -54,6 +66,13 @@ export interface SlotHit {
 	slotSec: number;
 	/** 该条派单的 category（只在取值合法时给出）。 */
 	category?: "overlay" | "fullscreen";
+	/**
+	 * [gate-mg-visual-job] 该槽位声明的视觉职能。生产侧硬闸判的就是它。
+	 * 取值非法或缺失时不给出——那由 `gtrk split` 的校验负责判红，此处不重复一套。
+	 */
+	visualJob?: VisualJob;
+	/** `relation` 档的视觉 brief。判红时打进错误消息：它与交上来的东西直接冲突。 */
+	visualBrief?: string;
 	/**
 	 * 该条派单声明的满屏底色（`dispatch.mg[].bg`），**只在 `category:"fullscreen"` 且取值是颜色时给出**。
 	 *
@@ -86,5 +105,17 @@ export function matchSlot(queue: MgDispatch[], slot: string): SlotHit {
 		category === "fullscreen" && typeof rawBg === "string" && /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(rawBg.trim())
 			? rawBg.trim()
 			: undefined;
-	return { compositionId: q.composition_id, slotSec, ...(category ? { category } : {}), ...(bg ? { bg } : {}), item: q };
+	const rawJob = (q as { visual_job?: unknown }).visual_job;
+	const visualJob = isVisualJob(rawJob) ? rawJob : undefined;
+	const rawBrief = (q as { visual_brief?: unknown }).visual_brief;
+	const visualBrief = typeof rawBrief === "string" && rawBrief.trim() ? rawBrief : undefined;
+	return {
+		compositionId: q.composition_id,
+		slotSec,
+		...(category ? { category } : {}),
+		...(bg ? { bg } : {}),
+		...(visualJob ? { visualJob } : {}),
+		...(visualBrief ? { visualBrief } : {}),
+		item: q,
+	};
 }

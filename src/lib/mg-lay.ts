@@ -104,11 +104,33 @@ export interface MgMetaBeat {
 	category?: string;
 	laid: { track_index: number } | null;
 }
+/**
+ * [gate-mg-visual-job §2.3] 一次显式放行的**留痕**。
+ *
+ * ⚠️ 这条存在的理由是「一个不用解释的放行，下次就会被当成常规做法用」。
+ * 理由留在工程里，日后翻工程的人看得见「当时为什么」——**命令行上的一句话会随终端消失，
+ * 工程文件不会**。
+ */
+export interface MgLayException {
+	/** 被放行的是哪一条闸。 */
+	gate: "x-text-for-relation";
+	/** 指名放行的 beat（逐 beat，不是全局开关）。 */
+	beats: string[];
+	/** `--why` 的原文。 */
+	why: string;
+}
 export interface StructMetaMg {
 	contract_version: "v1";
 	generated_at: string;
 	lay_tracks: number[];
 	beats: MgMetaBeat[];
+	/**
+	 * 本次铺轨用掉的显式例外。
+	 * ⚠️ **无例外时整个键不写**——没用过例外的工程，`struct_meta.mg` 与本件之前逐字节一致。
+	 * ⚠️ 每次铺轨**整体重写**（不累积）：这份账本描述的是「工程当前是什么样」，
+	 * 不是「历史上放行过几次」。不带 flag 重铺一次，例外就该消失——因为那一次它确实没被用。
+	 */
+	exceptions?: MgLayException[];
 }
 export interface MgLayResult {
 	next: Record<string, unknown>;
@@ -218,6 +240,11 @@ export function layMgTracks(opts: {
 	warn?: (message: string) => void;
 	/** 帧格化的人读 INFO 出口（包络量化后不足一帧、不落轨）；命令层接 `log.info`，纯函数单测可不传。 */
 	info?: (message: string) => void;
+	/**
+	 * [gate-mg-visual-job §2.3] 本次用掉的显式例外，原样写进 `struct_meta.mg.exceptions`。
+	 * 本层**不判断例外该不该给**（那是命令层 + lint 的事），只负责让它留在工程里。
+	 */
+	exceptions?: MgLayException[];
 }): MgLayResult {
 	const { gtrk, items, generatedAt } = opts;
 	// 帧率读法与 matrix lay / ai-drama lay 同源（fix-matrix-lay-frame-grid D7 整数判据）：缺席 / 非正 / 非整数即抛，
@@ -422,6 +449,8 @@ export function layMgTracks(opts: {
 		generated_at: generatedAt,
 		lay_tracks: createdTracks.map((t) => t.track_index),
 		beats: [...carriedBeats, ...metaBeats],
+		// [gate-mg-visual-job §2.3] 空数组也不写键——见 StructMetaMg.exceptions 的逐字节兼容说明。
+		...(opts.exceptions?.length ? { exceptions: opts.exceptions } : {}),
 	};
 
 	// 写 mg + delete 旧 rrv 键（防孤儿：既有工程升级后不留双份登记）
