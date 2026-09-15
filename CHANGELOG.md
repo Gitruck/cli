@@ -2,6 +2,12 @@
 
 ## 未发布
 
+### 加：文字模板候选态可按分类过滤（add-text-template-category 2.2）
+
+`gtrk mg fetch --source text [检索词] --category 打字机` 先按目录分类圈池子再检索，JSON 多返回 `category` 与 `categories`；
+分类不存在时零候选并列出可用分类，不会退回成「不过滤」。取块态给了 `--category` 就要与模板分类对得上，对不上直接拒。
+⚠️ `--category overlay|fullscreen` 是 registry 路的不透明度品类，文字模板路收到这两个值会当场报错，并指路到 `--slot <beat> --project <dir>` 派单模式。
+
 ### 改：B-roll 云端编排版本不一致时，告警不再列「命中旧幂等条目」这条成因（link-arrange-decision-pin-echo 9.7）
 
 服务端已把决策层版本钉进幂等键，且入键前写下的条目已随 24 小时有效期排空（2026-09-16 生产核实：

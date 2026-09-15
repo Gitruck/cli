@@ -66,6 +66,37 @@ export interface TextCmdOpts {
 	allowTemplateFirst?: boolean;
 	/** 例外的理由（一句话），随工程留痕。 */
 	why?: string;
+	/**
+	 * 候选态：按模板目录分类过滤（`打字机` / `标题` …，取值即目录条目的 `category`）。
+	 * ⚠️ 与 registry 路 `--category overlay|fullscreen`（不透明度品类）**同名异义**：
+	 * 本路收到那两个值当场报错指路，MUST NOT 静默丢弃（add-text-template-category §2.2）。
+	 */
+	category?: string;
+}
+
+/** registry 路 `--category` 的取值（不透明度品类）。文字模板路收到它们 = 拿错了口径。 */
+const OPACITY_CATEGORIES = ["overlay", "fullscreen"];
+
+/**
+ * 解析文字模板路的 `--category`（模板目录分类过滤）。
+ *
+ * ⚠️ 同名异义处置：`overlay` / `fullscreen` 在本路 MUST 显式报错并指路。2026-09-15 实测：
+ * 独立模式传 `--category fullscreen` 走 text 路 exit 0、JSON 里没有 `category` 键、无任何提示——
+ * commander 收下、程序丢弃，拿它当不透明度声明的人会**静默落空**。
+ */
+function resolveTextCategory(raw: string | undefined): string | undefined {
+	if (raw === undefined) return undefined;
+	const v = raw.trim();
+	if (!v) throw new Error("--category 不能为空：--source text 下它是模板目录分类（如「打字机」「标题」）");
+	if (OPACITY_CATEGORIES.includes(v.toLowerCase())) {
+		throw new Error(
+			`--source text 下 --category 是模板目录分类（如「打字机」「标题」），不收不透明度品类「${v}」。` +
+				"文字模板的叠加 / 满屏由派单决定：用 `--slot <beat> --project <dir>` 走派单模式" +
+				"（派单 category=fullscreen 且写了 bg 时自动钉满屏底色）；" +
+				"overlay / fullscreen 只在 registry 路（不带 --source text）收。",
+		);
+	}
+	return v;
 }
 
 /** 候选数只有两档：确认框的金额就只有两种，用户不必在 1/2/3 之间做无意义的权衡。 */
@@ -92,6 +123,8 @@ function announceCatalog(resolved: ResolvedCatalog): void {
 export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<Record<string, unknown>> {
 	const query = args.join(" ").trim();
 	const top = Math.max(1, Number(opts.top ?? 3) || 3);
+	// 先于目录解析与任何网络：同名异义的误用在这里就拒
+	const category = resolveTextCategory(opts.category);
 	const resolved = await resolveCatalog({ ...(opts.offline ? { offline: true } : {}) });
 	const catalog = resolved.catalog;
 	const pickId = opts.pick ?? (query && findTemplate(query, catalog) ? query : undefined);
@@ -99,8 +132,18 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 	// ── 候选态：网络不可达也要能列（spec「候选离线可列」）──
 	if (!pickId) {
 		announceCatalog(resolved);
-		const cands = searchTemplates(query ? query.split(/\s+/) : [], catalog, top);
-		log.step(`▶ 文字模板候选：「${query || "（全部）"}」→ ${cands.length} 件`);
+		// `--category` 是**过滤**（先圈池子再检索），不是把分类名掺进检索干草堆——
+		// 后者对「标题」这类词会把别的分类里 tag 带「标题」的件也捞进来。
+		const categories = [...new Set(catalog.items.map(categoryOf))];
+		const pool = category ? { ...catalog, items: catalog.items.filter((it) => categoryOf(it) === category) } : catalog;
+		if (category && pool.items.length === 0) {
+			// MUST NOT 回落成「不过滤」：那等于 flag 被静默丢弃
+			log.warn(`目录里没有分类「${category}」——可用分类：${categories.join(" / ")}`);
+		}
+		const cands = searchTemplates(query ? query.split(/\s+/) : [], pool, top);
+		log.step(
+			`▶ 文字模板候选：「${query || "（全部）"}」${category ? `［分类 ${category}，共 ${pool.items.length} 件］` : ""}→ ${cands.length} 件`,
+		);
 		for (const { item } of cands) {
 			// 列分类不列 family——F/M/R 是内部来源编号，用户看不懂（主理人 260914）。
 			log.info(
@@ -108,13 +151,14 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 			);
 			if (item.poster) log.info(`   预览：${item.poster}`);
 		}
-		if (cands.length === 0) log.warn("无候选——换个检索词（中文可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）");
+		if (cands.length === 0 && !(category && pool.items.length === 0)) log.warn("无候选——换个检索词（中文可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）");
 		return {
 			ok: true,
 			mode: "fetch",
 			source: "text",
 			stage: "candidates",
 			query,
+			...(category ? { category, categories } : {}),
 			catalog: { version: catalog.version, origin: resolved.origin, ...(resolved.reason ? { reason: resolved.reason } : {}) },
 			candidates: cands.map(({ item, score }) => ({ ...item, score })),
 		};
@@ -124,6 +168,13 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 	const item = findTemplate(pickId, catalog);
 	if (!item) {
 		throw new Error(`模板目录里没有「${pickId}」（目录 v${catalog.version}，${catalog.items.length} 件；先用候选态检索：gtrk mg fetch --source text <检索词>）`);
+	}
+	// 取块态给了 `--category`：对得上照常取，对不上当场拒——MUST NOT 收下丢弃（同名异义那条是同一个坑）
+	if (category && categoryOf(item) !== category) {
+		throw new Error(
+			`模板 ${item.id} 的分类是「${categoryOf(item)}」，与 --category「${category}」不符——` +
+				"--category 是候选态的分类过滤，取块时可以不给；给了就要对得上，免得取错件",
+		);
 	}
 	const target = await resolveTextTarget(item, opts);
 
