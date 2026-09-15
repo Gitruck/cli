@@ -117,13 +117,15 @@ export function compareDecisionPin(server: string, local: string = LOCAL_DECISIO
  *
  * ⚠️ 这不是「代码在不在仓」：那件的代码 2026-09-03 就在仓了
  * （`broll_arrange.py` 的 `idem_key = blake2b(f"{request_digest}\x1f{DECISION_ALGO_PIN}")`），
- * 但它的 `tasks.md §5.2 部署上线` **未勾** ⇒ 生产上还没有。**「代码在仓」与「已部署」
+ * 能确证生产 HTTP 含它的是 2026-09-13 15:33（CST）那次部署。**「代码在仓」与「已部署」
  * MUST 分开陈述**，混成一句会让下面那条成因跟着说错。
  *
  * 本值只影响**成因清单**，不影响任何处置与机读面（见 `decisionPinCauses`）。
- * 那件部署、且入键前写下的条目随 24h TTL 排空之后，MUST 把它改成 `true`。
+ * ⟲ 2026-09-16 改为 `true`：入键前的条目已随 24h TTL 排空，生产新鲜请求与逐字节重放
+ * 都回传 `broll-arrange-decision@v5`（link-arrange-decision-pin-echo 9.7）。
+ * 服务端若回滚到版本钉入键之前，MUST 改回 `false`。
  */
-export const IDEM_KEY_PINNED_DEPLOYED = false;
+export const IDEM_KEY_PINNED_DEPLOYED = true;
 
 /**
  * 版本不匹配时人读告警里的**成因清单**。
