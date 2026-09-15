@@ -2093,6 +2093,14 @@ const mad: ToolDescriptor = {
 		{ flag: "--duration <秒>", desc: "成片目标时长（默认 20，文案口径 15~30）" },
 		{ flag: "--seed <n>", desc: "随机种子（可复现；各工具语义见各自说明）" },
 		{ flag: "--refresh", desc: "强制忽略本地缓存、重拉当前 manifest 版本数据" },
+		{
+			flag: "--technique <值,…>",
+			desc: "只用点名的技法出片（技法名 / 别名 / pid，逗号分隔；零计费、不需 Key）",
+		},
+		{
+			flag: "--search <关键词>",
+			desc: "只查技法目录不出片（名/别名/类目包含匹配；与 --technique 互斥）",
+		},
 	],
 };
 

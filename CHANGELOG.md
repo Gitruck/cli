@@ -1,5 +1,194 @@
 # 更新日志
 
+## 1.2.5（2026-09-14）
+
+### 修：`mg fetch --source text --slot` 派单模式必败（fix-mg-fetch-text-slot-identity）
+
+真机上这条命令**从来没成功过**：
+
+```bash
+gtrk mg fetch --source text --pick tfx-type-terminal --slot B05 --project <工程>
+# → composition_id "B05" / lint 致命 1-cid-expect / 不落盘
+```
+
+两处不对。① `--slot` 收的是 beat id（`B05`），而派单里的 `composition_id` 是
+`<工程slug>-<beatId>`（`t07-B05`）——铺轨与 `mg lint --dispatch` 都按后者对账，旧实现却把前者
+直接当 id 用，`dispatch.json` 一个字没读。② 取到的模板 HTML 原样送 lint，而模板内的
+`data-composition-id` 恒为模板 id、期望 id 恒为 `<slug>-<beat>`，两者永远不等 ⇒ 必然致命。
+
+文字模板是 `ir` 态、**不能直改 HTML**（改一字节就掉成 `detached`，云端再也调不动），
+所以钉 id 的合法路径只有一条：改内嵌 IR → 走 `mg compile` 同一条本地编译链重编。现在命令替你做：
+
+- 派单模式的 `composition_id` / 坑位包络 / `category` 全部取自 `dispatch.mg` 那条（与中性块
+  `registry` 路共用同一份 `matchSlot`，两条路不再各写一份）；
+- 内嵌 IR 的 `id` 钉成期望 composition_id，`canvas.duration` 钉到**坑位包络 + 0.3s 余量**
+  （铁律⑦），且**原本贴在模板末尾的层跟着钉**——不钉的话坑位长于模板时，那些层会在原时长处
+  被隐藏，后半段元素凭空消失；
+- 重编产物自证仍须是 `ir` 态，否则报错零落盘；`id` 与时长都没改时**原字节落盘**，不重编。
+
+独立模式同病一并修：`--as` 过去只改文件名、不改颗粒内部 id；`--duration` 在 text 路被**静默忽略**
+（命令面照收、代码里根本没这个字段）。现在 `--as` 改写 IR `id`、`--duration` 钉 `canvas.duration`，
+且 `--slot` 与 `--duration` **互斥**（派单的包络由 `track_st` / `track_ed` 定，显式给时长会与它打架）。
+
+另两条顺带：镜像块自身不是 `ir` 态时**报错零落盘**（那是发布事故，静默落一颗改不动的颗粒，
+用户要到 `mg edit` 被拒才发现）；派单 `category` 透传给 lint，槽位派 `fullscreen` 而模板是透明叠加时
+报**非致命**的 `x-category-opaque`——不拦落盘，但提醒你给这颗补一层全幅实心底。
+
+## 1.2.4（2026-09-14）
+
+### `gtrk mg` 文字模板三口：`fetch --source text` / `compile` / `edit`（add-text-template-source）
+
+同合云自己 clean-room 重写的文字特效模板库进了 CLI。与中性块 `registry` 那条路**刻意不同**：
+文字模板 MUST NOT 走机械改写——中性块来自第三方、要替字体换色板才合规；文字模板的块**自带 IR**，
+一旦直接改 HTML 字节，它就从 `ir` 态掉成 `detached`，云端再也调不动。改内容只有两条路：
+
+```bash
+gtrk mg fetch --source text 打字机                       # 候选态：只列不取（--offline 用本地目录）
+gtrk mg fetch --source text --pick tfx-title-typeline    # 取块态：三源择优取，逐字节校 sha256
+gtrk mg compile ./mg-fetch/tfx-title-typeline.ir.json    # 改完 IR 重编译（L0，本地跑、0 积分、零请求）
+gtrk mg edit ./mg-fetch/xxx.html --say "打字机快一倍，副标改成青色" --n 3   # 云端改写（2 积分/候选）
+```
+
+`--n` 只收 1 或 3，**它就是计费单位数**。改写被拒绝（模型说「词表里做不到」）同样计费——
+那是为了不让「拒绝」变成免费试探，但拒绝理由会原文给你，不会只丢一句失败。
+
+### 文字模板目录：随包兜底 + 远端择新 + 8 个人话分类（add-text-template-source / add-text-template-category）
+
+目录走「远端择新、随包兜底」：扩批是纯写 IR 的轮次，不该被 CLI 发版卡住，所以**随包那份会过期，
+这是设计**——运行时按 `version` 择新，随包只在三源都不可达时顶上。本版随包 **v2026-09-14.11 / 103 件**。
+
+分类从 37 个收成 8 个：`F`/`M`/`R` 是内部来源编号（喵影家族 / MAD 图鉴技法号 / 参考视频），
+用户看不懂，而且 93 件摊出 37 个分类里有 16 个只有 1 件。改由**目录下发** `category`
+（快照脚本算，两端只读不算——各算一份会漂且漂了不报错），判据是规则不是手工名单：
+满 7 件才配独立、其余进「其他」、总数 ≤8。`family` 保留供溯源、仍进检索干草堆
+（老用户按 F02 搜不该搜不到）。
+
+### IR 编译默认走本地，`--remote` 留给排查与对拍（move-text-ir-compiler-to-client）
+
+`gtrk mg compile` 此前每次都要打一趟服务端。现在 L0 编译在本地跑完：**零请求、零延迟、断网可用**。
+TS 编译器是 Python 正本的第二实现，靠一道**逐字节等价闸**钉住（全量金样两侧逐字节相同，
+本版 103/103）。
+
+⚠️ `--remote` **MUST NOT 下线**：它是等价闸的参照系，也是真机上排查「本地编出来的和服务端一样吗」
+时手上唯一的另一条路。
+
+### IR 词表 v0.2：八项新表达 + 片段引用槽位（add-text-ir-vocabulary-v02）
+
+`mask` 收数组（多条并存）/ `feather` 收两元数组（不等量羽化）/ `animTarget:"inner"`（蒙版钉死、
+内容在后面滚）/ `repeatText` / `charRoll`（逐字滚码落定）/ `sweep`（扫光）/ `shape.glow` /
+`anim` 新增 `skx`·`sky`，外加 **`runs[].slot`**。
+
+`runs[].slot` 修的是一个缺口：`brush-title` / `caption-emoji-arrow` / `caption-keyword` 三颗的文字
+写在 `runs[].t` 字面量里，**此前没有任何字段能改**。现在它们的槽位回来了。
+
+⚠️ **`blur` 通道判否，且这是有射程的口径**：`filter: blur()` 被补间驱动正是 `gtrk mg lint` 的
+`c-filter-animated` 所指、r69 真渲实测 **+36.2%** 的最贵形态。往后任何要 `filter` 的通道
+（`drop-shadow` / `saturate` …）一律先找零卷积等价物，真找不到再单独拍板。
+
+### `gtrk tool mad`：技法点名 `--technique` 与目录检索 `--search`
+
+一键剪 MAD 此前只能让它自己挑技法。现在可以点名，也可以先查目录看有哪些
+（语义匹配仍留给 Agent，命令面只做目录检索）。
+
+### 其他
+
+- `gtrk mg lint`：内嵌 IR 的**两代载体都认**——换载体那次产物字节全变，只认新的会把线上已发的颗粒
+  整批判成 `detached`。
+
+## 1.2.3（2026-09-13）
+
+> ℹ️ **本节是补写的**。1.2.3 当时发到了 npm 却没进更新日志（包里那份 CHANGELOG 顶到 1.2.2 为止）。
+> 补写口径是**发布产物实证**、不是按提交时间猜：拉 `@gitruck/cli@1.2.3` 的 tarball 逐项 grep，
+> 确认 `text-template` / `compileIrBody` / `--technique` **一个都不在**（同时 `pip` 42 处、
+> `subtitle_line_split` 3 处命中，证明探针本身能响）——文字模板那批全部落在 1.2.4。
+
+### `gtrk mg lint`：新增非致命哨兵 `x-soft-alpha`（fix-alpha-delivery-discipline）
+
+颗粒里只要有**半透明面积**（`rgba`/`hsla` 半透明色、`#RRGGBBAA`、渐变到 `transparent`、
+带 blur 的 `text-shadow`/`box-shadow`、静态 `opacity<1`），lint 会提醒一句。
+
+**恒非致命、不要求改写**——半透明本身完全合法。它提醒的是交付纪律：剪映的 qtrle 交付依赖渲染管线
+在编码前**预乘 alpha**（剪映按预乘合成，直通 alpha 的软边会塌成实心，2026-09-14 真机实证）。
+所以**剪映路径的真机验收 MUST 用这颗颗粒本身验，MUST NOT 拿实心颗粒代验**——实心颗粒对预乘错配
+结构性失明，验了也是白验。
+
+⚠️ 颗粒与 CLI **MUST NOT 自行预乘**，那会双重压暗。预乘是渲染管线那一侧的事。
+
+哨兵刻意**不认** GSAP 补间参数里的 `opacity:0`：淡入淡出的端点是 0/1，不是驻留的半透明面积。
+
+契约 `gsap-emit-v1.md` 同批增补「Alpha 交付口径」一节，`gtrk-mg` 图纸补剪映预乘纪律。
+
+## 1.2.2（2026-09-13）
+
+### `gtrk subtitle lay` 云端拆行：`subtitle_type` 直传预设 id，PascalCase 映射表删除（link-subtitle-lay-cloud-line-split §6.2）
+
+拆行接口 2026-09-06 生产实测只认 infra `SubtitleType` 枚举**值**（`Default` / `Outline` / `CinemaYellow` /
+`ImmersiveBox` / `WideSpacing` / `DeepShadow` / `Boxed`），传 CLI 侧的预设 id `immersive_box` 会被拒「subtitle_type 未知」——
+同一枚举在 infra 两个接口上口径不一致，当时由消费方顶着，CLI 里挂了一张 `CLOUD_SUBTITLE_TYPE_BY_PRESET` 映射表兜。
+
+现在 infra 把写法归一收进零依赖轻模块 `subtitle_styles.canonical_subtitle_type_name`（`add-subtitle-line-split-api` §9），
+两个口同源。**部署后生产实测**：`immersive_box` / `ImmersiveBox` / `cinema_yellow` / `cinemayellow` 四种写法均 200、
+拆行结果逐条一致，未知值报 6016 且可选集以 snake_case 列出 ⇒ 映射表退化为恒等，按联动件收尾删除，
+预设 id 原样上行。
+
+对用户**零行为变化**：`subtitle lay` 传哪个预设、拆出来的行与上一版一字不差。
+未知 id 仍原样透传交服务端裁决（**fail-open 口径不变**）。
+⚠️ 这张表为什么拖到今天才删：删表直传 snake_case 的前提是服务端那个改动**已部署**——
+部署前删，线上就直接退回 09-06 那个「`immersive_box` 被拒」的缺陷。部署后它只是冗余而非有害，所以不急。
+
+本版无其他面向用户的改动（其余提交是 openspec 子模块指针推进）。
+
+## 1.2.1（2026-09-13）
+
+### `gtrk tool video_purify` / `image_purify`：region 作用域——按框直接去除，视频可限定时间段（link-add-purify-region-scope-cli）
+
+此前去水印只能「让服务端自己找」：`full_screen` 全片扫、`subtitle` 扫字幕带、`custom` 在归一化 ROI 里找水印。
+用户明明知道要去的东西在哪一块、在哪几秒，却没法直说。新增 **`region` 作用域**——框内**全部内容**直接去除，不做识别：
+
+```bash
+gtrk tool video_purify <视频> --purify-scope region --purify-region 0.7,0.02,0.28,0.1 --purify-region 0.1,0.8,0.3,0.12,12,48
+gtrk tool image_purify <图片> --purify-scope region --purify-region 0.7,0.02,0.28,0.1
+```
+
+`--purify-region` **可重复**，单次最多 16 个框（与服务端 `purify_roi.MAX_PURIFY_REGIONS` 同值）。
+视频的框是 `x,y,w,h[,start[,end]]`——空间四元归一化，时间两元为秒，`end` 省略即到结尾，
+**同一条片子里不同时间段的不同水印可以一次交清**。图片的框只有 `x,y,w,h`。
+`image_purify` 由此**第一次有了选项**（`--purify-scope full_screen|region`）。
+
+**组合矛盾一律前置报错**，不让用户上传完再被服务端拒：非 `region` 作用域给了 `--purify-region`、
+`region` 作用域一个框都没给、框数超上限、图片的框带了 `start` / `end`（服务端会忽略它们，CLI 让你当场知道没生效）。
+`params-json.regions` 通路照旧：只走 params-json 时只校验不改写，由 runner 的 `mergeParams` 合入（与 `custom` 的 roi 同款）。
+
+两个工具**共引同一个选项对象**（注册器按完整 flag 串去重、先注册者的 desc 生效），
+`validateRegistry` 新增一道闸拦同名选项写法不一致；`ToolOption` 加 `repeatable` 语义，注册时挂收集器、**缺省是空数组而非 undefined**。
+⚠️ 本条依赖服务端 `add-purify-region-scope` 已部署。
+
+### `gtrk matrix describe`：缓存键并入服务端判据版本，判据一改旧产物不再蒙混过关（fix-describe-window-coverage §10）
+
+`describes` 缓存的 `usable_flags` 四维是**服务端判据**的产物。判据一改（把取景器 HUD 纳入 `text_overlay` 正例、
+把被拍物体上的印字排除出 `watermark`），同一帧的正确读数就变了——而缓存键里没有判据版本的话，
+旧口径条目**永不重跑**，用户读到的还是旧判据的产物，且完全无感。
+
+现在缓存键实际是 `(material_id, ts_ms, criteria_version)`：新列**不进主键，而是读时比对**——
+行还在、版本对不上就算未命中，下一轮按正常路径重跑。**旧行不删不改、仍可读**，
+它是「用户上一轮看到过什么」的唯一凭据。写入侧改条件 upsert：版本相同维持原 `OR IGNORE` 语义
+（换准则不许改写客观层，防 VLM 措辞漂移悄悄改掉下游在读的 `desc`）；版本不同才整行刷新，
+否则新判据的 flags 永远落不进来、每轮重复计费还读到旧值。既有库幂等 ALTER 补列，旧行为 `NULL`、同走旧口径路。
+
+**报数分栏**：`--json` 新增 `cached_stale_criteria`，是 `called` 的**子集**而不是额外开销，
+专门回答「上轮明明理解过、这轮怎么又扣」——这些帧的旧产物出自更早的判据版本，不再作数。
+首值 `overlay-enum@2026-09-12`，对应 infra `link-describe-overlay-flag-recall` 当日上线的判据枚举化（叠加物两维扩枚举 + 按维分级）。
+⚠️ bump 的代价是真金白银：旧口径帧下一轮会重新调用、重新计费。这是有意的——判据变了还端旧产物，比多花一次钱坏得多。
+服务端判据上线与本常量 bump **MUST 同批发版**。
+
+### 文档：路径含英文逗号、零枚举硬失败、高潮点锚定口径（fix-material-intake-path-and-enumeration §5.2–5.4 等）
+
+- **路径含英文半角逗号**就重复传 `--dirs`，**累加不覆盖**；整串在盘上存在时自动不拆，全角「，」从不参与拆分。
+  `index` 报 0/0 先看这一条，再去查断链——README 中英与 `gtrk-matrix` 图纸排障表各补一行。
+- **零枚举是硬失败**：`gtrk matrix index && describe` 串里，零枚举会真的拦住 `describe`（个别素材失败不算硬失败）；
+  `index ... &` 后台起会把硬失败吞掉，回头要看 `materials.total` / `per_dir`——写进 `gtrk-travel-recap` / `gtrk-narration` 两份图纸。
+- README 中英与四张旗舰图纸改写**高潮点锚定**口径。
+
 ## 1.2.0（2026-09-11）
 
 ### `gtrk pip lay`：屏幕一条 + 人像一条同步录的口播，一句话合成画中画（add-pip-companion-lay）

@@ -292,6 +292,35 @@
 3. **验收纪律（MUST）**：凡颗粒含**半透明面积**（软光晕 / 渐变到 transparent / `text-shadow` 带 blur / `opacity<1` 图层，半透明像素占比 ≥1%），剪映路径的真机格 **MUST 用这颗本身或同类颗粒**验，**MUST NOT** 拿实心 + 抗锯齿边的颗粒代验——后者对预乘错配结构性失明。抽帧判据：解出的 qtrle 帧里半透明像素满足 `RGB ≈ 直通色 × α`。
 4. **哨兵**：`gtrk mg lint` 对含半透明面积的颗粒给**非致命**信息项 `x-soft-alpha`，只提醒「本颗粒的剪映交付依赖管线预乘配方（infra ≥ fix-qtrle-premultiplied-alpha-for-jianying），旧渲染服务会把软边渲成实心」，不拦铺轨、不要求作者改写。
 
+## 模板颗粒（ir 态）的改法（2026-09-14 增补）
+
+> **一句话**：由 IR 编译出来的颗粒，改内容 **MUST 改 IR 再重编译**，**MUST NOT 直接改 HTML**。
+> 词表、不变量、编译确定性与三态判定的正本在 infra capability `text-ir-profile`
+> （change `add-text-ir-profile-and-compiler`），本节**只作导读、不复制规则**。
+
+同合云的文字特效模板是由一份 **IR 文字子集**确定性编译出来的普通 gsap-emit v1 颗粒——
+对本契约而言它和别的颗粒没有任何区别，`beat_track` 也不为它新增任何键。
+
+区别只在**它自带出身证明**：编译产物在 `<template>` 内以
+`<script type="application/json" data-gtrk-ir>` 内嵌完整 IR，并在首行注释写
+`gtrk-ir-sha256` 与 `gtrk-html-sha256` 两个哈希。判定只看文件内容，不依赖文件名或目录。
+
+| 三态 | 含义 | 还能云端改写吗 |
+|---|---|---|
+| `ir` | 内嵌 IR 在，且声明的 html 哈希与实测一致 | 能 |
+| `detached` | 内嵌 IR 在但哈希对不上 ⇒ HTML 被直接改过 | 不能；可按内嵌 IR 重编回模板 |
+| `html` | 无内嵌 IR（绝大多数颗粒） | 不能（本来也不需要） |
+
+**手改 HTML 是单向操作**：改一个字节就从 `ir` 掉到 `detached`，`gtrk mg edit` 与客户端
+属性面板都会拒绝它。颗粒本身照常能渲能铺，所以 `gtrk mg lint` 只给**非致命**的
+`x-ir-detached` 提醒，不拦。
+
+两条合法改法：
+- **改字 / 换色 / 改字号描边阴影 / 改时长**：改 IR 后 `gtrk mg compile <ir.json>`（L0，0 积分）。
+- **换效果**：`gtrk mg edit <particle.html> --say "<一句话>"`（经云端模型链，按候选计费）。
+
+**内嵌的 JSON 块不参与渲染**，也不在本契约任何检查的射程内（它既没有 `src` 也不执行）。
+
 ## 颗粒骨架（中性模板）
 
 ```html

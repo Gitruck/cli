@@ -1,0 +1,2594 @@
+{
+	"schema": 1,
+	"version": "2026-09-15.1",
+	"generated_at": "2026-09-15T07:32:36.936Z",
+	"mirrors": [
+		{
+			"id": "tonghe",
+			"base": "https://api.ai-mcn.tv:9000/broadcast/text-templates"
+		},
+		{
+			"id": "jsdelivr",
+			"base": "https://cdn.jsdelivr.net/gh/Gitruck/text-templates@main"
+		},
+		{
+			"id": "raw",
+			"base": "https://raw.githubusercontent.com/Gitruck/text-templates/main"
+		}
+	],
+	"items": [
+		{
+			"id": "tfx-beat-swap",
+			"title": "三组排版卡点快闪（末组定格）",
+			"family": "M117",
+			"tags": [
+				"M117",
+				"beat",
+				"swap",
+				"a",
+				"b",
+				"c"
+			],
+			"duration": 6,
+			"slots": [
+				"a",
+				"b",
+				"c"
+			],
+			"poster": "posters/tfx-beat-swap.webp",
+			"file": {
+				"path": "tfx-beat-swap.html",
+				"sha256": "bb0cf18ded0ac8d10087b32ae484e2c6b9475e6daf9d5d9ac269d3167e4079c7",
+				"bytes": 6625
+			},
+			"ir_sha256": "5f3f1bb14fa347dc3a261bae350e14609616a7687f88a3321331a065b9663c92",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-biz-bar",
+			"title": "商务横条 · 白底黑字 + 副标",
+			"family": "F22",
+			"tags": [
+				"F22",
+				"biz",
+				"bar",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-biz-bar.webp",
+			"file": {
+				"path": "tfx-biz-bar.html",
+				"sha256": "7f48acbf0e79bace70df0fc194c3c57f5ace496a9f53d364418a355ec8674cc1",
+				"bytes": 5606
+			},
+			"ir_sha256": "720cccfa53d6979dedced6a5097510cf280fce6f072e8d98f8c721077addf995",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-biz-corner",
+			"title": "对角括号框 + 标题",
+			"family": "F22",
+			"tags": [
+				"F22",
+				"biz",
+				"corner",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-biz-corner.webp",
+			"file": {
+				"path": "tfx-biz-corner.html",
+				"sha256": "c3582b2a833063111b1cb76413058f7daf52373e6306421e591b6111a1125356",
+				"bytes": 7455
+			},
+			"ir_sha256": "2b40a8572ccb689f5d5b28720e4ee02c98be98782bc5c12c2dd79aa05f517b2a",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-biz-note",
+			"title": "便签清单 · 胶带 + 逐条打勾",
+			"family": "F22",
+			"tags": [
+				"F22",
+				"biz",
+				"note",
+				"i1",
+				"i2",
+				"i3",
+				"title"
+			],
+			"duration": 6,
+			"slots": [
+				"i1",
+				"i2",
+				"i3",
+				"title"
+			],
+			"poster": "posters/tfx-biz-note.webp",
+			"file": {
+				"path": "tfx-biz-note.html",
+				"sha256": "ec1213bfc2f9864670cabf451d4ceb366d6d2334e5f85f3f4524b8c515985595",
+				"bytes": 12275
+			},
+			"ir_sha256": "47c66c11f92a6bd41c5dbe9a37948eb182ee1d011205e70a216840d8016fffd4",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-biz-rules",
+			"title": "极简商务 · 上下细线夹持 + 字距收拢",
+			"family": "F22",
+			"tags": [
+				"F22",
+				"biz",
+				"rules",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-biz-rules.webp",
+			"file": {
+				"path": "tfx-biz-rules.html",
+				"sha256": "6a2ffd0426853a817610cf5d1d5296c1310d3a9fa66b20079086ee9e2555b929",
+				"bytes": 5731
+			},
+			"ir_sha256": "07bd6ec2ca41ed31b75ee3c05f00e7cfcc5d49c776f51f214edf976267319546",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-biz-stack",
+			"title": "主标 + 分隔线 + 三枚线框标签",
+			"family": "F22",
+			"tags": [
+				"F22",
+				"biz",
+				"stack",
+				"main",
+				"t1",
+				"t2",
+				"t3"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"t1",
+				"t2",
+				"t3"
+			],
+			"poster": "posters/tfx-biz-stack.webp",
+			"file": {
+				"path": "tfx-biz-stack.html",
+				"sha256": "4013dd6ff914fd26efd5d773298e7e0c0826d50cd2aa1fbac0c2e412c5be40be",
+				"bytes": 7848
+			},
+			"ir_sha256": "c038b0498cf81f77cf9e03fa540a378f9c8608a021d2bdb7defdf0df4a2df81e",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-brush-title",
+			"title": "书法感大字逐字砸入 + 下方字幕关键词换色（坐忘道）",
+			"family": "R1",
+			"tags": [
+				"R1",
+				"brush",
+				"title",
+				"big",
+				"c1",
+				"c2",
+				"c3"
+			],
+			"duration": 6,
+			"slots": [
+				"big",
+				"c1",
+				"c2",
+				"c3"
+			],
+			"poster": "posters/tfx-brush-title.webp",
+			"file": {
+				"path": "tfx-brush-title.html",
+				"sha256": "c0bb8d70990e67adf633b0875d4e948ce5cce33848ce93a14e8be77397ab2f1e",
+				"bytes": 5089
+			},
+			"ir_sha256": "f79d300ab534d9ab4c7566a9a71c6102e8a6ecb548da690f3474813ac44ddc02",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-bubble-chat",
+			"title": "聊天气泡 · 逐条弹入并整体上推",
+			"family": "F08",
+			"tags": [
+				"F08",
+				"bubble",
+				"chat",
+				"b1",
+				"b2",
+				"b3"
+			],
+			"duration": 7,
+			"slots": [
+				"b1",
+				"b2",
+				"b3"
+			],
+			"poster": "posters/tfx-bubble-chat.webp",
+			"file": {
+				"path": "tfx-bubble-chat.html",
+				"sha256": "1b3b87a442c4a39f1e089c14c712c3a788f1bed710605cdd8bb5a7c3d503f9f4",
+				"bytes": 6446
+			},
+			"ir_sha256": "022e4bfa01a51bebb8ffaa7b9a4363f8e55b1fe8894251c1d8956db88f660cb1",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-bubble-checkline",
+			"title": "复选框打勾 + 单行强调",
+			"family": "F08",
+			"tags": [
+				"F08",
+				"bubble",
+				"checkline",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-bubble-checkline.webp",
+			"file": {
+				"path": "tfx-bubble-checkline.html",
+				"sha256": "8958670f251ba119eac316bc5cd1ed7a74fbb8c30cb6fea21aee7f07d356e0bc",
+				"bytes": 6597
+			},
+			"ir_sha256": "2bf99b338b566699cdee7f6ef7d983090e1fa5a189000f0e1d5cdfec37d4376e",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-bubble-quote-box",
+			"title": "双层描边框 + 尾巴 + 双行",
+			"family": "F08",
+			"tags": [
+				"F08",
+				"bubble",
+				"quote",
+				"box",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-bubble-quote-box.webp",
+			"file": {
+				"path": "tfx-bubble-quote-box.html",
+				"sha256": "cf96cfd46681165b0ab2321bb55c2032357dfd6c9a563aaea1b62431b04b497f",
+				"bytes": 7738
+			},
+			"ir_sha256": "0d6eaf84a6bd6dcb73bdce31380e784cb7f5c5e92b80a51eea47c6495d8b036f",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-bubble-speech",
+			"title": "对话气泡 · 回弹弹入 + 打字",
+			"family": "F08",
+			"tags": [
+				"F08",
+				"bubble",
+				"speech",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-bubble-speech.webp",
+			"file": {
+				"path": "tfx-bubble-speech.html",
+				"sha256": "49b39b99b5808d35db7369abc5e3ecb64e54362d3a833b5f0413af5879d0a960",
+				"bytes": 6687
+			},
+			"ir_sha256": "126d1c44a1d3a9912f45152ac2c63590b59ca47acbc8b9b6efbb4db86ad62a15",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-bubble-tag",
+			"title": "胶囊标签 + 圆形图标按钮",
+			"family": "F08",
+			"tags": [
+				"F08",
+				"bubble",
+				"tag",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-bubble-tag.webp",
+			"file": {
+				"path": "tfx-bubble-tag.html",
+				"sha256": "27d82f62f54cd925e7105f2410edf8d448f59e448bac8b790ff83b90e7ec24d2",
+				"bytes": 5352
+			},
+			"ir_sha256": "6d2b152a721bd249685f313c98d2ff957bc6685cb653863448af2f984eedaa3d",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-button-emoji",
+			"title": "圆角按钮 + emoji 手指点击 + 爱心飘出",
+			"family": "F08",
+			"tags": [
+				"F08",
+				"button",
+				"emoji",
+				"btn",
+				"hand",
+				"heart"
+			],
+			"duration": 6,
+			"slots": [
+				"btn",
+				"hand",
+				"heart"
+			],
+			"poster": "posters/tfx-button-emoji.webp",
+			"file": {
+				"path": "tfx-button-emoji.html",
+				"sha256": "f3b2dfbeaeec881cbef94ff12e61e8774e8547f2b0eb76e4bf363a113b5f8f0b",
+				"bytes": 6900
+			},
+			"ir_sha256": "c80a3c9038f314b3b2693b740e319108513701c134e2382da2d1f8406c590ebd",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-callout-badge",
+			"title": "圆形编号徽标 + 折线 + 双行标注",
+			"family": "F06",
+			"tags": [
+				"F06",
+				"callout",
+				"badge",
+				"main",
+				"num",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"num",
+				"sub"
+			],
+			"poster": "posters/tfx-callout-badge.webp",
+			"file": {
+				"path": "tfx-callout-badge.html",
+				"sha256": "541534130b4ddadc1dc00194619015ce4c4014d74df643d9244150d470a8b6e8",
+				"bytes": 8155
+			},
+			"ir_sha256": "634a59c210aa0905e0c420600ba9c2ac983d53e18e682b22e52b57262f44cae3",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-callout-box",
+			"title": "描边框标注 + 指针点击 + 描边副标",
+			"family": "F06",
+			"tags": [
+				"F06",
+				"callout",
+				"box",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-callout-box.webp",
+			"file": {
+				"path": "tfx-callout-box.html",
+				"sha256": "61e9c86776c007ad840e84e5a20752ad88dd92315a8683a82c0c25f45e4b237d",
+				"bytes": 7471
+			},
+			"ir_sha256": "bc3b1055084077ea7ce6759ebc6003098b9f7cf116d1d8ee6ffc554f058bcd56",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-callout-corners",
+			"title": "标注 · 四角点接力弹入 → 框线浮现 → 文本淡入",
+			"family": "F06",
+			"tags": [
+				"F06",
+				"callout",
+				"corners",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-callout-corners.webp",
+			"file": {
+				"path": "tfx-callout-corners.html",
+				"sha256": "681bdb6da201e06c2d7add289d7d10f81cebe371f1059798401a74729910181f",
+				"bytes": 6864
+			},
+			"ir_sha256": "25b0b53bbb70d78c67624e97d62b74b8d967c96767583cfdf39ef2f293b35d50",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-callout-dotline",
+			"title": "标注 · 圆点扩散 → 折线生长 → 文本滑入",
+			"family": "F06",
+			"tags": [
+				"F06",
+				"callout",
+				"dotline",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-callout-dotline.webp",
+			"file": {
+				"path": "tfx-callout-dotline.html",
+				"sha256": "1902361607d1f5ab08e2b005bd99b0f13eafbe3bfe0cb68061abf5b30976625f",
+				"bytes": 7402
+			},
+			"ir_sha256": "c79eaa853f1be66e7369e5d6521d6437d9fd8056c34525b572864aa98e386b4f",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-callout-step",
+			"title": "阶梯折线 · 点 → 竖 → 横 → 竖 → 胶囊",
+			"family": "F06",
+			"tags": [
+				"F06",
+				"callout",
+				"step",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-callout-step.webp",
+			"file": {
+				"path": "tfx-callout-step.html",
+				"sha256": "5322a1761ee1b89f2b2f5c57e52c7c766568acbbc72540436d5df02085faf48b",
+				"bytes": 7412
+			},
+			"ir_sha256": "da3a70cd0e0f416bebcaeca2e49e2d7587957ce284ffa31f54ad0da5f66de2ee",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-caption-emoji-arrow",
+			"title": "emoji 内嵌字幕 + 箭头从上方指入关键词",
+			"family": "R7",
+			"tags": [
+				"R7",
+				"caption",
+				"emoji",
+				"arrow",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
+			"duration": 6,
+			"slots": [
+				"arrow",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
+			"poster": "posters/tfx-caption-emoji-arrow.webp",
+			"file": {
+				"path": "tfx-caption-emoji-arrow.html",
+				"sha256": "561387729a6b368ad7d229499cad32156b3e484afe5d4c0eca9a555206e87734",
+				"bytes": 5732
+			},
+			"ir_sha256": "e835a6d7afc3a6b20e1f7ccfe3c38dc5a85d683c9f86e38e90d3ced46e6ddcb5",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-caption-highlight",
+			"title": "整句淡入 → 高亮条从左扫过关键词",
+			"family": "F10",
+			"tags": [
+				"F10",
+				"caption",
+				"highlight",
+				"a",
+				"b",
+				"kw"
+			],
+			"duration": 6,
+			"slots": [
+				"a",
+				"b",
+				"kw"
+			],
+			"poster": "posters/tfx-caption-highlight.webp",
+			"file": {
+				"path": "tfx-caption-highlight.html",
+				"sha256": "4de465e711fdc52ef377747f6058d7bc61267e863fe68d45d9650f70233d126c",
+				"bytes": 6481
+			},
+			"ir_sha256": "a291753a6065c76d11abe0d305d9eb49f41ee2a318595cdef57cc7b69a1f273b",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-caption-keyword",
+			"title": "关键词高亮换色字幕（整句上浮，关键词换色并弹一下）",
+			"family": "R2",
+			"tags": [
+				"R2",
+				"caption",
+				"keyword",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
+			"duration": 6,
+			"slots": [
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
+			"poster": "posters/tfx-caption-keyword.webp",
+			"file": {
+				"path": "tfx-caption-keyword.html",
+				"sha256": "a943121ebe77d5cdb62342a55c5f4dbc128ba63d92e7740da1e8d00628729540",
+				"bytes": 3992
+			},
+			"ir_sha256": "f5d8475fc9de27c8c98c297f74f798a14da61f99dacd5d9ae6adf8c6d00ecf0a",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-caption-markword",
+			"title": "关键词色块逐个弹入",
+			"family": "F10",
+			"tags": [
+				"F10",
+				"caption",
+				"markword",
+				"w1",
+				"w2",
+				"w3"
+			],
+			"duration": 6,
+			"slots": [
+				"w1",
+				"w2",
+				"w3"
+			],
+			"poster": "posters/tfx-caption-markword.webp",
+			"file": {
+				"path": "tfx-caption-markword.html",
+				"sha256": "975f97eed53515bed970b361bc503de0410e124a5dba8f46b38f1746ef3e78e2",
+				"bytes": 5657
+			},
+			"ir_sha256": "2aeab2569f50839885606319830a053f8042c2d3250ddef451437b146baa185b",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-card-caption",
+			"title": "纯色衬底卡片排版",
+			"family": "M139",
+			"tags": [
+				"M139",
+				"card",
+				"caption",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-card-caption.webp",
+			"file": {
+				"path": "tfx-card-caption.html",
+				"sha256": "aef1d7af12bec0c5e2390e81ffbc7569d5bdcc72f18a9c14957e2aef04b8bd83",
+				"bytes": 6631
+			},
+			"ir_sha256": "0f0033029eb98efdb15a3697f4308d6286e7d9c7e7246884b48e50d81528633c",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-char-relay",
+			"title": "单字接力快闪（同位换字）",
+			"family": "M130",
+			"tags": [
+				"M130",
+				"char",
+				"relay",
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
+			"duration": 6,
+			"slots": [
+				"c1",
+				"c2",
+				"c3",
+				"c4"
+			],
+			"poster": "posters/tfx-char-relay.webp",
+			"file": {
+				"path": "tfx-char-relay.html",
+				"sha256": "5d131260bf7aba31a51726d589ec91adc6d223ed5aca89d4af2c9178745fca2c",
+				"bytes": 7928
+			},
+			"ir_sha256": "6e86d1ead16a42d58f4539ddb346d2cb1f67f43f56e62736b65056072772674c",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-checklist",
+			"title": "清单逐行滑入 + 依次打勾",
+			"family": "F18",
+			"tags": [
+				"F18",
+				"checklist",
+				"r1",
+				"r2",
+				"r3"
+			],
+			"duration": 7,
+			"slots": [
+				"r1",
+				"r2",
+				"r3"
+			],
+			"poster": "posters/tfx-checklist.webp",
+			"file": {
+				"path": "tfx-checklist.html",
+				"sha256": "a6ccba518f3a3246e7e72e2f0bea75b9c8c26070495b68d8d9056db40ac4e74c",
+				"bytes": 10357
+			},
+			"ir_sha256": "c1d16541ec3b3e41494560d82f644ee0e0d17f5c33ab3dbe554013bb21f72a89",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-cine-title",
+			"title": "电影化标题 · 年份标签 + 注脚小字",
+			"family": "F23",
+			"tags": [
+				"F23",
+				"cine",
+				"title",
+				"main",
+				"micro",
+				"year"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"micro",
+				"year"
+			],
+			"poster": "posters/tfx-cine-title.webp",
+			"file": {
+				"path": "tfx-cine-title.html",
+				"sha256": "e7f1c7bcc449ee123ee3a51294d90e6cb5d3198cc041a30dafc1b5d6a15a67d9",
+				"bytes": 6153
+			},
+			"ir_sha256": "c5a359a6b34fd6a6621038fdaf1e9f3b07a6eb85f20b01d185cd3219fefa3fe2",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-cjk-banner",
+			"title": "CJK 大字 + 竖排小字",
+			"family": "F13",
+			"tags": [
+				"F13",
+				"cjk",
+				"banner",
+				"main",
+				"side"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"side"
+			],
+			"poster": "posters/tfx-cjk-banner.webp",
+			"file": {
+				"path": "tfx-cjk-banner.html",
+				"sha256": "b16d8f9723d23b5eff3b878b8ca0e07b28373b139570f197c3ae2d54104e4f04",
+				"bytes": 6124
+			},
+			"ir_sha256": "d68ce51f026c67f61e3ed1e24e54286c748b1b686c63c90036e83f1683717cae",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-cjk-vertical",
+			"title": "竖排逐字淡入 + 侧线 + 印章点",
+			"family": "F13",
+			"tags": [
+				"F13",
+				"cjk",
+				"vertical",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-cjk-vertical.webp",
+			"file": {
+				"path": "tfx-cjk-vertical.html",
+				"sha256": "b85de9695d32577308f9e388bb77390ccfa3b8c87b715e0a928a827cca1b7128",
+				"bytes": 4733
+			},
+			"ir_sha256": "e93aecf9fe4fe5ab69ca64685f8002e8e5e29ef62df744612bff2bc24053122d",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-clock-card",
+			"title": "时钟日期卡 · 时间逐字落下 + 日期字距展开",
+			"family": "F18",
+			"tags": [
+				"F18",
+				"clock",
+				"card",
+				"date",
+				"day",
+				"time"
+			],
+			"duration": 6,
+			"slots": [
+				"date",
+				"day",
+				"time"
+			],
+			"poster": "posters/tfx-clock-card.webp",
+			"file": {
+				"path": "tfx-clock-card.html",
+				"sha256": "576366b03e861fde578e5403886359009b79283589a5431593051888fe287f94",
+				"bytes": 6582
+			},
+			"ir_sha256": "eac5fce04e26d8d5b6bc28e5098235192c678825714bfc7b9b717621767a9d9f",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-confetti-pop",
+			"title": "标题弹出 + 基础图形四散",
+			"family": "F19",
+			"tags": [
+				"F19",
+				"confetti",
+				"pop",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-confetti-pop.webp",
+			"file": {
+				"path": "tfx-confetti-pop.html",
+				"sha256": "b8a89a3304698e7ada591fd5275bba0f1da9092d71154098dc09a6af610aba12",
+				"bytes": 13290
+			},
+			"ir_sha256": "696032d684b399a0ae6ba5ed3cbf62679ee0ba94b7a0e1504c6c9f0359e97bae",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-counter-bar",
+			"title": "计数 + 进度 · 数字分档跳到目标值（一单 30/40）",
+			"family": "R8",
+			"tags": [
+				"R8",
+				"counter",
+				"bar",
+				"label",
+				"total",
+				"unit"
+			],
+			"duration": 6,
+			"slots": [
+				"label",
+				"total",
+				"unit"
+			],
+			"poster": "posters/tfx-counter-bar.webp",
+			"file": {
+				"path": "tfx-counter-bar.html",
+				"sha256": "51cd0cc6cba93457ae5b4e71f9a197fd21e52dc8987dafe7dfbfed9af76c2102",
+				"bytes": 13178
+			},
+			"ir_sha256": "7278199ab62f653259e09ee818c3270c5234f527b6a014e5dde1d2edf5719fb3",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-cyber-slash",
+			"title": "赛博斜切条 · 主块 + 细条 + 碎块",
+			"family": "F05",
+			"tags": [
+				"F05",
+				"cyber",
+				"slash",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-cyber-slash.webp",
+			"file": {
+				"path": "tfx-cyber-slash.html",
+				"sha256": "e27e93e81289209201c7a22c6d51247584d50c166c7e0e72ac3e8fb1cabeae48",
+				"bytes": 8042
+			},
+			"ir_sha256": "a0b432360e1de2057c4b133d892148bc7a790fe56dcb9554efa08b30c93f8c90",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-date-card",
+			"title": "大日期 + 竖线 + 月份星期",
+			"family": "F18",
+			"tags": [
+				"F18",
+				"date",
+				"card",
+				"day",
+				"mon",
+				"week"
+			],
+			"duration": 6,
+			"slots": [
+				"day",
+				"mon",
+				"week"
+			],
+			"poster": "posters/tfx-date-card.webp",
+			"file": {
+				"path": "tfx-date-card.html",
+				"sha256": "db87e488681aa0da54f9a8e44e862f2192fa497ea481a6c19c2358a06f03c466",
+				"bytes": 6589
+			},
+			"ir_sha256": "e9e576fbba33f798b391f0731da223c2fb18eb4ecbdd844d79eda8857915d268",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-glitch-rgb",
+			"title": "RGB 分离故障入场 + 中段一次抖动",
+			"family": "F16",
+			"tags": [
+				"F16",
+				"glitch",
+				"rgb",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-glitch-rgb.webp",
+			"file": {
+				"path": "tfx-glitch-rgb.html",
+				"sha256": "0cd40b596cef86f6ac4074dbabb2fc4f28f5a24b8e099e1e8f5278863044feed",
+				"bytes": 8228
+			},
+			"ir_sha256": "b587b12e0a3a1b26f2dd26741a7c95300a1d0b6a055da6a409acd1425adaf112",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-hud-lowerthird",
+			"title": "HUD 线框字条 · 角标 + 分段 + 扫描",
+			"family": "F05",
+			"tags": [
+				"F05",
+				"hud",
+				"lowerthird",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-hud-lowerthird.webp",
+			"file": {
+				"path": "tfx-hud-lowerthird.html",
+				"sha256": "fd03c363a71ea706450a594b005319f481ab469ed42b2321437a54672737bcfd",
+				"bytes": 8455
+			},
+			"ir_sha256": "b56e198f3de10f2e4c7f2ce7f653d512fb07e6717e5ca6792219392434659a8c",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lowerthird-bar",
+			"title": "字条 · 色块条滑入 + 姓名 / 头衔",
+			"family": "F04",
+			"tags": [
+				"F04",
+				"lowerthird",
+				"bar",
+				"name",
+				"role"
+			],
+			"duration": 6,
+			"slots": [
+				"name",
+				"role"
+			],
+			"poster": "posters/tfx-lowerthird-bar.webp",
+			"file": {
+				"path": "tfx-lowerthird-bar.html",
+				"sha256": "17bdf94c19d7f7991a3b420528765aa77dfa25a3961c424fb1b3793632a5b0e7",
+				"bytes": 5803
+			},
+			"ir_sha256": "80eb7d5869b759bd7ce9abbf8a655cd3628751988bf7f2b515c3ce615895adc8",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lowerthird-frame",
+			"title": "科技字条 · 极简线框逐边画出 + 角标 + 打字",
+			"family": "F05",
+			"tags": [
+				"F05",
+				"lowerthird",
+				"frame",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-lowerthird-frame.webp",
+			"file": {
+				"path": "tfx-lowerthird-frame.html",
+				"sha256": "4b3770a49c311ab3bbc9e0fe7ed04a87c7656568fef2a6de86276b3f18fed6da",
+				"bytes": 9176
+			},
+			"ir_sha256": "fd694d04c4dc0aa1f9de5b4277f60ff7bfdc20a4059957404c96ed57ea5b5dcf",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lowerthird-hang",
+			"title": "吊牌字条 · 垂线放下 + 摆动定住",
+			"family": "F04",
+			"tags": [
+				"F04",
+				"lowerthird",
+				"hang",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-lowerthird-hang.webp",
+			"file": {
+				"path": "tfx-lowerthird-hang.html",
+				"sha256": "6f343adcce10c2715331e6e22a451ddf8f93183ed8eeeec5121de5161e13a728",
+				"bytes": 6299
+			},
+			"ir_sha256": "cabd6c6399663c4aa1821540e708675516ce10ec756b3b564e89e3e69b8252ac",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lowerthird-lines",
+			"title": "字条 · 竖线生长 + 姓名 / 头衔双行",
+			"family": "F04",
+			"tags": [
+				"F04",
+				"lowerthird",
+				"lines",
+				"name",
+				"role"
+			],
+			"duration": 6,
+			"slots": [
+				"name",
+				"role"
+			],
+			"poster": "posters/tfx-lowerthird-lines.webp",
+			"file": {
+				"path": "tfx-lowerthird-lines.html",
+				"sha256": "112238d60c842c70b7a1d4fd32d5c09486ac5e033e607847b1d06c7dc58ee67c",
+				"bytes": 5116
+			},
+			"ir_sha256": "72e95d1775ba83019e38d81e3f63db073678d8547684b7e0035597daed9914e7",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lowerthird-pill",
+			"title": "圆角胶囊条 + 角标 + 圆形箭头按钮",
+			"family": "F04",
+			"tags": [
+				"F04",
+				"lowerthird",
+				"pill",
+				"main",
+				"tag"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"tag"
+			],
+			"poster": "posters/tfx-lowerthird-pill.webp",
+			"file": {
+				"path": "tfx-lowerthird-pill.html",
+				"sha256": "f4793b0d542108765e97733aa62fe392f3ab3b267620b9834214c5067e90e0d0",
+				"bytes": 7830
+			},
+			"ir_sha256": "f1a4eb5018d672450e987a1b08ed858fd4c82b6e941322e06bb2c49157bb0517",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lowerthird-tech",
+			"title": "科技字条 · 双线 + 编号 + 扫描",
+			"family": "F05",
+			"tags": [
+				"F05",
+				"lowerthird",
+				"tech",
+				"main",
+				"num",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"num",
+				"sub"
+			],
+			"poster": "posters/tfx-lowerthird-tech.webp",
+			"file": {
+				"path": "tfx-lowerthird-tech.html",
+				"sha256": "ee76b5e68e541d03bbdb9c813d25b407205411ae8a448d081a4d2cbc127ac0df",
+				"bytes": 10838
+			},
+			"ir_sha256": "6104622345060098d60e19ff24ef34bb58ea551e1bb13093dd6b334e1062a5c2",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-lyric-stagger",
+			"title": "多行错峰左滑上屏",
+			"family": "M122",
+			"tags": [
+				"M122",
+				"lyric",
+				"stagger",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-lyric-stagger.webp",
+			"file": {
+				"path": "tfx-lyric-stagger.html",
+				"sha256": "b020a1a97a584ed8fa1e6d1d235e4b3c3d1b32bb91c0344c82077860cca95a2a",
+				"bytes": 4439
+			},
+			"ir_sha256": "5717ebfb708650ba948d4866fb65c003392e4a7cc670a9c2b012fa0929a37bc8",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-mag-cover",
+			"title": "杂志封面 · 衬线双行 + 细线夹持",
+			"family": "F21",
+			"tags": [
+				"F21",
+				"mag",
+				"cover",
+				"byline",
+				"kicker",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"byline",
+				"kicker",
+				"main"
+			],
+			"poster": "posters/tfx-mag-cover.webp",
+			"file": {
+				"path": "tfx-mag-cover.html",
+				"sha256": "8f7ab7d96efda1dcc4429902e14d47014701e9dd23ddc6905228d10d0be7e0ce",
+				"bytes": 7437
+			},
+			"ir_sha256": "3236683fcfa6f5d9149008004bb05d20651ba6497fd7b895e35e77328db6096a",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-neon-frame",
+			"title": "霓虹圆角框 + 文字点亮",
+			"family": "F20",
+			"tags": [
+				"F20",
+				"neon",
+				"frame",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-neon-frame.webp",
+			"file": {
+				"path": "tfx-neon-frame.html",
+				"sha256": "f365f2705b28ab2196ed23b4bfe660549472b657402314f5e516852c1909576c",
+				"bytes": 7278
+			},
+			"ir_sha256": "a9b244382b118494f5031479b309b700da8454083c2e53fa44cfb9d0c5cb389f",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-neon-title",
+			"title": "霓虹描边发光标题 · 乱序闪烁点亮",
+			"family": "F20",
+			"tags": [
+				"F20",
+				"neon",
+				"title",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-neon-title.webp",
+			"file": {
+				"path": "tfx-neon-title.html",
+				"sha256": "51f1dc6ec4ad1129c4125c3067b148b952f51a5f003665f47e4feb0db0fbca6c",
+				"bytes": 6137
+			},
+			"ir_sha256": "6c3ce08840719d01527817cbc96f6d4000b6e91c45ab4cdb604adc1e64252d68",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-news-band",
+			"title": "报纸头条 · 双横线夹持 + 标签",
+			"family": "F21",
+			"tags": [
+				"F21",
+				"news",
+				"band",
+				"main",
+				"sub",
+				"tag"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub",
+				"tag"
+			],
+			"poster": "posters/tfx-news-band.webp",
+			"file": {
+				"path": "tfx-news-band.html",
+				"sha256": "aa4e51a151ca19abecfdd6e6388c6356ff3a5ee5b7e4fc611a3d31b5383a044f",
+				"bytes": 7241
+			},
+			"ir_sha256": "73a9336d5b008b4bf3153aa80a5a571c5454a6b12cca3b0efdd0fbb9bc83bc27",
+			"category": "商务排版"
+		},
+		{
+			"id": "tfx-num-roll",
+			"title": "数值滚动落定数据卡",
+			"family": "M143",
+			"tags": [
+				"M143",
+				"num",
+				"roll",
+				"cap",
+				"unit"
+			],
+			"duration": 6,
+			"slots": [
+				"cap",
+				"num",
+				"unit"
+			],
+			"poster": "posters/tfx-num-roll.webp",
+			"file": {
+				"path": "tfx-num-roll.html",
+				"sha256": "eb490be6334029ae5bc14ff7698287c721bd4813e84c99ce28750cea491d9af6",
+				"bytes": 13843
+			},
+			"ir_sha256": "5781cd865e8d27cdd1290593af132f708754165b6cd6fe8869f059c23cd5cbf4",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-pixel-window",
+			"title": "复古窗口 · 标题栏 + 进度条",
+			"family": "F03",
+			"tags": [
+				"F03",
+				"pixel",
+				"window",
+				"label",
+				"pct",
+				"title"
+			],
+			"duration": 6,
+			"slots": [
+				"label",
+				"pct",
+				"title"
+			],
+			"poster": "posters/tfx-pixel-window.webp",
+			"file": {
+				"path": "tfx-pixel-window.html",
+				"sha256": "d0a63038bd423a86fb100e96da436b8b0521b7b027eead5fa77a380ef8db154e",
+				"bytes": 11113
+			},
+			"ir_sha256": "6060262f827dfd1bb0f717e6937db43cb26a64dd8c1a57523eca6cc3bacb8d1c",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-quote-corner",
+			"title": "对角双引号 + 色框引文",
+			"family": "F07",
+			"tags": [
+				"F07",
+				"quote",
+				"corner",
+				"author"
+			],
+			"duration": 6,
+			"slots": [
+				"author",
+				"quote"
+			],
+			"poster": "posters/tfx-quote-corner.webp",
+			"file": {
+				"path": "tfx-quote-corner.html",
+				"sha256": "1acab834c7f5ecd8d55370c7e1ef13ec200f8061a262a816a7169be35e1eb30f",
+				"bytes": 7945
+			},
+			"ir_sha256": "7bd7e40ed254774a4d1a1990d6f342d0ca4dde57f075aef61b7b852316a13934",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-quote-frame",
+			"title": "引用框 · 引号弹入 → 正文逐行淡入 → 角括线收尾",
+			"family": "F07",
+			"tags": [
+				"F07",
+				"quote",
+				"frame",
+				"body",
+				"from"
+			],
+			"duration": 6,
+			"slots": [
+				"body",
+				"from"
+			],
+			"poster": "posters/tfx-quote-frame.webp",
+			"file": {
+				"path": "tfx-quote-frame.html",
+				"sha256": "6c6617bfe0163efa5f122b2b67d14cc51dfb0021ba60cdcb9da209f20542b931",
+				"bytes": 9106
+			},
+			"ir_sha256": "890461326fdcc08cac895166fef2e0c2fa34ca587e10539c36e01f114e770a49",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-quote-mark",
+			"title": "大引号 + 引文 + 署名",
+			"family": "F07",
+			"tags": [
+				"F07",
+				"quote",
+				"mark",
+				"author"
+			],
+			"duration": 6,
+			"slots": [
+				"author",
+				"quote"
+			],
+			"poster": "posters/tfx-quote-mark.webp",
+			"file": {
+				"path": "tfx-quote-mark.html",
+				"sha256": "dc144c5c8678404642f90da91c96d5410b664a96bccbb82573e7cbad69921deb",
+				"bytes": 6593
+			},
+			"ir_sha256": "a892e80a653ef7a036a235a6ae62c8a1bd5f9be88e676c0676628d116ff4e058",
+			"category": "标注引用"
+		},
+		{
+			"id": "tfx-scroll-split-type",
+			"title": "滚词翻页 → 中线劈开 → 打字机落句",
+			"family": "R11",
+			"tags": [
+				"R11",
+				"scroll",
+				"split",
+				"type",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-scroll-split-type.webp",
+			"file": {
+				"path": "tfx-scroll-split-type.html",
+				"sha256": "817ec96ac9cb9874c1a32db6eab1c6595e2eb80bcf9a4a029efaabc5971d5341",
+				"bytes": 11388
+			},
+			"ir_sha256": "fe973218d07805b3f9ee6eb6f39501992be1021203106771c076fb6250f0ed32",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-sparkle-title",
+			"title": "标题 + 三颗星芒错峰闪",
+			"family": "F19",
+			"tags": [
+				"F19",
+				"sparkle",
+				"title",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-sparkle-title.webp",
+			"file": {
+				"path": "tfx-sparkle-title.html",
+				"sha256": "de5238457cf7c9c3586b722962565d9af055d4a54bcea90a93ca333fe62343cb",
+				"bytes": 11755
+			},
+			"ir_sha256": "2855421dfa0b81522b56a7de5074423209b5909ee4450e87e4f7d6c4aca4a591",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-sports-band",
+			"title": "斜切赛事条 · 主块 + 强调斜条",
+			"family": "F24",
+			"tags": [
+				"F24",
+				"sports",
+				"band",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-sports-band.webp",
+			"file": {
+				"path": "tfx-sports-band.html",
+				"sha256": "cf00503e56b3153cf9c190f156a01cbe3b9243e83e157336ae162a89399b7514",
+				"bytes": 7061
+			},
+			"ir_sha256": "7bd6199d276bf1e8af6e0b8c875b2336b122c354f9079fd64c68b3d006efb2f4",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-supernova",
+			"title": "镜头感十字星芒聚拢 → 全屏闪白 → 星缩成小闪点让位 → 字从光里出现（超新星）",
+			"family": "F19",
+			"tags": [
+				"F19",
+				"supernova",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-supernova.webp",
+			"file": {
+				"path": "tfx-supernova.html",
+				"sha256": "656aa9a635abc68c3569478b351f0c343da7a8401c1ed27fe9ed5c780235d121",
+				"bytes": 7946
+			},
+			"ir_sha256": "568b10fc500ae9120f37f2890f0f5e56c490a231f1b132ac291e7898dc881133",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-tag-pill",
+			"title": "字条 · 小标签药丸弹入 + 文字",
+			"family": "F04",
+			"tags": [
+				"F04",
+				"tag",
+				"pill",
+				"label"
+			],
+			"duration": 6,
+			"slots": [
+				"label",
+				"tag"
+			],
+			"poster": "posters/tfx-tag-pill.webp",
+			"file": {
+				"path": "tfx-tag-pill.html",
+				"sha256": "fc90f3320aefcb28d0b4bc22ea0aa8f9ee87120c5717ea2c8c7022704e19ca5d",
+				"bytes": 4128
+			},
+			"ir_sha256": "933bd3ff61878c975abcd877be2a4f11297bcd615c26a2f42ff29f4e1b3e9b1b",
+			"category": "人名条"
+		},
+		{
+			"id": "tfx-title-3line",
+			"title": "三行阶梯错位大标题",
+			"family": "F11",
+			"tags": [
+				"F11",
+				"title",
+				"3line",
+				"l1",
+				"l2",
+				"l3"
+			],
+			"duration": 6,
+			"slots": [
+				"l1",
+				"l2",
+				"l3"
+			],
+			"poster": "posters/tfx-title-3line.webp",
+			"file": {
+				"path": "tfx-title-3line.html",
+				"sha256": "77a28b4902d22ba47ff1e46375c302d92b202013c51579bfaa0fbde63b0ad6e5",
+				"bytes": 6521
+			},
+			"ir_sha256": "ed44949b9212f1c0947d51d5a9f89d04feddbc0dd88efe8012617d68e52527ba",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-arrows",
+			"title": "三角箭头左右夹持 + 标题",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"arrows",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-arrows.webp",
+			"file": {
+				"path": "tfx-title-arrows.html",
+				"sha256": "52f00511599f23ab5c771d42822ea363a23c353d8e4ed80a9b1a81f456fa7e2b",
+				"bytes": 5862
+			},
+			"ir_sha256": "f96ddd301c231bcc8875412b02a667f9b61a66b5f539228c247348253ceee756",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-block",
+			"title": "色块从左滑入 → 字随后滑入",
+			"family": "F10",
+			"tags": [
+				"F10",
+				"title",
+				"block",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-block.webp",
+			"file": {
+				"path": "tfx-title-block.html",
+				"sha256": "ddfd30dc6ff311bcd3e7ed87ca0c65c432703ceade5540e3ff7effa97b7f2e04",
+				"bytes": 3823
+			},
+			"ir_sha256": "6e2f6f82280060896e72d66a01a517f2981fc117e45aa7dc6f30faa9a8a22ef8",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-blockslide",
+			"title": "色块滑入 → 文字浮出 → 色块划走",
+			"family": "F10",
+			"tags": [
+				"F10",
+				"title",
+				"blockslide",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-blockslide.webp",
+			"file": {
+				"path": "tfx-title-blockslide.html",
+				"sha256": "a2ee563e0ba235f28ea0e47f5c039a5f7a9543ad221c381372f6650b601c2d84",
+				"bytes": 5350
+			},
+			"ir_sha256": "701a5e2c91b62a5d001554fdd10dace04094604abff4048828a287e3b886c4c8",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-bounce",
+			"title": "逐字弹跳落位",
+			"family": "F15",
+			"tags": [
+				"F15",
+				"title",
+				"bounce",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-bounce.webp",
+			"file": {
+				"path": "tfx-title-bounce.html",
+				"sha256": "cda4e29f85d4d1abb48ce67f356d335e180fda60b088795ffa0a8053cef39501",
+				"bytes": 5377
+			},
+			"ir_sha256": "a73676b82d40ba2c35ab37687c4a69538c5f201f5b968d6243ae43cfea5de070",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-brackets",
+			"title": "主标 + 四角括号画出",
+			"family": "F02",
+			"tags": [
+				"F02",
+				"title",
+				"brackets",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-brackets.webp",
+			"file": {
+				"path": "tfx-title-brackets.html",
+				"sha256": "ccfbe80f4a23ab071c948b8424d08e99473b05ed6b2e666de702ffd41e9c7efd",
+				"bytes": 8012
+			},
+			"ir_sha256": "a964474d9af5a285b0ce67698066404991f70815d05a3beef97b20d288e9ed36",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-cinematic",
+			"title": "极大字距细体 + 微标 + 细线",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"cinematic",
+				"main",
+				"micro"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"micro"
+			],
+			"poster": "posters/tfx-title-cinematic.webp",
+			"file": {
+				"path": "tfx-title-cinematic.html",
+				"sha256": "458fe628bc89837fe0f96376c34f497f6a157680d5557f692a62dc0a3f794bfe",
+				"bytes": 5200
+			},
+			"ir_sha256": "db5d69253d0336d0034ec16314e351481f3d05c5557853080d9ff83358065ad4",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-decode",
+			"title": "逐字乱码滚动落定（AE 经典解码）",
+			"family": "M124",
+			"tags": [
+				"M124",
+				"title",
+				"decode",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-decode.webp",
+			"file": {
+				"path": "tfx-title-decode.html",
+				"sha256": "0fbfbd1216cdd0ba06857166087c55d17d7c1d3107d018f37c9c70ee3eee2719",
+				"bytes": 21326
+			},
+			"ir_sha256": "3dfb5a4f7e6d8f181485ae0f1cdf9ab45baae87e4fde1c8ef100975d54ffebe8",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-dualfont",
+			"title": "黑体主标 + 宋体副标错叠定格卡",
+			"family": "M118",
+			"tags": [
+				"M118",
+				"title",
+				"dualfont",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-dualfont.webp",
+			"file": {
+				"path": "tfx-title-dualfont.html",
+				"sha256": "14c577d4342cdef2f81b749c1deb0a5e0762babfff1b286ac2aa393b04fe5634",
+				"bytes": 5552
+			},
+			"ir_sha256": "27a812d423def10b97324239758af8c1cca3a50a88caab9818557c45be3afb99",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-echo",
+			"title": "描边大字 + 错位重影行",
+			"family": "F10",
+			"tags": [
+				"F10",
+				"title",
+				"echo",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-echo.webp",
+			"file": {
+				"path": "tfx-title-echo.html",
+				"sha256": "20526f9d5a1d9498e8485e870c6a8b2874492d3c10c19861739d295a250c4096",
+				"bytes": 5530
+			},
+			"ir_sha256": "b3610312087027152eb372800488fde56dc2c36f4dbb809f0fa7a448a4dd0c24",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-extrude",
+			"title": "三层偏移伪挤出标题",
+			"family": "M141",
+			"tags": [
+				"M141",
+				"title",
+				"extrude",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-extrude.webp",
+			"file": {
+				"path": "tfx-title-extrude.html",
+				"sha256": "13c561773b9b0ad7190c9ac9346870bca27e8b75cfc37941bb8d5c2ee97b3eaf",
+				"bytes": 5764
+			},
+			"ir_sha256": "053486841425bee2f2a07219de3c6190be35cb6e2900986b624ad0dc22ffee9d",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-flip",
+			"title": "逐字 3D 翻入（绕 X 轴从底边翻起）",
+			"family": "F14",
+			"tags": [
+				"F14",
+				"title",
+				"flip",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-flip.webp",
+			"file": {
+				"path": "tfx-title-flip.html",
+				"sha256": "1acbf501c8acf922a9334cb707f34e475c377b462cd564da43b34cb93b71017d",
+				"bytes": 3434
+			},
+			"ir_sha256": "e32f725aacae2c731e79d13e4ec42740fef7a42b610d38a7f42a9f97b70d25b9",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-flipcard",
+			"title": "卡片翻转落定 + 日期行",
+			"family": "F14",
+			"tags": [
+				"F14",
+				"title",
+				"flipcard",
+				"date",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"date",
+				"main"
+			],
+			"poster": "posters/tfx-title-flipcard.webp",
+			"file": {
+				"path": "tfx-title-flipcard.html",
+				"sha256": "352b2e891a57c3850adf8ecf865d4fbaa1a5476e0e49fbaf0349a5c761ceac6b",
+				"bytes": 5563
+			},
+			"ir_sha256": "1de7cbdd2f3df7a410f2693fcd9477693d41bf71e7eb11c25891405469270967",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-framereveal",
+			"title": "框线逐边画出 → 主标淡入 → 章节小字",
+			"family": "F09",
+			"tags": [
+				"F09",
+				"title",
+				"framereveal",
+				"chapter",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"chapter",
+				"main"
+			],
+			"poster": "posters/tfx-title-framereveal.webp",
+			"file": {
+				"path": "tfx-title-framereveal.html",
+				"sha256": "75d2f1a6bfb483444c224d0be8da0afcedc52ed5b652e177acf4fc3b604ade27",
+				"bytes": 7199
+			},
+			"ir_sha256": "5f85a58e20dacac12fce257c9a2207bc16da99058527d4a1ca9dcf1c0c502e27",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-gather",
+			"title": "收拢 / 吸入 · 逐字从远处缩入并从中心向外点亮",
+			"family": "R4",
+			"tags": [
+				"R4",
+				"title",
+				"gather",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-gather.webp",
+			"file": {
+				"path": "tfx-title-gather.html",
+				"sha256": "e71123bfbccd65526813ee12891dc4ece64947f6a2760d5b41ec44f95711f11e",
+				"bytes": 3644
+			},
+			"ir_sha256": "ed23fe026b5fdad8b01e49ad7cd45dc8331b186d9db6a8dbd880fffb24eae111",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-glow",
+			"title": "辉光 · 淡入后辉光脉冲一次再稳定",
+			"family": "R5",
+			"tags": [
+				"R5",
+				"title",
+				"glow",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-glow.webp",
+			"file": {
+				"path": "tfx-title-glow.html",
+				"sha256": "1ee2d753b4da41d089faa683404beac52ca8c118ade912d052f8b1cc89368bad",
+				"bytes": 4587
+			},
+			"ir_sha256": "0c3dde321e223787e1e25a63e6134161109de370fffb6f480df6a28d7a423834",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-linereveal",
+			"title": "横线生长 → 主标从线后上浮、副标从线后下沉",
+			"family": "F09",
+			"tags": [
+				"F09",
+				"title",
+				"linereveal",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-linereveal.webp",
+			"file": {
+				"path": "tfx-title-linereveal.html",
+				"sha256": "14f8b99fdd7494a6f363c827095865d20da9927ebfc9606a7aac593773100850",
+				"bytes": 5020
+			},
+			"ir_sha256": "738e6f59a89b013f9a817bf35e18f507e624c24d5626c9bf69b186030d672e5c",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-linewipe",
+			"title": "亮线横扫，扫过之处文字浮现",
+			"family": "F09",
+			"tags": [
+				"F09",
+				"title",
+				"linewipe",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-linewipe.webp",
+			"file": {
+				"path": "tfx-title-linewipe.html",
+				"sha256": "491944156271c2fd9d9e02ada30bf40956f9e4de77ea1a85f9c1ddaa9b385265",
+				"bytes": 5482
+			},
+			"ir_sha256": "86653de42e37f05a987ee0ee542489d8f38508ef3c8914377565863d65d2bf76",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-lsfade",
+			"title": "字距从宽收拢 + 淡入 + 细线",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"lsfade",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-lsfade.webp",
+			"file": {
+				"path": "tfx-title-lsfade.html",
+				"sha256": "5cc916d8c3cdeac4cd97dabc9a1b218d616f5cff8526f1834946ff8508237bd4",
+				"bytes": 3795
+			},
+			"ir_sha256": "d7160faab319b8a074aa00019be4cb76e6c1395238c1e4b28a6ffa5289f1bf42",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-maskrise",
+			"title": "文字自遮罩后整体升起",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"maskrise",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-maskrise.webp",
+			"file": {
+				"path": "tfx-title-maskrise.html",
+				"sha256": "d07d8da175dd9d5eb0a51d4dfb09951aac11fa5c6e3bbeea946191a268a4eb72",
+				"bytes": 5349
+			},
+			"ir_sha256": "4c6fe70a60654f4e457c1a8cebab542f540af8b56ade0cbb15b6fc11a9121785",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-slab",
+			"title": "大色块标题 + 反白副条",
+			"family": "F10",
+			"tags": [
+				"F10",
+				"title",
+				"slab",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-slab.webp",
+			"file": {
+				"path": "tfx-title-slab.html",
+				"sha256": "89dc94441a60d6ca9b3ba5e634ba5632e01e17e370ccb0fd5bf9c56e25f43ff8",
+				"bytes": 6196
+			},
+			"ir_sha256": "27aedab07d31a84468e9c189e63c8db6968a7aecb072632a91680e1c15729885",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-softfocus",
+			"title": "大字虚焦聚拢淡入",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"softfocus",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-softfocus.webp",
+			"file": {
+				"path": "tfx-title-softfocus.html",
+				"sha256": "c16a5675e5f0143e560550d101c9fb8009ecb5f27e071f43ec69e3799cb1f9e3",
+				"bytes": 6851
+			},
+			"ir_sha256": "814f817a0f248b9c125cdbfbc467895882d8fa81a8d952f2247eb9746be22e39",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-splitrise",
+			"title": "上下两半自中线合拢",
+			"family": "F09",
+			"tags": [
+				"F09",
+				"title",
+				"splitrise",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-splitrise.webp",
+			"file": {
+				"path": "tfx-title-splitrise.html",
+				"sha256": "a11a90490ada2ec122beaa6ba1da57e350c57cba48569f32585a2e0cab6c6b9f",
+				"bytes": 5752
+			},
+			"ir_sha256": "97f8002bbadf146d44024f1c315633e0c3d8be57c04e62ac852b4ed2777d4279",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-stack",
+			"title": "三行错落滑入，末行带高亮块（知识封面）",
+			"family": "F11",
+			"tags": [
+				"F11",
+				"title",
+				"stack",
+				"l1",
+				"l2",
+				"l3"
+			],
+			"duration": 6,
+			"slots": [
+				"l1",
+				"l2",
+				"l3"
+			],
+			"poster": "posters/tfx-title-stack.webp",
+			"file": {
+				"path": "tfx-title-stack.html",
+				"sha256": "9bfe20a040d694a3e0a4fc7f7e2dc2ba2ed5455dc721b45e780289a67befb597",
+				"bytes": 5545
+			},
+			"ir_sha256": "53b458d6e2c88779ef23ee318434c137bfda06008097983726404605eb57f76d",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-subrise",
+			"title": "主标上浮淡入 → 短线 → 小字副标",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"subrise",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-subrise.webp",
+			"file": {
+				"path": "tfx-title-subrise.html",
+				"sha256": "77060a92d4cb919abfc0b74b030d7c60e742df7c9fc75d941f6f47525a919049",
+				"bytes": 5056
+			},
+			"ir_sha256": "f1c9fb1e5ddb02ff458a5a2636cbb009274e6d22c025f43deb7347a43c276b12",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-sweep",
+			"title": "标题扫光循环",
+			"family": "M144",
+			"tags": [
+				"M144",
+				"title",
+				"sweep",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-sweep.webp",
+			"file": {
+				"path": "tfx-title-sweep.html",
+				"sha256": "5dbae17415f39e35095068a6fc5d9054cbc7d8c9307b7b65962877a9b2f30592",
+				"bytes": 5735
+			},
+			"ir_sha256": "ee0e3d993fc9fcc702deae6e9b203750fa6ef12b1afce5b9f71b0ed2c3618e3b",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-typeline",
+			"title": "主标打字机 → 强调短线生长 → 副标淡入",
+			"family": "F02",
+			"tags": [
+				"F02",
+				"title",
+				"typeline",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-title-typeline.webp",
+			"file": {
+				"path": "tfx-title-typeline.html",
+				"sha256": "955d11a99600361e28c5052758b012557fa8c7ae5f91ac6b718e4d9696e5ac40",
+				"bytes": 7095
+			},
+			"ir_sha256": "4d935f88fb0ceb9e391d45272d241141cfd37db9b7a06f14984771c9a9d45902",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-title-wave",
+			"title": "逐字波浪弹入（弹性回弹）",
+			"family": "F15",
+			"tags": [
+				"F15",
+				"title",
+				"wave",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-wave.webp",
+			"file": {
+				"path": "tfx-title-wave.html",
+				"sha256": "5fa88bc797824d38775e73f1dfacf411ee385a3545a4bf6c9ab5757fb7f0ca5c",
+				"bytes": 4772
+			},
+			"ir_sha256": "a9cf44a66a92d22abe79e9d8cab3e65f12d0f69fb61d9f31a164ec0fa79d9e4e",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-wordfade",
+			"title": "逐词上浮淡入",
+			"family": "F12",
+			"tags": [
+				"F12",
+				"title",
+				"wordfade",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-wordfade.webp",
+			"file": {
+				"path": "tfx-title-wordfade.html",
+				"sha256": "b317f563f7006e3a81a11911544ffb306506e561e8675d9da18be8f9acbf744a",
+				"bytes": 4219
+			},
+			"ir_sha256": "68910f974cfef855159f60bfe06bc1daeee12a10320fca709fceb72dc04e305a",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-title-zipper",
+			"title": "文字拉链 · 上下两半错位滑入合拢",
+			"family": "R3",
+			"tags": [
+				"R3",
+				"title",
+				"zipper",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-title-zipper.webp",
+			"file": {
+				"path": "tfx-title-zipper.html",
+				"sha256": "c5bf54ba76a1388b6bf86a74a4a4289cd924a8b7f5402c36220d88ab9820538f",
+				"bytes": 4390
+			},
+			"ir_sha256": "da58986e9189153f44f1cbbf7dc3e3885d7fad93286a849e72b6475f6102ba34",
+			"category": "标题"
+		},
+		{
+			"id": "tfx-travel-place",
+			"title": "地名标题 + 账号 handle",
+			"family": "F23",
+			"tags": [
+				"F23",
+				"travel",
+				"place",
+				"handle",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"handle",
+				"main"
+			],
+			"poster": "posters/tfx-travel-place.webp",
+			"file": {
+				"path": "tfx-travel-place.html",
+				"sha256": "99295e84c8b6f1a47b7a15faa6d5c40fcb2aa77f35f33e682d36cfb17bc9672f",
+				"bytes": 6591
+			},
+			"ir_sha256": "b3245eee85f3fd242356ea18c0452a8f4a4c497d1555ea8edb2198b941a8fc5a",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-travel-stamp",
+			"title": "圆形印章 + 地名 + 日期",
+			"family": "F23",
+			"tags": [
+				"F23",
+				"travel",
+				"stamp",
+				"date",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"date",
+				"main",
+				"stamp"
+			],
+			"poster": "posters/tfx-travel-stamp.webp",
+			"file": {
+				"path": "tfx-travel-stamp.html",
+				"sha256": "f92ce340b2d52441df3774e8a4457ecd7833e09b2ddf136d8908d7d5f41eb84b",
+				"bytes": 7913
+			},
+			"ir_sha256": "12bc6c89c47337f012ea294333a38eaf9ab58d6376431f1dc7647dca8256ea21",
+			"category": "其他"
+		},
+		{
+			"id": "tfx-type-backspace",
+			"title": "打字 → 退格 → 改写",
+			"family": "F01",
+			"tags": [
+				"F01",
+				"type",
+				"backspace",
+				"main",
+				"wrong"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"wrong"
+			],
+			"poster": "posters/tfx-type-backspace.webp",
+			"file": {
+				"path": "tfx-type-backspace.html",
+				"sha256": "d7af8abc74cd98fb58dce96fee54689cca9cb8842403d83b9a099ffd0b1e92c8",
+				"bytes": 11938
+			},
+			"ir_sha256": "e3d9bcf00fb4ed5f4231f19686af002144380e02f8ca6d62dfdc56577a729af0",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-boxed",
+			"title": "浅底条内打字（深色光标）",
+			"family": "F02",
+			"tags": [
+				"F02",
+				"type",
+				"boxed",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-type-boxed.webp",
+			"file": {
+				"path": "tfx-type-boxed.html",
+				"sha256": "1c32a141f627222f8404e9e74be36a3d9ce26a5992af8d2ff6508eea7478efcd",
+				"bytes": 5867
+			},
+			"ir_sha256": "11ec37a2dc2ca33b2fc665c01867b1ce6f796f95d4d44f588f2e10bb7cb7114a",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-center",
+			"title": "自中心向两侧展开点亮",
+			"family": "F01",
+			"tags": [
+				"F01",
+				"type",
+				"center",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-type-center.webp",
+			"file": {
+				"path": "tfx-type-center.html",
+				"sha256": "be01d55c011c6f45d6ca3b2c27e50780a0c973808d04a0928079f28e4a38d8cc",
+				"bytes": 5508
+			},
+			"ir_sha256": "21ade360e5aa57d49910dfa3ab1e8b15fdd8dd7efdf7062ac00bacfb2d4ed6fe",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-kicker",
+			"title": "上方小标 + 打字主标 + 线 + 副标",
+			"family": "F02",
+			"tags": [
+				"F02",
+				"type",
+				"kicker",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"kicker",
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-type-kicker.webp",
+			"file": {
+				"path": "tfx-type-kicker.html",
+				"sha256": "dd8159525ff10ee9bd94b1aae382ba31e96262ccb21da61776e7a9c15fb8e289",
+				"bytes": 8067
+			},
+			"ir_sha256": "865cb2f674f74cbca0009f423039722ecdf878172760f32e728c6634cb2fcdba",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-line",
+			"title": "打字机 · 单行 + 光标",
+			"family": "F01",
+			"tags": [
+				"F01",
+				"type",
+				"line",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-type-line.webp",
+			"file": {
+				"path": "tfx-type-line.html",
+				"sha256": "01763177bec69b3997b19ecd64970495c105ff919c45970f12c221d772059318",
+				"bytes": 5349
+			},
+			"ir_sha256": "be65e4c77b0cf1194af36002077ffdb6d01b9c89c8f2d52cc175f8553399b502",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-lines",
+			"title": "打字机 · 多行逐行接力",
+			"family": "F01",
+			"tags": [
+				"F01",
+				"type",
+				"lines",
+				"l1",
+				"l2",
+				"l3"
+			],
+			"duration": 7,
+			"slots": [
+				"l1",
+				"l2",
+				"l3"
+			],
+			"poster": "posters/tfx-type-lines.webp",
+			"file": {
+				"path": "tfx-type-lines.html",
+				"sha256": "f2ed6a146070d1ce96f435cf6e4a495902842fea1bb926a1887356a0f3ba0f9a",
+				"bytes": 12238
+			},
+			"ir_sha256": "1530cab1e04bf0168bec60c39676ffddf70bdbb4f087e9bac4de9ac54654648d",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-loading",
+			"title": "像素风 LOADING · 方块光标 + 分格进度条",
+			"family": "F03",
+			"tags": [
+				"F03",
+				"type",
+				"loading",
+				"done",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"done",
+				"main"
+			],
+			"poster": "posters/tfx-type-loading.webp",
+			"file": {
+				"path": "tfx-type-loading.html",
+				"sha256": "a1c69da70345bedd5de3524012220687878c3b0093e4d8e3836dfb3e431a36a2",
+				"bytes": 7382
+			},
+			"ir_sha256": "f70ef994f3154f9b39993c0f911116e615c03990213ae38e0bb5bcaca9675821",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-relay",
+			"title": "两段打字接力（主标 → 短线 → 副标）",
+			"family": "F02",
+			"tags": [
+				"F02",
+				"type",
+				"relay",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-type-relay.webp",
+			"file": {
+				"path": "tfx-type-relay.html",
+				"sha256": "fe3660f2c16e6a4985211cb2ae34b6a0d3125bdb645ce19c76739b6a2f0b6c59",
+				"bytes": 8860
+			},
+			"ir_sha256": "f5fc7057278ded85943147ffbc45e9fb76a50491626c47ab09f8fcd2cac38867",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-scramble",
+			"title": "随机打字机 · 逐字乱序点亮（确定性置换）",
+			"family": "R6",
+			"tags": [
+				"R6",
+				"type",
+				"scramble",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-type-scramble.webp",
+			"file": {
+				"path": "tfx-type-scramble.html",
+				"sha256": "956e220b6d9c3e75fc6129dd0fd6293a8e527c0effadc850195da90ff6d9fc40",
+				"bytes": 5328
+			},
+			"ir_sha256": "889c3577786a45f7a0a8dbcfabaa3b8b7b58492549b4ce855fe177fbf2b14d60",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-terminal",
+			"title": "终端风打字（提示符 + 方块光标）",
+			"family": "F01",
+			"tags": [
+				"F01",
+				"type",
+				"terminal",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-type-terminal.webp",
+			"file": {
+				"path": "tfx-type-terminal.html",
+				"sha256": "b8c1248fc807bd55bbf5be3de283b61157af3755897a56fdf6bd8592d1d87aa9",
+				"bytes": 7913
+			},
+			"ir_sha256": "ae80061d5fd2555ebcdff5d736c15a350030153e39eaf38ac337714e1a420cd9",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-twoline",
+			"title": "两行长句逐字打（跨行）",
+			"family": "F01",
+			"tags": [
+				"F01",
+				"type",
+				"twoline",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-type-twoline.webp",
+			"file": {
+				"path": "tfx-type-twoline.html",
+				"sha256": "566ffdadb84a09a520b8223c5854a9add430fb0049e5f042960d47236463c67b",
+				"bytes": 6562
+			},
+			"ir_sha256": "5e880059e339c540bfcc3714c697c6706a8ee0a512b4393a483658ed271e942a",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-type-underline",
+			"title": "打字机 + 下划线同步生长",
+			"family": "F02",
+			"tags": [
+				"F02",
+				"type",
+				"underline",
+				"main",
+				"sub"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"sub"
+			],
+			"poster": "posters/tfx-type-underline.webp",
+			"file": {
+				"path": "tfx-type-underline.html",
+				"sha256": "b883dac450d20183ba4d7d4fa15d439a7facd9ee21527e07d903bb297c4e205a",
+				"bytes": 7183
+			},
+			"ir_sha256": "9bae4da8e5ea8244529b890d15fb671abeb84d83be26416b08b5bf413724fa78",
+			"category": "打字机"
+		},
+		{
+			"id": "tfx-ui-toast",
+			"title": "仿通知弹窗滑入",
+			"family": "M131",
+			"tags": [
+				"M131",
+				"ui",
+				"toast",
+				"body",
+				"title"
+			],
+			"duration": 6,
+			"slots": [
+				"body",
+				"title"
+			],
+			"poster": "posters/tfx-ui-toast.webp",
+			"file": {
+				"path": "tfx-ui-toast.html",
+				"sha256": "fd4b48933af93088b80d68c30789606dc23104f7aba18f77cbe3bdde8cfeef72",
+				"bytes": 7652
+			},
+			"ir_sha256": "5d19518b8c01d63e9d0b8619687a1353a19f2de1c5e29ac38aa6302b57efbeb6",
+			"category": "对话气泡"
+		},
+		{
+			"id": "tfx-variety-subtitle",
+			"title": "综艺字幕 · 色标签弹入 + 深色文字条滑入",
+			"family": "F13",
+			"tags": [
+				"F13",
+				"variety",
+				"subtitle",
+				"main",
+				"tag"
+			],
+			"duration": 6,
+			"slots": [
+				"main",
+				"tag"
+			],
+			"poster": "posters/tfx-variety-subtitle.webp",
+			"file": {
+				"path": "tfx-variety-subtitle.html",
+				"sha256": "87fbc0fd20a60512c6d7d143d9069e6cdb5259b9eead586d5b22894097580c70",
+				"bytes": 4134
+			},
+			"ir_sha256": "74f617d45807a68ccf7b2495930d4346a131129b6db238fedde1e06e18f641d6",
+			"category": "字幕"
+		},
+		{
+			"id": "tfx-word-relay",
+			"title": "逐词累加字幕（词级接力）",
+			"family": "M125",
+			"tags": [
+				"M125",
+				"word",
+				"relay",
+				"main"
+			],
+			"duration": 6,
+			"slots": [
+				"main"
+			],
+			"poster": "posters/tfx-word-relay.webp",
+			"file": {
+				"path": "tfx-word-relay.html",
+				"sha256": "f2a0074ef70c601133e94af7f04a1ecb98d6832d5a88442e2e74d8af5356165f",
+				"bytes": 4867
+			},
+			"ir_sha256": "9e226fd5915fc5e130e96df60200e231ea336b82a0482ee26dc7457e53b562cc",
+			"category": "字幕"
+		}
+	]
+}

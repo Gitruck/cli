@@ -67,6 +67,7 @@ function ownAssetCompositionId(p: unknown): string | undefined {
 // 已核不成环（matrix-lay 不引 mg-lay），无额外加载成本。
 import { assertGtrkWriteInvariants, assertTrimIdentity } from "./gtrk-invariants";
 import { f2ms, r3, sec2frame } from "./frame-domain";
+import { type BeatTrackIdentity, identifyBeatTracks } from "./mg-track-identity";
 import { videoRateOf } from "./gtrk-patch";
 
 /**
@@ -113,6 +114,13 @@ export interface MgLayResult {
 	next: Record<string, unknown>;
 	/** laidParticles = **本次**新铺数（语义不变）；keptParticles = 从被剥轨原样搬运回来的既有颗粒数。 */
 	summary: { laidTrack: number | null; laidParticles: number; keptParticles: number };
+	/**
+	 * 逐条 beat 轨的识别结论与依据（fix-mg-lay-track-identity）。
+	 *
+	 * ⚠️ 这不是调试信息：账本与实际对不上时，人第一个会去看的就是「哪条轨被认成我们的」。
+	 * 识别结论不可见 = 把一次「我判错了但没人知道」留在原地。
+	 */
+	tracks: ({ track_index: number | null } & BeatTrackIdentity)[];
 	mg: StructMetaMg;
 }
 
@@ -224,8 +232,6 @@ export function layMgTracks(opts: {
 	const prevMg = structMeta.mg as PrevMeta;
 	const prevRrv = structMeta.rrv as PrevMeta;
 	const prevIndices = new Set<number>([...layTracksOf(prevMg), ...layTracksOf(prevRrv)]);
-	const removedTracks = beatTracks.filter((t) => typeof t.track_index === "number" && prevIndices.has(t.track_index));
-	const keptTracks = beatTracks.filter((t) => !(typeof t.track_index === "number" && prevIndices.has(t.track_index)));
 
 	// ── 自产颗粒的 composition_id 全集（fix-mg-material-strip-key，素材身份判据之二的定语）─────
 	// 三路取并集，都是**本层自己的账本**、与客户端改不改 id 无关：
@@ -234,17 +240,20 @@ export function layMgTracks(opts: {
 	//   ③ 本次 items（登记整个丢失时仍认得出自己刚要铺的那些）。
 	// 用途：把「path 落在 assets/mg/ 下」这条身份信号**再收紧一格**——只有文件名恰好是账本里的
 	// composition_id 才算自产物。用户往该目录塞的自有 html（文件名不在账本里）因此永远不进剥离面。
-	const ownCompositionIds = new Set<string>([
+	//
+	// ⚠️ **身份账本（`ledgerIds`）与素材剥离面（`ownCompositionIds`）是两个集合，MUST NOT 合并。**
+	// 第一版把它们写成一个，并且从「号在册的轨」上吸 id 补进去——那是个**循环**：
+	// 兜底靠号、身份又靠这个被号污染过的账本，绕一圈回到「只认号」，用户轨照样被误剥。
+	// （集成用例当场把它抓出来了；叶子模块的单测一条都没红——**接线格不可省**。）
+	//
+	// ⚠️ `priorIds` 与 `ledgerIds` 也要分开：**能不能用内容指纹，取决于「上一轮登记了什么」**，
+	// 与「本次要铺什么」无关。把 items 算进「有没有账本」会让老档（`beats:[]`）误判成有账本，
+	// 于是它的遗留轨被判成用户轨、永远剥不掉（老档回归用例当场红）。
+	const priorIds = new Set<string>([
 		...beatsOf(prevMg).map((b) => b.composition_id),
 		...beatsOf(prevRrv).map((b) => b.composition_id),
-		...items.map((it) => it.composition_id),
 	]);
-	for (const t of removedTracks) {
-		for (const c of t.track_timeline ?? []) {
-			const cid = clipCompositionId(c);
-			if (cid !== undefined) ownCompositionIds.add(cid);
-		}
-	}
+	const ledgerIds = new Set<string>([...priorIds, ...items.map((it) => it.composition_id)]);
 	/**
 	 * 一条 materials 条目是否为 **MG 自产物**（身份判据，双信号取并集，两条都是**写侧事实**）：
 	 *   ① `id` 前缀 `mg-` / `rrv-`（CLI 写侧 id 形态）；
@@ -257,6 +266,47 @@ export function layMgTracks(opts: {
 		const cid = ownAssetCompositionId(m.path);
 		return cid !== undefined && ownCompositionIds.has(cid);
 	};
+
+	// ── 识别哪几条轨是我们的（fix-mg-lay-track-identity）────────────────────────
+	// ⚠️ **主判据是内容指纹，不是 track_index**：那个号客户端每存一次就重发一遍
+	// （契约明写它会漂、且 MUST NOT 当身份判据）。只认号的旧实现有两种静默失败：
+	// **剥一半**（自产物被劈到两条轨、只剥走一条 ⇒ 重复叠加）与 **误剥用户轨**
+	// （重编号后用户自己的轨落到在册号上）。判据与三档命名照抄 `matrix-lay` 的成熟口径。
+	// ⚠️ **账本为空时回落到只认号**：老档可能 `beats:[]` 而轨上有 clip（去品牌化前的遗留形态），
+	// 此时没有内容指纹可比，号是唯一还剩的信号。这是**如实的降级**不是取巧——
+	// 有账本就用内容，没账本才认号，而不是反过来。
+	const identities = priorIds.size
+		? identifyBeatTracks(beatTracks, ledgerIds, prevIndices, clipCompositionId)
+		: beatTracks.map((t) => {
+				const reg = typeof t.track_index === "number" && prevIndices.has(t.track_index);
+				return {
+					verdict: (reg ? "self-produced" : "user-track") as "self-produced" | "user-track",
+					matched: 0,
+					total: (t.track_timeline ?? []).length,
+					indexRegistered: reg,
+					why: "上一轮登记为空（老档 beats:[]），无内容指纹可比 —— 回落到只认 track_index",
+				};
+			});
+	const removedTracks = beatTracks.filter((_, i) => identities[i].verdict !== "user-track");
+	const keptTracks = beatTracks.filter((_, i) => identities[i].verdict === "user-track");
+
+	// 素材剥离面 = 身份账本 ∪ **被判为自产的那些轨**上反查出来的 composition_id。
+	// 这一步 MUST 在识别**之后**做（见上面那段关于循环的说明）：先定哪几条轨是我们的，
+	// 再从那些轨上扩充素材面，用户轨上的 id 永远进不来。
+	const ownCompositionIds = new Set<string>(ledgerIds);
+	for (const t of removedTracks) {
+		for (const c of t.track_timeline ?? []) {
+			const cid = clipCompositionId(c);
+			if (cid !== undefined) ownCompositionIds.add(cid);
+		}
+	}
+	const trackReport = beatTracks.map((t, i) => ({ track_index: t.track_index ?? null, ...identities[i] }));
+	for (const r of trackReport) {
+		// 号漂了但内容对得上 = **良性降级**，打可读 INFO 说清楚，别让人以为出了故障。
+		if (r.verdict === "self-produced-edited") info(`beat 轨 ${r.track_index}：${r.why}`);
+		// 号在册却判成用户轨 —— 只认号的实现会在这里误剥用户内容，值得当面说一句。
+		else if (r.verdict === "user-track" && r.indexRegistered) info(`beat 轨 ${r.track_index}：${r.why}`);
+	}
 
 	// ── 保留集搬运（阶段 A）：按 composition_id 从**被剥轨**里捞回整条 clip，逐字段原样搬到新轨 ──
 	// ★ ⑤ 2026-07-26 拍板「原样搬运」：MUST NOT 从 struct_meta.mg.beats 重建 —— MgMetaBeat 没有 opaque
@@ -398,6 +448,7 @@ export function layMgTracks(opts: {
 			laidParticles: clips.length, // 语义不变 = **本次**新铺数（MUST NOT 混进保留数）
 			keptParticles: carriedClips.length,
 		},
+		tracks: trackReport,
 		mg,
 	};
 }

@@ -40,12 +40,45 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 **车道 → 栏目生产 skill 的解析（照此，别猜）**：读**有效栏目配置**的 `style.skills[]`（配置文件 `~/.gitruck/columns/<id>.json`；栏目 id 由 `--column <id>` 或 config `defaultColumn` 选取；零配置 = L0 内置默认栏目，**不携带 style 清单** → 必然走下方「无匹配」分支）。在 `style.skills[]` 里取 **`produces` 归一后（旧 `RRV_MG` → `MG`）等于 `MG`** 的条目 → 触发它 `ref` 指向的 skill 产颗粒。
 - 命中多条 → 按栏目约定取其一（一般栏目只登记一个 MG 生产 skill）。
 - 条目带 `routing:"none"`（管线外产物，如封面）→ 跳过，不当 MG 生产 skill。
-- **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺，给用户**三选一**（都不替他选）：
+- **无匹配** = 本栏目没有 MG 生产 skill → 别硬铺，给用户**四选一**（都不替他选）：
   1. **建栏目**：`/gtrk-style-maker` 沉淀自己的 MG 生产 skill（一次性，长期资产）；
   2. **换栏目**：`--column <id>` 指向已配置的栏目；
   3. **用中性块**：Hyperframes registry 的中性颗粒骨架（`gtrk mg fetch`，见下节「中性块工作流」）——没建栏目也能当场出 MG，但**骨架不是成品**，内容与审美 MUST 改写。
+  4. **用文字模板**：同合云自家的文字特效模板库（`gtrk mg fetch --source text`，见下节「文字模板工作流」）——**开箱即成品**（配色与排版已做过），改字走 `gtrk mg compile`、改效果走 `gtrk mg edit --say`。派单槽位 `theme` 落在 `opening-hook` / 字卡 / 强调 / `caption` 这几类时，它通常比中性块更省事。
   另可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene mg-explainer` 列第三方 MG 生产 skill，装完 `gtrk skills add <owner/repo> --produces MG` 登记即被本节解析到——本 skill 正文不点名任何仓、不点名任何块。
-- **有匹配时中性块缺省不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物）时可**提议**「这一槽用中性块」，用户点头才用。
+- **有匹配时中性块与文字模板缺省都不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物 / 纯文字入场）时可**提议**「这一槽用中性块」或「这一槽用文字模板」，用户点头才用。
+
+## 文字模板工作流（同合云自家模板 → 改字/改效果 → lint → 铺）
+
+> 与中性块是**两条路，别混**。中性块来自第三方、是骨架，要改字体换色板才合规（机械改写八条）；
+> 文字模板是我方 clean-room 重写的**成品**，**MUST NOT 做机械改写、MUST NOT 直接改 HTML**。
+
+**为什么不能直接改 HTML**：每颗文字模板都内嵌了产生它的 IR 与两个哈希，颗粒因此自带
+「我是由这份 IR 编出来的」的证明（三态：`ir` 可云调 / `detached` 已脱离 / `html` 普通颗粒）。
+手改一个字节，它就从 `ir` 掉到 `detached`——`gtrk mg edit` 和客户端属性面板都会拒绝它，
+云端再也调不动。`gtrk mg lint` 会报非致命的 `x-ir-detached` 提醒你这件事。
+
+逐槽位：
+
+1. **候选**：`gtrk mg fetch --source text "<检索词>" --top 3 --json`（中文词可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）。候选态**离线可用**；目录走远端择新、随包兜底，命令会明示这次用的是哪一版、从哪来的。
+2. **取块**：`gtrk mg fetch --source text --pick <模板 id> --slot <beatId> --project <目录> --json`，或独立模式 `--as <composition_id> [--duration <坑位秒>] [--out <目录>]`。落盘即可铺，**不需要改写**。
+   - **落点与时长由命令钉定，你不用管**（fix-mg-fetch-text-slot-identity）：派单模式的 `composition_id` 取自 `dispatch.mg` 那条（`<工程slug>-<beatId>`，**不是** `--slot` 收的 beat id），产物落 `<产物目录>/mg/<composition_id>.html`；颗粒内嵌 IR 的 `id` 与 `canvas.duration` 被一并钉到「期望 id」与「坑位包络 + 0.3s 余量」（铁律⑦），贴模板末尾的层跟着钉，然后走 `mg compile` 同一条本地编译链重编。产物因此仍是 `ir` 态（云端还能改），且 `mg lint --dispatch` 的 `1-cid-expect` 天然对得上。
+   - `--slot` 与 `--duration` **互斥**：派单模式的包络由 `track_st` / `track_ed` 定，显式给时长会与它打架；独立模式才用 `--duration`。
+   - 出参里的 `pinned` 写明改了什么（`id` 的 from→to、`duration` 的 from→to、被钉的层）；两者都没改时 `changed:false` 且**原字节落盘**（不重编）。
+   - **满屏槽位拿不出实心底 ⇒ 致命 `x-category-opaque`，拒落盘**（`gate-fullscreen-slot-needs-solid-bed`）。
+     判据只看**产物**——「这颗有没有满屏实心底」，**不看它是不是模板颗粒**。
+     ⚠️ 派单模式下**通常不用你操心**：`dispatch.mg[].bg` 写了底色的话，取块时会自动钉进
+     `canvas.bg`，声明当场兑现。撞上这条红一般意味着**派单只声明了 `fullscreen` 却没给 `bg`** ——
+     两条出路：① 这颗本来就该是叠加 ⇒ 改派单的 `category` 为 `overlay`；
+     ② 确实要盖住画面 ⇒ 给派单补 `bg`，或手动在 IR 里写 `canvas.bg`（编译器会产成根下第一个全幅子层）。
+     MUST NOT 靠「加一层 shape 当底」绕过：那种写法的覆盖面取决于祖先定位与 transform，
+     **静态判不出来**，`opaque` 登记不上（画出来了但成片按透明叠加处理）。
+   - 反方向（槽位派 `overlay`、颗粒却是实心）仍是**非致命**告警：那只是多盖了底轨，看得见、改得动，
+     不是「以为有其实没有」的静默落空。两个方向后果不对称，判据也就不对称。
+3. **改字（L0，0 积分）**：把内嵌的 IR 存成 `<id>.ir.json`，改 `slots` 里的文字（也可改 `colors` / `font` / `stroke` / `shadow` / `canvas.duration`），然后 `gtrk mg compile <id>.ir.json --out <目录>`。
+4. **改效果（2 积分/候选）**：`gtrk mg edit <particle.html> --say "打字机快一倍，副标改成青色" [--n 1|3]`。`--n` 只收 1 或 3，**它就是计费单位数**。返回的候选带 `scope`：`L1` = 在模板可调范围内，`L2` = 越界了、等于新生成（**不是失败**）。服务端说做不到时会给一句 `refusal`，**如实转述给用户**——他要的是「为什么不能」，不是一个没有解释的错误。
+5. **lint → 铺**：同中性块，`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`。
+6. **竖屏工程**：同中性块，契约当前只收 1920×1080。
 
 ## 中性块工作流（registry 骨架 → 改内容审美 → lint → 铺）
 
@@ -131,6 +164,8 @@ gtrk mg --project "<split产物目录>" --json
 ```
 
 - 读 `dispatch.mg` → 逐 beat 从 `<project>/mg/<composition_id>.html` 取源颗粒 → lint → 铺进 `.gtrk` 的 `beat_track`，把 `struct_meta.mg` 原子写回。**幂等**：重铺先剥旧自产轨再 append，用户在 opencut 手加的轨零连带。
+  - ⚠️ **「哪几条轨是我们的」按内容判，不按轨号判**（`fix-mg-lay-track-identity`）。工程被客户端打开保存过之后，`track_index` 会**整体重编**（客户端按当刻车道顺序现场发号，契约明写它会漂），而且一条 beat 轨可能被**劈成两条**（含物化颗粒视频的那些会单独成轨）。所以账本里记的号常常已经指不中了。
+  - 重铺前看结果里的**逐轨识别结论**（`tracks[]`：`self-produced` / `self-produced-edited` / `user-track` 各带一句依据）。`self-produced-edited` = 号漂了但内容对得上，**良性降级不是故障**；某条轨号在册却判成 `user-track`，说明重编号之后那个号撞上了别人的轨——**保留是对的**。
   - **剥离面口径**（= 「本次会剥掉什么」，和「本次铺什么」是两件事）：
     - **`--only <beat>` = 只剥命中的那几颗**（真增量合并）——轨上其余已铺颗粒连同用户手调**原样保留**。
     - **全量重铺 = 剥掉登记里的全部自产轨再整轨重建**，**唯一例外**：本次派单里有、却因缺 HTML / lint 未过 / 重投影后零存活而**没铺成**的那些（`skipped` 里那几颗），它们上一轮的 clip **留在轨上**——不会因为新的做坏了就把旧的也毁掉。反过来，**派单里已不存在**的已铺条目（你重跑过 `gtrk split`、这个 beat 不做 MG 了）仍照剥：那是计划变更，不是做坏了。

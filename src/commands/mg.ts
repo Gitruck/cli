@@ -30,13 +30,16 @@ import { lintParticle, parseCompositionId } from "../lib/mg-lint";
 import { isInsideDir } from "../lib/outdir-guard";
 import { renderParticle, CID_SHAPE, assertNotJianyingDraftDir } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
-import type { Dispatch, MgDispatch } from "../lib/splitdoc";
+// 派单读取与槽位命中：与 `fetch --source text` 共用同一份口径（fix-mg-fetch-text-slot-identity）
+import { matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
 import { reportReprojection, reprojectDispatchWindows, withTimecodeSource } from "../lib/reproject";
 import { reportMaterialIntegrity, safeCheckMaterialIntegrity } from "../lib/material-integrity";
 import { log, routeLogsToStderr } from "../lib/log";
 import { writeFile } from "node:fs/promises";
 import { adoptBlock, AdoptError, DEFAULT_FONT, PARTICLE_H, PARTICLE_W } from "../lib/mg-adopt";
 import { fetchBlockFile, findBlock, loadSnapshot, primaryFile, searchBlocks, type SnapshotItem } from "../lib/mg-registry";
+import { runCompile, runEdit, runFetchText } from "./mg-text";
+import { describeState, identifyParticle } from "../lib/particle-identity";
 
 const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
 // 源目录双探（读旧兼容）：写侧 mg/，读侧并集 mg/ ∪ rrv/（既有工程零迁移）
@@ -74,6 +77,16 @@ interface MgOpts {
 	font?: string;
 	/** fetch：候选态也列 excluded 件（缺省只列 ok / review）。 */
 	all?: boolean;
+	/** fetch 来源：`registry`（中性块，缺省）或 `text`（我方文字模板库）。 */
+	source?: string;
+	/** edit 模式：一句话说清要改成什么。 */
+	say?: string;
+	/** edit 模式：候选数，只收 1 或 3（缺省 1）。它就是计费单位数。 */
+	n?: string;
+	/** fetch --source text：跳过目录更新，只用本地（离线/内网）。 */
+	offline?: boolean;
+	/** compile 模式：走服务端而不是本地（排查与对拍用，不是默认路径）。 */
+	remote?: boolean;
 }
 
 export function registerMg(program: Command): void {
@@ -88,18 +101,23 @@ export function registerMg(program: Command): void {
 		.option("--only <beat>", "只跑单 beat（收 beat id 如 B12，非 composition_id）：增量重铺该 beat，轨上其余已铺颗粒原样保留")
 		.option("--lint-only", "只 lint 校验，不铺轨不写回")
 		.option("--replace-all", "显式授权重置整轨：不走增量保留、整轨剥掉重铺——会删掉轨上其余已铺颗粒（不在本次派单/--only 里的那些）")
-		.option("--duration <sec>", "render 模式必填：显式时长锚（秒）——独立模式无坑位包络，它就是 lint 包络与计费时长")
+		.option("--duration <sec>", "render 模式必填 / fetch 独立模式可选：显式时长锚（秒）——独立模式无坑位包络，它就是 lint 包络与计费时长；--source text 下还会钉进 IR 的 canvas.duration")
 		.option("--format <fmt>", "render 模式产物格式：首发仅 qtrle（剪映可读透明 MOV；webm 剪映不吃、明确拒绝）")
 		.option("--out <dir>", "render 模式落盘目录（缺省 ./mg-render/<composition_id>/；绝不写剪映草稿目录）")
 		.option("--yes", "render 模式：跳过计费预估确认")
 		.option("--pick <name>", "fetch 模式：取 registry 块 <name> 改写成颗粒（缺省不给 = 候选态只列不取）")
 		.option("--top <n>", "fetch 候选态：列前 N 件（缺省 3）")
-		.option("--slot <beat>", "fetch 派单模式：目标 beat id（如 B03）——从 dispatch.mg 取 composition_id / 坑位包络 / category，产物落 <project>/mg/")
-		.option("--as <composition_id>", "fetch 独立模式：目标 composition_id（配 --duration），产物落 --out（缺省 ./mg-fetch/）")
+		.option("--slot <beat>", "fetch 派单模式：目标 beat id（如 B03）——从 dispatch.mg 取 composition_id / 坑位包络 / category，产物落 <project>/mg/<composition_id>.html（注意：落点用派单的 composition_id，不是 beat id）")
+		.option("--as <composition_id>", "fetch 独立模式：目标 composition_id（配 --duration），产物落 --out（缺省 ./mg-fetch/）；--source text 下会一并改写颗粒内部的 id")
 		.option("--canvas <WxH>", "fetch：画布尺寸；契约当前只收 1920x1080")
 		.option("--category <c>", "fetch：overlay / fullscreen（缺省派单值或按块底色推断）")
 		.option("--font <name>", "fetch：替换块内字体名（缺省运行时镜像可证的 CJK 字体）")
 		.option("--all", "fetch 候选态：连 excluded 件一起列")
+		.option("--source <s>", "fetch 来源：registry（中性块，缺省）| text（我方文字模板库，块自带 IR 可云端改写）")
+		.option("--say <text>", "edit 模式：一句话说清要改成什么（如「打字机快一倍，副标改成青色」）")
+		.option("--n <n>", "edit 模式：候选数，只收 1 或 3（缺省 1）——它就是计费单位数")
+		.option("--offline", "fetch --source text：不更新模板目录，直接用本地那份")
+		.option("--remote", "compile 模式：改走服务端编译（默认本地，零请求）——留给排查与两侧对拍")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MgOpts) => {
 			if (process.argv[2] === "rrv") log.warn("`gtrk rrv` 已更名为 `gtrk mg`（去品牌化），别名仍可用但建议改用 `gtrk mg`。");
@@ -114,24 +132,20 @@ export async function runMg(words: string[], opts: MgOpts): Promise<MgResult> {
 	if (sub === "lint") return runLint(words.slice(1), opts);
 	if (sub === "status") return runStatus(opts);
 	if (sub === "render") return runRender(words.slice(1), opts);
-	if (sub === "fetch") return runFetch(words.slice(1), opts);
-	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>`);
+	if (sub === "fetch") {
+		// 文字模板是**第二个来源**，不是 registry 的一种过滤：它的块自带 IR、不做机械改写、
+		// 改内容走 compile / edit。两条路的取块与改写语义都不同，故在这里分流而非塞进 runFetch。
+		if ((opts.source ?? "registry") === "text") return done(opts, (await runFetchText(words.slice(1), opts)) as MgResult);
+		if (opts.source && opts.source !== "registry") throw new Error(`--source 只收 registry | text：${opts.source}`);
+		return runFetch(words.slice(1), opts);
+	}
+	if (sub === "compile") return done(opts, (await runCompile(words.slice(1), opts)) as MgResult);
+	if (sub === "edit") return done(opts, (await runEdit(words.slice(1), opts)) as MgResult);
+	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>；文字模板：gtrk mg fetch --source text <检索词> / gtrk mg compile <ir.json> / gtrk mg edit <file> --say "…"`);
 	return runLay(opts);
 }
 
-/** 定位 dispatch + baseDir（同 matrix）。 */
-function resolveDispatch(opts: MgOpts): { dispatchPath: string; baseDir: string } {
-	if (opts.dispatch) {
-		const dispatchPath = resolve(opts.dispatch);
-		return { dispatchPath, baseDir: dirname(dirname(dispatchPath)) };
-	}
-	if (opts.project) {
-		const baseDir = resolve(opts.project);
-		return { dispatchPath: join(baseDir, "split", "dispatch.json"), baseDir };
-	}
-	throw new Error("需 --project <目录> 或显式 --dispatch <path>");
-}
-
+/** 定位工程 .gtrk：`<baseDir>/gtrk/project.gtrk` 优先，回落 `<baseDir>/project.gtrk`。 */
 function locateGtrk(baseDir: string): string | undefined {
 	return [join(baseDir, "gtrk", "project.gtrk"), join(baseDir, "project.gtrk")].find((p) => existsSync(p));
 }
@@ -143,14 +157,6 @@ function locateSrcHtml(baseDir: string, compositionId: string): string | undefin
 		if (existsSync(p)) return p;
 	}
 	return undefined;
-}
-
-async function readMgQueue(dispatchPath: string): Promise<MgDispatch[]> {
-	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split 落地派单）`);
-	// dispatch 桶读旧兼容：新键 mg，遗留键 rrv_mg（既有 dispatch.json 零迁移）
-	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch & { rrv_mg?: MgDispatch[] };
-	const queue = dispatch.mg ?? dispatch.rrv_mg;
-	return Array.isArray(queue) ? queue : [];
 }
 
 interface MgResult {
@@ -497,6 +503,8 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	const file = args[0];
 	if (!file) throw new Error('用法：gtrk mg lint <particle.html> [--dispatch <path>]');
 	const html = await readFile(resolve(file), "utf8");
+	// 三态由 particle-identity 算好传进 lint——lint 自身零 import，算不了 sha256
+	const particleState = identifyParticle(html).state;
 	const nameId = basename(file).replace(/\.html?$/i, "");
 	let dispatchIds: string[] | undefined;
 	let slotDuration: number | undefined;
@@ -559,9 +567,10 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 		...(dispatchIds ? { dispatchIds } : {}),
 		...(compositionId ? { compositionId } : {}),
 		...(slotDuration ? { slotDuration } : {}),
+		identity: particleState,
 	});
 	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
-	if (lint.ok) log.ok(`lint 通过（${basename(file)}；opaque=${lint.opaque}）`);
+	if (lint.ok) log.ok(`lint 通过（${basename(file)}；opaque=${lint.opaque}；${describeState(particleState)}）`);
 	else log.err(`lint 未过（${lint.violations.filter((v) => v.fatal).length} 项致命）`);
 	const result: MgResult = { mode: "lint", ...lint, ok: lint.ok };
 	if (opts.json) console.log(JSON.stringify(result));
@@ -667,15 +676,10 @@ async function runFetch(args: string[], opts: MgOpts): Promise<MgResult> {
 	let outPath: string;
 	if (opts.slot) {
 		const { dispatchPath, baseDir } = resolveDispatch(opts);
-		const queue = await readMgQueue(dispatchPath);
-		const q = queue.find((x) => x.beat === opts.slot || x.composition_id === opts.slot);
-		if (!q) {
-			throw new Error(`派单里没有 beat「${opts.slot}」；现有：${[...new Set(queue.map((x) => x.beat))].slice(0, 12).join("、") || "（空）"}`);
-		}
-		cid = q.composition_id;
-		slotSec = r3(q.track_ed - q.track_st);
-		if (!(slotSec > 0)) throw new Error(`派单条目 ${cid} 的坑位包络非正（track_st=${q.track_st} track_ed=${q.track_ed}）`);
-		if (!category && typeof q.category === "string" && (q.category === "overlay" || q.category === "fullscreen")) category = q.category;
+		const hit = matchSlot(await readMgQueue(dispatchPath), opts.slot);
+		cid = hit.compositionId;
+		slotSec = hit.slotSec;
+		if (!category && hit.category) category = hit.category;
 		outPath = join(baseDir, "mg", `${cid}.html`);
 	} else {
 		if (!opts.as || !opts.duration) {
