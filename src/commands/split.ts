@@ -25,6 +25,7 @@ import {
 	type Transcript,
 } from "../lib/projection";
 import { validateSplitDoc, buildLanding, renderSplitMarkdown, type SplitDoc } from "../lib/splitdoc";
+import { formatJobDistribution } from "../lib/mg-visual-job";
 import { resolveColumnConfig, effectiveVocab } from "../lib/column-config";
 import { readUserConfig } from "../lib/user-config";
 import { readGtrk, assertGtrkV1, writeStructMetaSplit } from "../lib/gtrk-writeback";
@@ -234,7 +235,7 @@ async function runLand(
 		transcriptHash: transcript.text_hash,
 		vocab: effectiveVocab(resolved.config),
 	};
-	const { errors, warnings } = validateSplitDoc(doc, ctx);
+	const { errors, warnings, visualJobs } = validateSplitDoc(doc, ctx);
 	for (const w of warnings) log.warn(w);
 	if (errors.length) {
 		throw new Error(
@@ -287,6 +288,12 @@ async function runLand(
 		`落地完成：${landing.split.beats.length}/${doc.beats.length} beat 落轨` +
 			`（MG ${landing.dispatch.mg.length} · FILM_BROLL ${landing.dispatch.film_broll.length} · AI_DRAMA ${landing.dispatch.ai_drama.length}）`,
 	);
+	// [gate-mg-visual-job §1.5] 职能分布**只观测、不判红**：它不是阈值，是让人一眼看出这条片子
+	// 派了什么形状的视觉。⚠️ `decor` MUST 单列、MUST NOT 并进 `statement`——它是必要但可被滥用的
+	// 一档（「标成 decor 就不用想视觉了」），**异常多本身就是信号**，并进去这个信号就看不见了。
+	if (visualJobs && landing.dispatch.mg.length > 0) {
+		log.info(`   · MG 视觉职能分布：${formatJobDistribution(visualJobs)}`);
+	}
 	for (const s of landing.skipped) log.warn(`跳过 ${s.beat}：${s.reason}`);
 	for (const s of landing.shrunk) log.warn(`收缩 ${s.beat}：${s.dropped} 句被剪，按存活 ${s.kept} 句包络 → ${s.track_st}s…${s.track_ed}s（建议人工复核）`);
 	if (landing.unhandledLanes.length > 0) {

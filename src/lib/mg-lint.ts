@@ -1843,6 +1843,23 @@ export function lintParticle(
 		 * 给 `detached` 时报非致命哨兵 `x-ir-detached`；不给则整项跳过。
 		 */
 		identity?: "ir" | "detached" | "html";
+		/**
+		 * [gate-mg-visual-job] 该槽位声明的视觉职能（`statement` / `relation` / `data` / `decor`）。
+		 * `relation` / `data` 两档**不许用文字模板颗粒交差**——它们是「要为这个意思专门设计」的那两档。
+		 * 不给则整项跳过（裸 lint / 未命中派单时无从判断）。
+		 */
+		visualJob?: string;
+		/**
+		 * 该槽位的 `visual_brief`。判红时**打进错误消息**——它是 agent 自己写下的设计意图，
+		 * 与交上来的模板颗粒直接冲突，那句话本身就是最强的说明。
+		 */
+		visualBrief?: string;
+		/**
+		 * 逐 beat 的显式放行（`--allow-text-for-relation <beatId> --why "<一句话>"`）。
+		 * ⚠️ 由命令层解析并只对**指名的那个 beat** 传 true，MUST NOT 做成全局开关或配置项：
+		 * 一个能在配置里长期打开的 flag，等价于这条闸不存在。
+		 */
+		allowTextForRelation?: boolean;
 	} = {},
 ): LintResult {
 	const v: LintViolation[] = [];
@@ -2061,6 +2078,43 @@ export function lintParticle(
 							'<div style="position:absolute;inset:0;background:<底色>"> 作首子层）'
 					: `category「${opts.category}」期望透明叠加，但颗粒 HTML 反推为不透明满屏（以 HTML 为准落 clip.opaque=true）`,
 			);
+		}
+	}
+
+	// [gate-mg-visual-job] ★ 关系槽位不得用文字模板颗粒交差。
+	//
+	// 这是本件**唯一不可绕过**的那一条，它之所以能硬，是因为来源**可从产物直接判、不靠自述**：
+	// 文字模板产的颗粒内嵌 `v:"text-v0"` 的 IR，`composition_id` 被改写成 beat id 之后仍在
+	// （2026-09-15 实证：t04 工程 19 颗全被改名成 `t04-B03` 这类 id，identity() 仍判 ir 态、
+	// 仍读得出内嵌 IR）；手写 GSAP 颗粒没有内嵌 IR，是 html 态。
+	//
+	// ⚠️ 判据取**产物内容**，MUST NOT 取文件名、目录或 agent 的自述——颗粒会被改名、
+	//    会被内容寻址重命名，而**自述正是本件要防的那个东西**。
+	//
+	// ⚠️ 被禁的是「从库里捞一个套上」，**不是「用文字」**：用排版画关系的手写颗粒
+	//    （并置两列 + 破折号那种）正是要保住的东西，它没有内嵌 IR，本条不拦。
+	//    区别不在媒介，在**有没有为这个意思专门做设计**。
+	if (opts.visualJob === "relation" || opts.visualJob === "data") {
+		const fromTemplateLibrary = /<template[^>]*\bdata-gtrk-ir\b|data-gtrk-ir/.test(html) && /"v"\s*:\s*"text-v0"/.test(html);
+		if (fromTemplateLibrary) {
+			if (opts.allowTextForRelation) {
+				push(
+					"x-text-for-relation-allowed",
+					false,
+					`已按显式放行通过：槽位 visual_job=${opts.visualJob} 却用了文字模板颗粒。理由随工程留痕（struct_meta.mg）`,
+				);
+			} else {
+				push(
+					"x-text-for-relation",
+					true,
+					`槽位声明 visual_job=${opts.visualJob}（要为这个意思专门设计一个视觉），` +
+						"却交上来一颗**文字模板库里的**颗粒（内嵌 v:\"text-v0\" 的 IR）。" +
+						(opts.visualBrief ? `\n   你自己写的 visual_brief 是：「${opts.visualBrief}」——模板给不出这个。` : "") +
+						"\n   ⚠️ 被禁的是「从库里捞一个套上」，**不是「用文字」**：用排版画关系的手写颗粒" +
+						"（并置两列 + 破折号那种）正是要保住的东西，本条不拦它。" +
+						"\n   确实非用不可 ⇒ `--allow-text-for-relation <beatId> --why \"<一句话>\"`（逐 beat、必带理由、随工程留痕）",
+				);
+			}
 		}
 	}
 

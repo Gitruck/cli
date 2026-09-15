@@ -38,7 +38,8 @@ import {
 	categoryOf,
 } from "../lib/text-templates";
 // 派单读取与 registry 中性块路共用同一份口径（fix-mg-fetch-text-slot-identity）
-import { matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
+import { MG_SRC_DIRS, matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
+import { MG_EXCEPTIONS_REL, appendMgException } from "../lib/mg-exceptions";
 import { r3 } from "../lib/frame-domain";
 
 export interface TextCmdOpts {
@@ -58,6 +59,13 @@ export interface TextCmdOpts {
 	offline?: boolean;
 	/** `mg compile` 走服务端而不是本地。排查与对拍用（§4.1），不是默认路径。 */
 	remote?: boolean;
+	/**
+	 * [gate-mg-visual-job §2B.3] 放行排产顺序闸：原创档没产完也允许取模板块。
+	 * ⚠️ MUST 配 `--why`；MUST NOT 做成常开配置。
+	 */
+	allowTemplateFirst?: boolean;
+	/** 例外的理由（一句话），随工程留痕。 */
+	why?: string;
 }
 
 /** 候选数只有两档：确认框的金额就只有两种，用户不必在 1/2/3 之间做无意义的权衡。 */
@@ -234,6 +242,85 @@ interface TextTarget {
 }
 
 /**
+ * [gate-mg-visual-job §2B] **排产顺序闸：先原创，后套用。**
+ *
+ * 本片仍有 `visual_job` 为 `relation` / `data` 且**尚未产出源 HTML** 的槽位时，
+ * `gtrk mg fetch --source text`（派单模式）**拒绝执行**。
+ *
+ * 主理人 2026-09-15：「先生成自由创意的，最后再生成基于文字模板发挥的。」
+ *
+ * ## 为什么是顺序，而不只是判断点前移
+ *
+ * 理由与「派单阶段不得以模板库为依据」同源，都是防**锚定**：
+ * agent 连着看过十几颗模板颗粒之后，它对「MG 该长什么样」的默认印象已被那批东西定住；
+ * 这时再让它自由发挥，发挥出来的多半还是模板的形状。**顺序本身就是一道隔离。**
+ *
+ * ⚠️ MUST 是**拒绝服务**而非告警 —— 告警留不住顺序，agent 会照着告警继续往下走。
+ *
+ * ⚠️ 附带好处：原创做不出来会**更早暴露**。某个 relation 槽位若其实无法手做、必须回退模板，
+ * 现在会在流程前段撞上，而不是等片子快收口时才发现。
+ *
+ * ⚠️ 代价如实说：本条**牺牲了「先铺一批模板看整体效果」这种工作法**。要保留只能走显式例外。
+ *
+ * ⚠️ **独立模式不受本条约束**（不带 `--project` / `--slot`，没有派单，无从判断顺序）。
+ * 把单颗试用一起挡掉是过度拦截。
+ */
+async function assertOriginalsFirst(
+	queue: Awaited<ReturnType<typeof readMgQueue>>,
+	baseDir: string,
+	opts: TextCmdOpts,
+): Promise<void> {
+	const pending = queue.filter((q) => {
+		const job = (q as { visual_job?: unknown }).visual_job;
+		if (job !== "relation" && job !== "data") return false;
+		// 「已产出」判据 = 源 HTML 在盘上。MUST NOT 判「铺没铺」——本闸管的是**生产顺序**，
+		// 不是落轨顺序；颗粒产出来了还没铺，那也算原创已经做完了。
+		return !MG_SRC_DIRS.some((d) => existsSync(join(baseDir, d, `${q.composition_id}.html`)));
+	});
+	if (!pending.length) return;
+
+	if (opts.allowTemplateFirst) {
+		if (!opts.why || !opts.why.trim()) {
+			throw new Error(
+				"--allow-template-first 必须同时给 --why \"<一句话>\"：这是一次性的、带理由的例外，不是开关。",
+			);
+		}
+		// ⚠️ 留痕 MUST 落在**工程目录**里：终端会消失，工程文件不会。
+		// 只 log 一句等于没有理由——三个月后翻这条片子的人查不出当初为什么按了例外。
+		const pendingBeats = pending.map((q) => q.beat);
+		await appendMgException(baseDir, {
+			gate: "template-first",
+			pending_beats: pendingBeats,
+			why: opts.why.trim(),
+			at: new Date().toISOString(),
+		});
+		log.warn(
+			`▶ 已按显式例外放行排产顺序闸（理由：${opts.why.trim()}）——` +
+				`本片还有 ${pending.length} 个原创档槽位没产：${pendingBeats.join("、")}`,
+		);
+		log.warn(`   已记进 ${join(baseDir, ...MG_EXCEPTIONS_REL.split("/"))}（一次性例外随工程留痕，不是开关）`);
+		return;
+	}
+
+	// ⚠️ 拒绝消息 MUST 说人话：列出未产的 beat **与它们自己写的 visual_brief**，
+	//    让用户一眼看出「还差这几个原创的」，而不是一句「顺序不对」。
+	const lines = pending
+		.map((q) => {
+			const brief = (q as { visual_brief?: unknown }).visual_brief;
+			const job = (q as { visual_job?: unknown }).visual_job;
+			return `  · ${q.beat}（${String(job)}）${typeof brief === "string" && brief ? `：${brief}` : ""}`;
+		})
+		.join("\n");
+	throw new Error(
+		`先产原创，再取模板。本片还有 ${pending.length} 个需要专门设计的槽位没产出源 HTML：\n${lines}\n` +
+			"  为什么是顺序：连着看过十几颗现成品之后，「MG 该长什么样」的默认印象会被那批东西定住，\n" +
+			"  这时再自由发挥，发挥出来的多半还是它们的形状。**顺序本身就是一道隔离。**\n" +
+			"  出路：先把上面这几颗手做出来（产到 <project>/mg/<composition_id>.html），再回来取模板；\n" +
+			"  确实要先取 ⇒ `--allow-template-first --why \"<一句话>\"`（一次性例外，随工程留痕）。",
+	);
+}
+
+/**
  * 取块落点与钉定目标。
  *
  * ⚠️ **派单模式的 composition_id 来自 `dispatch.mg`，不是 `--slot` 的值**
@@ -249,7 +336,9 @@ async function resolveTextTarget(item: TextTemplateItem, opts: TextCmdOpts): Pro
 			throw new Error("--slot 与 --duration 互斥：派单模式的坑位包络由 dispatch.mg 的 track_st / track_ed 定，显式给时长会与它打架");
 		}
 		const { dispatchPath, baseDir } = resolveDispatch(opts);
-		const hit = matchSlot(await readMgQueue(dispatchPath), opts.slot);
+		const queue = await readMgQueue(dispatchPath);
+		await assertOriginalsFirst(queue, baseDir, opts);
+		const hit = matchSlot(queue, opts.slot);
 		return {
 			cid: hit.compositionId,
 			outPath: join(baseDir, "mg", `${hit.compositionId}.html`),

@@ -29,9 +29,9 @@ import { r3 } from "../lib/frame-domain";
 import { lintParticle, parseCompositionId } from "../lib/mg-lint";
 import { isInsideDir } from "../lib/outdir-guard";
 import { renderParticle, CID_SHAPE, assertNotJianyingDraftDir } from "../lib/mg-render";
-import { layMgTracks, type MgLayItem, type StructMetaMg } from "../lib/mg-lay";
+import { layMgTracks, type MgLayItem, type MgLayException, type StructMetaMg } from "../lib/mg-lay";
 // 派单读取与槽位命中：与 `fetch --source text` 共用同一份口径（fix-mg-fetch-text-slot-identity）
-import { matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
+import { MG_SRC_DIRS, matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
 import { reportReprojection, reprojectDispatchWindows, withTimecodeSource } from "../lib/reproject";
 import { reportMaterialIntegrity, safeCheckMaterialIntegrity } from "../lib/material-integrity";
 import { log, routeLogsToStderr } from "../lib/log";
@@ -43,7 +43,7 @@ import { describeState, identifyParticle } from "../lib/particle-identity";
 
 const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
 // 源目录双探（读旧兼容）：写侧 mg/，读侧并集 mg/ ∪ rrv/（既有工程零迁移）
-const MG_SRC_DIRS = ["mg", "rrv"] as const;
+
 
 interface MgOpts {
 	project?: string;
@@ -52,6 +52,19 @@ interface MgOpts {
 	lintOnly?: boolean;
 	/** 逃生门（fix-mg-lay-strip-scope ④）：显式授权「重置整轨」——清空保留集 + 绕过空 queue 守门。 */
 	replaceAll?: boolean;
+	/**
+	 * [gate-mg-visual-job §2.3] 逐 beat 放行「relation/data 槽位用文字模板颗粒」。
+	 * 可重复给。⚠️ MUST 配 `--why`，且 MUST NOT 做成配置项——
+	 * 一个能在配置里长期打开的 flag，等价于这条闸不存在。
+	 */
+	allowTextForRelation?: string[];
+	/** 放行的理由（一句话）。随工程留痕进 `struct_meta.mg`。 */
+	why?: string;
+	/**
+	 * [gate-mg-visual-job §2B.3] 排产顺序闸的例外：原创档没产完也允许取模板块。
+	 * ⚠️ 同样 MUST 配 `--why` 并留痕；MUST NOT 做成常开配置。
+	 */
+	allowTemplateFirst?: boolean;
 	json?: boolean;
 	/** render 模式（add-mg-standalone-render）：显式时长锚（秒，必填）。 */
 	duration?: string;
@@ -101,6 +114,19 @@ export function registerMg(program: Command): void {
 		.option("--only <beat>", "只跑单 beat（收 beat id 如 B12，非 composition_id）：增量重铺该 beat，轨上其余已铺颗粒原样保留")
 		.option("--lint-only", "只 lint 校验，不铺轨不写回")
 		.option("--replace-all", "显式授权重置整轨：不走增量保留、整轨剥掉重铺——会删掉轨上其余已铺颗粒（不在本次派单/--only 里的那些）")
+		.option(
+			"--allow-text-for-relation <beat...>",
+			"逐 beat 放行「relation/data 槽位用文字模板颗粒」（必须同时给 --why）——一次性例外，理由随工程留痕，不是开关",
+		)
+		.option(
+			"--why <reason>",
+			"配 --allow-text-for-relation / --allow-template-first 用：一句话说明为什么要这个例外" +
+				"（随工程留痕——铺轨侧写 struct_meta.mg.exceptions，取块侧写 <工程>/split/mg-exceptions.json）",
+		)
+		.option(
+			"--allow-template-first",
+			"放行排产顺序闸：原创档（relation/data）还没产完也允许取文字模板块（必须同时给 --why）",
+		)
 		.option("--duration <sec>", "render 模式必填 / fetch 独立模式可选：显式时长锚（秒）——独立模式无坑位包络，它就是 lint 包络与计费时长；--source text 下还会钉进 IR 的 canvas.duration")
 		.option("--format <fmt>", "render 模式产物格式：首发仅 qtrle（剪映可读透明 MOV；webm 剪映不吃、明确拒绝）")
 		.option("--out <dir>", "render 模式落盘目录（缺省 ./mg-render/<composition_id>/；绝不写剪映草稿目录）")
@@ -188,8 +214,28 @@ function laidCompositionIds(gtrk: Record<string, unknown> | undefined): string[]
 	return ids;
 }
 
+/**
+ * [gate-mg-visual-job §2.3] 解析逐 beat 放行集。
+ *
+ * ⚠️ **不给 `--why` 就拒绝执行**：例外必须**带理由**。一个不用解释的放行，
+ * 下次就会被当成常规做法用——而理由随工程留痕之后，日后翻工程的人看得见「当时为什么」。
+ * ⚠️ MUST NOT 做成配置项：一个能在配置里长期打开的 flag，等价于这条闸不存在。
+ */
+function resolveAllowTextBeats(opts: MgOpts): Set<string> {
+	const list = opts.allowTextForRelation ?? [];
+	if (!list.length) return new Set();
+	if (!opts.why || !opts.why.trim()) {
+		throw new Error(
+			"--allow-text-for-relation 必须同时给 --why \"<一句话>\"：\n" +
+				"  这是一次性的、带理由的、可追溯的例外，不是开关。理由会写进 struct_meta.mg 随工程留痕。",
+		);
+	}
+	return new Set(list);
+}
+
 /** 铺轨模式。 */
 async function runLay(opts: MgOpts): Promise<MgResult> {
+	const allowTextBeats = resolveAllowTextBeats(opts);
 	const { dispatchPath, baseDir } = resolveDispatch(opts);
 	const allQueue = await readMgQueue(dispatchPath);
 	const queue = opts.only ? allQueue.filter((q) => q.beat === opts.only) : allQueue;
@@ -283,10 +329,18 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		const category = typeof q.category === "string" ? q.category : undefined;
 		// 铁律⑦：坑位长度 = 槽位包络，与 dispatch 的 duration（=duration_hint 语义）彻底解耦。
 		const slotDuration = r3(win.track_ed - win.track_st);
+		// [gate-mg-visual-job] 职能与 brief 从派单透传进 lint：硬闸判的就是它们。
+		// 放行**逐 beat**：`--allow-text-for-relation <beatId>` 只对指名的那个 beat 生效，
+		// 别的违规 beat 仍红。MUST NOT 做成全局开关（那等于这条闸不存在）。
+		const visualJob = typeof q.visual_job === "string" ? q.visual_job : undefined;
+        const visualBrief = typeof q.visual_brief === "string" ? q.visual_brief : undefined;
 		const lint = lintParticle(html, {
 			compositionId: q.composition_id,
 			dispatchIds,
 			category,
+			...(visualJob ? { visualJob } : {}),
+			...(visualBrief ? { visualBrief } : {}),
+			...(allowTextBeats.has(q.beat) || allowTextBeats.has(q.composition_id) ? { allowTextForRelation: true } : {}),
 			...(slotDuration > 0 ? { slotDuration } : {}),
 		});
 		for (const vv of lint.violations) (vv.fatal ? log.warn : log.info)(`${q.beat} lint ${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
@@ -428,7 +482,15 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 				"若你改的正是时间线或 beat 派单，颗粒时码可能与新窗口对不齐，重跑一次本命令即可（纯本地、不计费）。",
 		);
 	}
-	const { next, summary, mg } = layMgTracks({ gtrk: freshGtrk, items, generatedAt: new Date().toISOString(), keep, warn: log.warn, info: log.info });
+	// [gate-mg-visual-job §2.3] 例外随工程留痕。⚠️ 只登记**真的落在本次铺轨范围内**的 beat：
+	// `--allow-text-for-relation` 给了一个本次没铺的 beat（打错字 / 被 `--only` 滤掉）时，
+	// 把它写进账本等于在工程里留一条查无此事的记录。
+	const layingBeats = new Set(queue.flatMap((q) => [q.beat, q.composition_id]));
+	const usedAllowBeats = [...allowTextBeats].filter((b) => layingBeats.has(b));
+	const exceptions: MgLayException[] = usedAllowBeats.length
+		? [{ gate: "x-text-for-relation", beats: usedAllowBeats, why: (opts.why ?? "").trim() }]
+		: [];
+	const { next, summary, mg } = layMgTracks({ gtrk: freshGtrk, items, generatedAt: new Date().toISOString(), keep, warn: log.warn, info: log.info, exceptions });
 	// 时码来源登记（add-consume-side-reprojection 7.1，纯追加可选字段）：
 	// 让「这批已铺产物是照哪条时间线、哪种模式铺的」可被后续体检读取。本 change 只**登记**，不据此判失效。
 	// 注意它描述的是**本次铺的那些**——保留条目带的是上一轮时码（混排形态，见 spec 同名 Scenario）。

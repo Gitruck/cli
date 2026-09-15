@@ -15,6 +15,54 @@ description: 视觉拆分派单器——把一条已剪好的口播工程（gtrk
 2. **绝不抄原句文字作定位**：旧版用「前锚点……后锚点」原文片段定位——**已退役**。锚点文字会诱发幻觉、会和实拍漂移。一律用 id 区间。
 3. **绝不自造/推算任何时码**：拆分稿里**不写任何秒级时码字段**。轨道时码由 `gtrk split` 落地时现场投影写入 `struct_meta.split` / `dispatch.json`。你只管语义（lane / 叙事功能 / handoff），时间线交给 CLI。
 
+## ★ MG 槽位的视觉职能 `visual_job`（必填）
+
+每个 MG 槽位（含 overlay aux）都要回答一个问题：**这段为什么要动画。** 四档：
+
+| 取值 | 判据 | 还要填什么 |
+|---|---|---|
+| `statement` | 就一句话 / 一个词 / 一个标题 | — |
+| `relation` | 出现**对比 / 并置 / 因果 / 包含 / 递进 / 聚合 / 循环** | `visual_brief` 必填 |
+| `data` | 具体的量、步骤或拓扑 | — |
+| `decor` | 不承载信息（转场 / 角标） | — |
+
+⚠️ **判据是「这段的意思里有没有第二个东西与它并置」，不是「用不用文字」。**
+
+一块「温柔—坚定 / 和善—有立场」的并置面板**是纯文字画的**，但它表达的是对照关系
+⇒ `relation`，**不是** `statement`。第一档刻意叫 `statement` 而不叫 `text`——
+叫 `text` 会让「它是文字做的」直接滑成「它是 text 档」，把结构化排版拍平成一张字卡。
+
+### `visual_brief`（`relation` 档必填）
+
+一句话说清**这个关系靠什么视觉手段成立**。
+
+⚠️ **它 MUST NOT 被要求是非文字的**：「两列并置、中间破折号连起来、右列更重」
+与「三个齿轮咬合」是**同一类合格答案**。要求「必须非文字」会把用排版画关系这条路堵死，
+而那恰恰是要保住的东西。brief 回答的是「这个关系怎么看得出来」，不是「用不用字」。
+
+想不出具体视觉的，**诚实地退回 `statement`**——那本身就是正确结果。
+
+### 全片一个 `relation` / `data` 都没有时
+
+顶层要具名 `mg_visual_job_note`，一句话说明为什么这条片子通篇只有单一陈述。
+纯字卡包装的口播片是**合法**形态，本条只要求它是个有意识的选择。
+
+⚠️ 这里**没有比例阈值**，也 MUST NOT 有：「不超过 N%」给不出依据、会误伤合法极端形态、
+还能被「宣告一个例外槽位」绕过。「一个都不需要」是可以要求交代的**判断**。
+
+### ⚠️ 派单这一步 MUST NOT 引用具体模板
+
+派单产物里出现 `tfx-*` 形状的模板 id ⇒ **判红**。
+
+理由是**锚定**：判「这段要什么」的那一步若看得见模板库，会**从「库里有什么」倒推
+「这段需要什么」**。正确的形态不是早点判，是**判的时候那个选项根本不存在**。
+
+写「大字标题从左侧滑入」这类描述是合格的；写 `tfx-title-typeline` 不是。
+
+⚠️ **如实说射程**：本条能做到的只有**工具面不提供 + 产物留痕判红**两件。
+它**拦不住**「同一会话里更早读过 MG 图纸、脑子里已经装着那批模板」——那种锚定不留痕，也判不出来。
+别把它当成杜绝；它降低的是「顺手去库里找」的概率，不是消灭锚定。
+
 ## 前置：确认工程 + CLI
 
 - 需要一个 **oralcut 产物目录**（跑过 `gtrk oralcut` 得到的目录），里面有 `gtrk/project.gtrk` 与 `transcript/transcript.json`。没有 transcript（旧任务）→ 让用户用新版本重跑 `gtrk oralcut`（恒出 transcript）。
@@ -84,7 +132,7 @@ gtrk split --project "<oralcut产物目录>" --json
 - `lane` 四选一 `A_ROLL | MG | AI_DRAMA | FILM_BROLL`；`base_track` 三选一 `真人出镜 | 口播继续 | 旁白主导`。
 - `irreplaceability` 四选一 `必须真人出镜 | 优先 MG | 可被 B-roll 替代 | 可降级处理`。
 - **handoff 按 lane 分型**（校验器会硬查）：
-  - `MG` → `handoff:{slug_hint?, theme?, bg?, duration_hint}`，**`duration_hint`（秒）必填**；可选 `category`（overlay 透明叠加/fullscreen 不透明满屏,裁决⑩,供色带分层,详见 field-schema）。
+  - `MG` → `handoff:{visual_job, visual_brief?, slug_hint?, theme?, bg?, duration_hint}`，**`visual_job` 与 `duration_hint`（秒）必填**（`visual_job` 见上节；`relation` 档另需 `visual_brief`）；可选 `category`（overlay 透明叠加/fullscreen 不透明满屏,裁决⑩,供色带分层,详见 field-schema）。
   - `FILM_BROLL` → `handoff:{queries:[...非空], shots?, per_shot_sec?, exclude?, anchors?}`，**`queries` 非空必填**；queries 写**英文长句场景描述**（一条一个意象，避多义动词），**exclude 保持中文**；`anchors` 为关键词锚（圈定指引见下节，细则见 field-schema）。
   - `AI_DRAMA` → `handoff:{narrative?, theme?, emotion_stage?, platform?, shot_count?}`，全可选（下游框架 skill /gtrk-ai-drama 有推断默认）。
   - `A_ROLL` → **无 handoff**（写了会被警告忽略）。
@@ -209,7 +257,7 @@ SHALL 停在派单这一步、SHALL NOT 自动交棒**。两者语义正交，�
 
 `quote-card`（金句卡）· `term-callout`（术语解释）· `network-diagram`（关系图）· `archive-caption`（档案标注）· `pause-card`（停顿卡）· `data-annotation`（数据标注）· `timeline-tag`（年份/时间标注）· `overlay`（叠层颗粒）。辅助层不是装饰，是补充理解职责。挂载范围三型：`"same_beat"`（同 beat）/ `{from,to}`（id 区间）/ `{trigger:"uNNNN"}`（触发点）。
 
-**前七类纯建议性**（只进人读稿一行摘要，不承接派单）；**第八类 `overlay` 承接颗粒派单**——底轨主视觉（如 `FILM_BROLL` 电影感 B-roll）之上叠一层 MG 透明概念颗粒时用它，必带 `handoff:{duration_hint（正数秒,必填）, category?, slug_hint?, theme?, bg?}`，`gtrk split` 落地时投影成派生颗粒（`composition_id=<slug>-<beatId>-aux<n>`，进 `dispatch.mg`，后续 `gtrk mg` 铺透明颗粒）。脑手分工：**你（脑）判断该不该叠 overlay、写 handoff 语义；CLI（手）投影落轨写时码**。`overlay` mount 只用 `same_beat` / `{from,to}`（`{trigger}` 一期不支持，会被 skip 告警）。细则见 `references/field-schema.md`。
+**前七类纯建议性**（只进人读稿一行摘要，不承接派单）；**第八类 `overlay` 承接颗粒派单**——底轨主视觉（如 `FILM_BROLL` 电影感 B-roll）之上叠一层 MG 透明概念颗粒时用它，必带 `handoff:{visual_job（必填,见上节）, visual_brief?, duration_hint（正数秒,必填）, category?, slug_hint?, theme?, bg?}`（⚠️ overlay aux 多是「底轨之上叠概念图解」，**正是最该判 `relation` 的一档**，别一律填 `statement`），`gtrk split` 落地时投影成派生颗粒（`composition_id=<slug>-<beatId>-aux<n>`，进 `dispatch.mg`，后续 `gtrk mg` 铺透明颗粒）。脑手分工：**你（脑）判断该不该叠 overlay、写 handoff 语义；CLI（手）投影落轨写时码**。`overlay` mount 只用 `same_beat` / `{from,to}`（`{trigger}` 一期不支持，会被 skip 告警）。细则见 `references/field-schema.md`。
 
 **何时叠 overlay（通用原则，别只想着「底轨之上叠概念图」）**：另一条高频触发是**重点词 / 点题强调**——文稿出现「**这就是 X**」「**这正是 X**」「**X，其实就是 Y**」「**说白了就是 X**」这类**点题、下定义、指认关键概念**的短语时，在该 beat 叠一层 `overlay` 透明颗粒，把**关键词/关键概念视觉「点」出来**（浮在主视觉之上、不挡主体），让重点被强调、而非随口播平铺过去。这是给透明叠层的一条**系统性来源**：每条口播里的点题/定义句，都是 overlay 候选——常能显著提升叠层密度。判断权仍在你（脑）：**不是每个「这就是」都叠**，挑真正的点题、关键定义、概念指认、金句收束处；**overlay 稀缺才有力，滥用则失焦**。（叠层长什么样、用什么强调色/动效，归栏目的 MG 生产 skill，不在拆分层定。）
 
@@ -225,6 +273,9 @@ SHALL 停在派单这一步、SHALL NOT 自动交棒**。两者语义正交，�
 - span 里有没有混进 `dropped:true` 的句子？（会被跳过/收缩）
 - beat 之间有没有重叠？id 区间有没有倒序？
 - FILM_BROLL 有没有 queries？是不是英文长句场景描述（不是中文/关键词堆叠）？exclude 是不是中文？MG 有没有 duration_hint？
+- 每个 MG 槽位（含 overlay aux）有没有 `visual_job`？`relation` 的有没有 `visual_brief`？
+- ★ 有没有**因为「这段只有一句话」就一律填 `statement`**？逐条回看：这段的意思里**有没有第二个东西与它并置**（对比 / 因果 / 递进 / 聚合）——有就是 `relation`，哪怕你打算用纯文字画它。
+- 拆分稿里有没有出现具体模板 id（`tfx-*`）？（判红；派单这一步不该看得见模板库）
 - `transcript_hash` 是不是原样透传自视图？
 - 拆分稿里有没有混进任何秒级时码字段？（必须零时码）
 
