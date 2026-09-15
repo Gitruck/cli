@@ -2,6 +2,11 @@
 
 ## 未发布
 
+### 文档：`gtrk-tools` 图纸写明 `audio_tts_clone` 可选出字幕（link-add-tts-subtitle-output-cli 3.2）
+
+输入列补 `--subtitle-format <fmt>`（可选、缺省不出、不额外计费、取值以服务端为准），产物列补另产 `tts-<音色代号>.srt`（服务端降级时不留空文件）；
+新增守卫 `test/skill-tools-tts-subtitle.test.mjs` 按列校验，防止文案被改回。
+
 ### 加：文字模板候选态可按分类过滤（add-text-template-category 2.2）
 
 `gtrk mg fetch --source text [检索词] --category 打字机` 先按目录分类圈池子再检索，JSON 多返回 `category` 与 `categories`；
