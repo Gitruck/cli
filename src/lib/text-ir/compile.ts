@@ -261,7 +261,16 @@ function textContentStyle(ir: Dict, L: Dict): string[] {
 	s.push(`color:${res(ir, L.color ?? "#ffffff")}`);
 	s.push(`text-align:${L.align ?? "center"}`);
 	if (L.vertical) s.push("writing-mode:vertical-rl;text-orientation:upright");
-	if (L.maxWidth) s.push(`max-width:${pyNum(L.maxWidth)}px;white-space:normal;word-break:break-all`);
+	// ⚠️ `width:max-content` 不能省。`.ct` 是 `position:absolute` 且只给了 `left`，
+	// 「收缩到适应」的可用宽因此是**包含块宽 − left**（`.ly` 是 inset:0，即画布宽）：
+	// 居中层 left=960 ⇒ 只有 960px。`nowrap` 时不显形（溢出再靠 translate 拉回来居中），
+	// 一切成 `normal` 它就变成真约束，maxWidth 写多大都没用。
+	// `max-content` 把用过的宽钉成「不换行时的 preferred 宽」再由 max-width 封顶。
+	if (L.maxWidth)
+		s.push(
+			`width:max-content;max-width:${pyNum(L.maxWidth)}px;` +
+				`white-space:normal;word-break:break-all`,
+		);
 
 	const b: Dict | undefined = L.box;
 	if (b) {
