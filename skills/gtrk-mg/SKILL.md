@@ -61,7 +61,11 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 逐槽位：
 
 1. **候选**：`gtrk mg fetch --source text "<检索词>" --top 3 --json`（中文词可用：开场 / 字卡 / 标题 / 字幕 / 强调 / 打字机 / 字条 / 引用 / 气泡 / 故障 / 竖排 / 闪光 / 清单 / 计数 …）。候选态**离线可用**；目录走远端择新、随包兜底，命令会明示这次用的是哪一版、从哪来的。
-2. **取块**：`gtrk mg fetch --source text --pick <模板 id> --slot <beatId> --project <目录> --json`，或独立模式 `--as <composition_id> [--out <目录>]`。落盘即可铺，**不需要改写**。
+2. **取块**：`gtrk mg fetch --source text --pick <模板 id> --slot <beatId> --project <目录> --json`，或独立模式 `--as <composition_id> [--duration <坑位秒>] [--out <目录>]`。落盘即可铺，**不需要改写**。
+   - **落点与时长由命令钉定，你不用管**（fix-mg-fetch-text-slot-identity）：派单模式的 `composition_id` 取自 `dispatch.mg` 那条（`<工程slug>-<beatId>`，**不是** `--slot` 收的 beat id），产物落 `<产物目录>/mg/<composition_id>.html`；颗粒内嵌 IR 的 `id` 与 `canvas.duration` 被一并钉到「期望 id」与「坑位包络 + 0.3s 余量」（铁律⑦），贴模板末尾的层跟着钉，然后走 `mg compile` 同一条本地编译链重编。产物因此仍是 `ir` 态（云端还能改），且 `mg lint --dispatch` 的 `1-cid-expect` 天然对得上。
+   - `--slot` 与 `--duration` **互斥**：派单模式的包络由 `track_st` / `track_ed` 定，显式给时长会与它打架；独立模式才用 `--duration`。
+   - 出参里的 `pinned` 写明改了什么（`id` 的 from→to、`duration` 的 from→to、被钉的层）；两者都没改时 `changed:false` 且**原字节落盘**（不重编）。
+   - 派单 `category` 与模板透明度不一致时会报**非致命**的 `x-category-opaque`（例：槽位派 `fullscreen`、模板是透明叠加）。它不拦落盘，但**看见要处置**：满屏槽位得给这颗补一层全幅实心底（改 IR 加一层 `shape` 再 `gtrk mg compile`），否则出片时底轨会透出来。
 3. **改字（L0，0 积分）**：把内嵌的 IR 存成 `<id>.ir.json`，改 `slots` 里的文字（也可改 `colors` / `font` / `stroke` / `shadow` / `canvas.duration`），然后 `gtrk mg compile <id>.ir.json --out <目录>`。
 4. **改效果（2 积分/候选）**：`gtrk mg edit <particle.html> --say "打字机快一倍，副标改成青色" [--n 1|3]`。`--n` 只收 1 或 3，**它就是计费单位数**。返回的候选带 `scope`：`L1` = 在模板可调范围内，`L2` = 越界了、等于新生成（**不是失败**）。服务端说做不到时会给一句 `refusal`，**如实转述给用户**——他要的是「为什么不能」，不是一个没有解释的错误。
 5. **lint → 铺**：同中性块，`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`。

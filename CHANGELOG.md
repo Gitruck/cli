@@ -1,5 +1,39 @@
 # 更新日志
 
+## 1.2.5（2026-09-14）
+
+### 修：`mg fetch --source text --slot` 派单模式必败（fix-mg-fetch-text-slot-identity）
+
+真机上这条命令**从来没成功过**：
+
+```bash
+gtrk mg fetch --source text --pick tfx-type-terminal --slot B05 --project <工程>
+# → composition_id "B05" / lint 致命 1-cid-expect / 不落盘
+```
+
+两处不对。① `--slot` 收的是 beat id（`B05`），而派单里的 `composition_id` 是
+`<工程slug>-<beatId>`（`t07-B05`）——铺轨与 `mg lint --dispatch` 都按后者对账，旧实现却把前者
+直接当 id 用，`dispatch.json` 一个字没读。② 取到的模板 HTML 原样送 lint，而模板内的
+`data-composition-id` 恒为模板 id、期望 id 恒为 `<slug>-<beat>`，两者永远不等 ⇒ 必然致命。
+
+文字模板是 `ir` 态、**不能直改 HTML**（改一字节就掉成 `detached`，云端再也调不动），
+所以钉 id 的合法路径只有一条：改内嵌 IR → 走 `mg compile` 同一条本地编译链重编。现在命令替你做：
+
+- 派单模式的 `composition_id` / 坑位包络 / `category` 全部取自 `dispatch.mg` 那条（与中性块
+  `registry` 路共用同一份 `matchSlot`，两条路不再各写一份）；
+- 内嵌 IR 的 `id` 钉成期望 composition_id，`canvas.duration` 钉到**坑位包络 + 0.3s 余量**
+  （铁律⑦），且**原本贴在模板末尾的层跟着钉**——不钉的话坑位长于模板时，那些层会在原时长处
+  被隐藏，后半段元素凭空消失；
+- 重编产物自证仍须是 `ir` 态，否则报错零落盘；`id` 与时长都没改时**原字节落盘**，不重编。
+
+独立模式同病一并修：`--as` 过去只改文件名、不改颗粒内部 id；`--duration` 在 text 路被**静默忽略**
+（命令面照收、代码里根本没这个字段）。现在 `--as` 改写 IR `id`、`--duration` 钉 `canvas.duration`，
+且 `--slot` 与 `--duration` **互斥**（派单的包络由 `track_st` / `track_ed` 定，显式给时长会与它打架）。
+
+另两条顺带：镜像块自身不是 `ir` 态时**报错零落盘**（那是发布事故，静默落一颗改不动的颗粒，
+用户要到 `mg edit` 被拒才发现）；派单 `category` 透传给 lint，槽位派 `fullscreen` 而模板是透明叠加时
+报**非致命**的 `x-category-opaque`——不拦落盘，但提醒你给这颗补一层全幅实心底。
+
 ## 1.2.4（2026-09-14）
 
 ### `gtrk mg` 文字模板三口：`fetch --source text` / `compile` / `edit`（add-text-template-source）

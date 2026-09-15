@@ -360,3 +360,80 @@ export function posterUrls(catalog: TextTemplateCatalog, item: TextTemplateItem,
 export function existsPackagedCache(): boolean {
 	return existsSync(cachePath());
 }
+
+// ─────────────────────────── 落点钉定（fix-mg-fetch-text-slot-identity） ───────────────────────────
+
+/**
+ * 坑位余量（秒）。gsap-emit v1 铁律⑦：颗粒时间线总长 SHALL ≥ 坑位包络 + 0.3s——
+ * 主叙事播完后定格驻留到坑位末尾，免得「动画一过完颗粒突兀消失」。
+ */
+export const SLOT_MARGIN_SEC = 0.3;
+
+export interface PinIrTarget {
+	/** 期望 composition_id（派单条目的 `composition_id`，或独立模式的 `--as`）。 */
+	id?: string;
+	/** 期望 `canvas.duration`（秒）。派单模式 = r3(坑位包络 + 0.3)；独立模式 = `--duration`。 */
+	duration?: number;
+}
+
+export interface PinIrResult {
+	ir: Record<string, unknown>;
+	/** id 改动（未改则不给）。 */
+	id?: { from: string; to: string };
+	/** 时长改动（未改则不给）。 */
+	duration?: { from: number; to: number };
+	/** 跟着钉到新时长的层 id —— 原 `out` 等于模板 `canvas.duration` 的那些。 */
+	pinnedLayers: string[];
+	/** 有任何一处被改。false ⇒ 调用方 SHALL 原字节落盘，不必重编。 */
+	changed: boolean;
+}
+
+/**
+ * 把模板 IR 钉到落点要求：`id` → 期望 composition_id，`canvas.duration` → 坑位时长。
+ *
+ * **为什么非改 IR 不可**：模板 HTML 里的 `data-composition-id`、`__timelines[...]` 注册键、
+ * CSS 属性选择器作用域全部由 IR 的 `id` 编译而来，而 lint 铁律 `1-cid-expect` 校的正是
+ * 「HTML 内 id == 期望 id」。直接改 HTML 字节会让这颗从 `ir` 掉成 `detached`（云端调不动），
+ * 所以唯一合法的改法是改 IR 再走同一条编译链——契约 `gsap-emit-v1.md`「模板颗粒（ir 态）的改法」。
+ *
+ * **层的 `out` 必须跟着钉**（铁律⑦的另一半）：编译器对 `L.out < canvas.duration` 的层会在
+ * `out` 处写 `tl.set(…,{visibility:'hidden'})`（`text-ir/compile.ts`）。模板里贴到末尾的层
+ * `out == 原 canvas.duration`，若只改 canvas 不改它们，坑位长于模板时后半段元素会凭空消失。
+ * 反过来，原本就**短于**模板时长的层是作者的编排意图（如提前退场的提示符），MUST NOT 动。
+ *
+ * 纯函数：深拷贝入参，不改原对象、不做 IO。
+ */
+export function pinTemplateIr(ir: Record<string, unknown>, target: PinIrTarget): PinIrResult {
+	const next = structuredClone(ir) as Record<string, unknown>;
+	const out: PinIrResult = { ir: next, pinnedLayers: [], changed: false };
+
+	if (target.id !== undefined && target.id !== next.id) {
+		out.id = { from: String(next.id ?? ""), to: target.id };
+		next.id = target.id;
+		out.changed = true;
+	}
+
+	if (target.duration !== undefined) {
+		const canvas = (next.canvas ?? {}) as Record<string, unknown>;
+		const from = Number(canvas.duration);
+		const to = target.duration;
+		if (!(to > 0)) throw new Error(`钉定时长必须为正数秒：${target.duration}`);
+		if (!(from > 0)) throw new Error(`模板 IR 的 canvas.duration 非正（${canvas.duration}），无法钉定`);
+		if (Math.abs(from - to) > 1e-9) {
+			canvas.duration = to;
+			next.canvas = canvas;
+			out.duration = { from, to };
+			out.changed = true;
+			// 原本贴到模板末尾的层跟着钉；容差按毫秒格（IR 的时间字面就是 3 位小数）
+			for (const layer of (Array.isArray(next.layers) ? next.layers : []) as Record<string, unknown>[]) {
+				const o = layer?.out;
+				if (typeof o === "number" && o >= from - 1e-6) {
+					layer.out = to;
+					out.pinnedLayers.push(String(layer.id ?? "?"));
+				}
+			}
+		}
+	}
+
+	return out;
+}

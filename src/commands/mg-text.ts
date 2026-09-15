@@ -29,11 +29,17 @@ import {
 	describeCatalog,
 	fetchTemplateHtml,
 	findTemplate,
+	pinTemplateIr,
 	resolveCatalog,
 	searchTemplates,
+	SLOT_MARGIN_SEC,
 	type ResolvedCatalog,
+	type TextTemplateItem,
 	categoryOf,
 } from "../lib/text-templates";
+// 派单读取与 registry 中性块路共用同一份口径（fix-mg-fetch-text-slot-identity）
+import { matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
+import { r3 } from "../lib/frame-domain";
 
 export interface TextCmdOpts {
 	pick?: string;
@@ -43,6 +49,8 @@ export interface TextCmdOpts {
 	slot?: string;
 	project?: string;
 	dispatch?: string;
+	/** 独立模式：坑位时长锚（秒）。派单模式不收它——那边的包络由 dispatch 定。 */
+	duration?: string;
 	say?: string;
 	n?: string;
 	yes?: boolean;
@@ -109,49 +117,141 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 	if (!item) {
 		throw new Error(`模板目录里没有「${pickId}」（目录 v${catalog.version}，${catalog.items.length} 件；先用候选态检索：gtrk mg fetch --source text <检索词>）`);
 	}
-	const { cid, outPath } = resolveTextOutPath(item.id, opts);
+	const target = await resolveTextTarget(item, opts);
 
 	log.step(`▶ 取模板 ${item.id}（${item.file.path}，${item.file.bytes} B，sha256 ${item.file.sha256.slice(0, 12)}…）`);
 	const got = await fetchTemplateHtml(catalog, item);
 	for (const a of got.attempts) log.info(`[${a.id}] ${a.ok ? "✓" : "✗"} ${a.url}${a.reason ? `（${a.reason}）` : ""} ${a.ms}ms`);
 
-	const identity = identifyParticle(got.html);
-	const lint = lintParticle(got.html, { compositionId: cid, slotDuration: item.duration, identity: identity.state });
+	// 镜像块自身 MUST 是 `ir` 态：目录里的模板本就由 IR 编译而来，不是的话是**发布事故**
+	// （块被直接改过 / 镜像传错文件）。静默落一颗改不动的颗粒，用户要到 `mg edit` 被拒
+	// 那一刻才发现，而那时他已经在它上面改了半天。
+	const src = identifyParticle(got.html);
+	if (src.state !== "ir" || !src.ir) {
+		throw new Error(
+			`模板块 ${item.id} 自证不是 ir 态（identity=${src.state}）——目录里的模板应恒由 IR 编译而来，` +
+				"这多半是发布事故（块被直接改过，或镜像传错了文件）。已零落盘，请报 issue。",
+		);
+	}
+
+	// ── 钉落点：id → 期望 composition_id，canvas.duration → 坑位包络 ──
+	// **改 IR、不改 HTML**：HTML 里的 `data-composition-id` / `__timelines` 注册键 / CSS 属性选择器
+	// 作用域全由 IR 的 `id` 编译而来，而 lint 铁律 `1-cid-expect` 校的正是「HTML 内 id == 期望 id」。
+	// 直接改字节会让这颗从 `ir` 掉成 `detached`（云端调不动），所以唯一合法的改法是改 IR 再走
+	// **同一条**编译链——契约 `gsap-emit-v1.md`「模板颗粒（ir 态）的改法」。
+	const pinned = pinTemplateIr(src.ir, {
+		id: target.cid,
+		...(target.pinDuration !== undefined ? { duration: target.pinDuration } : {}),
+	});
+	let html = got.html;
+	if (pinned.changed) {
+		if (pinned.id) log.step(`▶ 钉 composition_id：${pinned.id.from} → ${pinned.id.to}`);
+		if (pinned.duration) {
+			const why =
+				target.slotSec !== undefined
+					? `（坑位包络 ${target.slotSec}s + ${SLOT_MARGIN_SEC}s 余量，铁律⑦）`
+					: "（--duration）";
+			const layers = pinned.pinnedLayers.length ? `；贴模板末尾的层跟着钉：${pinned.pinnedLayers.join("、")}` : "";
+			log.step(`▶ 钉时长：${pinned.duration.from}s → ${pinned.duration.to}s ${why}${layers}`);
+		}
+		const res = compileIrLocal(pinned.ir);
+		// 自证不过 = 编译器与三态判定的口径漂了，比落一颗坏颗粒更该当场停（同 `mg compile`）。
+		const after = identifyParticle(res.html);
+		if (after.state !== "ir") {
+			throw new Error(`钉定后的本地产物自证失败（identity=${after.state}）——编译器与三态判定的哈希口径可能已不一致，请报 issue，不落盘`);
+		}
+		html = res.html;
+	}
+
+	const lint = lintParticle(html, {
+		compositionId: target.cid,
+		slotDuration: target.lintSec,
+		identity: "ir",
+		...(target.category ? { category: target.category } : {}),
+	});
 	for (const v of lint.violations) (v.fatal ? log.err : log.warn)(`${v.fatal ? "✗" : "·"} ${v.law}: ${v.msg}`);
 	const base = {
 		mode: "fetch" as const,
 		source: "text",
 		id: item.id,
-		composition_id: cid,
+		composition_id: target.cid,
 		catalog: { version: catalog.version, origin: resolved.origin },
 		fetched_from: got.source,
 		url: got.url,
-		identity: identity.state,
+		identity: "ir",
+		...(target.slotSec !== undefined ? { slot_sec: target.slotSec } : {}),
+		duration: pinned.duration?.to ?? item.duration,
+		pinned: {
+			changed: pinned.changed,
+			...(pinned.id ? { id: pinned.id } : {}),
+			...(pinned.duration ? { duration: pinned.duration } : {}),
+			layers: pinned.pinnedLayers,
+		},
+		compiled: pinned.changed,
 		lint: { ok: lint.ok, opaque: lint.opaque, violations: lint.violations },
 	};
 	if (!lint.ok) {
 		log.err(`lint 致命项未过（${lint.violations.filter((v) => v.fatal).length} 项），不落盘`);
 		return { ...base, ok: false, stage: "lint-failed" };
 	}
-	await mkdir(dirname(outPath), { recursive: true });
-	await writeFile(outPath, got.html, "utf8");
-	log.ok(`已落 ${outPath}（${describeState(identity.state)}；${item.duration}s；槽位 ${item.slots.join("、") || "无"}）`);
+	await mkdir(dirname(target.outPath), { recursive: true });
+	// 恒 LF：哈希是三态身份的判据，CRLF 会让这颗在别的机器上被判 detached
+	await writeFile(target.outPath, html, "utf8");
+	log.ok(`已落 ${target.outPath}（${describeState("ir")}；${base.duration}s；槽位 ${item.slots.join("、") || "无"}）`);
 	log.warn("改内容走 `gtrk mg compile`（改 IR 重编译）或 `gtrk mg edit --say`（云端改写）——直接改 HTML 会让它脱离模板，云端就调不动了。");
-	return { ...base, ok: true, stage: "written", path: outPath };
+	return { ...base, ok: true, stage: "written", path: target.outPath };
 }
 
-/** 取块落点：派单模式取 beat 的 composition_id，独立模式用 --as，都没有就用模板 id。 */
-function resolveTextOutPath(templateId: string, opts: TextCmdOpts): { cid: string; outPath: string } {
+interface TextTarget {
+	/** 期望 composition_id：派单条目的 `composition_id` / `--as` / 模板 id。 */
+	cid: string;
+	outPath: string;
+	/** 送 lint 的坑位包络（铁律⑦判据）。 */
+	lintSec: number;
+	/** 钉给 `canvas.duration` 的值；`undefined` = 不钉，保留模板时长。 */
+	pinDuration?: number;
+	/** 派单坑位包络（仅派单模式）——出参与日志用。 */
+	slotSec?: number;
+	/** 派单 category，透传 lint 做 opaque 自洽提示（`x-category-opaque` 恒非致命）。 */
+	category?: "overlay" | "fullscreen";
+}
+
+/**
+ * 取块落点与钉定目标。
+ *
+ * ⚠️ **派单模式的 composition_id 来自 `dispatch.mg`，不是 `--slot` 的值**
+ * （fix-mg-fetch-text-slot-identity）：`--slot` 收的是 beat id（`B05`），而派单条目的
+ * `composition_id` 是 `<工程slug>-<beatId>`（`t07-B05`）——铺轨与 `mg lint --dispatch`
+ * 都按后者对账。旧实现把前者直接当 id 用，于是派单模式**必然** `1-cid-expect` 致命。
+ * 口径与 registry 中性块路共用 `matchSlot`，两条路不再各写一份。
+ */
+async function resolveTextTarget(item: TextTemplateItem, opts: TextCmdOpts): Promise<TextTarget> {
 	if (opts.slot) {
 		if (!opts.project && !opts.dispatch) throw new Error("--slot 需要配 --project <dir>（或 --dispatch <path>）");
-		const baseDir = resolve(opts.project ?? dirname(resolve(opts.dispatch as string)));
-		// 派单模式沿用工程内落点；composition_id 用槽位名，与 dispatch.mg 对齐
-		return { cid: opts.slot, outPath: join(baseDir, "mg", `${opts.slot}.html`) };
+		if (opts.duration !== undefined) {
+			throw new Error("--slot 与 --duration 互斥：派单模式的坑位包络由 dispatch.mg 的 track_st / track_ed 定，显式给时长会与它打架");
+		}
+		const { dispatchPath, baseDir } = resolveDispatch(opts);
+		const hit = matchSlot(await readMgQueue(dispatchPath), opts.slot);
+		return {
+			cid: hit.compositionId,
+			outPath: join(baseDir, "mg", `${hit.compositionId}.html`),
+			lintSec: hit.slotSec,
+			// 铁律⑦：总长 ≥ 坑位 + 0.3s 余量，主叙事播完定格驻留到坑位末尾
+			pinDuration: r3(hit.slotSec + SLOT_MARGIN_SEC),
+			slotSec: hit.slotSec,
+			...(hit.category ? { category: hit.category } : {}),
+		};
 	}
-	const cid = opts.as ?? templateId;
+	const cid = opts.as ?? item.id;
 	const outDir = resolve(opts.out ?? "./mg-fetch");
 	assertNotJianyingDraftDir(outDir);
-	return { cid, outPath: join(outDir, `${cid}.html`) };
+	const outPath = join(outDir, `${cid}.html`);
+	if (opts.duration === undefined) return { cid, outPath, lintSec: item.duration };
+	const d = Number(opts.duration);
+	if (!(d > 0)) throw new Error(`--duration 必须为正数秒：${opts.duration}`);
+	// 独立模式无坑位包络，`--duration` 就是 lint 包络（同 `mg render` / registry 独立模式口径）
+	return { cid, outPath, lintSec: d, pinDuration: d };
 }
 
 // ─────────────────────────── mg compile ───────────────────────────
