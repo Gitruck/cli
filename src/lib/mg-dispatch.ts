@@ -54,6 +54,14 @@ export interface SlotHit {
 	slotSec: number;
 	/** 该条派单的 category（只在取值合法时给出）。 */
 	category?: "overlay" | "fullscreen";
+	/**
+	 * 该条派单声明的满屏底色（`dispatch.mg[].bg`），**只在 `category:"fullscreen"` 且取值是颜色时给出**。
+	 *
+	 * ⚠️ 这个字段在本 change 之前**全 CLI 零消费方**——splitdoc 写了一个没人读的颜色，
+	 * 而同一条派单声明的 `fullscreen` 也没人兑现。两件事是同一件：派单说了要盖住画面、
+	 * 也说了用什么颜色盖，只是没人把线接上。
+	 */
+	bg?: string;
 	item: MgDispatch;
 }
 
@@ -71,5 +79,12 @@ export function matchSlot(queue: MgDispatch[], slot: string): SlotHit {
 	const slotSec = r3(q.track_ed - q.track_st);
 	if (!(slotSec > 0)) throw new Error(`派单条目 ${q.composition_id} 的坑位包络非正（track_st=${q.track_st} track_ed=${q.track_ed}）`);
 	const category = q.category === "overlay" || q.category === "fullscreen" ? q.category : undefined;
-	return { compositionId: q.composition_id, slotSec, ...(category ? { category } : {}), item: q };
+	// bg 只在满屏档透出：overlay 槽位就算写了 bg 也 MUST NOT 兑现——那会把透明叠加变成盖住画面的板子。
+	// 取值须是 #RRGGBB / #RRGGBBAA 字面色；`$name` 这类引用在派单里无从解析（派单没有 colors 表）。
+	const rawBg = (q as { bg?: unknown }).bg;
+	const bg =
+		category === "fullscreen" && typeof rawBg === "string" && /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(rawBg.trim())
+			? rawBg.trim()
+			: undefined;
+	return { compositionId: q.composition_id, slotSec, ...(category ? { category } : {}), ...(bg ? { bg } : {}), item: q };
 }

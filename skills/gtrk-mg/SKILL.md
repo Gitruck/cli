@@ -65,7 +65,16 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
    - **落点与时长由命令钉定，你不用管**（fix-mg-fetch-text-slot-identity）：派单模式的 `composition_id` 取自 `dispatch.mg` 那条（`<工程slug>-<beatId>`，**不是** `--slot` 收的 beat id），产物落 `<产物目录>/mg/<composition_id>.html`；颗粒内嵌 IR 的 `id` 与 `canvas.duration` 被一并钉到「期望 id」与「坑位包络 + 0.3s 余量」（铁律⑦），贴模板末尾的层跟着钉，然后走 `mg compile` 同一条本地编译链重编。产物因此仍是 `ir` 态（云端还能改），且 `mg lint --dispatch` 的 `1-cid-expect` 天然对得上。
    - `--slot` 与 `--duration` **互斥**：派单模式的包络由 `track_st` / `track_ed` 定，显式给时长会与它打架；独立模式才用 `--duration`。
    - 出参里的 `pinned` 写明改了什么（`id` 的 from→to、`duration` 的 from→to、被钉的层）；两者都没改时 `changed:false` 且**原字节落盘**（不重编）。
-   - 派单 `category` 与模板透明度不一致时会报**非致命**的 `x-category-opaque`（例：槽位派 `fullscreen`、模板是透明叠加）。它不拦落盘，但**看见要处置**：满屏槽位得给这颗补一层全幅实心底（改 IR 加一层 `shape` 再 `gtrk mg compile`），否则出片时底轨会透出来。
+   - **满屏槽位拿不出实心底 ⇒ 致命 `x-category-opaque`，拒落盘**（`gate-fullscreen-slot-needs-solid-bed`）。
+     判据只看**产物**——「这颗有没有满屏实心底」，**不看它是不是模板颗粒**。
+     ⚠️ 派单模式下**通常不用你操心**：`dispatch.mg[].bg` 写了底色的话，取块时会自动钉进
+     `canvas.bg`，声明当场兑现。撞上这条红一般意味着**派单只声明了 `fullscreen` 却没给 `bg`** ——
+     两条出路：① 这颗本来就该是叠加 ⇒ 改派单的 `category` 为 `overlay`；
+     ② 确实要盖住画面 ⇒ 给派单补 `bg`，或手动在 IR 里写 `canvas.bg`（编译器会产成根下第一个全幅子层）。
+     MUST NOT 靠「加一层 shape 当底」绕过：那种写法的覆盖面取决于祖先定位与 transform，
+     **静态判不出来**，`opaque` 登记不上（画出来了但成片按透明叠加处理）。
+   - 反方向（槽位派 `overlay`、颗粒却是实心）仍是**非致命**告警：那只是多盖了底轨，看得见、改得动，
+     不是「以为有其实没有」的静默落空。两个方向后果不对称，判据也就不对称。
 3. **改字（L0，0 积分）**：把内嵌的 IR 存成 `<id>.ir.json`，改 `slots` 里的文字（也可改 `colors` / `font` / `stroke` / `shadow` / `canvas.duration`），然后 `gtrk mg compile <id>.ir.json --out <目录>`。
 4. **改效果（2 积分/候选）**：`gtrk mg edit <particle.html> --say "打字机快一倍，副标改成青色" [--n 1|3]`。`--n` 只收 1 或 3，**它就是计费单位数**。返回的候选带 `scope`：`L1` = 在模板可调范围内，`L2` = 越界了、等于新生成（**不是失败**）。服务端说做不到时会给一句 `refusal`，**如实转述给用户**——他要的是「为什么不能」，不是一个没有解释的错误。
 5. **lint → 铺**：同中性块，`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`。

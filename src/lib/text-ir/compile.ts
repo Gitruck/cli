@@ -705,6 +705,25 @@ export function compileIrBody(irInput: Dict): string {
 	const body: string[] = [];
 	const js: string[] = [];
 
+	// ── canvas.bg：满幅实心底（add-text-ir-canvas-bg）──────────────────────────
+	// **只在有 bg 时多产这一行**。无 bg 时一个字节都不多 ⇒ 既有 103 份金样产物逐字节不变，
+	// 逐字节等价闸不动、目录不必重发。这是唯一能同时满足「加档」与「不重编全库」的切法。
+	//
+	// ⚠️ 落点是**硬要求不是风格**，两条各有出处：
+	//  ① MUST 是**根下第一个渲染子层**、样式 MUST **内联**——下游 `gtrk mg lint` 的 opaque
+	//    推导只读「根标签 + 第一个渲染子标签」的**内联** style（`mg-lint.ts` 的 deriveOpaque，
+	//    它会跳过 <style>/<script> 这类非渲染标签，所以排在 <style> 之后没关系）。
+	//    落进更深的嵌套 ⇒ **像素画出来了但 clip.opaque 记成 false**，成片时按透明叠加处理，
+	//    两边都不报错——2026-09-15 的事故就是这个形态。
+	//  ② 底 MUST NOT 上根：铁律4「根零视觉、透明显式」。根照旧 background:transparent，
+	//    实心底是它上面盖的一层全幅子层。这不是绕路，是契约钦定的形态。
+	if (ir.canvas.bg) {
+		body.push(
+			`<div class="bgfill" style="position:absolute;inset:0;` +
+				`background:${res(ir, ir.canvas.bg)}"></div>`,
+		);
+	}
+
 	layers.forEach((L, i) => {
 		const lid: string = L.id;
 		const [px, py] = L.pos;

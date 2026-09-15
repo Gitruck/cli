@@ -139,6 +139,61 @@ function isFullBleed(tagStr: string): boolean {
 	return isFullBleedStyle(attr(tagStr, "style") ?? "");
 }
 
+/**
+ * 某个开标签的**有效样式** = 内联 `style` ＋ `<style>` 块里命中它的类/id/标签规则
+ * （gate-fullscreen-slot-needs-solid-bed）。
+ *
+ * ## 为什么要补这一路
+ *
+ * 合规的写法允许把全幅性与底色写在 `<style>` 的类规则里（`.bgfill{position:absolute;inset:0;...}`），
+ * 而 `deriveOpaque` 原先只读内联 `style` ⇒ 这种颗粒**画出来了但登记成透明**，
+ * 成片时按透明叠加处理，两边都不报错。
+ *
+ * ⚠️ 这不是新能力：**同一个文件里** CSS 成本那条路早就在解析 `<style>` 规则体
+ * （`styleBlockRules` + `isFullBleedStyle`）。原先是自家两套口径，本函数把它收成一套。
+ *
+ * ## 射程（刻意不做的部分）
+ *
+ * 只做**最朴素的选择器匹配**：`.cls` / `#id` / `tag`，以及它们前面带祖先前缀的形式
+ * （取选择器最后一节判）。MUST NOT 往「真 CSS 选择器引擎」方向长——
+ * 这里要的是「别把合规写法漏判成透明」，不是复刻浏览器。
+ * 匹配不上就当没有，**判不准一律回落到「不透明=false」**（保守方向：
+ * 把实心误判成透明只是少一次优化，把透明误判成实心会黑掉底轨）。
+ */
+function effectiveStyle(tagStr: string, rules: { selector: string; own: string }[]): string {
+	const inline = attr(tagStr, "style") ?? "";
+	const cls = new Set(
+		(attr(tagStr, "class") ?? "")
+			.split(/\s+/)
+			.filter(Boolean)
+			.map((c) => c.toLowerCase()),
+	);
+	const id = (attr(tagStr, "id") ?? "").toLowerCase();
+	const tag = /^<([a-zA-Z][\w-]*)/.exec(tagStr)?.[1]?.toLowerCase() ?? "";
+	const hits: string[] = [];
+	for (const { selector, own } of rules) {
+		// 逗号分组逐个判；每一支取**最后一节**（祖先前缀不参与匹配，见上「射程」）
+		for (const one of selector.split(",")) {
+			const last = one.trim().split(/\s+|>/).filter(Boolean).pop();
+			if (!last) continue;
+			const s = last.toLowerCase();
+			const ok =
+				(s.startsWith(".") && cls.has(s.slice(1))) ||
+				(s.startsWith("#") && id === s.slice(1)) ||
+				(/^[a-z][\w-]*$/.test(s) && s === tag);
+			if (ok) {
+				hits.push(own);
+				break;
+			}
+		}
+	}
+	// ⚠️ 内联排**最前**：`bgOf` 用的是 `String.match`（非全局）⇒ 取**第一条** `background` 声明。
+	//    要让「内联优先于类规则」这条 CSS 语义成立，内联就得排在前面。
+	//    （`isFullBleedStyle` 是存在性判断，与次序无关。）
+	//    第一版写成 `hits + inline` 并注释「取最后一条」——想当然了，`match` 不是那么工作的。
+	return `${inline};${hits.join(";")}`;
+}
+
 /** 从一段 style 串里取 background 声明 → 有无声明 / 是否非透明。 */
 function bgOf(style: string): { declared: boolean; opaque: boolean } {
 	const bg = style.match(/background(?:-color)?\s*:\s*([^;"']+)/i);
@@ -175,11 +230,28 @@ export interface OpaqueDerivation {
  * **两处都声明时取「有任一非透明底即 opaque」**：颗粒画出的不透明像素只要有一层是满幅的，成片里就盖住底轨——
  * 这与 `clip.opaque` 要表达的事实（「该颗粒是否满屏不透明」）同义。
  */
-function deriveOpaque(rootTagStr: string | null, childTagStr: string | null): OpaqueDerivation {
+function deriveOpaque(
+	rootTagStr: string | null,
+	childTagStr: string | null,
+	/**
+	 * `<style>` 块里的规则（`styleBlockRules(html)`）。不传 = 只看内联，行为与本 change 之前逐字相同。
+	 *
+	 * ⚠️ **射程如实声明：只解析根与第一个渲染子层，MUST NOT 往深处走。**
+	 * 更深的层（比如把 1920×1080 的 shape 塞进 `.ly > .ct > .sh`）**看着满屏、但静态判不出来**——
+	 * 它的覆盖面取决于祖先的定位与 transform，而那是几何推理，CSS 文本给不出保证。
+	 * 硬判会产生**假阳性**：把其实没盖满的颗粒登记成 `opaque=true` ⇒ 成片时黑掉底轨。
+	 * 假阳性比假阴性糟得多，所以这里宁可漏判。
+	 * ⇒ 要满屏实心底，正道是 IR 写 `canvas.bg`（编译器产的就是根下第一个全幅子层，
+	 * 正好落在本函数看得见的位置），或手写时自己放一个全幅首子层。
+	 */
+	rules: { selector: string; own: string }[] = [],
+): OpaqueDerivation {
 	if (!rootTagStr) return { opaque: false, declared: false, solidOnRoot: false, solidOnChild: false };
-	const root = bgOf(attr(rootTagStr, "style") ?? "");
-	const childFull = childTagStr !== null && isFullBleed(childTagStr);
-	const child = childFull ? bgOf(attr(childTagStr as string, "style") ?? "") : { declared: false, opaque: false };
+	const root = bgOf(effectiveStyle(rootTagStr, rules));
+	const childFull = childTagStr !== null && isFullBleedStyle(effectiveStyle(childTagStr, rules));
+	const child = childFull
+		? bgOf(effectiveStyle(childTagStr as string, rules))
+		: { declared: false, opaque: false };
 	return {
 		opaque: root.opaque || child.opaque,
 		declared: root.declared || child.declared,
@@ -1854,7 +1926,13 @@ export function lintParticle(
 
 	// 铁律4 后半：透明与否必须显式 + 实心底 MUST 下沉子层（align-particle-solid-backdrop-contract）。
 	// 推导面 = 根 style ∪ 根下首个全幅子层 style，与契约铁律4④ 同源。
-	const { opaque, declared, solidOnRoot, solidOnChild } = deriveOpaque(root, firstChildTag(html, root));
+	// [gate-fullscreen-slot-needs-solid-bed] 把 `<style>` 类规则一起喂进去——合规写法允许
+	// 把全幅性与底色写在类规则里，只读内联会把那种颗粒漏判成透明（画出来了但登记不上）。
+	const { opaque, declared, solidOnRoot, solidOnChild } = deriveOpaque(
+		root,
+		firstChildTag(html, root),
+		styleBlockRules(html),
+	);
 	if (root && !declared)
 		push(
 			"4-bg-explicit",
@@ -1948,11 +2026,42 @@ export function lintParticle(
 	if (opts.dispatchIds && cid && !opts.dispatchIds.includes(cid))
 		push("x-dispatch", false, `composition_id "${cid}" 不在 dispatch.mg 派单中`);
 
-	// 品类↔opaque 对账（裁决⑩，声明+校验；以 HTML 反推 opaque 为准，不符只告警）
+	// 品类↔opaque 对账（裁决⑩）。
+	//
+	// [gate-fullscreen-slot-needs-solid-bed] **「声明要满屏、产物没有底」这一档升为致命。**
+	//
+	// 为什么单这一档升：它是**派单说了一件事、产物没做、两边都不吭声**的那种失败。
+	// 2026-09-15 实测 t04 有 10 个槽位声明 `category:"fullscreen"`、t07 有 3 个，
+	// **一个都没兑现**；信号确实打了（就是这条），但走的是 info 灰字、夹在一模一样的
+	// `x-soft-alpha` 之间、exit 0 ⇒ 等于没打。
+	//
+	// ⚠️ 而且原文案本身就是问题的一部分：「以 HTML 为准落 clip.opaque=false」
+	// **把认输写成了结论**——它没说「你要的满屏底没兑现」，它说的是「好的，那就按透明算」。
+	//
+	// ⚠️ 判据只取**产物**，MUST NOT 取出身（是不是文字模板颗粒）：
+	// 文字模板**能不能**有实心底是 profile 的取舍（`add-text-ir-canvas-bg` 已开这一档），会变；
+	// 「这颗有没有实心底」是产物事实，不会变。按出身写的闸在加档上线当天就错了。
+	// 按产物写还多拦一类：**手写颗粒漏了底**，此前完全拦不住。
+	//
+	// 反方向（声明透明、产物却是实心）**仍非致命**：那只是多盖了底轨，看得见、改得动，
+	// 不是「以为有其实没有」的静默落空。
 	if (opts.category && opts.category in CATEGORY_EXPECTED_OPAQUE) {
 		const expect = CATEGORY_EXPECTED_OPAQUE[opts.category];
-		if (expect !== opaque)
-			push("x-category-opaque", false, `category「${opts.category}」期望${expect ? "不透明满屏" : "透明叠加"}，但颗粒 HTML 反推为${opaque ? "不透明满屏" : "透明叠加"}（以 HTML 为准落 clip.opaque=${opaque}）`);
+		if (expect !== opaque) {
+			const missingBed = expect && !opaque;
+			push(
+				"x-category-opaque",
+				missingBed,
+				missingBed
+					? `槽位声明 category「${opts.category}」（要盖住画面），但这颗颗粒**没有满屏实心底**——` +
+							"声明不会自己兑现，成片时它是透明叠加、底轨会透出来。两条出路：" +
+							"① 这颗本来就该是叠加 ⇒ 把派单的 category 改成 overlay；" +
+							"② 确实要盖住画面 ⇒ 给它一个满幅实心底（IR 写 `canvas.bg` 即可，" +
+							"编译器会产成根下第一个全幅子层；手写颗粒就自己放一个 " +
+							'<div style="position:absolute;inset:0;background:<底色>"> 作首子层）'
+					: `category「${opts.category}」期望透明叠加，但颗粒 HTML 反推为不透明满屏（以 HTML 为准落 clip.opaque=true）`,
+			);
+		}
 	}
 
 	// 铁律⑦：颗粒应占满坑位并终态驻留。静态估长只能给**下界**，故恒非致命（含下面两条提示）——

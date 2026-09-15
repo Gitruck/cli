@@ -374,6 +374,15 @@ export interface PinIrTarget {
 	id?: string;
 	/** 期望 `canvas.duration`（秒）。派单模式 = r3(坑位包络 + 0.3)；独立模式 = `--duration`。 */
 	duration?: number;
+	/**
+	 * 期望 `canvas.bg`（满幅实心底色）。**只在派单声明 `category:"fullscreen"` 且写了 `bg` 时给**。
+	 *
+	 * 派单里的 `dispatch.mg[].bg` 此前**全 CLI 零消费方**——splitdoc 写了一个没人读的颜色。
+	 * 而 `category:"fullscreen"` 的声明同样没人兑现（2026-09-15 实测 t04 有 10 个这样的槽位、
+	 * t07 有 3 个，产物 opaque 全 false，**不报任何错**）。两件事其实是同一件：
+	 * 派单说了要盖住画面、也说了用什么颜色盖，只是没人把它接上。本键就是那根线。
+	 */
+	bg?: string;
 }
 
 export interface PinIrResult {
@@ -382,6 +391,8 @@ export interface PinIrResult {
 	id?: { from: string; to: string };
 	/** 时长改动（未改则不给）。 */
 	duration?: { from: number; to: number };
+	/** 底色改动（未改则不给）。`from` 为 `null` = 模板原本就没有底。 */
+	bg?: { from: string | null; to: string };
 	/** 跟着钉到新时长的层 id —— 原 `out` 等于模板 `canvas.duration` 的那些。 */
 	pinnedLayers: string[];
 	/** 有任何一处被改。false ⇒ 调用方 SHALL 原字节落盘，不必重编。 */
@@ -432,6 +443,21 @@ export function pinTemplateIr(ir: Record<string, unknown>, target: PinIrTarget):
 					out.pinnedLayers.push(String(layer.id ?? "?"));
 				}
 			}
+		}
+	}
+
+	// ── canvas.bg：把派单声明的满屏底色钉进去（add-text-ir-canvas-bg §5.1）─────────
+	// ⚠️ `transparent` MUST 同批翻成 false —— 校验器要求两者自洽，只改一个会当场判红。
+	//    它不是装饰位：`transparent` 现在的全部职责就是和 `canvas.bg` 对账。
+	if (target.bg !== undefined) {
+		const canvas = (next.canvas ?? {}) as Record<string, unknown>;
+		const from = typeof canvas.bg === "string" ? canvas.bg : null;
+		if (from !== target.bg) {
+			canvas.bg = target.bg;
+			next.canvas = canvas;
+			next.transparent = false;
+			out.bg = { from, to: target.bg };
+			out.changed = true;
 		}
 	}
 

@@ -142,6 +142,10 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 	const pinned = pinTemplateIr(src.ir, {
 		id: target.cid,
 		...(target.pinDuration !== undefined ? { duration: target.pinDuration } : {}),
+		// 满屏槽位：把派单声明的底色钉进 `canvas.bg`（add-text-ir-canvas-bg §5.1）。
+		// 不接这根线的话，满屏槽位取模板必然撞 `x-category-opaque` 致命闸——
+		// 而派单其实早就写了要用什么颜色，闸就只是在挡路。
+		...(target.bg ? { bg: target.bg } : {}),
 	});
 	let html = got.html;
 	if (pinned.changed) {
@@ -154,6 +158,11 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 			const layers = pinned.pinnedLayers.length ? `；贴模板末尾的层跟着钉：${pinned.pinnedLayers.join("、")}` : "";
 			log.step(`▶ 钉时长：${pinned.duration.from}s → ${pinned.duration.to}s ${why}${layers}`);
 		}
+		if (pinned.bg)
+			log.step(
+				`▶ 钉满屏底色：${pinned.bg.from ?? "（模板原本没有底）"} → ${pinned.bg.to}` +
+					"（派单 category=fullscreen 且写了 bg；transparent 同批翻 false）",
+			);
 		const res = compileIrLocal(pinned.ir);
 		// 自证不过 = 编译器与三态判定的口径漂了，比落一颗坏颗粒更该当场停（同 `mg compile`）。
 		const after = identifyParticle(res.html);
@@ -185,6 +194,7 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 			changed: pinned.changed,
 			...(pinned.id ? { id: pinned.id } : {}),
 			...(pinned.duration ? { duration: pinned.duration } : {}),
+			...(pinned.bg ? { bg: pinned.bg } : {}),
 			layers: pinned.pinnedLayers,
 		},
 		compiled: pinned.changed,
@@ -212,8 +222,15 @@ interface TextTarget {
 	pinDuration?: number;
 	/** 派单坑位包络（仅派单模式）——出参与日志用。 */
 	slotSec?: number;
-	/** 派单 category，透传 lint 做 opaque 自洽提示（`x-category-opaque` 恒非致命）。 */
+	/** 派单 category，透传 lint 做 opaque 对账（`fullscreen` 却没实心底 ⇒ 致命）。 */
 	category?: "overlay" | "fullscreen";
+	/**
+	 * 派单声明的满屏底色，钉给 `canvas.bg`。只在 `category:"fullscreen"` 且派单写了 `bg` 时有。
+	 *
+	 * ⚠️ 没有它的话，满屏槽位取模板必然撞 `x-category-opaque` 致命闸（库里 103 件一件没有底），
+	 * 而派单其实**早就写了要用什么颜色**——这根线不接上，闸就只是在挡路。
+	 */
+	bg?: string;
 }
 
 /**
@@ -241,6 +258,7 @@ async function resolveTextTarget(item: TextTemplateItem, opts: TextCmdOpts): Pro
 			pinDuration: r3(hit.slotSec + SLOT_MARGIN_SEC),
 			slotSec: hit.slotSec,
 			...(hit.category ? { category: hit.category } : {}),
+			...(hit.bg ? { bg: hit.bg } : {}),
 		};
 	}
 	const cid = opts.as ?? item.id;
