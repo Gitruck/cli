@@ -68,7 +68,9 @@ const ALIGNS = ["left", "center", "right"] as const;
 
 const TOP_KEYS = ["v", "id", "title", "family", "canvas", "transparent", "hold",
 	"colors", "slots", "layers", "envelope", "note"] as const;
-const CANVAS_KEYS = ["w", "h", "fps", "duration", "bg"] as const;
+const CANVAS_KEYS = ["w", "h", "fps", "duration", "bg", "scrim"] as const;
+/** `scrim` 的子键（add-text-ir-scrim）。`rect` 缺省 = 满屏。 */
+const SCRIM_KEYS = ["fill", "rect", "radius"] as const;
 const LAYER_KEYS = ["id", "type", "slot", "text", "font", "color", "opacity", "pos", "anchor",
 	"in", "out", "anim", "loop", "mask", "stagger", "shape",
 	"align", "vertical", "maxWidth", "box", "glow", "stroke", "shadow", "runs",
@@ -184,6 +186,53 @@ export function validateIr(ir: unknown): string[] {
 		if (ir.transparent !== false) E.push("canvas.bg 在场时 transparent 必须 false（满幅实心底不是透明叠加）");
 	} else if (ir.transparent !== true) {
 		E.push("transparent 必须 true（要满幅实心底请写 canvas.bg）");
+	}
+
+	// canvas.scrim：可调透明度的压板（add-text-ir-scrim）。与 bg 分键而不是放宽 bg——
+	// bg 的 `transparent:false` 是下游判据（deriveOpaque / 满屏槽位闸拿它认「能不能当实心底」），
+	// 让它再收 alpha 等于让「实心底」同时指两种东西，闸就没意义了。
+	if (c.scrim !== undefined && c.scrim !== null) {
+		const s = checkSub(c.scrim, SCRIM_KEYS, "canvas.scrim", E);
+		if (bg !== undefined && bg !== null) {
+			E.push("canvas.scrim 与 canvas.bg 互斥（要满幅实心底用 bg，要压暗用 scrim）");
+		}
+		if (ir.transparent !== true) {
+			E.push(
+				"canvas.scrim 在场时 transparent 仍须 true —— 压板是半透明的，" +
+					"颗粒依然是透明叠加；把它写成 false 会让满屏槽位的闸放行一块压板",
+			);
+		}
+		const fill = s.fill;
+		if (fill === undefined || fill === null) {
+			E.push("canvas.scrim.fill 必填");
+		} else {
+			checkColor(fill, "canvas.scrim.fill", colors, E);
+			const lit = typeof fill === "string" && fill.startsWith("$") ? colors[fill.slice(1)] : fill;
+			// ⚠️ alpha 就是 scrim 存在的理由，不带 alpha 的一律拒并指路。
+			if (typeof lit === "string" && lit.length === 7) {
+				E.push(
+					"canvas.scrim.fill 须带 alpha（#RRGGBBAA）——" +
+						"要满幅实心底用 canvas.bg，要局部实心衬板用 shape 层或层的 box",
+				);
+			} else if (typeof lit === "string" && lit.length === 9 && lit.slice(7).toLowerCase() === "ff") {
+				E.push(
+					"canvas.scrim.fill 的 alpha 是 FF（全不透明），那不是压板：" +
+						"满屏用 canvas.bg，局部用 shape 层或层的 box",
+				);
+			}
+		}
+		const rect = s.rect;
+		if (rect !== undefined && rect !== null) {
+			if (!Array.isArray(rect) || rect.length !== 4 || !rect.every((x) => isNum(x))) {
+				E.push("canvas.scrim.rect 须为 [x, y, w, h] 四个数");
+			} else if ((rect[2] as number) <= 0 || (rect[3] as number) <= 0) {
+				E.push("canvas.scrim.rect 的 w/h 须为正数");
+			}
+		}
+		const radius = s.radius;
+		if (radius !== undefined && radius !== null && (!isNum(radius) || (radius as number) < 0)) {
+			E.push("canvas.scrim.radius 须为非负数");
+		}
 	}
 
 	let slots: Dict = isDict(ir.slots) ? ir.slots : {};

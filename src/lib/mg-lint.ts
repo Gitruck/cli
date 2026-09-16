@@ -111,11 +111,46 @@ function firstChildTag(html: string, rootTagStr: string | null): string | null {
 		const m = /^<([a-zA-Z][\w-]*)\b[^>]*>/.exec(html.slice(i));
 		if (!m) return null;
 		const name = m[1].toLowerCase();
+		// [add-text-ir-scrim] 压板层跳过，继续找下一个全幅子层。
+		//
+		// scrim 是「压暗底轨」而非「盖掉底轨」的半透明层，而它恰好落在根下第一个渲染子层的
+		// 位置 —— 正是本函数的取样点。不跳的话 `bgOf` 会把 `#000000A6` 判成非透明
+		// （它只认 transparent/none/rgba(...,0) 三种形态），于是**一块压板被登记成合格实心底**：
+		// 满屏槽位据此过闸，出片时底轨从压板后面透出来。
+		// `deriveOpaque` 头注写的保守方向是「把实心误判成透明只是少一次优化，
+		// 把透明误判成实心会黑掉底轨」——这里正是后者，所以必须跳。
+		//
+		// ⚠️ 判据取**编译器自产的显式标记**，不取颜色解析：颜色侧的 alpha 识别（见 `bgOf`）
+		// 面大易漏（#RRGGBBAA / #RGBA / rgba() / hsla() 四种写法），漏一种就是静默失守。
+		// 显式声明优于推断——这是我方编译器产的层，它自己知道自己是什么。
+		if (/\bdata-gtrk-scrim\b/i.test(m[0])) {
+			i += skipElement(html, i, name, m[0]);
+			continue;
+		}
 		if (!NON_RENDERING.includes(name)) return m[0];
 		// 跳过整块：有闭合标签的（style/script/title）连内容一起跳，自闭合的（meta/link）只跳标签
 		const close = new RegExp(`</${name}\\s*>`, "i").exec(html.slice(i));
 		i += close ? close.index + close[0].length : m[0].length;
 	}
+}
+
+/**
+ * 从 `html[at]` 处的开标签起，返回**整个元素**（含内容与闭合标签）的长度。
+ *
+ * 按同名标签配对计深度，不靠「找第一个 `</div>`」——scrim 现在恒是空 div，
+ * 但手写颗粒里塞了内容的压板一样该被整块跳过，朴素切法会在那里把深度算错、
+ * 把 scrim 内部的某个子层当成「根下第一个全幅子层」。
+ * 闭合标签缺失（非法 HTML）时只跳开标签，不吞掉文档剩余部分。
+ */
+function skipElement(html: string, at: number, name: string, openTag: string): number {
+	const re = new RegExp(`<${name}\\b[^>]*>|</${name}\\s*>`, "gi");
+	re.lastIndex = at + openTag.length;
+	let depth = 1;
+	for (let m = re.exec(html); m; m = re.exec(html)) {
+		depth += m[0].startsWith("</") ? -1 : 1;
+		if (depth === 0) return m.index + m[0].length - at;
+	}
+	return openTag.length;
 }
 
 /**
@@ -199,8 +234,40 @@ function bgOf(style: string): { declared: boolean; opaque: boolean } {
 	const bg = style.match(/background(?:-color)?\s*:\s*([^;"']+)/i);
 	if (!bg) return { declared: false, opaque: false };
 	const val = bg[1].trim().toLowerCase();
-	const transparent = val === "transparent" || val === "none" || /rgba\([^)]*,\s*0\s*\)/.test(val);
+	const transparent =
+		val === "transparent" || val === "none" || /rgba\([^)]*,\s*0\s*\)/.test(val) || hasAlpha(val);
 	return { declared: true, opaque: !transparent };
+}
+
+/**
+ * 颜色值是否带 **alpha < 1**（[add-text-ir-scrim] 的**兜底**，不是主路）。
+ *
+ * 治的是同一件事：半透明底此前一律被判成 `opaque=true`，于是一块压板能冒充实心底过闸。
+ * 我方编译器产的 scrim 走显式 `data-gtrk-scrim` 标记（见 `firstChildTag`）；
+ * 这条只为**手写颗粒**兜底。
+ *
+ * ⚠️ **闸 MUST NOT 依赖本函数**：四种写法（`#RRGGBBAA` / `#RGBA` / `rgba()` / `hsla()`）
+ * 漏一种就是静默失守，而「静默失守」正是这类推断式判据的固有失败形态。
+ * 主路永远是上游那个显式标记；这里只是让漏网的少一点。
+ * 保守方向与 `deriveOpaque` 一致：**宁可把实心误判成透明**（少一次优化），
+ * 也不能把透明误判成实心（会黑掉底轨）。所以边界上一律往「透明」判。
+ */
+function hasAlpha(val: string): boolean {
+	const hex8 = /^#([0-9a-f]{6})([0-9a-f]{2})$/.exec(val);
+	if (hex8) return parseInt(hex8[2], 16) < 255;
+	const hex4 = /^#([0-9a-f]{3})([0-9a-f])$/.exec(val);
+	if (hex4) return parseInt(hex4[2], 16) < 15;
+	const fn = /^(?:rgba?|hsla?)\(([^)]*)\)$/.exec(val);
+	if (fn) {
+		// 逗号式 `rgba(0,0,0,.65)` 与斜杠式 `rgb(0 0 0 / 65%)` 都收——
+		// 后者是现代 CSS 的常规写法，漏了它等于这条兜底对半数手写颗粒失效。
+		const slash = fn[1].split("/");
+		const raw = (slash.length > 1 ? slash[1] : fn[1].split(",")[3] ?? "").trim();
+		if (!raw) return false;
+		const a = raw.endsWith("%") ? parseFloat(raw) / 100 : parseFloat(raw);
+		return Number.isFinite(a) && a < 1;
+	}
+	return false;
 }
 
 /** `deriveOpaque` 的完整推导结果（align-particle-solid-backdrop-contract：推导面由「根」扩为「根 ∪ 首个全幅子层」）。 */

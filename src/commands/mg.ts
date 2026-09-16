@@ -577,6 +577,9 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	let dispatchIds: string[] | undefined;
 	let slotDuration: number | undefined;
 	let compositionId: string | undefined; // 期望 id（非覆盖值）
+	// 显式 `--category` 优先于派单里的（与 runFetch :743 同序），两者都没有 ⇒ 闸不介入
+	let slotCategory: "overlay" | "fullscreen" | undefined =
+		opts.category === "overlay" || opts.category === "fullscreen" ? opts.category : undefined;
 	// 工程根/派单定位：`--dispatch` 与 `--project` 都能解析出来（今日只认前者，于是给了
 	// `--project` 时既不比对派单、也无从谈工程内含闸——2026-09-07 正是这条路）。
 	let dispatchPath: string | undefined;
@@ -599,6 +602,13 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 			// 铁律⑦：坑位长度 = 槽位包络（与 dispatch.duration 的 hint 语义解耦），同 runLay
 			const d = r3(hit.track_ed - hit.track_st);
 			if (d > 0) slotDuration = d;
+			// [gate-fullscreen-slot-needs-solid-bed] 派单的 category 也要往下传。
+			// ⚠️ **这条原先是漏的**：`--category` 在命令面注册着、派单里也写着，但 runLint
+			// 一个都不读 ⇒ `gtrk mg lint --dispatch`（用户检查已铺颗粒最自然的那条命令）
+			// **根本触发不了满屏闸**，闸只活在 `mg fetch` 那条路上。
+			// 于是「取块时合规、后来颗粒被换掉」这条最常见的失守路径完全没人看。
+			// 2026-09-16 补线时撞到（本仓 add-text-ir-scrim 的接线格跑不通才发现）。
+			if (!slotCategory && hit.category) slotCategory = hit.category;
 		}
 		if (byName) compositionId = byName.composition_id;
 
@@ -635,6 +645,7 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 		...(dispatchIds ? { dispatchIds } : {}),
 		...(compositionId ? { compositionId } : {}),
 		...(slotDuration ? { slotDuration } : {}),
+		...(slotCategory ? { category: slotCategory } : {}),
 		identity: particleState,
 	});
 	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);

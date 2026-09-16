@@ -724,6 +724,28 @@ export function compileIrBody(irInput: Dict): string {
 		);
 	}
 
+	// ── canvas.scrim：可调透明度的压板（add-text-ir-scrim）─────────────────────
+	// 同款切法：**只在有 scrim 时多产这一行**，无 scrim 一个字节都不多。
+	//
+	// ⚠️ `data-gtrk-scrim="1"` 不是装饰，是**给 lint 侧看的显式标记**。
+	// scrim 恰好是根下第一个渲染子层，正是 `mg-lint.ts` 的 `deriveOpaque` 推导面；
+	// 而它判透明只认 `transparent`/`none`/`rgba(...,0)` 三种形态，`#000000A6` 这种
+	// 半透明落不进去 ⇒ **一块压板会被认成合格实心底**，满屏槽位据此过闸、
+	// 出片时底轨从压板后面透出来。修法取显式标记不取颜色解析：
+	// 这是我方编译器自产的层，声明优于推断（颜色侧 alpha 识别只作兜底）。
+	const sc = ir.canvas.scrim as { fill: string; rect?: number[]; radius?: number } | undefined;
+	if (sc) {
+		const r = sc.rect;
+		const geo = r
+			? `left:${r[0]}px;top:${r[1]}px;width:${r[2]}px;height:${r[3]}px`
+			: "inset:0";
+		const radius = sc.radius ? `;border-radius:${sc.radius}px` : "";
+		body.push(
+			`<div class="sc" data-gtrk-scrim="1" style="position:absolute;${geo};` +
+				`background:${res(ir, sc.fill)}${radius}"></div>`,
+		);
+	}
+
 	layers.forEach((L, i) => {
 		const lid: string = L.id;
 		const [px, py] = L.pos;
