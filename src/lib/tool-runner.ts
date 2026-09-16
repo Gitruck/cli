@@ -370,8 +370,13 @@ async function uploadManyAndSubmit(
 // ---------------------------------------------------------------- 面包屑目录名
 
 /** 本地时间戳 YYMMDD-HHMMSS（input=none 的工具产物目录用）。 */
-function timestamp(): string {
-	const d = new Date();
+/**
+ * 产物目录用的秒级时间戳 `YYMMDD-HHMMSS`（本地时区）。
+ * ⚠️ **全仓唯一实现**：`src/lib/mad/mad.ts` 曾另写过一份逐字等价的（2026-09-16 已收敛到这里）。
+ * 秒级粒度本身撞得上——防撞靠 {@link createOutDir} 的原子探路，不靠加长时间戳。
+ */
+export function timestamp(now: Date = new Date()): string {
+	const d = now;
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
@@ -388,6 +393,13 @@ export function resolveOutDir(descriptor: ToolDescriptor, inputAbs: string | und
 
 /** 撞名消解的序号上界（撞满即报错；MUST NOT 无限重试）。 */
 const MAX_OUTDIR_CANDIDATES = 99;
+
+/**
+ * 固定名面包屑清单（`task.json` 提交即落、`result.json` 收尾落、`result-output.json` 结构化结果）。
+ * 三者**按固定名被消费**，故撞名时 MUST NOT 改名、只 WARN —— 口径见
+ * `fix-tool-outdir-collision` Open Question ① 的 2026-09-16 拍板。
+ */
+const BREADCRUMB_NAMES = ["task.json", "result.json", "result-output.json"] as const;
 
 /** 取 fs 错误码（EEXIST/ENOENT…）；非 fs 错误返回 undefined。 */
 function fsErrCode(e: unknown): string | undefined {
@@ -571,6 +583,24 @@ export async function runCloudTool(
 				throw new Error(
 					`${e instanceof Error ? e.message : String(e)}（任务已提交，task_id=${taskId}，可凭其在云端取回产物）`,
 				);
+			}
+			// 固定名面包屑的覆盖告警（fix-tool-outdir-collision 0.2 拍板：补 WARN、不改名）。
+			// 射程 = **显式 `--out`**：那是 proposal Open Question ① 点名的唯一残口。
+			//   · 无 `--out` 且无输入文件 ⇒ 时间戳目录，第一层已原子防撞，撞不上；
+			//   · 有输入文件 ⇒ `<输入名>-<tool>/` 幂等重跑本就该落回同一目录（设计如此），
+			//     每次都喊会变噪音，故**刻意不报**。
+			// 不改名的理由：三者按固定名被消费（`oralcut-result` / skill / agent 都按名读），改名会污染既有约定
+			// —— 产物文件那一侧才走改名（见 resolveCollisionFreeName）。
+			// 只在第一次建目录时判：writeBreadcrumb 会重入，放块外会把自己刚写的 task.json 当成旧的误报。
+			if (opts.out) {
+				const stale = BREADCRUMB_NAMES.filter((f) => existsSync(join(outDir, f)));
+				if (stale.length > 0) {
+					emitWarn(
+						`「${outDir}」下已有上一次任务的面包屑（${stale.join("、")}），本次将覆盖它们——` +
+							`固定名不参与改名，上一次的 task_id 与产物清单将不可回溯。` +
+							`产物文件本身不受影响（撞名会自动改名保留）。要并行跑多条，给每条一个独立的 --out。`,
+					);
+				}
 			}
 			outDirReady = true; // 一次运行只建一次目录：重入不会再派生 -2
 		}

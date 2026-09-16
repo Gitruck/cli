@@ -5,7 +5,7 @@
  * IR 按需拉取 → BGM/beat 三级降级 → madJsx 组装 → 落 .jsx + result.json + 完成话术。
  * 无 Key 承诺（D10）：无 --bgm 全程只走免鉴权数据面，不触需鉴权接口、不要求 Key、零计费。
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { resolve, join } from "node:path";
 import type { CloudConfig } from "../config";
@@ -13,7 +13,7 @@ import { resolveToolPricing, type PriceResolver } from "../tool-pricing";
 import { loadConfig as realLoadConfig } from "../config";
 import { submitTask } from "../cloud";
 import { uploadCached, invalidateUpload } from "../upload-cache";
-import { pollToolTask } from "../tool-runner";
+import { pollToolTask, createOutDir, timestamp } from "../tool-runner";
 import { probeDuration } from "../media";
 import { r3 } from "../frame-domain";
 import { madJsx, type MadWindow, type FootageMap, type BeatMarker } from "../convert/ir_to_jsx";
@@ -127,10 +127,6 @@ function collectSlotIds(ir: IRProject): string[] {
 
 const SLOT_STAGGER = 0.3; // 窗内各 slot srcOffset 错开（秒）
 
-function timestamp(now: Date): string {
-	const p = (n: number) => String(n).padStart(2, "0");
-	return `${p(now.getFullYear() % 100)}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
-}
 
 /**
  * 查询态（`--search`）：只查技法目录，不要素材文件夹、不产 .jsx、不落 result.json、不碰选择器。
@@ -350,8 +346,13 @@ export async function runMad(inputArg: string | undefined, opts: MadOpts, deps: 
 	const { jsx } = madJsx({ master, windows, header, bgm });
 
 	// ⑨ 落盘
-	const outDir = opts.out ? resolve(opts.out) : join(process.cwd(), `mad-${timestamp(now)}`);
-	await mkdir(outDir, { recursive: true });
+	// 产物目录防撞（fix-tool-outdir-collision 0.3 拍板：mad 跟修，与 tool 族共用同一份实现）。
+	// 改前是 `mkdir(recursive:true)` —— 已存在即**静默复用**，同一秒起两条 mad 会让后者的
+	// mad.jsx 覆盖前者，且两条回执的 outDir 逐字符相同（与 2026-09-02 那次 tool 族真机事故同形，
+	// 只是 mad 零计费、损失是一份 jsx 被悄悄换掉）。
+	// antiCollision 口径照抄 tool-runner：`--out` 是用户明示的落点，替他改名反而是惊吓。
+	const outDirCandidate = opts.out ? resolve(opts.out) : join(process.cwd(), `mad-${timestamp(now)}`);
+	const outDir = await createOutDir(outDirCandidate, !opts.out);
 	const jsxPath = join(outDir, "mad.jsx");
 	await writeFile(jsxPath, jsx);
 	const result: MadResult = {
