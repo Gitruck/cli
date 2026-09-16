@@ -274,14 +274,29 @@ export type DedupScope = "scene" | "material";
 /** 来源层（D2 层序铁律，写死不配置）：自上而下 local > concept > common（common 最下、紧贴口播/黑底之上）。 */
 export type SourceLayer = "local" | "concept" | "common";
 /** 层带语义序（自上而下 local > concept > common）。
- * ★ fix-broll-zorder-contract-drift（2026-08-19 打样实锤）：gtrk v1 契约与客户端一致为
+ * ★ fix-broll-zorder-contract-drift（2026-08-19 打样实锤）：gtrk v1 契约为
  * **track_index 越大越靠前（上层）**（composition-contract-v1 §video_track:「最小=底轨 main，
- * 越大越靠前」；客户端 project-to-timeline 同口径）——本模块此前以相反世界观（小=上层）分配
+ * 越大越靠前」）——本模块此前以相反世界观（小=上层）分配
  * index：黑底落 bandEnd 最大号=按契约盖住全部候选轨、层带 local 落最小号=按契约沉底，
  * 与层序铁律「local 最上」正好相反。音频驱动工程首个客户端走查（黑片压顶截图）拍出实锤。
  * 修正后分配：黑底=baseIndex（最小、垫底），带区自 baseIndex+1 起按 common→concept→local
  * 升号排布（local 号最大=契约上层=铁律「本地最上」）。本常量保持**语义序**（自上而下）不变，
- * index 分配处按其反序遍历。 */
+ * index 分配处按其反序遍历。
+ *
+ * ⟲ link-broll-zorder-contract-recheck（2026-09-16）订正上面那句论据，**结论不变、依据换掉**：
+ * 原文写「客户端 project-to-timeline 同口径」。那只对客户端的**导出**侧成立；**导入**侧当时恰恰相反
+ * （小=上），由 opencut `fix-gtrk-import-overlay-z-order` 于 2026-09-05 修正。而用户在客户端里看到的
+ * 层序是**导入**侧决定的 ⇒ 08-19 那条论据链有一环是错的。
+ *
+ * 那张「黑片压顶」截图本身是真的，推理也没断，只是成因不是它看上去的那个：音频驱动工程没有口播视频轨，
+ * 主选按「最小 track_index = main」会选中一条 **B-roll 候选轨**当主画面；黑底取 bandEnd（最大号）
+ * 在当时客户端的「小=上」下落到 overlay 最末 = 紧贴 main 之上 ⇒ 它盖住的正是那条被当作主画面的 B-roll。
+ * 黑底原本的意图是「B-roll 期间遮住口播 A-roll」，可那个位置上的不是 A-roll、是主内容。
+ *
+ * ⇒ 两侧当年各自绕开症状、谁都没修中间那条方向不一致。根因已由主件修掉，
+ * 至此契约 / 本模块 / 后端 / 客户端导入 / 客户端导出**五处同向**。
+ * ⚠️ 本模块的方向依据 SHALL 只认**契约条文**，MUST NOT 拿任一消费方当下的实现当锚（对侧会改）。
+ * 正本见 spec `broll-source-layering`「层序铁律的 track_index 落法」。 */
 export const SOURCE_LAYER_ORDER: readonly SourceLayer[] = ["local", "concept", "common"];
 
 const isSourceLayer = (v: unknown): v is SourceLayer => v === "local" || v === "concept" || v === "common";
@@ -3952,9 +3967,15 @@ export function layBrollTracks(opts: {
 		}
 	}
 
-	// ── 纯黑底垫轨（track_index 恒 = 全部层带之下 bandEnd，比所有候选轨都大）──
-	// gtrk v1 里非主轨 track_index 越大越靠下（客户端 importer 升序进 overlay、overlay[0] 最上层），
-	// 故黑底恰好落在「全部候选轨（各层带）之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	// ── 纯黑底垫轨（track_index 恒 = 层带区之下预留的最小号 baseIndex）──
+	// gtrk v1 契约：非主轨 track_index **越大越靠前（上层）**（composition-contract-v1 §video_track），
+	// 故黑底取**最小**号恰好落在「全部候选轨（各层带）之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	// ⟲ link-broll-zorder-contract-recheck（2026-09-16）：本段原写「恒 = bandEnd，比所有候选轨都大」
+	//   且方向断言与契约恰好相反，两处均已过时——取号早已在 fix-broll-zorder-contract-drift 改成 baseIndex
+	//   （见下方赋值处），方向断言则与 SOURCE_LAYER_ORDER 头注**正相反**。原文还拿「客户端 importer
+	//   升序进 overlay」当方向依据，而那个实现正是 opencut fix-gtrk-import-overlay-z-order 修掉的东西。
+	// ⚠️ 方向依据 SHALL 只认契约条文，MUST NOT 拿任一消费方（客户端 importer / 剪映导出 / 后端渲染）
+	//   当下的实现当锚。保留下来的是「黑底为什么垫在候选轨之下、口播主轨之上」这个**意图**。
 	// 他层保留轨在场时即使本轮零新轨也要重铺黑底（黑轨已被恒剥，位置随层结构平移）。
 	//
 	// ★ fix-broll-black-bed-regression：黑底在场不变量 —— **剥后仍有任何自产 B-roll 内容轨在场，
