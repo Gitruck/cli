@@ -8,7 +8,33 @@
 新鲜请求与逐字节重放都回传当前版本、重放不二次计费）。这条成因在当前部署下不可能发生，继续列出只会把排查引向不存在的地方。
 `IDEM_KEY_PINNED_DEPLOYED` 改为 `true`；服务端若回滚到版本钉入键之前，须改回 `false`。
 
-## 1.2.5（2026-09-14）
+## 1.2.5（2026-09-14 定版，2026-09-15 发布）
+
+> 下面四条补录于 2026-09-16：**它们随 1.2.5 一起发出去了，但当时漏写了用户面条目**。
+> 判据取自 registry 拉回的 `@gitruck/cli@1.2.5` 包体（`dist/index.js` 里的运行期串），
+> 不是本地源码——本机全局 `gtrk` 是指向开发仓的符号链接，照它判会把未发的算进来。
+> 已发的 1.2.5 代码切在 `69a1f51`：`gate-mg-visual-job` 与「本地编译补校验」**不在这一版里**。
+
+### 修：`maxWidth` 的文字层换画幅会被挤窄（fix-text-ir-maxwidth-shrink）
+
+编译器给带 `maxWidth` 的文字层补 `width:max-content`。原先只给 `max-width`，
+块级盒会占满父宽，居中与右对齐算出来的落点因此偏。
+
+### 加：满屏槽位必须真有实心底（gate-fullscreen-slot-needs-solid-bed）
+
+`dispatch.mg` 的 `category:"fullscreen"` 表达「这段 MG 盖住画面」，此前**声明了也不会兑现**——
+信号打过（`x-category-opaque`），但走灰字 `log.info`、夹在一模一样的 `x-soft-alpha` 之间、
+`exit 0`，等于没打。现在拿不出满幅实心底就**致命拒落盘**，并给两条出路（改 `overlay`／补 `canvas.bg`）。
+配套：`dispatch.mg[].bg` 这个一直没有消费方的字段接上了——取块时钉进 IR 的 `canvas.bg`，
+声明当场兑现。**判据只取产物不取出身**：按「这颗是不是文字模板」写的闸，在加档上线当天就会错。
+
+### 修：`mg lay` 拿会漂的 `track_index` 当自产轨主键（fix-mg-lay-track-identity）
+
+契约明写它会漂、MUST NOT 当身份判据；客户端保存时按 `10+i` 重发，还会按有无物化视频劈轨。
+失败形态是「剥一半」（静默重复叠加）与「误剥用户轨」。改用内容指纹，口径照抄 `matrix-lay`
+那边早修过的成熟实现。
+
+### 改：随包文字模板目录刷到 `v2026-09-15.1` / 103 件
 
 ### 修：`mg fetch --source text --slot` 派单模式必败（fix-mg-fetch-text-slot-identity）
 
