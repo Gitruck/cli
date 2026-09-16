@@ -84,7 +84,10 @@ interface MgOpts {
 	as?: string;
 	/** fetch：画布 WxH；契约当前只收 1920x1080，其余拒绝。 */
 	canvas?: string;
-	/** fetch：overlay / fullscreen；缺省按块底色推断（派单模式取派单 category）。 */
+	/**
+	 * fetch：registry 路 = 不透明度品类 overlay / fullscreen（缺省按块底色推断，派单模式取派单 category）；
+	 * `--source text` 路 = 模板目录分类过滤（**同名异义**，text 路收到 overlay / fullscreen 报错指路，见 mg-text.ts）。
+	 */
 	category?: string;
 	/** fetch：替换块内 font-family 的字体名；缺省为运行时镜像可证的 CJK 字体。 */
 	font?: string;
@@ -136,7 +139,10 @@ export function registerMg(program: Command): void {
 		.option("--slot <beat>", "fetch 派单模式：目标 beat id（如 B03）——从 dispatch.mg 取 composition_id / 坑位包络 / category，产物落 <project>/mg/<composition_id>.html（注意：落点用派单的 composition_id，不是 beat id）")
 		.option("--as <composition_id>", "fetch 独立模式：目标 composition_id（配 --duration），产物落 --out（缺省 ./mg-fetch/）；--source text 下会一并改写颗粒内部的 id")
 		.option("--canvas <WxH>", "fetch：画布尺寸；契约当前只收 1920x1080")
-		.option("--category <c>", "fetch：overlay / fullscreen（缺省派单值或按块底色推断）")
+		.option(
+			"--category <c>",
+			"fetch：registry 路=不透明度品类 overlay / fullscreen（缺省派单值或按块底色推断）；--source text 路=模板目录分类过滤（如 打字机 / 标题），收到 overlay / fullscreen 当场报错指路",
+		)
 		.option("--font <name>", "fetch：替换块内字体名（缺省运行时镜像可证的 CJK 字体）")
 		.option("--all", "fetch 候选态：连 excluded 件一起列")
 		.option("--source <s>", "fetch 来源：registry（中性块，缺省）| text（我方文字模板库，块自带 IR 可云端改写）")
