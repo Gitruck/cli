@@ -133,6 +133,16 @@ gtrk transcript <本地视频.mp4> --json          # 转成一个含总结/时�
    - 字体落 `~/.gitruck/fonts`，经 `ass` 滤镜 `fontsdir` 供给——**不动用户的系统字体表**。
    - 平台未覆盖时（如 linux-arm64）会明确报错并指引手工安装，**不会错装其他架构的包**。
 
+6. **skill 新鲜度（agent 纪律 · fix-skill-install-staleness）**：随包 `/gtrk-*` skill 是
+   **装进去的那一刻的快照**，`npm i -g @gitruck/cli@latest` 升级 CLI **不会**刷新它们。
+   ⇒ **你正在读的这份 skill 有可能落后于当前 CLI 版本，而且落后时不会报任何错。**
+   需要 skill 的命令在检测到落后时会往 **stderr** 打一次提示并附修复命令；
+   见到它 **MUST** 转告用户跑 `gtrk skills install`（或 `gtrk upgrade`），
+   **MUST NOT** 当噪音忽略 —— 「照着旧口径继续干活」正是这条提示要防的事。
+   随时自查：`gtrk doctor` 里的「Skill 新鲜度」一行。判不出或一致时**零输出**，
+   所以没看到提示不等于装过（没装过 manifest 就不存在，doctor 会如实说判不出）。
+
+
 ---
 
 ## 2. 核心命令：`gtrk oralcut <毛片>`

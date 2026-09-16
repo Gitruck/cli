@@ -248,6 +248,15 @@ gtrk skills install --all
 gtrk skills install --copy
 ```
 
+> ⚠️ **升级 CLI 不会自动刷新已装的 skill。** `npm i -g @gitruck/cli@latest` 只换掉 CLI 包本体，
+> 各 Agent 目录下那份 skill 仍是**上次装进去的快照** —— agent 会照着旧口径干活，**而且不报错**。
+> 刷新走 `gtrk upgrade`（升 CLI + 刷 skill）或单独跑 `gtrk skills install`。
+>
+> 自 **1.1.3** 起这件事有信号了：需要 skill 的命令（`oralcut` / `long2short` / `split` / `matrix` /
+> `mg` / `subtitle` / `project`）在检测到本机 skill 落后时，会往 **stderr** 提示一次并给出修复命令；
+> 一致或判不出时**零输出**。随时自查跑 `gtrk doctor`，里面有一行「Skill 新鲜度」；
+> 嫌吵用环境变量 `GTRK_SKILL_FRESHNESS=off` 整块关掉。
+
 `--agents` 接受上游适配器和 gtrk 补充层的 Agent ID。国产 Agent 已覆盖 `trae`、`trae-cn`、`codebuddy`、`qoder`、`qoder-cn`、`qwen-code`、`kimi-code-cli`、`iflow-cli`、`codearts-agent`、`lingma`，并额外补充上游尚未登记的 `workbuddy`、`qoderwork`、`comate`。常见简写 `qwen`、`kimi`、`iflow`、`codearts`、`tongyi-lingma`、`qoder-work`、`baidu-comate` 也会自动映射。以后上游新增 Agent，gtrk 无须发版也能直接使用新 ID；已有脚本若必须写死一个目录，仍可用 `--dir <skills目录>` 走兼容复制模式。
 
 不同 Agent 的**输入 UI 不统一**：Claude 常把 skill 名放进 `/` 补全；Codex 的不同客户端可从 `$`、`/skills` 或 Skills 面板进入；TRAE 以 Skills 设置、显式点名或语义触发为主。因此没看到 Claude 风格的 `/gtrk-*` 下拉，不代表 skill 没安装。新 skill 没出现时，刷新窗口或新开会话。

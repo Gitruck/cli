@@ -253,6 +253,17 @@ gtrk skills install --all
 gtrk skills install --copy
 ```
 
+> ⚠️ **Upgrading the CLI does not refresh the skills you already installed.**
+> `npm i -g @gitruck/cli@latest` swaps the CLI package only; the copy under each agent's directory is still
+> **the snapshot from your last install** — the agent keeps working from the stale wording, **and nothing errors out**.
+> Refresh with `gtrk upgrade` (CLI + skills) or run `gtrk skills install` on its own.
+>
+> Since **1.1.3** this is no longer silent: the skill-backed commands (`oralcut`, `long2short`, `split`,
+> `matrix`, `mg`, `subtitle`, `project`) print a one-off notice on **stderr** with the fix command when they
+> detect that the installed skills lag behind the package; when they match, or cannot be judged, output is
+> **empty**. Run `gtrk doctor` any time for the "Skill freshness" row, or set
+> `GTRK_SKILL_FRESHNESS=off` to silence the whole thing.
+
 `--agents` accepts agent IDs from both the upstream adapter and the gtrk supplement layer. Chinese agents already covered include `trae`, `trae-cn`, `codebuddy`, `qoder`, `qoder-cn`, `qwen-code`, `kimi-code-cli`, `iflow-cli`, `codearts-agent` and `lingma`, plus `workbuddy`, `qoderwork` and `comate` which upstream has not registered yet. Common shorthands — `qwen`, `kimi`, `iflow`, `codearts`, `tongyi-lingma`, `qoder-work`, `baidu-comate` — are mapped automatically. When upstream adds new agents, gtrk can use the new IDs without a release; if an existing script must hardcode a directory, `--dir <skills dir>` still gives you the compatible copy mode.
 
 **Agent input UIs are not standardized**: Claude usually surfaces skill names in `/` completion; different Codex clients enter via `$`, `/skills` or a Skills panel; TRAE relies mostly on Skills settings, explicit naming or semantic triggering. So not seeing a Claude-style `/gtrk-*` dropdown does not mean the skill is missing. If a new skill does not show up, refresh the window or start a new session.
