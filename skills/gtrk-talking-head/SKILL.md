@@ -137,7 +137,7 @@ gtrk oralcut "<inputs/…_full.mp4>" --lang zh-CN [--script 稿.txt] [--preset c
 
 以上四项一次确认完 = 检查点①收口。
 
-## 五、拆分与铺轨：三车道，无 AI 再现
+## 五、拆分与铺轨：三车道，无 AI 情景动画
 
 口播链拆分**只派三车道**（拍板：口播场景不需要 AI_DRAMA）：
 

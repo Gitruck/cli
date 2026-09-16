@@ -1,9 +1,9 @@
 ---
 name: gtrk-ai-drama
-description: AI 再现分镜稿生成器——把成片 SOP 第③步（B-roll 底轨阶段）分到 AI_DRAMA 车道的 beat，逐个产**四段朴素描述（故事背景 / 角色 / 分镜 / 原文文稿）+ 独立视觉基调段 + 时长预算**，中英双版；Markdown 外壳默认严格兼容 gitruck-ai-drama-desk 解析器，可直接导入工作台，也可拿去任意外部 AI 漫剧管线（可灵 / 即梦 / Vidu / Veo / Runway / LTX / 本地开源，或 LibTV / OiiOii / TapNow 这类成片 agent 平台）上手用。创作与出片仍在 skill / 外部工作台；工作台导出的 return-v1 包用 `gtrk ai-drama lay` 确定性回填独立 AI 轨。当用户想「上 AI 再现 / 做 AI 分镜 / AI 动画描述 / 把这段做成 AI 视频 / 给这段配 AI 再现 / 弗洛伊德这段怎么做视频」时使用本 skill。通用拆镜 craft（蒙太奇段分层 / 四段描述结构 / 中英双语 / 时长预算）由本 skill 自持；栏目视觉 DNA（Style Lock）从栏目配置 style.skills 里 produces==AI_DRAMA 的条目解析注入，绝不硬编某栏目风格。凡把口播派单里 AI_DRAMA 段落转成可出片的描述稿，优先用本 skill，别手搓。
+description: AI 情景动画分镜稿生成器——把成片 SOP 第③步（B-roll 底轨阶段）分到 AI_DRAMA 车道的 beat，逐个产**四段朴素描述（故事背景 / 角色 / 分镜 / 原文文稿）+ 独立视觉基调段 + 时长预算**，中英双版；Markdown 外壳默认严格兼容 gitruck-ai-drama-desk 解析器，可直接导入工作台，也可拿去任意外部 AI 漫剧管线（可灵 / 即梦 / Vidu / Veo / Runway / LTX / 本地开源，或 LibTV / OiiOii / TapNow 这类成片 agent 平台）上手用。创作与出片仍在 skill / 外部工作台；工作台导出的 return-v1 包用 `gtrk ai-drama lay` 确定性回填独立 AI 轨。当用户想「上 AI 情景动画 / 做 AI 分镜 / AI 动画描述 / 把这段做成 AI 视频 / 给这段配 AI 情景动画 / 弗洛伊德这段怎么做视频」时使用本 skill。通用拆镜 craft（蒙太奇段分层 / 四段描述结构 / 中英双语 / 时长预算）由本 skill 自持；栏目视觉 DNA（Style Lock）从栏目配置 style.skills 里 produces==AI_DRAMA 的条目解析注入，绝不硬编某栏目风格。凡把口播派单里 AI_DRAMA 段落转成可出片的描述稿，优先用本 skill，别手搓。
 ---
 
-# AI 再现分镜稿生成器（gtrk-ai-drama）
+# AI 情景动画分镜稿生成器（gtrk-ai-drama）
 
 把口播派单里分到 **`AI_DRAMA` 车道**的 beat，逐个拆成分镜、为每个 beat 产 **四段朴素描述 + 独立视觉基调 + 时长预算**（中英双版），落到 `<project>/ai-drama/<beat_id>.md`，再交棒 AI Drama Desk 或任意外部平台出片；标准工作台导出包由 CLI 自动回填时间线。
 
@@ -22,7 +22,7 @@ return-v1 标准包由 `gtrk ai-drama lay` 确定性回填；其他平台没有�
 
 **你与 `matrix` 同属第 ③ 步，MUST 在 MG 之前落位。** 理由：**AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**——整条管线里唯一的叠加层是 MG（含 ov）。MG 的排版决策是「因势象形避主体」、**依赖底轨的最终画面构图**；若你的片段在 MG 之后才回铺，底轨构图就变了，先产的 MG 是对着「还没有 AI 画面的底轨」做的避让，你的片段落位后必然被避让错位、甚至被 MG 盖住画面主体。
 
-> ⚠️ **本节旧口径是错的，已于 2026-08-17 纠正**：旧文写「第 ⑤ 步、最后一层视觉，越往后叠得越上层」——**那是把「工序次序」误当成了「图层次序」**。工序上你必须先落位；图层上你本来就在底轨、从来不是「最上层」。若你在别处读到「AI 再现最后上」的表述，以本节为准。
+> ⚠️ **本节旧口径是错的，已于 2026-08-17 纠正**：旧文写「第 ⑤ 步、最后一层视觉，越往后叠得越上层」——**那是把「工序次序」误当成了「图层次序」**。工序上你必须先落位；图层上你本来就在底轨、从来不是「最上层」。若你在别处读到「AI 情景动画最后上」的表述，以本节为准。
 
 **异步等待的口子（你造成的那个）**：你产完描述后，用户要去外部平台出片、抽卡可能数天。严格串行会把 ④⑤ 无限期卡住，故约定：进 ⑤ 的硬门是「**AI 片段已回铺 ∨ 用户明示先跳过**」。走「明示跳过」时，下游 `/gtrk-mg` MUST 把与你的 beat 相邻/重叠区间的 MG 颗粒标记为「AI 回铺后待复查构图」并在收口时复述——**你在交代进度时也要把这个代价说清**，让用户知道跳过意味着将来可能返工那几颗。
 
@@ -49,7 +49,7 @@ return-v1 标准包由 `gtrk ai-drama lay` 确定性回填；其他平台没有�
 2. **取 AI_DRAMA 生产条目**：读 `style.skills[]`，逐条把 `produces` **归一**（历史别名如 `RRV_MG→MG` 等按归一规则处理），取 `produces == "AI_DRAMA"` 的条目。
    - 命中 → 拿它的 `ref`（指向一个 skill 目录/资源）→ **读该 skill 的 Style Lock / 风格资产**（通常是它 `references/` 下的 style-lock、theme-accent、影视参考锚点等），把其中的**底色 / 单点强调色 / 影视参考 / 材质 / 栏目禁令**当作本次生成的视觉 DNA，注入 ①视觉基调段与各描述。
    - 条目声明 `routing:"none"` → 跳过（显式管线外）。
-   - **无 AI_DRAMA 匹配条目 = 该栏目没绑 AI 再现风格资产** → 用下面「中性默认」。
+   - **无 AI_DRAMA 匹配条目 = 该栏目没绑 AI 情景动画风格资产** → 用下面「中性默认」。
 3. **注入，不臆造**：读到什么风格资产就用什么；**没读到就用中性默认，绝不凭栏目名猜风格、绝不套用别的栏目的调性**。
 
 > 举例（仅示意解析机制，非硬编）：`real-roam-guide` 栏目配置里 `style.skills` 有一条 `{produces:"AI_DRAMA", ref:"…/ai-drama-prompter"}` → 解析到它 → 读它的 style-lock（黑白单红那套）注入。换个栏目、换个 ref，注入的就是另一套风格。**本 skill 正文里不写死任何一套具体风格。**
@@ -69,7 +69,7 @@ return-v1 标准包由 `gtrk ai-drama lay` 确定性回填；其他平台没有�
 
 1. **1 镜 = 1 情感颗粒**：同一个动作不切两镜；情绪转折必须切镜。
 2. **每镜 3–8 秒**：短于 3 秒观众来不及呼吸；长于 8 秒 AI 视频模型会塌（人物表情 / 手部漂移）。
-3. **长文段拆蒙太奇段**：一个 AI_DRAMA beat 可能覆盖很长一段文稿、含多个场景/情境。此时**先拆蒙太奇段**（每段锚一个场景/情境），**段内 3–6 镜**按情感颗粒切、**段间可换场**。镜数上限按**段级**判定，**不再因整段总镜数超 6 就回退 splitter**——长区间整段做 AI 再现是合法创作，不是拆分错误。
+3. **长文段拆蒙太奇段**：一个 AI_DRAMA beat 可能覆盖很长一段文稿、含多个场景/情境。此时**先拆蒙太奇段**（每段锚一个场景/情境），**段内 3–6 镜**按情感颗粒切、**段间可换场**。镜数上限按**段级**判定，**不再因整段总镜数超 6 就回退 splitter**——长区间整段做 AI 情景动画是合法创作，不是拆分错误。
 4. **切分触发器**（任一出现才考虑切）：时间 / 空间改变、主体改变（例：理论家 → 当事人）、抽象概念登场（从「人物戏」切到「象征物戏」）、情绪转折（安静→刺点 / 爆发→凝滞）。**不要因一个句号、一个逗号就切。**
 5. **控整体不控单镜**：你对**区间总时长**负责（各镜建议秒数之和量级贴合 `track_st→track_ed`），但不必把每一镜的秒数抠死——AI 平台交付本就不保证逐帧准，最终对齐由回填这一步兜：走 `gtrk ai-drama lay` 时它按窗口顺排、
 末镜尽量吸收到 `track_ed`；**素材短于窗口就留空档**（MUST NOT 拉伸/循环去填满），没有标准包才由用户手动拼。
@@ -140,7 +140,7 @@ bun scripts/validate-storyboard.mjs <候选稿.md>
 通过时输出单行 JSON 并退出 0；不通过时逐条列出违约项并退出非零。它校验的是生产端硬契约；工作台仍是最终权威，仓库可用时可再用其 `server/lib/parse.ts` 做回归。
 
 ```
-# AI 再现分镜稿 · [自动标题]（beat <beat_id>）
+# AI 情景动画分镜稿 · [自动标题]（beat <beat_id>）
 
 > [责权利声明：本稿只描述意图与时长；角色一致性依赖下游角色资产机制；出片/拼回在用户手里]
 
@@ -208,7 +208,7 @@ face / hair / eyes / wardrobe / signature prop + do-not-change + one line on how
 > **中性 Style Lock**：影视级自然主义画面，真实可信的光源（窗光 / 实用光 / 自然天光，不炫技），克制稳定的镜头语言（固定或缓慢推拉摇，无手持抖动 / 无广告级动态运镜 / 无无人机炫技），近单色到低饱和的克制调色（不追 HDR、不追霓虹），胶片颗粒质感。忌塑料 3D 渲染、忌动漫二次元、忌过度戏剧化打光。
 > **EN**: Cinematic naturalism, believable practical light sources (window / practical / natural daylight, no showing off), restrained stable camera language (locked or slow dolly/pan/tilt, no handheld shake, no ad-grade dynamic moves, no drone stunts), near-monochrome to low-saturation restrained grade (no HDR, no neon), visible film grain. Avoid plastic 3D render, anime, and over-dramatic lighting.
 
-中性默认下**不设单点强调色 / 不指定影视导演锚点**（那些是栏目资产）。用完顺带提醒用户：**想要这条栏目有自己的 AI 再现视觉 DNA，去 `/gtrk-style-maker` 沉淀一套 AI_DRAMA 风格资产并登记进 `style.skills`**，之后每次生成都会自动注入。分镜稿与提示词层也可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene ai-drama`，装完用 `gtrk skills add <owner/repo>` 登记；本 skill 正文不点名任何仓。
+中性默认下**不设单点强调色 / 不指定影视导演锚点**（那些是栏目资产）。用完顺带提醒用户：**想要这条栏目有自己的 AI 情景动画视觉 DNA，去 `/gtrk-style-maker` 沉淀一套 AI_DRAMA 风格资产并登记进 `style.skills`**，之后每次生成都会自动注入。分镜稿与提示词层也可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene ai-drama`，装完用 `gtrk skills add <owner/repo>` 登记；本 skill 正文不点名任何仓。
 
 **禁忌行**（写进 ①）分两层：
 - **通用 AI slop 兜底（本 skill 自带，任何栏目都写）**：glossy 3D render / plastic skin、HDR look / oversaturated、generic AI anime / saccharine、deformed face / extra fingers / mutated limbs、text overlay / captions / 字幕（字幕剪辑阶段另做）、heavy lens flare / chromatic aberration、cartoon / low-res / unfinished。
@@ -245,7 +245,7 @@ face / hair / eyes / wardrobe / signature prop + do-not-change + one line on how
    命令会先按当刻口播工程重投影 beat 窗口，再把所有镜头复制到 `<gtrk目录>/assets/ai-drama/<slug>/`，共用一条新的 `video_track`；每个 beat 从起点顺排，最后一镜吸收到 beat 终点。既有 A-roll、BGM 与 B-roll 轨零改动。若已铺 AI 轨被用户手调过，缺省拒绝覆盖；只有用户明确同意丢弃手调时才加 `--replace-all`。
 3. **非标准平台才手动回铺**：外部平台没有 return-v1 清单时，才由用户把片段拖回 opencut 的 **AI_DRAMA 车道**，对齐该 beat 的 `track_st→track_ed`。AI 出片仍是外部异步、用户驱动；未拿到完整片段前要停下等用户，别替他假装出片 / 回轨完成。
 4. **回铺齐 ≠ 收口，还有两步**：你的片段回铺齐只意味着 **③ B-roll 底轨阶段**完成。接着 MUST 走 **④ 全局抽帧检查画面构图**（对三源合并后的最终底轨抽帧，看主体位置 / 安全区 / 画面朝向 / 明暗，**停下等用户确认**）→ 过了才交棒 **⑤ `/gtrk-mg`** 把 MG（含 ov）叠上 → 最后才 `gtrk render` 收口。
-   ⚠️ **MUST NOT 从你这里直接跳到 `render`**（旧文档曾这么写，那是错的——它把 AI 再现当成了最后一层）。
+   ⚠️ **MUST NOT 从你这里直接跳到 `render`**（旧文档曾这么写，那是错的——它把 AI 情景动画当成了最后一层）。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill，用户只对话**。但 AI_DRAMA 车道天然有「用户去外部平台出片 + 手动拼回」的手工环节——那部分是外部的手，无法替跑；除此之外的解析、生成、落盘、交代，全由你（脑）一次做完，别让用户自己去拼描述。
 

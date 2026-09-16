@@ -121,7 +121,7 @@ Lanes are laid **in order, with a checkpoint at every step**: first fill the B-r
         ↓                                               │
    gtrk matrix     按文稿铺 B-roll                       │
         ↓                                               │
-   AI 再现（可选）  外部平台出片 → 手动回铺               │
+   AI 情景动画（可选）  外部平台出片 → 手动回铺           │
         ↓                                               │
    客户端挑选      抽帧核构图 ← 底轨定稿前别往下走        │
         ↓                                               │

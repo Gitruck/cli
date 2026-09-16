@@ -61,7 +61,7 @@ gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
 
 > **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
 
-配方口径（mark-weight 0.3 / BGM 0.10 宁低勿高 / gap-fill fast / 句界吸附缺省）与旅拍图纸 §五 同源，引用不复制。派单车道按内容走（FILM_BROLL 为主，可派 MG / AI 再现——AI 再现描述稿走 `/gtrk-ai-drama`，外部平台出片手动回铺）。
+配方口径（mark-weight 0.3 / BGM 0.10 宁低勿高 / gap-fill fast / 句界吸附缺省）与旅拍图纸 §五 同源，引用不复制。派单车道按内容走（FILM_BROLL 为主，可派 MG / AI 情景动画——AI 情景动画描述稿走 `/gtrk-ai-drama`，外部平台出片手动回铺）。
 
 ## 三、检查点①（必停一次）
 

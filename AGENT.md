@@ -235,7 +235,7 @@ gtrk oralcut-result 88269671080189958 --render --out "D:/回收/某条"
 
 ## 2.2 视觉拆分派单器：`gtrk split`（成片 → 分镜派单）
 
-`oralcut` 出的是「剪好的口播成片」；`split` 把它拆成 **beat 级视觉分镜**并派单给下游四车道（真人 A-roll / MG 动态图 / AI_DRAMA 再现 / FILM_BROLL 影视素材）。**纯本地、同步、无云端任务**。上游依赖 `transcript.json`（oralcut 家族恒出的句级词表，源时基）。
+`oralcut` 出的是「剪好的口播成片」；`split` 把它拆成 **beat 级视觉分镜**并派单给下游四车道（真人 A-roll / MG 动态图 / AI_DRAMA 情景动画 / FILM_BROLL 影视素材）。**纯本地、同步、无云端任务**。上游依赖 `transcript.json`（oralcut 家族恒出的句级词表，源时基）。
 
 编排顺序（脑=`gtrk-splitter` skill / 手=本命令）：
 
