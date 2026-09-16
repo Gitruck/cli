@@ -430,8 +430,9 @@ export function textUnits(text: string): number {
 // 第 ②「在锚点浮动窗内挑词边界」③「词边界无解才字符强切」两步从来没写；更难堪的是旧头注
 // 已经把「切点在 ±2 字符内有空格则吸附到空格」承诺出去了，实现里只有一句 `p.trim()`。
 // 本节补的就是 ②③（并把那句承诺真正兑现），锚点那一步一行不动。
-// 第 ② 级的词表与判据不在本文件——它是待替换品（HanLP 蒸馏快照到位后整表换掉），
-// 单独落在 `caption-word-guard.ts`，本节只 import `splitsWord` 这一个入口。
+// 第 ② 级的词表与判据不在本文件——它是**人工维护的种子表**（主理人 2026-09-16 裁定不做
+// HanLP 蒸馏快照，理由见该文件 `CJK_GUARD_WORDS` 头注），单独落在 `caption-word-guard.ts`，
+// 本节只 import `splitsWord` 这一个入口。
 
 /**
  * 锚点浮动窗（单位=字宽）。对齐 infra `subtitle-line-split` 正本 spec:8-14
