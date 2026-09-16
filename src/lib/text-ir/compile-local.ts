@@ -12,13 +12,25 @@
 import { createHash } from "node:crypto";
 
 import { canonicalJson, compileIrBody } from "./compile";
+import { REF_H, REF_W, normalizeIr } from "./layout";
 import { assertValidIr } from "./validate";
 import type { CompileResult } from "../text-ir-client";
 
 const sha256 = (s: string): string => createHash("sha256").update(s, "utf8").digest("hex");
 
 /** IR → 与服务端同形的编译结果。抛错即编译失败，调用方 MUST NOT 落盘。 */
-export function compileIrLocal(ir: Record<string, unknown>): CompileResult {
+export function compileIrLocal(
+	ir: Record<string, unknown>,
+	/**
+	 * 目标画幅（add-text-ir-aspect-agnostic-layout）。
+	 *
+	 * ⚠️ 这里**有缺省**而 `compileIrBody` 没有，是有意的分工：底层纯函数少传画幅
+	 * 等于静默产错画幅的颗粒，必须拦；本函数是 CLI 适配层，调用方是命令面——
+	 * 独立模式下用户本就没有工程画幅可给，取参考画幅是唯一说得通的答案。
+	 * 派单模式 MUST 显式传工程画幅（见 `mg fetch`）。
+	 */
+	canvasSize: [number, number] = [REF_W, REF_H],
+): CompileResult {
 	// ★ 先校验再编译（fix-local-ir-compile-skips-validation）。
 	//
 	// 此前这条路**零校验**：`transparent:false`、`canvas:1280x720@60fps` 这类服务端会当场拒
@@ -32,10 +44,11 @@ export function compileIrLocal(ir: Record<string, unknown>): CompileResult {
 	// ⚠️ 位置 MUST 在 `compileIrBody` **之前**：编译器对某些非法输入会抛它自己的异常
 	// （如未定义颜色引用），那句话没有路径、用户拿不到定位。先校验才有指名到键的消息。
 	assertValidIr(ir);
-	const body = compileIrBody(ir);
+	const irSrc = normalizeIr(ir);
+	const body = compileIrBody(ir, canvasSize);
 	// 两个哈希口径不同：ir 的按 canonical JSON 算；html 的按**去掉首行声明后**的字节算
 	// （同正本 `identity.html_sha256`）。错一个就会让自家产物被自家判成 detached。
-	const irSha = sha256(canonicalJson(ir));
+	const irSha = sha256(canonicalJson(irSrc));
 	const htmlSha = sha256(body);
 	const canvas = ir.canvas as { duration?: unknown } | undefined;
 	return {

@@ -99,7 +99,7 @@ for (const id of ids) {
 	const want = readFileSync(join(dir, `${id}.html`), "utf8");
 	let got;
 	try {
-		got = compileIr(ir, sha256);
+		got = compileIr(ir, sha256, [1920, 1080]);
 	} catch (e) {
 		bad.push({ id, why: `TS 侧抛错：${e instanceof Error ? e.message : String(e)}` });
 		continue;
@@ -126,6 +126,55 @@ if (bad.length) {
 	console.log(`\n✗ ${bad.length} 份不同：`);
 	for (const b of bad.slice(0, 8)) console.log(`  · ${b.id}：${b.why}`);
 	if (bad.length > 8) console.log(`  …另有 ${bad.length - 8} 份`);
+	process.exit(1);
+}
+
+// ──────────────────── ①′ 竖屏面（k ≠ 1 那条路径）────────────────────
+//
+// ⚠️ 没有这一段，闸对「两侧缩放算得不一样」**结构上失明**：
+// 1920×1080 时 k === 1，而 `layout.px()` 在 k === 1 时直接原值返回 ——
+// 整条缩放路径一行都没跑。①段全绿只证明了 k === 1 这一档。
+const portraitDir = process.env.GTRK_TEXT_IR_PORTRAIT ?? dir.replace(/text_ir$/, "text_ir_portrait");
+if (!existsSync(portraitDir)) {
+	console.error(`❌ 竖屏金样目录不可达：${portraitDir}`);
+	console.error("   **MUST NOT 把它改成静默跳过** —— 跳过等于回到只测 k===1 的状态。");
+	process.exit(2);
+}
+const PORTRAIT = [1080, 1920];
+const pIds = readdirSync(portraitDir).filter((f) => f.endsWith(".html")).map((f) => f.slice(0, -5)).sort();
+if (pIds.length === 0) {
+	console.error(`❌ ${portraitDir} 里一份竖屏金样都没有`);
+	process.exit(2);
+}
+let pOk = 0;
+const pBad = [];
+for (const id of pIds) {
+	// IR 优先取竖屏目录自带的（tfx-scrim-probe 是专造的），否则取横屏那份 ——
+	// **同一份 IR、两个画幅**正是这道闸要比的东西。
+	const own = join(portraitDir, `${id}.ir.json`);
+	const irPath = existsSync(own) ? own : join(dir, `${id}.ir.json`);
+	const ir = JSON.parse(readFileSync(irPath, "utf8"));
+	const want = readFileSync(join(portraitDir, `${id}.html`), "utf8");
+	let got;
+	try {
+		got = compileIr(ir, sha256, PORTRAIT);
+	} catch (e) {
+		pBad.push({ id, why: `TS 侧抛错：${e instanceof Error ? e.message : String(e)}` });
+		continue;
+	}
+	if (got === want) { pOk++; continue; }
+	let i = 0;
+	while (i < Math.min(got.length, want.length) && got[i] === want[i]) i++;
+	const ctx = (x) => JSON.stringify(x.slice(Math.max(0, i - 40), i + 40));
+	pBad.push({ id, why: `第 ${i} 字节起不同
+       正本: ${ctx(want)}
+       TS  : ${ctx(got)}` });
+}
+console.log(`①′ 竖屏面：${pOk} / ${pIds.length} 逐字节相同（1080×1920，k=0.5625）`);
+if (pBad.length) {
+	console.log(`
+✗ ${pBad.length} 份不同：`);
+	for (const b of pBad.slice(0, 8)) console.log(`  · ${b.id}：${b.why}`);
 	process.exit(1);
 }
 
@@ -177,4 +226,4 @@ if (badBad.length) {
 	if (badBad.length > 8) console.log(`  …另有 ${badBad.length - 8} 份`);
 	process.exit(1);
 }
-console.log("等价闸通过（两段）");
+console.log("等价闸通过（三段：横屏 / 竖屏 / 拒绝面）");

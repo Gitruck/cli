@@ -25,6 +25,8 @@
  *    只有科学计数法的切换阈值不同 —— `pyNum()` 把那一档也对齐了。
  */
 
+import { normalizeIr, project } from "./layout";
+
 /** 铁律 5：GSAP 只许走这个 CDN（云渲容器里只放行它）。 */
 const CDN = "https://lib.baomitu.com/gsap/3.13.0/gsap.min.js";
 
@@ -679,11 +681,15 @@ function canonNums<T>(o: T): T {
  * 首行声明要算 sha256，而两个消费方的哈希能力不同（CLI 走 `node:crypto` 同步、
  * 客户端走 WebCrypto 异步），所以**哈希不在本函数里做**——由调用方用 `stamp()` 盖。
  */
-export function compileIrBody(irInput: Dict): string {
-	const ir = canonNums(irInput);
+export function compileIrBody(irInput: Dict, canvas: [number, number]): string {
+	// ⚠️ **两份 IR，别合并**（与 Python 正本同构）：
+	//   `irSrc` 住在 1920 参考系 —— **内嵌块与 ir_sha256 用它**；
+	//   `ir`    是投影到目标画幅那份 —— **只用来产出字节**。
+	// 合并会让 ir_sha256 随画幅漂，且客户端按内嵌 IR 重编时**二次缩放**。
+	const irSrc = canonNums(normalizeIr(irInput));
+	const ir = canonNums(project(irSrc, canvas));
 	const cid: string = ir.id;
-	const w: number = ir.canvas.w;
-	const h: number = ir.canvas.h;
+	const [w, h] = canvas;
 	const duration = Number(ir.canvas.duration);
 	const slots: Dict = ir.slots ?? {};
 	const layers: Dict[] = ir.layers;
@@ -843,7 +849,7 @@ export function compileIrBody(irInput: Dict): string {
 		`  })();</script>${nl}` +
 		// 内嵌 IR 收在两个 <script> **之后**：载体是 <template> 而非 <script>（前者不会让
 		// 渲染引擎产静帧），位置在脚本后则不触发 lint 铁律 1b 的「第一个 </template>」朴素切法。
-		`  ${irCarrierBlock(ir)}${nl}` +
+		`  ${irCarrierBlock(irSrc)}${nl}` +
 		`</div>${nl}` +
 		`</template>${nl}`
 	);
@@ -855,7 +861,14 @@ export function stamp(body: string, ir: Dict, sha256: (s: string) => string): st
 	return `<!-- gtrk-ir-sha256=${irSha} gtrk-html-sha256=${sha256(body)} -->\n${body}`;
 }
 
-/** IR → 完整颗粒 HTML（含首行声明）。`sha256` 由调用方注入。 */
-export function compileIr(ir: Dict, sha256: (s: string) => string): string {
-	return stamp(compileIrBody(ir), ir, sha256);
+/**
+ * IR → 完整颗粒 HTML（含首行声明）。`sha256` 由调用方注入。
+ *
+ * `canvas` **无缺省**（与 Python 正本一致，禁静默兜底）：少传一个画幅就悄悄按
+ * 1920×1080 编，等于在竖屏工程里产一颗横屏颗粒，而挂载是非等比缩放 ⇒ 拉伸变形，
+ * 两边都不报错。调用方必须自己说清楚要编到哪个画幅。
+ */
+export function compileIr(ir: Dict, sha256: (s: string) => string, canvas: [number, number]): string {
+	const irSrc = normalizeIr(ir);
+	return stamp(compileIrBody(ir, canvas), irSrc, sha256);
 }

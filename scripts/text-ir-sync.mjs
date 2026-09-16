@@ -25,7 +25,7 @@ const dstDir = join(oc, "apps", "web", "src", "tonghe", "text-ir");
 
 // 两份都要搬。**校验器与编译器是一套**：只搬编译器会让客户端编得出而拒不掉，
 // 那正是 `fix-local-ir-compile-skips-validation` 要治的形态（本地能编出来 ≠ 这份 IR 合法）。
-const FILES = ["compile.ts", "validate.ts"];
+const FILES = ["compile.ts", "validate.ts", "layout.ts"];
 
 if (!existsSync(oc)) {
 	console.error(`❌ opencut 仓不可达：${oc}`);

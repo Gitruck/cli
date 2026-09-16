@@ -44,9 +44,13 @@
  *   报告次序一致。
  */
 
+import { POS_ANCHORS, normalizeIr } from "./layout";
+
 // ── 常量（逐条对应 schema.py）──────────────────────────────────────────────
 const COLOR_RE = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 const EASE_RE = /^[a-zA-Z0-9.(),]+$/;
+
+
 
 export const VERSION = "text-v0";
 const CANVAS_W = 1920;
@@ -68,7 +72,8 @@ const ALIGNS = ["left", "center", "right"] as const;
 
 const TOP_KEYS = ["v", "id", "title", "family", "canvas", "transparent", "hold",
 	"colors", "slots", "layers", "envelope", "note"] as const;
-const CANVAS_KEYS = ["w", "h", "fps", "duration", "bg", "scrim"] as const;
+// ⚠️ `w`/`h` 已移出（add-text-ir-aspect-agnostic-layout）：画幅是**编译入参**，不是 IR 字段。
+const CANVAS_KEYS = ["fps", "duration", "bg", "scrim"] as const;
 /** `scrim` 的子键（add-text-ir-scrim）。`rect` 缺省 = 满屏。 */
 const SCRIM_KEYS = ["fill", "rect", "radius"] as const;
 const LAYER_KEYS = ["id", "type", "slot", "text", "font", "color", "opacity", "pos", "anchor",
@@ -140,9 +145,13 @@ const pyRepr = (s: string): string => `'${s.replace(/\\/g, "\\\\").replace(/'/g,
 /**
  * 校验 IR；返回错误消息数组（空 = 通过）。**消息与次序逐条对齐 Python 正本**。
  */
-export function validateIr(ir: unknown): string[] {
+export function validateIr(irInput: unknown): string[] {
 	const E: string[] = [];
-	if (!isDict(ir)) return ["顶层不是对象"];
+	if (!isDict(irInput)) return ["顶层不是对象"];
+	// ⚠️ **先归一化再校验**：老 IR 的 pos:[x,y] 与 canvas.w/h 在这里一次性升级掉再判。
+	// 次序反了就是「存量工程打开就废」——compileTextIr 里 assertValidIr 先跑，
+	// 老写法直接判非法，用户的属性面板当场改不了字。归一化在副本上做，不改入参。
+	const ir = normalizeIr(irInput) as Dict;
 	extraKeys(ir, TOP_KEYS, "顶层", E);
 	for (const k of ["v", "id", "canvas", "transparent", "hold", "layers"]) {
 		if (!(k in ir)) E.push(`缺必填 ${k}`);
@@ -156,7 +165,7 @@ export function validateIr(ir: unknown): string[] {
 	}
 
 	const c = checkSub(ir.canvas, CANVAS_KEYS, "canvas", E);
-	if (c.w !== CANVAS_W || c.h !== CANVAS_H) E.push(`canvas 必须 ${CANVAS_W}x${CANVAS_H}`);
+	// 画幅已不在 IR 里；老 IR 的 w/h 由 normalizeIr 在校验前摘掉（不报错，那是升级不是违规）。
 	if (c.fps !== CANVAS_FPS) E.push(`fps 必须 ${CANVAS_FPS}`);
 	let dur: number | null = null;
 	if (!isNum(c.duration) || !(DURATION_MIN <= c.duration && c.duration <= DURATION_MAX)) {
@@ -313,10 +322,25 @@ function numRepr(v: number): string {
 }
 
 function validateGeometry(L: Dict, p: string, dur: number | null, E: string[]): void {
-	for (const k of ["pos", "anchor"]) {
-		if (k in L && !(Array.isArray(L[k]) && (L[k] as unknown[]).length === 2 && (L[k] as unknown[]).every(isNum))) {
-			E.push(`${p}.${k} 须 [数,数]`);
+	// `pos` 是**锚点式**：老的 [x,y] 由 normalizeIr 在校验之前一次性升级掉，
+	// 走到这里时只该有一种形态。词表里只有锚点式一种**合法**写法。
+	const pos = L.pos;
+	if (!isDict(pos)) {
+		E.push(`${p}.pos 须为 {at, off}（九宫锚点 + 偏移）；老的 [x,y] 由解析器升级，别手写`);
+	} else {
+		for (const k of Object.keys(pos)) {
+			if (k !== "at" && k !== "off") E.push(`${p}.pos 未定义键 ${k}`);
 		}
+		if (!(POS_ANCHORS as readonly string[]).includes(pos.at as string)) {
+			E.push(`${p}.pos.at 须为九宫之一：${POS_ANCHORS.join("/")}`);
+		}
+		const off = pos.off;
+		if (!(Array.isArray(off) && off.length === 2 && off.every(isNum))) {
+			E.push(`${p}.pos.off 须 [数,数]`);
+		}
+	}
+	if ("anchor" in L && !(Array.isArray(L.anchor) && (L.anchor as unknown[]).length === 2 && (L.anchor as unknown[]).every(isNum))) {
+		E.push(`${p}.anchor 须 [数,数]`);
 	}
 	const i = L.in;
 	const o = L.out;

@@ -82,7 +82,7 @@ interface MgOpts {
 	slot?: string;
 	/** fetch 独立模式：目标 composition_id（配 --duration）。 */
 	as?: string;
-	/** fetch：画布 WxH；契约当前只收 1920x1080，其余拒绝。 */
+	/** fetch：画布 WxH。`--source text` 收任意正整数画幅；registry 路仍只收 1920×1080。 */
 	canvas?: string;
 	/**
 	 * fetch：registry 路 = 不透明度品类 overlay / fullscreen（缺省按块底色推断，派单模式取派单 category）；
@@ -138,7 +138,7 @@ export function registerMg(program: Command): void {
 		.option("--top <n>", "fetch 候选态：列前 N 件（缺省 3）")
 		.option("--slot <beat>", "fetch 派单模式：目标 beat id（如 B03）——从 dispatch.mg 取 composition_id / 坑位包络 / category，产物落 <project>/mg/<composition_id>.html（注意：落点用派单的 composition_id，不是 beat id）")
 		.option("--as <composition_id>", "fetch 独立模式：目标 composition_id（配 --duration），产物落 --out（缺省 ./mg-fetch/）；--source text 下会一并改写颗粒内部的 id")
-		.option("--canvas <WxH>", "fetch：画布尺寸；契约当前只收 1920x1080")
+		.option("--canvas <WxH>", "fetch：画布尺寸。--source text 收任意正整数画幅（文字模板按画幅现编）；registry 中性块仍只收 1920x1080")
 		.option(
 			"--category <c>",
 			"fetch：registry 路=不透明度品类 overlay / fullscreen（缺省派单值或按块底色推断）；--source text 路=模板目录分类过滤（如 打字机 / 标题），收到 overlay / fullscreen 当场报错指路",
@@ -608,7 +608,9 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 			// **根本触发不了满屏闸**，闸只活在 `mg fetch` 那条路上。
 			// 于是「取块时合规、后来颗粒被换掉」这条最常见的失守路径完全没人看。
 			// 2026-09-16 补线时撞到（本仓 add-text-ir-scrim 的接线格跑不通才发现）。
-			if (!slotCategory && hit.category) slotCategory = hit.category;
+			if (!slotCategory && (hit.category === "overlay" || hit.category === "fullscreen")) {
+				slotCategory = hit.category;
+			}
 		}
 		if (byName) compositionId = byName.composition_id;
 
@@ -741,8 +743,23 @@ async function runFetch(args: string[], opts: MgOpts): Promise<MgResult> {
 	if (opts.canvas) {
 		const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(opts.canvas.trim());
 		if (!m) throw new Error(`--canvas 格式应为 WxH：${opts.canvas}`);
-		if (Number(m[1]) !== PARTICLE_W || Number(m[2]) !== PARTICLE_H) {
-			throw new Error(`契约当前只收 ${PARTICLE_W}×${PARTICLE_H} 颗粒（lint 铁律 1）：竖屏 / 异形画布请走栏目 skill，或等契约开口；registry 中性块不适用`);
+		// [add-text-ir-aspect-agnostic-layout] 从「只收 1920×1080」改成「须为正整数」。
+		// 引擎早已按颗粒声明尺寸挂载缩放（fix-particle-subcomposition-scale），
+		// 原来那条硬闸拦的是一个**不存在的失败形态**。
+		// ⚠️ 但**registry 中性块仍只有 1920×1080 一种**——那批是手写 HTML、几何写死在块里，
+		// 取块改写不会跟着缩，给它别的画幅出来就是错的。
+		// 所以放开的只有 `--source text` 这一路（文字模板按画幅现编），registry 路照旧钉死。
+		const cw = Number(m[1]);
+		const ch = Number(m[2]);
+		if (!Number.isInteger(cw) || !Number.isInteger(ch) || cw <= 0 || ch <= 0) {
+			throw new Error(`--canvas 的宽高须为正整数：${opts.canvas}`);
+		}
+		if (opts.source !== "text" && (cw !== PARTICLE_W || ch !== PARTICLE_H)) {
+			throw new Error(
+				`registry 中性块只有 ${PARTICLE_W}×${PARTICLE_H} 一种几何（块是手写 HTML、尺寸写死在块里，` +
+					"取块改写不会跟着缩）。要别的画幅请走 `--source text`：文字模板的 IR 住在 1920 参考系、" +
+					"画幅是编译入参，按目标画幅现编即可",
+			);
 		}
 	}
 	if (opts.category !== undefined && opts.category !== "overlay" && opts.category !== "fullscreen") {

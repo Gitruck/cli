@@ -1901,6 +1901,11 @@ export function lintParticle(
 		dispatchIds?: string[];
 		category?: string;
 		/**
+		 * 目标工程画幅 `[w, h]`（add-text-ir-aspect-agnostic-layout）。
+		 * 给了就比对颗粒声明尺寸；不给只判正整数（裸 lint 无从知道目标工程）。
+		 */
+		canvas?: [number, number];
+		/**
 		 * 该颗粒的槽位包络（秒）。给了才跑铁律⑦启发式；裸 lint / 未命中派单时不给 → 整项跳过。
 		 * 契约明令「逐帧与总长只有真渲染引擎能判」，故本项**恒非致命**、只做提醒。
 		 */
@@ -1963,8 +1968,38 @@ export function lintParticle(
 				`按期望 id 落轨会写出 clip_id/material 指向「${opts.compositionId}」，而本文件注册的是 __timelines["${cid}"]，渲染必错`,
 		);
 	if (root) {
-		if (attr(root, "data-width") !== "1920") push("1-width", true, `根 data-width 应为 "1920"（实为 ${attr(root, "data-width") ?? "缺"}）`);
-		if (attr(root, "data-height") !== "1080") push("1-height", true, `根 data-height 应为 "1080"（实为 ${attr(root, "data-height") ?? "缺"}）`);
+		// [add-text-ir-aspect-agnostic-layout] 画幅闸从「必须 1920×1080」改成「必须是正整数，
+		// 且与期望画幅相符」。
+		//
+		// ⚠️ 原来那条**当初是对的**：`fix-particle-subcomposition-scale` 之前，颗粒声明尺寸
+		// 与根合成尺寸不等就会被 `#stage` 裁掉、只渲左上一角。修复上线之后那个失败形态
+		// 就不存在了 —— 引擎按颗粒声明的 `data-width/height` 挂载缩放，根合成尺寸本就是
+		// `flags.width/height` 参数。留着它，拦的是**一个已经不存在的东西**
+		// （同型教训见 `fix-embedded-ir-carrier-breaks-render` 的停发闸：过时的闸会白卡一次发版）。
+		//
+		// ⚠️ 但**不能无条件放开**：挂载用的是**非等比** `scale(w/dw, h/dh)`，
+		// 跨比例是拉伸变形不是加黑边。所以口径不是「随便什么尺寸都行」，是
+		// **「声明尺寸 MUST 等于目标画幅」**——不等就说明这颗没按工程画幅编，判红。
+		// 目标画幅由调用方给（`opts.canvas`）；不给则只判「是不是正整数」，
+		// 那是裸 lint 的场景（手上只有一个文件，无从知道它要放进什么工程）。
+		const dw = Number(attr(root, "data-width"));
+		const dh = Number(attr(root, "data-height"));
+		const posInt = (v: number) => Number.isInteger(v) && v > 0;
+		if (!posInt(dw)) push("1-width", true, `根 data-width 须为正整数（实为 ${attr(root, "data-width") ?? "缺"}）`);
+		if (!posInt(dh)) push("1-height", true, `根 data-height 须为正整数（实为 ${attr(root, "data-height") ?? "缺"}）`);
+		if (opts.canvas && posInt(dw) && posInt(dh)) {
+			const [cw, ch] = opts.canvas;
+			if (dw !== cw || dh !== ch) {
+				push(
+					"1-canvas-match",
+					true,
+					`颗粒声明 ${dw}×${dh}，工程画幅是 ${cw}×${ch}——挂载走的是**非等比** scale(w/dw, h/dh)，` +
+						`跨比例会把颗粒拉伸变形（不是加黑边），而两边都不报错。` +
+						`文字模板按目标画幅重编即可（IR 住在 1920 参考系，画幅是编译入参）；` +
+						`手写颗粒请按工程画幅重做`,
+				);
+			}
+		}
 	}
 
 	// 铁律2：paused timeline + __timelines 注册且 id 匹配（空白宽容；接受字面量与 var 常量两惯例）
