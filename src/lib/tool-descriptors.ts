@@ -2339,6 +2339,7 @@ const videoTranslateDub: ToolDescriptor = {
 	async postprocess(ctx, landed, out) {
 		// 工程素材重连（D6）：.gtrk 改写成本机绝对路径；其余格式结构各异，只提示一次手动重新链接
 		let otherProjects = false;
+		const draftDirs = new Map<string, boolean>(); // 剪映 / CapCut 草稿目录 → 是否落了 draft_meta_info.json
 		for (const p of landed) {
 			const dir = basename(dirname(p));
 			if (dir === "gtrk" && p.toLowerCase().endsWith(".gtrk")) {
@@ -2347,11 +2348,20 @@ const videoTranslateDub: ToolDescriptor = {
 				} catch (e) {
 					ctx.warn(`客户端工程素材路径改写失败（工程仍可打开，需手动重新链接素材）：${e instanceof Error ? e.message : String(e)}`);
 				}
+			} else if (dir === "jianying" || dir === "capcut") {
+				draftDirs.set(dir, (draftDirs.get(dir) ?? false) || basename(p) === "draft_meta_info.json");
 			} else if (DUB_PROJECT_DIRS.has(dir)) {
 				otherProjects = true;
 			}
 		}
-		if (otherProjects) {
+		// 草稿缺 meta：服务端只有拿到客户端草稿目录才产 meta，而译制配音接口暂不收该参数 ⇒ 剪映 / CapCut 草稿列表里看不到（D6 ⟲）
+		const noMeta = [...draftDirs].filter(([, hasMeta]) => !hasMeta).map(([d]) => (d === "jianying" ? "剪映" : "CapCut"));
+		if (noMeta.length) {
+			ctx.warn(
+				`${noMeta.join(" / ")} 草稿暂时只有 draft_content.json（缺 draft_meta_info.json），在草稿列表里看不到、不能直接打开；想接着剪请用客户端工程 gtrk/project.gtrk`,
+			);
+		}
+		if (otherProjects || [...draftDirs.values()].some(Boolean)) {
 			ctx.warn(
 				"剪映 / CapCut / Premiere 等工程里的素材是占位文件名：打开后请把原片、dub.wav、bgm.wav、base.mp4 指向本产物目录里的同名文件（原片指回你本地的源文件）",
 			);

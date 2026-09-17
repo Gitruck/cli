@@ -12,7 +12,7 @@
 
 产物：`<输入名>-dub.mp4`（音频输入为 `-dub.mp3`）、`dub.wav`、`bgm.wav` 与 `base.mp4`（有则落）、字幕 `.srt`、逐句对齐记录 `transcript.json`、
 工程文件按格式分目录（`gtrk/`、`jianying/` …），`result-output.json` 为配音对齐报告。
-客户端工程 `gtrk/project.gtrk` 的素材路径已改写为本机的原片与产物目录文件，打开即用；剪映 / CapCut / PR 等格式里的素材是占位名，终端会提示一行手动重新链接。
+客户端工程 `gtrk/project.gtrk` 的素材路径已改写为本机的原片与产物目录文件，打开即用。剪映 / CapCut 草稿目前缺 `draft_meta_info.json`，草稿列表里看不到，终端会提示改用客户端工程；PR / Final Cut 等格式里的素材是占位名，终端会提示一行手动重新链接。
 字幕、逐句记录、工程文件等附带产物偶尔缺项时只打一行 WARN，任务照常判成功。
 
 ### 加：工具族通用「附加输入文件」
