@@ -14,6 +14,7 @@ import { resolveFfmpeg } from "./ffmpeg";
 import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, probeGeometry } from "./media";
 import { renderProReport } from "./clip-brief";
 import { assertEnum, catalogEnumSync } from "./enum-catalog";
+import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
 
 // ---------------------------------------------------------------- 类型
 
@@ -90,6 +91,11 @@ export interface ToolContext {
 	opts: Record<string, unknown>;
 	/** --param/--params-json 解析结果（runner 最终会逐字段合并覆盖到 payload 上，descriptor 只读）。 */
 	extraParams: Record<string, unknown>;
+	/**
+	 * 产物目录绝对路径（link-video-translate-dub-local-paths-cli）。有输入文件的工具在提交前即是最终落点；
+	 * 无输入文件且没给 --out 的工具建目录时可能防撞改名，runner 建目录后回填。单测手搓的上下文可不给。
+	 */
+	outDir?: string;
 	/** 人读提示输出口（一律走 stderr，不污染 --json 的 stdout）。 */
 	warn: (msg: string) => void;
 }
@@ -2186,6 +2192,39 @@ export async function relinkDubGtrk(gtrkPath: string, landed: string[], inputAbs
 	return changed;
 }
 
+/** `--project-formats <list>` → 格式数组（逗号拆、去空白、丢空项）；没给返回 undefined，给了却全空本地拒。 */
+export function parseDubProjectFormats(v: unknown): string[] | undefined {
+	if (v == null) return undefined;
+	const formats = String(v)
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	if (!formats.length) throw new Error("--project-formats 至少写一个格式（逗号分隔，如 gtrk,jianying）");
+	return formats;
+}
+
+/** 这次要不要剪映 / CapCut 草稿（只看用户显式给的 --project-formats；缺省只出 gtrk）。 */
+function dubWantsDraft(formats: string[] | undefined): boolean {
+	return !!formats?.some((f) => f.startsWith("jianying") || f.startsWith("capcut"));
+}
+
+/**
+ * 剪映草稿文件夹（link-video-translate-dub-local-paths-cli）：`<剪映草稿根>/<产物目录名>`，与 `gtrk long2short` 同填法
+ * （主件 add-video-translate-dub-local-paths tasks 0.2 核定：`nle_draft_dir` 是具体草稿文件夹，meta 的 draft_fold_path / draft_name 由它派生）。
+ * 草稿根解析同 `gtrk oralcut`：显式 --jianying-draft-dir → gtrk init 配置 → 自动探测。解析不到或没有产物目录时 undefined。
+ */
+export function dubDraftFolder(ctx: ToolContext): string | undefined {
+	if (!ctx.outDir) return undefined;
+	const opt = ctx.opts.jianyingDraftDir == null ? undefined : String(ctx.opts.jianyingDraftDir);
+	const root = resolveJianyingDraftDir(opt);
+	return root ? join(root, basename(ctx.outDir)) : undefined;
+}
+
+/** 视频输入才带本机路径（音频不产工程文件）；需要产物目录。 */
+function dubSendsLocalPaths(ctx: ToolContext): boolean {
+	return !!ctx.inputAbs && !isAudioFile(ctx.inputAbs) && !!ctx.outDir;
+}
+
 /** 降级明细键 → 用户看得懂的产物名（未知键原样显示；`project:<格式>` 归到工程文件）。 */
 const DUB_ERROR_LABELS: Record<string, string> = {
 	subtitle: "字幕",
@@ -2240,6 +2279,10 @@ const videoTranslateDub: ToolDescriptor = {
 		},
 		SUBTITLE_TYPE_OPTION,
 		{ flag: "--project-formats <list>", desc: "译制配音要出的工程文件格式，逗号分隔（如 gtrk,jianying,xml；未传则只出客户端工程 .gtrk）" },
+		{
+			flag: "--jianying-draft-dir <dir>",
+			desc: "剪映草稿目录（要剪映草稿时用：草稿落到这里、剪映列表里可见；缺省读 gtrk init 的配置或自动探测）",
+		},
 	],
 	extraInputs: [
 		{
@@ -2261,6 +2304,10 @@ const videoTranslateDub: ToolDescriptor = {
 			"译制配音耗时较长，长片十几分钟起。提交成功后产物目录里会先写 task.json（含任务号）；" +
 				"中途断开可凭任务号在云端查询取回，别直接重跑（重跑会重新计费）",
 		);
+		// 要剪映草稿却找不到草稿目录：上传前说一次（buildPayload 会跑两遍，提示放这里不重复）
+		if (dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats)) && !dubDraftFolder(ctx)) {
+			ctx.warn("没找到剪映草稿目录 → 剪映 / CapCut 草稿将缺 draft_meta_info.json、列表里看不到。可加 --jianying-draft-dir <你的草稿目录> 重跑");
+		}
 		return ctx.inputAbs!; // 整片上传（见头注释）
 	},
 	buildPayload(fileId, ctx) {
@@ -2289,13 +2336,16 @@ const videoTranslateDub: ToolDescriptor = {
 		if (o.speedBand != null) p.speed_band = parseSpeedBand(o.speedBand);
 		if (str(o.subtitleMode)) p.subtitle = str(o.subtitleMode);
 		if (str(o.subtitleType)) p.subtitle_type = str(o.subtitleType);
-		if (o.projectFormats != null) {
-			const formats = String(o.projectFormats)
-				.split(",")
-				.map((s) => s.trim())
-				.filter(Boolean);
-			if (!formats.length) throw new Error("--project-formats 至少写一个格式（逗号分隔，如 gtrk,jianying）");
-			p.project_formats = formats;
+		const formats = parseDubProjectFormats(o.projectFormats);
+		if (formats) p.project_formats = formats;
+		// 本机路径（link-video-translate-dub-local-paths-cli）：服务端据此把工程素材写成本机路径、要草稿时产齐 meta
+		if (dubSendsLocalPaths(ctx)) {
+			p.source_path = ctx.inputAbs;
+			p.local_output_dir = ctx.outDir;
+			if (dubWantsDraft(formats)) {
+				const folder = dubDraftFolder(ctx);
+				if (folder) p.struct_meta = { nle_draft_dir: folder };
+			}
 		}
 		return p;
 	},
@@ -2337,14 +2387,17 @@ const videoTranslateDub: ToolDescriptor = {
 	 * ⇒ MUST NOT 判失败；但要让用户当场知道少了什么。明细（可能很长）只进 result-output.json，终端只打一行。
 	 */
 	async postprocess(ctx, landed, out) {
-		// 工程素材重连（D6）：.gtrk 改写成本机绝对路径；其余格式结构各异，只提示一次手动重新链接
+		// 工程素材重连（D6）：.gtrk 里还有占位名就改写成本机绝对路径（服务端已写本机路径时改写 0 条）；其余格式只提示
 		let otherProjects = false;
+		let gtrkLanded = false;
+		let gtrkHadPlaceholders = false;
 		const draftDirs = new Map<string, boolean>(); // 剪映 / CapCut 草稿目录 → 是否落了 draft_meta_info.json
 		for (const p of landed) {
 			const dir = basename(dirname(p));
 			if (dir === "gtrk" && p.toLowerCase().endsWith(".gtrk")) {
+				gtrkLanded = true;
 				try {
-					await relinkDubGtrk(p, landed, ctx.inputAbs);
+					if ((await relinkDubGtrk(p, landed, ctx.inputAbs)) > 0) gtrkHadPlaceholders = true;
 				} catch (e) {
 					ctx.warn(`客户端工程素材路径改写失败（工程仍可打开，需手动重新链接素材）：${e instanceof Error ? e.message : String(e)}`);
 				}
@@ -2354,14 +2407,32 @@ const videoTranslateDub: ToolDescriptor = {
 				otherProjects = true;
 			}
 		}
-		// 草稿缺 meta：服务端只有拿到客户端草稿目录才产 meta，而译制配音接口暂不收该参数 ⇒ 剪映 / CapCut 草稿列表里看不到（D6 ⟲）
+		// 草稿缺 meta：服务端要拿到草稿文件夹（struct_meta.nle_draft_dir）才产；没找到剪映草稿目录或服务端尚未升级时会缺
 		const noMeta = [...draftDirs].filter(([, hasMeta]) => !hasMeta).map(([d]) => (d === "jianying" ? "剪映" : "CapCut"));
 		if (noMeta.length) {
 			ctx.warn(
-				`${noMeta.join(" / ")} 草稿暂时只有 draft_content.json（缺 draft_meta_info.json），在草稿列表里看不到、不能直接打开；想接着剪请用客户端工程 gtrk/project.gtrk`,
+				`${noMeta.join(" / ")} 草稿缺 draft_meta_info.json，在草稿列表里看不到、不能直接打开；` +
+					"加 --jianying-draft-dir <你的剪映草稿目录> 重跑可补齐，或直接用客户端工程 gtrk/project.gtrk",
 			);
 		}
-		if (otherProjects || [...draftDirs.values()].some(Boolean)) {
+		// 剪映两件套齐全且提交时带了草稿文件夹 ⇒ 落进剪映草稿目录（同 gtrk oralcut / long2short）；CapCut v1 留在产物目录
+		const wantsDraft = dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats));
+		const folder = wantsDraft ? dubDraftFolder(ctx) : undefined;
+		if (folder && draftDirs.get("jianying") === true && ctx.outDir) {
+			try {
+				const landing = await copyJianyingDraft(join(ctx.outDir, "jianying"), folder);
+				if (landing.complete) ctx.warn(`剪映草稿已落到：${folder}（打开剪映即可在草稿列表里看到）`);
+				else ctx.warn(`剪映草稿两件套不全（缺 ${landing.missing.join("、")}），没有放进剪映草稿目录`);
+			} catch (e) {
+				ctx.warn(`剪映草稿放进草稿目录失败（产物目录 jianying/ 里仍有两件套）：${e instanceof Error ? e.message : String(e)}`);
+			}
+		}
+		if (draftDirs.get("capcut") === true) {
+			ctx.warn("CapCut 草稿两件套在产物目录 capcut/ 下，暂不自动放进 CapCut 草稿目录，需要时整个文件夹手动复制过去");
+		}
+		// 素材占位名提示：以取回的 .gtrk 为准（还有占位名 = 服务端没写本机路径）；没出 .gtrk 时看这次有没有带本机路径
+		const placeholders = gtrkLanded ? gtrkHadPlaceholders : !dubSendsLocalPaths(ctx);
+		if (placeholders && (otherProjects || [...draftDirs.values()].some(Boolean))) {
 			ctx.warn(
 				"剪映 / CapCut / Premiere 等工程里的素材是占位文件名：打开后请把原片、dub.wav、bgm.wav、base.mp4 指向本产物目录里的同名文件（原片指回你本地的源文件）",
 			);

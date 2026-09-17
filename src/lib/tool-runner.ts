@@ -551,6 +551,9 @@ export async function runCloudTool(
 	}
 
 	const extraParams = parseExtraParams(opts.param ?? [], opts.paramsJson);
+	// 落点：resolveOutDir 只产**候选名**（它在这一刻执行、真正建目录在 submit 之后的 writeBreadcrumb），
+	// 最终名由 createOutDir 在建目录那一刻回填（防撞可能追加 -2/-3…）。下游全部读回填后的 outDir。
+	const outDirCandidate = resolveOutDir(descriptor, inputAbs, opts.out);
 	const ctx: ToolContext = {
 		inputAbs,
 		...(inputList ? { inputAbsList: inputList } : {}),
@@ -558,11 +561,9 @@ export async function runCloudTool(
 		ffmpegPath: opts.ffmpegPath,
 		opts,
 		extraParams,
+		outDir: outDirCandidate,
 		warn: (m) => process.stderr.write(`\x1b[2m   ${m}\x1b[0m\n`),
 	};
-	// 落点：resolveOutDir 只产**候选名**（它在这一刻执行、真正建目录在 submit 之后的 writeBreadcrumb），
-	// 最终名由 createOutDir 在建目录那一刻回填（防撞可能追加 -2/-3…）。下游全部读回填后的 outDir。
-	const outDirCandidate = resolveOutDir(descriptor, inputAbs, opts.out);
 	let outDir = outDirCandidate;
 	// 防撞射程与 resolveOutDir 的三支一一对应：只有「无输入文件 + 无 --out」那支是秒级时间戳候选名。
 	const antiCollision = !opts.out && !inputAbs;
@@ -621,6 +622,7 @@ export async function runCloudTool(
 				);
 			}
 			outDirReady = true; // 一次运行只建一次目录：重入不会再派生 -2
+			ctx.outDir = outDir; // 防撞改名时回填（只有「无输入文件 + 无 --out」那支会改名）
 		}
 		const fingerprint = inputList
 			? await Promise.all(inputList.map((p) => safeFingerprint(p)))
