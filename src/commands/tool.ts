@@ -69,6 +69,12 @@ export function configureToolCommand(cmd: Command, registry: ToolDescriptor[] = 
 			if (o.repeatable) cmd.option(o.flag, o.desc, collectParam, []);
 			else cmd.option(o.flag, o.desc);
 		}
+		// 附加输入文件的 flag（link-video-translate-dub-cli D3）：同一命名空间、同一去重规则
+		for (const x of d.extraInputs ?? []) {
+			if (seen.has(x.flag)) continue;
+			seen.add(x.flag);
+			cmd.option(x.flag, x.desc);
+		}
 	}
 	cmd.action(async (words: string[] | undefined, opts: ToolOpts) => {
 		await runToolCommand(words ?? [], opts, registry);

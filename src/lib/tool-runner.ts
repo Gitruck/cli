@@ -28,6 +28,7 @@ import {
 	type ToolDescriptor,
 	type ToolContext,
 	type DownloadItem,
+	type ExtraInputSpec,
 	type OutputResult,
 	defaultExtsFor,
 } from "./tool-descriptors";
@@ -165,8 +166,51 @@ export function guardDuration(
 	if (max == null || !inputAbs) return;
 	const sec = probe(inputAbs, ffmpegPath);
 	if (sec > max) {
-		throw new Error(`视频超过 ${Math.round(max / 60)} 分钟上限，请先裁剪`);
+		throw new Error(`输入时长超过 ${Math.round(max / 60)} 分钟上限，请先裁剪或分段后再提交`);
 	}
+}
+
+// ---------------------------------------------------------------- 附加输入文件（link-video-translate-dub-cli D3）
+
+/** 本次实际要上传的附加输入：给了值、未被 ignoreReason 放弃、且已过本地校验。 */
+export interface ActiveExtraInput {
+	spec: ExtraInputSpec;
+	abs: string;
+}
+
+/**
+ * 附加输入的本地校验（纯本地、零网络）：逐个解析绝对路径、校验存在性与扩展名，不过即抛——
+ * 调用点在**任何上传之前**，所以坏参数零上传零提交零计费。
+ * 未给值的附加输入不出现在返回值里（⇒ payload 不写键、面包屑不记）；
+ * 声明了 ignoreReason 且本次用不上的，经 ctx.warn 提示一次后同样跳过。
+ */
+export function resolveExtraInputs(descriptor: ToolDescriptor, ctx: ToolContext): ActiveExtraInput[] {
+	const active: ActiveExtraInput[] = [];
+	for (const spec of descriptor.extraInputs ?? []) {
+		const raw = ctx.opts[spec.optKey];
+		if (raw == null || String(raw).trim() === "") continue;
+		const reason = spec.ignoreReason?.(ctx);
+		if (reason) {
+			ctx.warn(reason);
+			continue;
+		}
+		const flagName = spec.flag.split(/\s/)[0];
+		const abs = resolve(String(raw));
+		if (!existsSync(abs)) throw new Error(`${flagName} 指定的文件不存在：${abs}`);
+		const e = extname(abs).toLowerCase();
+		if (!spec.exts.includes(e)) {
+			throw new Error(`${flagName} 不支持「${e || "无扩展名"}」文件（支持：${spec.exts.join(" ")}）`);
+		}
+		active.push({ spec, abs });
+	}
+	return active;
+}
+
+/** 把附加输入的 file_id 写进 payload（与 extras 同序；覆盖 descriptor 返回值中的同名键）。 */
+function applyExtraFileIds(payload: Record<string, unknown>, extras: ActiveExtraInput[], fileIds: string[]): void {
+	extras.forEach((x, i) => {
+		payload[x.spec.payloadKey] = fileIds[i];
+	});
 }
 
 // ---------------------------------------------------------------- 流式下载
@@ -519,6 +563,9 @@ export async function runCloudTool(
 	}
 
 	const extraParams = parseExtraParams(opts.param ?? [], opts.paramsJson);
+	// 落点：resolveOutDir 只产**候选名**（它在这一刻执行、真正建目录在 submit 之后的 writeBreadcrumb），
+	// 最终名由 createOutDir 在建目录那一刻回填（防撞可能追加 -2/-3…）。下游全部读回填后的 outDir。
+	const outDirCandidate = resolveOutDir(descriptor, inputAbs, opts.out);
 	const ctx: ToolContext = {
 		inputAbs,
 		...(inputList ? { inputAbsList: inputList } : {}),
@@ -526,11 +573,9 @@ export async function runCloudTool(
 		ffmpegPath: opts.ffmpegPath,
 		opts,
 		extraParams,
+		outDir: outDirCandidate,
 		warn: (m) => process.stderr.write(`\x1b[2m   ${m}\x1b[0m\n`),
 	};
-	// 落点：resolveOutDir 只产**候选名**（它在这一刻执行、真正建目录在 submit 之后的 writeBreadcrumb），
-	// 最终名由 createOutDir 在建目录那一刻回填（防撞可能追加 -2/-3…）。下游全部读回填后的 outDir。
-	const outDirCandidate = resolveOutDir(descriptor, inputAbs, opts.out);
 	let outDir = outDirCandidate;
 	// 防撞射程与 resolveOutDir 的三支一一对应：只有「无输入文件 + 无 --out」那支是秒级时间戳候选名。
 	const antiCollision = !opts.out && !inputAbs;
@@ -545,6 +590,10 @@ export async function runCloudTool(
 	} else if (descriptor.kind === "cloud" && descriptor.buildPayload) {
 		descriptor.buildPayload("__dry_run__", ctx);
 	}
+
+	// ①c 附加输入的本地校验（link-video-translate-dub-cli D3）：排在必填干跑之后（ignoreReason 可能要读必填参数）、
+	// 任何上传之前（坏扩展名 / 文件不存在零上传零提交）。真正上传排在主输入之后，见下方两条上传分支。
+	const extraInputs = resolveExtraInputs(descriptor, ctx);
 
 	// ②b 零上传直提交（none + buildPayloadNone，add-tool-audio-tts-clone）：纯参数任务无上传物
 	const isNoneDirect = descriptor.input.kind === "none" && !!descriptor.buildPayloadNone;
@@ -603,12 +652,18 @@ export async function runCloudTool(
 				}
 			}
 			outDirReady = true; // 一次运行只建一次目录：重入不会再派生 -2
+			ctx.outDir = outDir; // 防撞改名时回填（只有「无输入文件 + 无 --out」那支会改名）
 		}
 		const fingerprint = inputList
 			? await Promise.all(inputList.map((p) => safeFingerprint(p)))
 			: inputAbs
 				? await safeFingerprint(inputAbs)
 				: undefined;
+		// 附加输入只在确有上传时记键：未声明 / 未给值的工具 task.json 逐字节不变
+		const extraCrumb: Record<string, { source: string; fingerprint: string | undefined }> = {};
+		for (const x of extraInputs) {
+			extraCrumb[x.spec.payloadKey] = { source: x.abs, fingerprint: await safeFingerprint(x.abs) };
+		}
 		await writeFile(
 			join(outDir, "task.json"),
 			JSON.stringify(
@@ -620,6 +675,7 @@ export async function runCloudTool(
 					...(fileIds ? { fileIds } : {}),
 					source: inputList ?? inputAbs,
 					fingerprint,
+					...(extraInputs.length ? { extraInputs: extraCrumb } : {}),
 					createdAt: new Date().toISOString(),
 				},
 				null,
@@ -642,15 +698,35 @@ export async function runCloudTool(
 		await writeBreadcrumb();
 		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
 	} else if (isMulti) {
+		// 附加输入追加在主输入之后一起上传（顺序即上传顺序）；无附加输入时 paths / fileIds 与从前逐项相同
+		const n = inputList!.length;
 		const buildMulti = (fids: string[]): unknown => {
-			const p = descriptor.buildPayloadMulti!(fids, ctx);
+			const p = descriptor.buildPayloadMulti!(fids.slice(0, n), ctx);
+			applyExtraFileIds(p, extraInputs, fids.slice(n));
 			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
 			mergeParams(p, extraParams);
 			return p;
 		};
-		const submitted = await uploadManyAndSubmit(deps, inputList!, taskType, buildMulti, !!opts.reupload);
+		const paths = [...inputList!, ...extraInputs.map((x) => x.abs)];
+		const submitted = await uploadManyAndSubmit(deps, paths, taskType, buildMulti, !!opts.reupload);
 		taskId = submitted.taskId;
-		fileIds = submitted.fileIds;
+		fileIds = submitted.fileIds.slice(0, n);
+		fileId = submitted.fileIds[0]!;
+		await writeBreadcrumb();
+		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
+	} else if (extraInputs.length) {
+		// 单输入 + 附加输入（link-video-translate-dub-cli D3）：主输入先传、附加输入后传，走与多文件同一套
+		// 「逐个缓存上传 → 一次提交 → 6004 时全部缓存条目失效强制重传」编排——附加输入的缓存 file_id 过期
+		// 同样能自愈（只收编主输入的 uploadAndSubmitTask 做不到这一点）。无附加输入的工具不进这支，行为逐字节不变。
+		const buildWithExtras = (fids: string[]): Record<string, unknown> => {
+			const p = descriptor.buildPayload ? descriptor.buildPayload(fids[0]!, ctx) : { file_id: fids[0] };
+			applyExtraFileIds(p, extraInputs, fids.slice(1));
+			mergeParams(p, extraParams);
+			return p;
+		};
+		const paths = [uploadPath!, ...extraInputs.map((x) => x.abs)];
+		const submitted = await uploadManyAndSubmit(deps, paths, taskType, buildWithExtras, opts.reupload === true);
+		taskId = submitted.taskId;
 		fileId = submitted.fileIds[0]!;
 		await writeBreadcrumb();
 		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
@@ -692,6 +768,9 @@ export async function runCloudTool(
 	for (const it of items) {
 		let dest = join(outDir, it.filename);
 		try {
+			// 文件名带子目录（如 `jianying/draft_content.json`）时先建父目录（link-video-translate-dub-cli D4）；
+			// 平铺文件名不进这支，既有工具行为逐字节不变。
+			if (/[\\/]/.test(it.filename)) await mkdir(dirname(dest), { recursive: true });
 			if (isNoneInput) {
 				// input=none 的产物名不携带任何输入身份（`tts-<speaker>` 只有音色、与被合成的文本无关）
 				// ⇒ 同一目录内的两次调用极可能是两份不同产物，静默截断就是数据丢失（解说装配兜底路

@@ -2,6 +2,30 @@
 
 ## 未发布
 
+### 加：视频译制配音 `video_translate_dub`（link-video-translate-dub-cli）
+
+`gtrk tool video_translate_dub <视频或音频> --language <源语种> --translate-language <目标语种> --speaker <clone 或音色代号>`：
+把原片里的话翻译成目标语种，用所选音色或克隆原片说话人的声音逐句重新配音，画面保持原样（不做口型同步）。
+单条最长 120 分钟，超了上传前直接拒；按分钟计费，运行前实时查价。
+可选 `--ref <参考音频或视频>`（仅 `clone` 有意义，克隆别人的声音须先取得本人同意）、`--ref-lang`、`--no-keep-bgm`、`--fit-policy`、
+`--speed-band <最小,最大>`、`--subtitle-mode`、`--subtitle-type`、`--project-formats <逗号分隔>`；各参数的合法取值以服务端为准，CLI 不内置枚举。
+
+产物：`<输入名>-dub.mp4`（音频输入为 `-dub.mp3`）、`dub.wav`、`bgm.wav` 与 `base.mp4`（有则落）、字幕 `.srt`、逐句对齐记录 `transcript.json`、
+工程文件按格式分目录（`gtrk/`、`jianying/` …），`result-output.json` 为配音对齐报告。
+提交时自动带上原片与产物目录的本机路径，各格式工程里的素材都指向本机文件，打开即用。要剪映草稿加 `--project-formats gtrk,jianying`：草稿两件套齐全后自动放进剪映草稿目录（新增 `--jianying-draft-dir`，缺省读 `gtrk init` 配置或自动探测，与 `gtrk oralcut` 一致）；CapCut 草稿留在产物目录。服务端尚未升级时工程里仍是占位名、剪映草稿缺 meta，终端会各打一行提示。
+字幕、逐句记录、工程文件等附带产物偶尔缺项时只打一行 WARN，任务照常判成功。
+
+### 加：工具族通用「附加输入文件」
+
+工具可声明除主输入之外的本地文件参数（首个使用者是上面的 `--ref`）：任何上传之前先本地校验文件存在与扩展名，
+主输入之后上传，`--reupload` 同样生效，`task.json` 记录 `extraInputs`；没声明的工具行为与面包屑不变。
+产物文件名带子目录时自动建父目录。
+
+### 改：共享参数说明与超时长报错
+
+`--language` / `--translate-language` / `--speaker` / `--subtitle-type` 的说明改为不绑定单一工具的表述，参数名不变。
+视频类工具输入超时长的报错改为「输入时长超过 N 分钟上限，请先裁剪或分段后再提交」。
+
 ### 文档：`gtrk-tools` 图纸写明 `audio_tts_clone` 可选出字幕（link-add-tts-subtitle-output-cli 3.2）
 
 输入列补 `--subtitle-format <fmt>`（可选、缺省不出、不额外计费、取值以服务端为准），产物列补另产 `tts-<音色代号>.srt`（服务端降级时不留空文件）；
