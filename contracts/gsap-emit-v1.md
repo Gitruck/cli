@@ -2,8 +2,8 @@
 
 > **契约版本**：gsap-emit v1（2026-07-10；2026-07-24 增补铁律 7「占满坑位 + 终态驻留」，主理人硬性规定；同日铁律 6 增补字体注册表命中规则，对齐 gitruck-infra change `align-render-font-contract`；**2026-07-26 增补「回调与 seek 语义」一节**——补此前留白，首次对**渲染引擎侧**提出 MUST 条款，对齐 change `define-seek-suppress-events-contract`；**同日该节核实状态转「已核实（行为层）」**——真渲染引擎（producer `0.6.101`）三帧实测回调可达、结论绑定该引擎版本；
 > **2026-07-26 铁律 4 按真机实测改写**——实心底 MUST 下沉为根下第一个全幅子层、根元素 MUST 保持零视觉、overlay 颗粒 MUST 在根显式写 `background:transparent`，
-> 附证据锚并消歧铁律编号，对齐 change `align-particle-solid-backdrop-contract`；**同日增补铁律 8「重复图元合并」**——把整组同步驱动的重复图元合并成单元素，以规避一类真渲染横带、纵向重复叠印与逐帧闪烁缺陷；触发轴未知，本条只按零成本写法成文、不设数字门槛，对齐 change `add-particle-primitive-merge-law`）。产 HTML 动画颗粒、经同合云渲染管线（html_animate_render）逐帧 seek 合成的 skill/工具，其产物 MUST 满足本契约。
-> **边界**：本契约只约束**机器可判定的管线消费属性**（封装/注册/确定性/自包含/依赖可达/禁 var()/字体名命中注册表）。画面长什么样——颜色、字体取值、构图、节奏——**一律由调用方按其栏目自身规则决定**，本契约不点名任何具体字体/颜色；文中示例取值均为中性占位。
+> 附证据锚并消歧铁律编号，对齐 change `align-particle-solid-backdrop-contract`；**同日增补铁律 8「重复图元合并」**——把整组同步驱动的重复图元合并成单元素，以规避一类真渲染横带、纵向重复叠印与逐帧闪烁缺陷；触发轴未知，本条只按零成本写法成文、不设数字门槛，对齐 change `add-particle-primitive-merge-law`；**2026-09-18 铁律 4 增补⑤「自包含的体积上限」**——上限同源自客户端颗粒运行时的 2,000,000 字符硬限，对齐 change `add-particle-html-size-lint`）。产 HTML 动画颗粒、经同合云渲染管线（html_animate_render）逐帧 seek 合成的 skill/工具，其产物 MUST 满足本契约。
+> **边界**：本契约只约束**机器可判定的管线消费属性**（封装/注册/确定性/自包含/体积上限/依赖可达/禁 var()/字体名命中注册表）。画面长什么样——颜色、字体取值、构图、节奏——**一律由调用方按其栏目自身规则决定**，本契约不点名任何具体字体/颜色；文中示例取值均为中性占位。
 
 ## 原理（为什么不能用 CSS animation）
 
@@ -113,11 +113,12 @@
 > 手写颗粒没有这条路，仍需按工程画幅各写一份。
 2. **GSAP `paused` 时间线 + 注册**：`var tl = gsap.timeline({paused:true}); … window.__timelines = window.__timelines || {}; window.__timelines["<id>"] = tl;`。`<id>` 必须等于根的 `data-composition-id`。
 3. **确定性**：禁用 `Math.random` / `Date.now` / 无参 `new Date()`（过不了引擎 StaticGuard）。要"随机感"用固定种子/解析式/递归生成（见「确定性配方」）。
-4. **自包含 + 实心底下沉子层 + 透明度显式声明**（**2026-07-26 按真机实测改写**；原文「全屏颗粒给根设明确 `background`；透明颗粒根不设 background」**已作废**，见下方证据锚）：颗粒不依赖外部文件（除脚本 CDN）。底色的**取值**由调用方按其栏目规则决定，本契约只管**摆在哪个元素上**。
+4. **自包含（含体积上限⑤）+ 实心底下沉子层 + 透明度显式声明**（**2026-07-26 按真机实测改写**；原文「全屏颗粒给根设明确 `background`；透明颗粒根不设 background」**已作废**，见下方证据锚）：颗粒不依赖外部文件（除脚本 CDN）。底色的**取值**由调用方按其栏目规则决定，本契约只管**摆在哪个元素上**。
    - **① 实心底 MUST 下沉为根下第一个全幅子层**（`position:absolute;inset:0` 或等价的 `top/left/width/height` 铺满），**MUST NOT 写在根元素的 `style` 上**。理由是实测事实：**根元素的绘制属性在子合成挂载时被丢弃**，写在根上的实心底**一个像素都不落地**——成片里表现为「浮空面板」（前景照常渲出、底没了、底轨透出来），本地播放器与客户端预览都看不出。
    - **② 根元素 MUST 保持零视觉**：根 `style` MUST NOT 出现任何会绘制像素的属性（实心 `background` / `border` / `box-shadow` / `outline` …）。写了不报错，但**不生效**，只会误导后来者以为底已经有了。
    - **③ 透明与否 MUST 显式声明**：`background` 声明 MUST 至少出现一处——**满屏（不透明）颗粒**写在 ① 的全幅子层上；**透明叠加（overlay）颗粒** MUST 在**根**显式写 `background:transparent`，MUST NOT 靠「不写」表达透明。根上的 `transparent` 虽然同样不落成像素（它本就不绘制），但它是**给人和机器读的意图声明**——缺了它，作者与 `gtrk mg lint` 都无从区分「想透明」与「忘了想」。
    - **④ 消费侧同源**：`gtrk mg lint` 的 `opaque` 推导面 = 「根 `style` ∪ 根下首个全幅子层 `style`」，与本条 ①③ 同源；两处皆无 `background` 声明才报 `4-bg-explicit`，满屏颗粒把实心底写在根上另报非致命 `4-bg-on-root`。
+   - **⑤ 自包含的体积上限（2026-09-18 增补，change `add-particle-html-size-lint`）**：自包含不等于无限内嵌。颗粒 HTML 总长 **MUST ≤ 2,000,000 字符**（JS `String.length`，UTF-16 码元，不是字节），**SHOULD ≤ 500,000**。上限**同源自客户端颗粒运行时**——`gitruck-opencut-rewrite/apps/web/src/tonghe/particle-runtime-protocol.ts` 的 `MAX_PARTICLE_HTML_LENGTH` / `MAX_PARTICLE_SNAPSHOT_LENGTH`（`apps/web/public/tonghe/player-runtime.js` 同值）：bootstrap 超限直接拒载，每次 seek 的快照（颗粒根节点整份 `outerHTML` 回传父帧）同限 ⇒ 超限颗粒在客户端**永远加载不出来**，而 lint / 铺轨 / 云渲此前全部照过（2026-09-18 真实案例：一张 2400×1350 PNG 4.4 MB 整张 base64 内嵌进 CSS `background-image`，HTML 5,884,886 字符）。500,000 这条线的依据是机制：快照整份回传，体积直接决定预览帧率。**内嵌位图 MUST 先按它在颗粒里的实际显示尺寸裁剪缩放再内嵌**；不透明图用 JPEG / WebP，只有需要 alpha 的才留 PNG（base64 膨胀 4/3）；仍超就不该内嵌——大图放图片素材轨，颗粒只留透明叠加层。云端 `html_animate_render` **没有**这条上限（一次读入、逐帧 seek，无整份回传机制），本条因此不是渲染管线约束而是**客户端消费约束**——但产物契约以最严消费者为准。消费侧：`gtrk mg lint` 报 `4-html-size`（**致命**，> 2,000,000，命中即短路、其余项不跑）与 `4-html-size-heavy`（非致命，> 500,000），文案点名最大的一段 `data:` URI 及其字节数。
 5. **脚本用渲染机可达的 CDN（编译期内联）**：`<script src="https://lib.baomitu.com/gsap/3.13.0/gsap.min.js"></script>` 或由渲染管线 vendor 本地。⚠️ jsdelivr 在渲染服务器不稳（实测 compile 期 `fetch failed` → GSAP 未加载 → 整片全黑）。编译器**只内联 http(s) CDN、不内联相对本地路径**（写 `src="gsap.min.js"` 运行时 404）。
 6. **颜色/字体用字面值，禁 CSS `var()` 自定义变量；字体名 MUST 命中服务端注册字体表**：编译器/挂载不可靠地解析 var()（字体映射把 `var(--font-body)` 当字面字体名；颜色 var() 不应用 → 整片全黑，实测）。直接写字面值（如 `#RRGGBB` / `'某字体名'`）；SVG 属性里同样禁 var()。栏目级换色/换主题 = **生成期**替换字面值（查调用方自己的词表/token 注入），不是运行时变量。**字体名规则（2026-07-24 增补）**：font-family 的每个具名家族 MUST 逐字符命中渲染服务端注册字体表（gitruck-infra 仓 `utils/assets/text/classic_template/font_manifest.json`，中英别名等价），并 SHOULD 以 `sans-serif`/`serif` 通用族收尾兜底；表外名字渲染不失败但**字形不保证**（服务端 fail-open 系统回退，2026-07-24 真机实锤：错名导致目标字形被回退成另一款系统字形）。具体选哪款仍由调用方栏目规则决定，本契约不点名。
 7. **占满坑位 + 终态驻留（2026-07-24 主理人硬性规定；2026-07-26 增补无限循环定性）**：颗粒时间线总长 MUST ≥ 它在成片中的**坑位时长**（落轨 clip 的实际时长，通常 = 派单槽位包络 `track_ed − track_st`，**不是** `duration_hint`）；动画主叙事播完后，颗粒 MUST 以「**定格保持**」或「**有限次循环**」驻留到坑位末尾。**禁用无限循环 `repeat:-1`（2026-07-26 增补，补此前留白）**：无限循环让时间线总长为 `Infinity`，本条「总长 ≥ 坑位」就**变得不可验证**（机器与人都无从判断它是否真按坑位算过），且掩盖「作者根本没算坑位」这件事。循环次数 MUST **按坑位算死**——`repeat = ceil((坑位时长 − 循环起点) / 单圈时长) − 1`，宁可多算一两圈（末尾被 clip 裁掉无害），也不许写 `-1` 蒙混——坑位内任意时刻（含最后一帧）核心内容必须可见。**禁止**「整体渐隐到空 / 全局退场 / 清空画面」类收尾：渐隐会与剪辑层转场冲突，淡出与否由剪辑/装配层决定，不在颗粒内做。局部元素可按叙事退场（黯淡/让位），但画面在坑位内不得归零；**定格不动是完全合法的终态**（不必为凑动作密度在尾段硬加动画）。违反表现 = 观感上「动画一过完整个颗粒突兀消失」（2026-07-24 真机实测，事故工程见本仓 change `fix-mg-clip-fill-slot`）。
@@ -388,7 +389,7 @@
 墙钟截图类工具驱动不了 paused 时间线（只看到 t=0），**不能**用来验收。必须真渲染引擎 seek 验证：
 1. 颗粒放进最小 composition（root `index.html` 用 `data-composition-src` 引它）；
 2. 走渲染管线（html_animate_render）渲染；
-3. 抽不同时间点的帧**比对应当不同**（相同=冻结=铁律没守住）。客观自检：根有 `<template>`、`window.__timelines["<id>"]` 已注册且 id 匹配、无 random/Date、tl 总长 ≥ 颗粒时长。
+3. 抽不同时间点的帧**比对应当不同**（相同=冻结=铁律没守住）。客观自检：根有 `<template>`、`window.__timelines["<id>"]` 已注册且 id 匹配、无 random/Date、tl 总长 ≥ 颗粒时长、HTML ≤ 2,000,000 字符（铁律 4⑤；`gtrk mg lint` 的 `4-html-size`）。
 > ⚠️ 不要用「本地等价 seek 脚本 / Node 无头模拟」替代真引擎渲染——它不经真编译+挂载，测不出 var()-不解析、CDN-内联失败、StaticGuard 这类只在真引擎暴露的问题（实测教训：本地等价测试报 OK，真引擎全黑）。
 >
 > ⚠️ **客户端预览对「底色 / 透明度」类问题结构性失明，MUST NOT 用作这类验收的判据**（2026-07-26 增补）。
@@ -405,3 +406,4 @@
 - **整组同步驱动的重复图元必须合并**：网格、排线、刻度、点阵用单元素表达，SVG 以一条 `<path>` 的多子路径合成；逐元素动画批次豁免。详见 gsap-emit v1 铁律 8。
 - **真卷积滤镜别用补间驱动（也别让带滤镜的元素被 `transform` 补间驱动）、整幅静态滤镜先缩面积**：`blur()` / `drop-shadow()` / `feGaussianBlur` 按「面积 × 半径 × 帧数」吃每帧墙钟；**每帧重卷积**才是最贵的形态（补间驱动 filter +36.2%、静态 filter + transform 补间 **+42.7%**）。预烘是次选、必须 RGBA PNG，且**对整幅静态滤镜实测可能净亏**（先做同颗对照再用）。`box-shadow` 整族不在射程内。⚠️「去滤镜省墙钟」**依颗粒形态而定、不能一概而论**。详见本文件「渲染成本：真卷积滤镜」一节。
 - **别用 `requestAnimationFrame`/`setInterval` 驱动画面**——不被 seek，等于冻结。所有视觉变化必须挂在 tl 上。（与「回调与 seek 语义」一节同源：任何**不经 tl** 的自有时钟都不被定帧驱动；而挂在 tl 上的回调是否被触发，则由该节的引擎侧条款保证。`gtrk mg lint` 对本条给**非致命**项 `x-raf-interval`——静态正则分不清「驱动画面」与其它用途，故只提醒不拦。）
+- **自包含 ≠ 无限内嵌**：原图整张 base64 塞进颗粒会撞客户端 2,000,000 字符硬限——客户端永远加载不出来，而 lint / 铺轨 / 云渲此前都不报。位图先按实际显示尺寸裁剪缩放再内嵌，大图走图片素材轨。详见铁律 4⑤；`gtrk mg lint` 报 `4-html-size`（致命）/ `4-html-size-heavy`（非致命）。

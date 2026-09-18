@@ -30,6 +30,8 @@
  *   致命性**按项声明**（语义上允许致命），但**本期落地的三项 `c-filter-*` 全部非致命**；
  *   提为致命须另走独立 change（spec 写死两项前提：MAD 出成片路线已立项 + 生产语料全量复扫零命中），
  *   **MUST NOT** 用 env / 配置项 / 运行期开关翻转。
+ * - ⚠️ 数字前缀里的**致命**项之一是 `4-html-size`（add-particle-html-size-lint）：HTML 超过客户端硬上限
+ *   2,000,000 字符——**别按「`4-*` 皆非致命」的旧印象读**；它命中即短路（其余项不跑）。同组 `4-html-size-heavy` 非致命。
  *
  * 顺带从颗粒 HTML 的 background 声明推导 opaque（权威源是颗粒作者，非可缺省的 dispatch.bg）。
  * 推导面 = **根 style ∪ 根下首个全幅子层 style**（契约铁律4④）——2026-07-26 r69 真渲实测：
@@ -1889,6 +1891,110 @@ export function detectFilterCost(html: string): FilterCostFindings {
 	return { animated, staticFullBleed, staticTransformed, indeterminate };
 }
 
+// ── 体积（add-particle-html-size-lint）─────────────────────────────────────────────
+/**
+ * 颗粒 HTML 体积硬上限——**同源自客户端颗粒运行时**，不是本仓的取舍：
+ * - `gitruck-opencut-rewrite/apps/web/src/tonghe/particle-runtime-protocol.ts`：
+ *   `MAX_PARTICLE_HTML_LENGTH = 2_000_000` / `MAX_PARTICLE_SNAPSHOT_LENGTH = 2_000_000`
+ *   （`createParticleBootstrapMessage` 超限返回 null ⇒ 颗粒根本不会被送进 iframe）；
+ * - 同仓 `apps/web/public/tonghe/player-runtime.js`：`MAX_HTML_LENGTH` / `MAX_SNAPSHOT_LENGTH` 同值
+ *   （`bootstrap()` 超限 throw "invalid particle bootstrap HTML"；`sendSnapshot()` 每次 seek 取
+ *   `root.outerHTML` 整份回传、超限只报错不发快照）。
+ * 量纲 = JS `String.length`（UTF-16 码元，**不是字节**），比较符 = `>`（恰好等于放行）——
+ * 两者 MUST 与客户端逐字相同；`mg lay` 原样复制文件，两边算出的数才一致。
+ * ⚠️ 客户端若改上限，MUST 同批立 cli link- 件改这里；本仓测试不依赖姊妹仓在盘上，漂移只能靠这条纪律。
+ */
+export const MAX_PARTICLE_HTML_LENGTH = 2_000_000;
+/**
+ * 预览帧率告警线（产品口径，不是客户端限值；design D3）：客户端每次 seek 都把颗粒根节点的
+ * outerHTML 整份快照 postMessage 回父帧（结构化克隆 + 父侧再解析），体积与每次 seek 的固定开销成正比。
+ * 不给帧率数——没测过，不编。两条阈值都是常量，MUST NOT 做成 env / 配置项 / 开关。
+ */
+export const HEAVY_PARTICLE_HTML_LENGTH = 500_000;
+
+export interface DataUriHit {
+	/** `data:` 与首个 `;` / `,` 之间的 mime；RFC 2397 缺省 `text/plain` */
+	mime: string;
+	base64: boolean;
+	/** 整段 data URI 在 HTML 里占的字符数（含 `data:` 前缀与参数） */
+	chars: number;
+	/** 解码后字节数：base64 按 3/4 折算并扣 padding；非 base64（percent-encoding）不折算 = null */
+	bytes: number | null;
+	/** 落点：css `url()` / `src=` 类属性 / 其它（JS 字符串等） */
+	site: "css-url" | "src-attr" | "other";
+	/** 起点偏移 */
+	at: number;
+}
+
+/** data URI 终止符：引号 / 右括号 / 尖括号 / 空白。base64 折行写法会被截短（现网颗粒不折行，接受）。 */
+const DATA_URI_END = /["')<>\s]/g;
+/** `data:` 到首个 `,` 之间须形如 `mime(;param)*`——JS 对象字面量 `{ data: 1 }` 之类不会被误收。 */
+const DATA_URI_HEADER = /^[a-z0-9.+\/-]*(?:;[a-z0-9.+=_-]+)*$/i;
+
+/** 扫出 HTML 里全部 `data:` URI（线性一趟，6M 字符量级毫秒级）。 */
+export function detectDataUris(html: string): DataUriHit[] {
+	const out: DataUriHit[] = [];
+	const re = /data:/gi;
+	for (let m = re.exec(html); m; m = re.exec(html)) {
+		const at = m.index;
+		DATA_URI_END.lastIndex = at + 5;
+		const endHit = DATA_URI_END.exec(html);
+		const end = endHit ? endHit.index : html.length;
+		const uri = html.slice(at, end);
+		const comma = uri.indexOf(",");
+		if (comma < 0) continue;
+		const header = uri.slice(5, comma);
+		if (!DATA_URI_HEADER.test(header)) continue;
+		const params = header.split(";");
+		const mime = params[0] || "text/plain";
+		const base64 = params.slice(1).some((p) => p.toLowerCase() === "base64");
+		const payload = uri.slice(comma + 1);
+		let bytes: number | null = null;
+		if (base64) {
+			const pad = /=+$/.exec(payload)?.[0].length ?? 0;
+			bytes = Math.floor(((payload.length - pad) * 3) / 4);
+		}
+		const before = html.slice(Math.max(0, at - 24), at);
+		const site: DataUriHit["site"] = /url\(\s*["']?$/i.test(before)
+			? "css-url"
+			: /\b(?:src|href|srcset|poster)\s*=\s*["']?$/i.test(before)
+				? "src-attr"
+				: "other";
+		out.push({ mime, base64, chars: uri.length, bytes, site, at });
+		re.lastIndex = end;
+	}
+	return out;
+}
+
+const fmtInt = (n: number): string => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const fmtBytes = (b: number): string =>
+	b >= 1_000_000 ? `${(b / 1_000_000).toFixed(2)} MB` : b >= 1_000 ? `${(b / 1_000).toFixed(1)} KB` : `${b} B`;
+const SITE_LABEL: Record<DataUriHit["site"], string> = {
+	"css-url": "css url()",
+	"src-attr": "src= 类属性",
+	other: "其它位置（JS 字符串等）",
+};
+const IMAGE_FIX =
+	"出路：① 按它在颗粒里的**实际显示尺寸**裁剪缩放后再内嵌（1920×1080 画幅里显示 800×450 就别塞 2400×1350 原图）；" +
+	"② 不透明图改 JPEG / WebP，只有需要 alpha 才留 PNG；" +
+	"③ 仍超就不该内嵌——大图放图片素材轨（gtrk matrix material / 本地图片 B-roll），颗粒只留透明叠加层";
+
+/** 体积项文案的 data URI 段：点名**最大的一段**（作者要修的就是它，列全表是噪音）；没有就如实归因，不误导成图片问题。 */
+function dataUriClause(html: string, hits: DataUriHit[]): string[] {
+	if (!hits.length)
+		return ["未见 data: URI——体积来自标记与脚本本身（巨型 SVG 路径 / 内联数据数组）；出路：路径抽稀、数值降精度、数据集下采样"];
+	const top = hits.reduce((a, b) => (b.chars > a.chars ? b : a));
+	const sum = hits.reduce((acc, h) => acc + h.chars, 0);
+	const pct = ((sum / html.length) * 100).toFixed(1);
+	const bytes =
+		top.bytes === null ? "非 base64、不折算字节" : `解码后 ${fmtInt(top.bytes)} 字节（${fmtBytes(top.bytes)}；base64 膨胀 4/3）`;
+	return [
+		`最大的一段 data: URI：${top.mime}${top.base64 ? " base64" : ""}，占 ${fmtInt(top.chars)} 字符，${bytes}，落点 ${SITE_LABEL[top.site]}；` +
+			`共 ${hits.length} 段 data: URI，合计 ${fmtInt(sum)} 字符、占整份 HTML ${pct}%`,
+		IMAGE_FIX,
+	];
+}
+
 export function lintParticle(
 	html: string,
 	opts: {
@@ -1937,6 +2043,42 @@ export function lintParticle(
 	const v: LintViolation[] = [];
 	const push = (law: string, fatal: boolean, msg: string) => v.push({ law, fatal, msg });
 
+	// 根解析先行：体积项短路时也要把 compositionId / opaque 带回去（`--json` 消费方的既有字段）。
+	const root = rootTag(html);
+	const cid = root ? attr(root, "data-composition-id") : undefined;
+
+	// 铁律4⑤ 体积（add-particle-html-size-lint）：上限同源自客户端颗粒运行时（见常量注释）。
+	// 超硬上限**短路**——超限颗粒必须重做，重做后本就要重跑 lint，此刻报出的其它项全是对一份
+	// 将被替换的文件的诊断；且现行全套在 5.87M 字符输入上实测 1.4 s（design D6）。heavy 档不短路。
+	if (html.length > MAX_PARTICLE_HTML_LENGTH) {
+		push(
+			"4-html-size",
+			true,
+			[
+				`颗粒 HTML ${fmtInt(html.length)} 字符，超过客户端硬上限 ${fmtInt(MAX_PARTICLE_HTML_LENGTH)}` +
+					"（opencut particle-runtime-protocol.ts MAX_PARTICLE_HTML_LENGTH；player-runtime.js 同值）——" +
+					"客户端 bootstrap 超限直接拒载、每次 seek 的快照同限，这颗在客户端**永远加载不出来**，而 lint / lay / 云渲此前全部照过",
+				...dataUriClause(html, detectDataUris(html)),
+				"其余检查项本次未跑（超限颗粒必须重做），缩图后重跑 lint",
+			].join("\n   "),
+		);
+		const { opaque } = deriveOpaque(root, firstChildTag(html, root), styleBlockRules(html));
+		return { ok: false, violations: v, opaque, ...(opts.identity ? { identity: opts.identity } : {}), compositionId: cid };
+	}
+	if (html.length > HEAVY_PARTICLE_HTML_LENGTH)
+		push(
+			"4-html-size-heavy",
+			false,
+			[
+				`颗粒 HTML ${fmtInt(html.length)} 字符，超过预览帧率告警线 ${fmtInt(HEAVY_PARTICLE_HTML_LENGTH)}` +
+					`（硬上限 ${fmtInt(MAX_PARTICLE_HTML_LENGTH)}，超了在客户端加载不出来）——` +
+					"客户端每次 seek 都把颗粒根节点的 outerHTML 整份快照回传父帧（postMessage 结构化克隆 + 父侧解析），体积直接决定预览帧率；" +
+					"快照是挂载后的 outerHTML（GSAP 给每个被驱动元素写内联 style），离上限越近越可能在 seek 时超限、不发快照",
+				...dataUriClause(html, detectDataUris(html)),
+				"本项非致命、不拦铺轨",
+			].join("\n   "),
+		);
+
 	// 铁律1：<template> 包裹 + 根 data-* 三件
 	if (!/<template[\s>]/i.test(html)) push("1-template", true, "缺 <template> 包裹根元素（裸 div 整片渲染失败）");
 	// 铁律1b：script MUST 全部在 <template> 内（fix-mg-lint-script-scope，2026-08-27 真机实锤）：
@@ -1954,8 +2096,6 @@ export function lintParticle(
 				);
 		}
 	}
-	const root = rootTag(html);
-	const cid = root ? attr(root, "data-composition-id") : undefined;
 	if (!root || !cid) push("1-composition-id", true, "根元素缺 data-composition-id");
 	// 期望 id 一致性：opts.compositionId 是**期望值**（铺轨=派单 id / lint=形如 cid 的 basename），不再覆盖 cid。
 	// 不等 = 复制 <id>.html 改名时漏改内部 id → 落轨会写出以期望 id 命名的 clip/material，

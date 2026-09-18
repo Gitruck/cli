@@ -2,6 +2,11 @@
 
 ## 未发布
 
+### 改：`gtrk mg lint` 补体积规则（add-particle-html-size-lint）
+
+颗粒 HTML 超过 2,000,000 字符（客户端颗粒运行时的硬上限，超了在客户端永远加载不出来）现在判致命 `4-html-size`：铺轨跳过该 beat、`mg render` 不提交零计费；命中即短路，其余检查项不跑。超过 500,000 字符给非致命 `4-html-size-heavy`（客户端每次 seek 整份快照回传，体积直接决定预览帧率）。
+报错点名最大的一段 data: URI（类型、字符数、解码字节数、落点），给「按实际显示尺寸裁剪缩放后再内嵌」的改法；没有 data: URI 的超限如实归因为标记与脚本本身。契约 `contracts/gsap-emit-v1.md` 铁律 4 增补⑤，`gtrk-mg` 图纸 lint 节同步。
+
 ### 加：视频译制配音 `video_translate_dub`（link-video-translate-dub-cli）
 
 `gtrk tool video_translate_dub <视频或音频> --language <源语种> --translate-language <目标语种> --speaker <clone 或音色代号>`：
