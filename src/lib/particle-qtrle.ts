@@ -7,11 +7,17 @@
  *
  * 🔴 **键与落点 MUST 与客户端逐字节同构** —— 这是钱的问题，不是性能问题。
  * 客户端（`gitruck-opencut-rewrite/apps/web/src/tonghe/`）导出剪映时走的是同一条链：
- *   · 键：`particle-cache.ts:81 serializeParticleRenderIdentity` + `:106 particleCacheKey`
- *   · 落点：`cloud-export.ts:73 CACHE_DIR` + `:126 cacheFilePath`
+ *   · 键：`particle-cache.ts:89 serializeParticleRenderIdentity` + `:116 particleCacheKey`
+ *   · 落点：`cloud-export.ts:74 CACHE_DIR` + `:127 cacheFilePath`
  * 两端同构 ⇒ 客户端烤过的颗粒 CLI 直接命中、反之亦然，同一颗粒永不烤第二遍。
- * 键的任一字段（含 `width`/`height`）一变即分叉，命中率归零 —— 分叉不会出错，只是白花钱，
- * 因而**不会被任何测试自然发现**，只能靠这里的注释与 `particle-qtrle.test.mjs` 的固定向量守。
+ * 键的任一字段（含 `width`/`height`/`recipe`）一变即分叉，命中率归零 —— 分叉不会出错，只是白花钱，
+ * 因而**不会被任何测试自然发现**。守法只有两道（fix-particle-cache-identity-parity）：
+ *   · **字段清单正本** = openspec capability `particle-cache-identity`（本仓为正本，客户端同名 capability 引用它）；
+ *     这里的注释与客户端注释都只是指针，MUST NOT 各自复抄清单。
+ *   · **金样** = 该 change `vectors/particle-cache-identity.md`：写死 hex，两端测试各钉同一组；
+ *     `particle-qtrle.test.mjs` 曾用被测函数现算期望（用实现证实现），2026-09-13 客户端加 `recipe`
+ *     后本仓漂了五天没有一条测试变红——就是这样漂过去的。改身份任一项 MUST 同批：对侧 link- 件 /
+ *     两端金样 / 变异证红（`openspec/config.yaml` proposal 规则）。
  *
  * ⚠️ **与 `mg-render.ts` 有意分道**：那条是 `gtrk mg render`（脱离工程的精剪补给口），
  * 提交体 `video_size` 是 **1920×1080**（`mg-render.ts:168`，其射程本就是 1920×1080-only）。
@@ -43,6 +49,14 @@ import { log } from "./log";
  *  🔴 客户端提 ABI 而这里没跟 ⇒ 两端各存一份、命中率归零。跨端对表见 tasks §0.8。 */
 export const PARTICLE_RENDER_ABI = "v2-subcomposition-scale";
 
+/** qtrle 交付配方版本。出处：客户端 `tonghe/particle-cache.ts:59 QTRLE_DELIVERY_RECIPE`；
+ *  v1-premultiplied 对应 infra `fix-qtrle-premultiplied-alpha-for-jianying`（2026-09-14 上线）：
+ *  剪映按预乘 alpha 合成，旧直通版产物 MUST 自然 miss、不做回退读取。
+ *  🔴 客户端 bump 此值而这里没跟 ⇒ 两端各存一份、命中率归零（2026-09-13 ~ 09-18 实发）。
+ *  本模块 `format` 恒 qtrle，故身份串**无条件**写 `recipe`；客户端是 `format === "qtrle" ? RECIPE : undefined`，
+ *  两式在 qtrle 身份上逐字节同（webm 身份不含此键，本模块不产 webm）。 */
+export const QTRLE_DELIVERY_RECIPE = "v1-premultiplied";
+
 /** 颗粒捕获尺寸。出处：客户端 `tonghe/cloud-render.ts:625 PARTICLE_CAPTURE_SIZE`。
  *  🔴 恒定，**MUST NOT** 取工程画布尺寸 —— 它进内容寻址键，一变即分叉。
  *  几何取舍（继承客户端既定口径）：颗粒是满帧叠加层，画布 >720p 时按 contain-fit 上采样回满帧，
@@ -72,15 +86,19 @@ export interface ParticleIdentity {
 	opaque: boolean;
 	/** 测试/迁移显式覆盖；生产缺省恒取 `PARTICLE_RENDER_ABI`。 */
 	abi?: string;
+	/** 测试/迁移显式覆盖；生产缺省恒取 `QTRLE_DELIVERY_RECIPE`。 */
+	recipe?: string;
 }
 
 /**
  * 固定字段顺序的渲染身份串。
  *
  * 🔴 **字段顺序即序列化顺序**（`JSON.stringify` 按字面量书写序出键），MUST 与客户端
- * `serializeParticleRenderIdentity` 逐字一致：`abi,html,format,quality,fps,width,height,durationUs,opaque`。
+ * `serializeParticleRenderIdentity` 逐字一致：`abi,html,format,quality,fps,width,height,durationUs,opaque,recipe`
+ * （正本：capability `particle-cache-identity`）。
  * 调换任意两项都会换出另一个 sha256 —— 不报错，只是从此和客户端各烤各的。
  * HTML **不做任何归一化**（客户端亦然：`materializeBeatHtml` 在文件形态下原样返回文件文本）。
+ * `duration` 取 `.gtrk` 契约投影值原值（见 `buildParticlePlan`），`durationUs = round(duration × 1e6)`。
  */
 export function serializeParticleIdentity({
 	html,
@@ -92,6 +110,7 @@ export function serializeParticleIdentity({
 	duration,
 	opaque,
 	abi = PARTICLE_RENDER_ABI,
+	recipe = QTRLE_DELIVERY_RECIPE,
 }: ParticleIdentity): string {
 	return JSON.stringify({
 		abi,
@@ -103,6 +122,7 @@ export function serializeParticleIdentity({
 		height,
 		durationUs: Math.round(duration * 1_000_000),
 		opaque,
+		recipe,
 	});
 }
 
@@ -289,6 +309,9 @@ export async function buildParticlePlan(
 
 	for (const { beat, trackIndex } of beats) {
 		const clipId = typeof beat.clip_id === "string" && beat.clip_id ? beat.clip_id : String(beat.material ?? "?");
+		// 🔴 身份的 duration = `.gtrk` 契约投影值**原值**（帧投影三位小数，time-domain-discipline T3），
+		// MUST NOT 再投影 / 取整 / 换算——客户端侧（D3 乙）也改为用同一投影值进键与提交体，
+		// 两端对同一个 double 做 round(×1e6) 才逐字节同（capability `particle-cache-identity`）。
 		const duration = num(beat.duration, num(beat.track_ed) - num(beat.track_st));
 		if (!(duration > 0)) {
 			skipped.push({ clipId, reason: "时长非正数" });
