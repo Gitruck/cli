@@ -23,7 +23,7 @@
  */
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
-import { readFileSync } from "node:fs";
+import { readJsonSync } from "../lib/read-json";
 import { join, resolve } from "node:path";
 import {
 	describeProjectionSource,
@@ -174,12 +174,7 @@ function resolvePaths(opts: SubtitleLayOpts): { gtrkPath: string; transcriptPath
 
 /** transcript 结构门（消费面：只需 utterances + material_id；text_hash 缺失按空串透传）。 */
 function loadTranscript(path: string): Transcript {
-	let raw: unknown;
-	try {
-		raw = JSON.parse(readFileSync(path, "utf8"));
-	} catch (e) {
-		throw new Error(`transcript.json 不是合法 JSON：${path}（${e instanceof Error ? e.message : String(e)}）`);
-	}
+	const raw: unknown = readJsonSync(path, "transcript.json");
 	const t = raw as Transcript;
 	if (!t || !Array.isArray(t.utterances) || t.utterances.length === 0 || typeof t.material_id !== "string") {
 		throw new Error(`transcript.json 结构异常（缺 utterances/material_id）：${path}`);

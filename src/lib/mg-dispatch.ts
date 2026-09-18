@@ -10,11 +10,11 @@
  */
 import { existsSync } from "node:fs";
 import { isVisualJob, type VisualJob } from "./mg-visual-job";
-import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { r3 } from "./frame-domain";
 import type { Dispatch, MgDispatch } from "./splitdoc";
+import { readJson } from "./read-json";
 
 export interface DispatchLocator {
 	/** `--dispatch <path>` 显式路径；优先于 `--project`。 */
@@ -43,7 +43,7 @@ export function resolveDispatch(opts: DispatchLocator): { dispatchPath: string; 
 /** 读 MG 队列。dispatch 桶读旧兼容：新键 `mg`，遗留键 `rrv_mg`（既有 dispatch.json 零迁移）。 */
 export async function readMgQueue(dispatchPath: string): Promise<MgDispatch[]> {
 	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split 落地派单）`);
-	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch & { rrv_mg?: MgDispatch[] };
+	const dispatch = await readJson(dispatchPath, "派单清单") as Dispatch & { rrv_mg?: MgDispatch[] };
 	const queue = dispatch.mg ?? dispatch.rrv_mg;
 	return Array.isArray(queue) ? queue : [];
 }

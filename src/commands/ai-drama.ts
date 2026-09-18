@@ -1,7 +1,7 @@
 /** gtrk ai-drama lay —— 消费 AI Drama Desk return-v1 导出包，确定性回填独立 AI 视频轨。 */
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { aiDramaTracksEdited, layAiDramaTracks, type AiDramaLayPackage } from "../lib/ai-drama-lay";
 // [adjust-lay-frame-domain D1] 顶层 video_rate 与 matrix lay / gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
@@ -12,6 +12,7 @@ import { reportReprojection, reprojectDispatchWindows } from "../lib/reproject";
 import { probeGeometry, type Geometry } from "../lib/media";
 import { compareWalls, wallFromDeclared, wallFromProbe } from "../lib/clock-adapter";
 import { log, routeLogsToStderr } from "../lib/log";
+import { readJson } from "../lib/read-json";
 
 interface AiDramaOpts {
 	project?: string;
@@ -92,7 +93,7 @@ function safeLeafFile(v: unknown, where: string): string {
 async function readPackage(input: string): Promise<{ exportDir: string; pkg: AiDramaLayPackage }> {
 	const manifestPath = manifestPathOf(input);
 	if (!existsSync(manifestPath)) throw new Error(`找不到 AI 导出清单：${manifestPath}`);
-	const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ReturnManifest;
+	const manifest = await readJson(manifestPath, "AI 导出清单") as ReturnManifest;
 	if (typeof manifest.slug !== "string" || !manifest.slug) throw new Error(`${manifestPath}：缺 slug`);
 	if (typeof manifest.beatId !== "string" || !/^B\d+$/i.test(manifest.beatId)) throw new Error(`${manifestPath}：beatId 须形如 B03`);
 	if (!finite(manifest.trackSt) || !finite(manifest.trackEd) || manifest.trackEd <= manifest.trackSt) {

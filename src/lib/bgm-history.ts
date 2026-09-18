@@ -11,9 +11,10 @@
  *
  * 失败一律降级：历史文件读写失败绝不影响铺轨或检索（选曲新鲜度是锦上添花，不是硬门禁）。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { homedir } from "node:os";
+import { readJsonSync } from "./read-json";
 
 export interface BgmUseEntry {
 	/** 归一化标题键（去重主键）。 */
@@ -54,7 +55,7 @@ function historyPath(): string {
 export function readBgmHistory(path = historyPath()): BgmUseEntry[] {
 	try {
 		if (!existsSync(path)) return [];
-		const raw = JSON.parse(readFileSync(path, "utf-8")) as { entries?: unknown };
+		const raw = readJsonSync<{ entries?: unknown }>(path);
 		if (!Array.isArray(raw.entries)) return [];
 		return raw.entries.filter(
 			(e): e is BgmUseEntry =>

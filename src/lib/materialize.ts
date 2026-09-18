@@ -7,7 +7,7 @@
  * 下载遇 404（产物过期被 GC）不整体中止：记入 errors、仍完成报告落盘与输出。
  */
 import { join, basename, dirname } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { collectWriteViolations, type WriteViolation } from "./gtrk-invariants";
 import { download as realDownload, type OralCutOutput } from "./cloud";
 import { copyJianyingDraft } from "./jianying";
@@ -17,6 +17,7 @@ import type { SourceRateInfo } from "./media";
 import { openFolder } from "./open";
 import { log } from "./log";
 import { ensureLandingWritable, type LandingWaitDeps } from "./landing-wait";
+import { readJson } from "./read-json";
 
 /** 把云端返回的细分格式名归一化到基础格式（jianying_draft/jianying_meta → jianying）。 */
 export function baseFormat(fmt: string): string {
@@ -150,7 +151,7 @@ export async function landingCheckGtrk(gtrkPath: string, wall: LandingWall): Pro
 		violations: [],
 	};
 	try {
-		const gtrk = JSON.parse(await readFile(gtrkPath, "utf8")) as Record<string, unknown>;
+		const gtrk = await readJson(gtrkPath, ".gtrk 工程") as Record<string, unknown>;
 		const materials = Array.isArray(gtrk.materials) ? (gtrk.materials as unknown[]) : [];
 		const walled = materials.map((m) => {
 			if (typeof m !== "object" || m === null || !samePath((m as { path?: unknown }).path, wall.sourcePath)) return m;

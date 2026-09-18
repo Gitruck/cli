@@ -70,6 +70,7 @@ const { version } = JSON.parse(readFileSync(join(packageRoot(), "package.json"),
 
 import { firstRunTutorialOnce } from "./lib/first-run-tutorial";
 import { skillFreshnessNoticeOnce } from "./lib/skill-freshness";
+import { installStreamGuards } from "./lib/log";
 
 const program = new Command();
 
@@ -103,6 +104,12 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
 // ⚠️ MUST 在注册子命令之前装——命令注册期自己抛的异常也算崩溃。幂等，重复调无副作用。
 // 装钩子本身零网络、零磁盘、零输出；真要不要发由 reportCrash 的三道闸（开关/告知痕迹/Key）判。
 installCrashHooks();
+
+// 呈现流的**异步**失败路（change `fix-local-io-environment-failures` · design D2）。
+// 同步那条在 `lib/log.ts` 的 writeTo 里收；流已排队时 Node 走的是 `error` 事件，由同一模块的守卫收。
+// 读端关掉（`gtrk … | head`、终端被关、agent 工具调用被掐）不是缺陷，不该炸掉正在跑的活。
+// ⚠️ 只吞具名两码，其余重抛 —— 真出事的写入失败照旧落到 uncaughtException 与崩溃上报。
+installStreamGuards();
 
 // ── 注册子命令（后续新增命令在此加一行）──
 registerInstall(program);

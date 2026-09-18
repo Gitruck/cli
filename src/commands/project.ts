@@ -22,12 +22,13 @@
  */
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
 import { CloudError, cloudErrorCode, download as realDownload, getTaskResult, parseJson } from "../lib/cloud";
 import { invalidateUpload, uploadCached } from "../lib/upload-cache";
+import { readJson } from "../lib/read-json";
 import { DEFAULT_VISIBILITY_BACKOFF_MS } from "../lib/upload-submit";
 import { defaultExtsFor, extFromUrl, pickUrl } from "../lib/tool-descriptors";
 import { FORMAT_META } from "../lib/materialize";
@@ -271,12 +272,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 		}
 		const transcriptAbs = resolve(opts.transcript!);
 		if (!existsSync(transcriptAbs)) throw new Error(`找不到 transcript.json：${transcriptAbs}`);
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(await readFile(transcriptAbs, "utf8"));
-		} catch (e) {
-			throw new Error(`transcript.json 不是合法 JSON：${transcriptAbs}（${e instanceof Error ? e.message : String(e)}）`);
-		}
+		const parsed: unknown = await readJson(transcriptAbs, "transcript.json");
 		submitBody = normalizeTranscriptForSubmit(parsed, transcriptAbs);
 	}
 

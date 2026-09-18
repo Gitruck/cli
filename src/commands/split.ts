@@ -14,7 +14,7 @@
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import {
 	describeProjectionSource,
@@ -28,6 +28,7 @@ import { validateSplitDoc, buildLanding, renderSplitMarkdown, type SplitDoc } fr
 import { formatJobDistribution } from "../lib/mg-visual-job";
 import { resolveColumnConfig, effectiveVocab } from "../lib/column-config";
 import { readUserConfig } from "../lib/user-config";
+import { readJson } from "../lib/read-json";
 import { readGtrk, assertGtrkV1, writeStructMetaSplit } from "../lib/gtrk-writeback";
 import { log, routeLogsToStderr } from "../lib/log";
 
@@ -104,7 +105,7 @@ function slugify(name: string): string {
 }
 
 async function loadTranscript(path: string): Promise<Transcript> {
-	const t = JSON.parse(await readFile(path, "utf8")) as Transcript;
+	const t = await readJson<Transcript>(path, "transcript.json");
 	if (!t || !Array.isArray(t.utterances) || typeof t.material_id !== "string" || typeof t.text_hash !== "string") {
 		throw new Error(`transcript.json 结构异常（缺 utterances/material_id/text_hash）：${path}`);
 	}
@@ -215,7 +216,7 @@ async function runLand(
 	if (!transcriptPath || !existsSync(transcriptPath)) throw new Error(TRANSCRIPT_MISSING);
 
 	log.step("▶ 校验拆分稿并落地…");
-	const doc = JSON.parse(await readFile(splitdocPath, "utf8")) as SplitDoc;
+	const doc = await readJson<SplitDoc>(splitdocPath, "拆分稿");
 	const transcript = await loadTranscript(transcriptPath);
 
 	// ① v1 门（读 .gtrk 并记录内容 revision，供写回前双重校验）

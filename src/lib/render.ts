@@ -25,7 +25,7 @@
  * 后端那条链结构性不合成叠加层（明文「只渲 track_index 最小的一条 video_track」「beat_track 忽略」），
  * **不存在**可对拍的后端向量 ⇒ MUST NOT 声称同源，改以 CLI 自有黄金向量对拍。
  */
-import { writeFile, unlink, readFile } from "node:fs/promises";
+import { writeFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -41,6 +41,7 @@ import {
 	renderMaskPng,
 } from "./mask-raster";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { readJson } from "./read-json";
 
 const AUDIO_SAMPLE_RATE = 48000;
 const AUDIO_LAYOUT = "stereo";
@@ -1211,5 +1212,5 @@ export async function renderGtrk(
 
 /** 读取 .gtrk 文件（JSON）→ GtrkV1。 */
 export async function readGtrkFile(gtrkPath: string): Promise<GtrkV1> {
-	return JSON.parse(await readFile(gtrkPath, "utf8")) as GtrkV1;
+	return await readJson(gtrkPath, ".gtrk 工程") as GtrkV1;
 }

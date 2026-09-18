@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homeFile } from "../paths";
 import type { CatalogPattern, MadCatalog, MadManifest, PoolEntry } from "./types";
+import { readJson } from "../read-json";
 
 /** MAD 本地缓存根目录 ~/.gitruck/mad-cache。 */
 export function madCacheDir(): string {
@@ -152,7 +153,7 @@ export async function ensureMadData(opts: { refresh?: boolean }, deps: DataDeps)
 			);
 		}
 		try {
-			manifest = validateManifest(JSON.parse(await readFile(snapshotPath, "utf8")));
+			manifest = validateManifest(await readJson(snapshotPath));
 		} catch {
 			throw new Error("本地 manifest 缓存损坏且当前离线。请连网重跑，或加 --refresh 强制重新下载。");
 		}
@@ -206,7 +207,7 @@ export async function ensureMadData(opts: { refresh?: boolean }, deps: DataDeps)
 	// ⑤ 装载池
 	let pool: PoolEntry[];
 	try {
-		pool = JSON.parse(await readFile(poolPath, "utf8"));
+		pool = await readJson<PoolEntry[]>(poolPath);
 		if (!Array.isArray(pool)) throw new Error("mad_pool 非数组");
 	} catch (e) {
 		throw new Error(`技法池数据装载失败：${e instanceof Error ? e.message : String(e)}（可加 --refresh 重拉）`);
@@ -255,7 +256,7 @@ export async function ensureMadCatalog(
 	}
 
 	try {
-		return parseCatalog(JSON.parse(await readFile(path, "utf8")));
+		return parseCatalog(await readJson(path));
 	} catch (e) {
 		throw new Error(`技法目录装载失败：${e instanceof Error ? e.message : String(e)}（可加 --refresh 重拉）`);
 	}

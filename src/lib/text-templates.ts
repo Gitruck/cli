@@ -13,11 +13,12 @@
  * 信任边界仍然落在**每件的块 sha256** 上，MUST NOT 给目录再加一层签名：目录被换最多
  * 导致条目多几条少几条，正文一旦对不上 sha256 就拒，成本与收益不对等。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import packagedCatalog from "../data/text-template-catalog.json";
 import { gitruckHome } from "./paths";
 import { sha256Hex } from "./particle-identity";
+import { readJsonSync } from "./read-json";
 
 export const MIRROR_ROOT = "https://api.ai-mcn.tv:9000/broadcast/text-templates";
 export const SOURCE_TIMEOUT_MS = 5000;
@@ -125,8 +126,10 @@ export interface ResolveDeps {
 
 function readCache(file: string): { catalog: TextTemplateCatalog; fetched_at: number } | undefined {
 	try {
-		const raw = JSON.parse(readFileSync(file, "utf8"));
-		if (isCatalog(raw?.catalog) && typeof raw?.fetched_at === "number") return raw;
+		const raw = readJsonSync<{ catalog?: unknown; fetched_at?: unknown }>(file, "文字模板缓存");
+		if (isCatalog(raw?.catalog) && typeof raw?.fetched_at === "number") {
+			return raw as { catalog: TextTemplateCatalog; fetched_at: number };
+		}
 	} catch {
 		/* 缓存坏了当没有——它是加速器不是真相源 */
 	}

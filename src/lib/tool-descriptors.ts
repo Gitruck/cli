@@ -15,6 +15,7 @@ import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, probeGeome
 import { renderProReport } from "./clip-brief";
 import { assertEnum, catalogEnumSync } from "./enum-catalog";
 import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
+import { readJson } from "./read-json";
 
 // ---------------------------------------------------------------- 类型
 
@@ -2171,7 +2172,7 @@ const DUB_PROJECT_DIRS = new Set(["jianying", "capcut", "xml", "fcpxml", "otio"]
  * 找不到对应落地文件的衍生占位名原样保留（该项降级未出）。先写临时文件再改名，改写中途失败不留半截工程。返回改写条数。
  */
 export async function relinkDubGtrk(gtrkPath: string, landed: string[], inputAbs: string | undefined): Promise<number> {
-	const gtrk = JSON.parse(await readFile(gtrkPath, "utf8")) as { materials?: Array<{ path?: unknown }> };
+	const gtrk = await readJson(gtrkPath, ".gtrk 工程") as { materials?: Array<{ path?: unknown }> };
 	const landedByName = new Map<string, string>();
 	for (const p of landed) {
 		if (DUB_DERIVED_MEDIA.has(basename(p)) && basename(dirname(p)) !== "gtrk") landedByName.set(basename(p), resolvePath(p));

@@ -12,8 +12,8 @@
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename, isAbsolute, relative, sep } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
@@ -185,6 +185,7 @@ import { loadLocalIndex, pathInDirs, searchLoadedIndex, type LoadedIndex } from 
 import { requireFfmpeg, resolveFfmpeg } from "../lib/ffmpeg";
 import { EXCLUDE_RECENT_DEFAULT, filterRecentlyUsed, recentBgmKeys } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
+import { readJson, readJsonSync } from "../lib/read-json";
 
 interface MatrixOpts {
 	/** matrix index：解码路径（speedup-matrix-index-proxy-decode）。 */
@@ -1521,7 +1522,7 @@ async function runDescribeMode(
 	if (opts.plan) {
 		planPath = resolve(opts.plan);
 		if (!existsSync(planPath)) throw new Error(`找不到 plan 文件：${planPath}`);
-		planObj = JSON.parse(await readFile(planPath, "utf8")) as BrollPlan;
+		planObj = await readJson(planPath, "plan") as BrollPlan;
 		const got = collectPlanDescribeItems(planObj, topK);
 		items = got.items;
 		targets = got.targets;
@@ -1747,7 +1748,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 	if (!existsSync(planPath)) {
 		throw new Error(`找不到 plan 文件：${planPath}（先 gtrk matrix --project <目录> --lay 0 产 plan，或用 --plan 显式指定）`);
 	}
-	const plan = JSON.parse(await readFile(planPath, "utf8")) as BrollPlan;
+	const plan = await readJson(planPath, "plan") as BrollPlan;
 
 	// ── 可编辑面白名单校验（matrix-command spec：不可编辑字段改坏即拒并明示；纯结构面）──
 	const violations = validatePlanForLay(plan);
@@ -2064,7 +2065,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	}
 	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split <拆分稿> 落地派单）`);
 
-	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch;
+	const dispatch = await readJson(dispatchPath, "派单清单") as Dispatch;
 	const rawQueue: FilmDispatch[] = Array.isArray(dispatch.film_broll) ? dispatch.film_broll : [];
 
 	// ── 现场重投影（add-consume-side-reprojection 6.1）：在**发起第一次检索之前**完成 ──
@@ -2337,7 +2338,7 @@ async function runArrangeQcHere(
 }> {
 	const dispatchPath = join(baseDir, "split", "dispatch.json");
 	const dispatch = existsSync(dispatchPath)
-		? (JSON.parse(readFileSync(dispatchPath, "utf8")) as { film_broll?: Array<{ beat?: string; span?: { from?: string } }> })
+		? (readJsonSync(dispatchPath, "派单清单") as { film_broll?: Array<{ beat?: string; span?: { from?: string } }> })
 		: undefined;
 	const leads = leadSentencesFrom(dispatch, reproj.utteranceIndex);
 	if (leads.length === 0) {

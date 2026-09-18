@@ -4,8 +4,9 @@
  * 与上传缓存、ffmpeg、抽出物缓存同住 ~/.gitruck/。读为 sync（配置极小），写在 init 流程里调。
  */
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { gitruckHome } from "./paths";
+import { readJsonSync } from "./read-json";
 
 /** 云端 API 默认根地址（生产）。init 预填、loadConfig 兜底，用户一般只需填 Key。 */
 export const DEFAULT_API_BASE = "https://api.ai-mcn.tv:10000";
@@ -51,7 +52,7 @@ export function configPath(): string {
 export function readUserConfig(): UserConfig {
 	if (!existsSync(FILE)) return {};
 	try {
-		return JSON.parse(readFileSync(FILE, "utf8")) as UserConfig;
+		return readJsonSync<UserConfig>(FILE);
 	} catch {
 		return {}; // 损坏当空，init 可重写
 	}

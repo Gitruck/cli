@@ -6,7 +6,7 @@
 import { Command } from "commander";
 import { resolve, dirname, join, basename, extname } from "node:path";
 import { existsSync } from "node:fs";
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { fmtTime, scanFinalCut, shouldFail, type QcItem, type QcReport, type QcSeverity } from "../lib/qc";
 import { openLocalIndexDb, recordConfirmedCuts } from "../lib/local-index";
@@ -20,6 +20,7 @@ import { probeGcMemberType } from "../lib/matrix";
 import { loadConfig } from "../lib/config";
 import { requireFfmpeg } from "../lib/ffmpeg";
 import { sec2ms } from "../lib/frame-domain";
+import { readJson } from "../lib/read-json";
 
 interface QcOpts {
 	gtrk?: string;
@@ -106,7 +107,7 @@ export function registerQc(program: Command): void {
 			if (opts.gtrk) {
 				const gtrkAbs = resolve(opts.gtrk);
 				if (!existsSync(gtrkAbs)) throw new Error(`gtrk 工程不存在：${gtrkAbs}`);
-				gtrk = JSON.parse(await readFile(gtrkAbs, "utf8"));
+				gtrk = await readJson(gtrkAbs, ".gtrk 工程");
 			}
 
 			log.step(`▶ 成片质检：${basename(inputAbs)}${gtrk ? "（工程感知）" : ""}`);

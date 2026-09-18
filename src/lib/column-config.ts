@@ -9,9 +9,10 @@
  * 零配置 = 只评 L0（《实在界漫游指南》全套词表），split 链路行为与词表化前逐字节等价。
  */
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { gitruckHome } from "./paths";
 import { BASE_TRACKS, CONTAINER_STAGES, LANES, NARRATIVES } from "./splitdoc";
+import { readJsonSync } from "./read-json";
 
 export interface ColumnVocab {
 	narrative?: string[];
@@ -184,7 +185,7 @@ function readLocalColumn(columnId: string, dir: string, warnings: string[]): Col
 		return undefined;
 	}
 	try {
-		const parsed = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const parsed = readJsonSync(p) as unknown;
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			warnings.push(`栏目配置格式异常（非 JSON 对象）：${p}，回落内置默认`);
 			return undefined;
@@ -382,7 +383,7 @@ export function appendStyleSkillEntry(
 	if (existsSync(path)) {
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(readFileSync(path, "utf8"));
+			parsed = readJsonSync(path);
 		} catch (e) {
 			throw new Error(`栏目配置损坏（JSON 解析失败），拒绝覆盖：${path}（${e instanceof Error ? e.message : String(e)}）`);
 		}

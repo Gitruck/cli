@@ -5,7 +5,7 @@
  */
 import { join } from "node:path";
 import { gitruckHome } from "./paths";
-import { stat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { stat, mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import {
 	CHUNK_THRESHOLD,
@@ -17,6 +17,7 @@ import { uploadFile } from "./cloud";
 import { noticeOnce } from "./compliance-notice";
 import { crashReportNoticeOnce } from "./crash-report";
 import type { CloudConfig } from "./config";
+import { readJson } from "./read-json";
 
 const CACHE_DIR = gitruckHome();
 const CACHE_FILE = join(CACHE_DIR, "upload-cache.json");
@@ -55,7 +56,7 @@ async function fingerprint(path: string): Promise<string> {
 async function load(): Promise<UploadCacheState> {
 	if (!existsSync(CACHE_FILE)) return {};
 	try {
-		return JSON.parse(await readFile(CACHE_FILE, "utf8")) as UploadCacheState;
+		return await readJson<UploadCacheState>(CACHE_FILE);
 	} catch {
 		return {}; // 缓存损坏不致命，当空处理
 	}
@@ -90,7 +91,7 @@ type Sessions = Record<string, ChunkSessionRecord>;
 async function loadSessions(): Promise<Sessions> {
 	if (!existsSync(SESSION_FILE)) return {};
 	try {
-		return JSON.parse(await readFile(SESSION_FILE, "utf8")) as Sessions;
+		return await readJson<Sessions>(SESSION_FILE);
 	} catch {
 		return {}; // 会话文件损坏不致命：丢的只是断点线索，重传即可
 	}

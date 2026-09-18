@@ -17,6 +17,7 @@ import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path
 import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
 import { probeGeometry, probeDuration } from "./media";
 import { r3, deliveryRate, sec2ms } from "./frame-domain";
+import { readJsonSync } from "./read-json";
 
 /** 粗对齐 PCM 采样率（Hz）。 */
 const PCM_RATE = 4000;
@@ -335,7 +336,7 @@ export interface AlignResumeInfo {
 
 /** 读回对齐工程：素材路径 + 人工确认偏移。 */
 export function readAlignOffset(gtrkPath: string): AlignResumeInfo {
-	const j = JSON.parse(readFileSync(gtrkPath, "utf8")) as Record<string, unknown>;
+	const j = readJsonSync(gtrkPath, ".gtrk 工程") as Record<string, unknown>;
 	const materials = (j.materials ?? []) as Array<Record<string, unknown>>;
 	const byId = new Map(materials.map((m) => [String(m.id), m]));
 	const vTracks = (j.video_track ?? []) as Array<Record<string, unknown>>;

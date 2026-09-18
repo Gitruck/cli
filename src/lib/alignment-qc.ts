@@ -28,6 +28,7 @@ import {
 	type MaterialDescribe,
 } from "./describe";
 import { extractFrameJpg, openLocalIndexDb, type SqlDb } from "./local-index";
+import { readJsonSync } from "./read-json";
 
 /** 单句审计条目（alignment-audit.json items[]）。 */
 export interface AlignmentItem {
@@ -195,26 +196,25 @@ export interface AlignmentRunDeps {
 
 export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps): Promise<AlignmentReport> {
 	const log = deps.onLog ?? (() => {});
-	const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf-8"));
 	const gtrkPath = join(projectDir, "gtrk", "project.gtrk");
 	const transcriptPath = join(projectDir, "transcript", "transcript.json");
 	if (!existsSync(gtrkPath) || !existsSync(transcriptPath)) {
 		throw new Error(`工程不完整：需要 ${gtrkPath} 与 ${transcriptPath}（oralcut/project init 产物布局）`);
 	}
-	const gtrk = readJson(gtrkPath) as {
+	const gtrk = readJsonSync(gtrkPath, ".gtrk 工程") as {
 		video_track?: Array<{ track_timeline?: GtrkClip[] }>;
 		materials?: Array<{ id?: string; path?: string }>;
 	};
-	const transcript = readJson(transcriptPath) as {
+	const transcript = readJsonSync(transcriptPath, "transcript.json") as {
 		utterances?: Array<{ id: string; text: string; st: number; ed: number }>;
 	};
 	const planPath = join(projectDir, "split", "broll-plan.json");
-	const quoteSpans = existsSync(planPath) ? quoteSpansFromPlan(readJson(planPath)) : [];
+	const quoteSpans = existsSync(planPath) ? quoteSpansFromPlan(readJsonSync(planPath, "plan")) : [];
 	// [七三开] 卡点句 = 各 beat 的 span.from（dispatch 派单里的领衔句）；无 dispatch 时全按 lead 兜底。
 	const dispatchPath = join(projectDir, "split", "dispatch.json");
 	let leadIds: Set<string> | undefined;
 	if (existsSync(dispatchPath)) {
-		const dsp = readJson(dispatchPath) as { film_broll?: Array<{ span?: { from?: string } }> };
+		const dsp = readJsonSync(dispatchPath, "派单清单") as { film_broll?: Array<{ span?: { from?: string } }> };
 		const ids = (dsp.film_broll ?? []).map((f) => f.span?.from).filter((x): x is string => !!x);
 		if (ids.length > 0) leadIds = new Set(ids);
 	}

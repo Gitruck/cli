@@ -16,7 +16,7 @@
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
@@ -130,16 +130,116 @@ export function resolveTranscriptOutput(inputAbs: string, out?: string): string 
 	return output;
 }
 
-/** 临时文件写完后原子替换；失败时不留下半截 Markdown。 */
+/** 占用类失败：目标文件正被别的进程持着。Windows 上编辑器 / 网盘同步 / 杀软 / 索引器都会造成它。 */
+const RENAME_BUSY_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+/**
+ * 退避梯度（ms）：共 5 次尝试、约 750 ms 窗口。
+ * **不做无上限重试**——编辑器开着那个文件可以开一整天，无上限只会把「报错」换成「卡死」。
+ */
+const RENAME_BACKOFF_MS = [50, 100, 200, 400];
+/** 残骸清理的年龄闸：正常写入以毫秒计，一小时留得足够宽，不会踩到并发进程正在写的那份。 */
+const STALE_TEMP_MS = 60 * 60 * 1000;
+
+/** 单测注入旋钮（形制同 `crash-report.ts` 的 `__crashReportIo`）。**生产恒 `null`**。 */
+export const __atomicWriteIo: {
+	impl: null | {
+		writeFile?: typeof writeFile;
+		rename?: typeof rename;
+		sleep?: (ms: number) => Promise<void>;
+	};
+} = { impl: null };
+
+function atomicIo() {
+	const i = __atomicWriteIo.impl ?? {};
+	return {
+		writeFile: i.writeFile ?? writeFile,
+		rename: i.rename ?? rename,
+		sleep: i.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms))),
+	};
+}
+
+/** 写成功后顺手清同目标的历史 temp 残骸。只清够老的——免得踩到并发进程正在写的那一份。 */
+async function sweepStaleTemps(path: string): Promise<void> {
+	try {
+		const dir = dirname(path);
+		const prefix = `${basename(path)}.`;
+		const now = Date.now();
+		for (const name of await readdir(dir)) {
+			if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+			const p = join(dir, name);
+			const st = await stat(p).catch(() => null);
+			if (st && now - st.mtimeMs > STALE_TEMP_MS) await rm(p, { force: true });
+		}
+	} catch {
+		/* 清残骸失败不值得打断一次已经成功的写入 */
+	}
+}
+
+/** rename 阶段失败的人话文案。按错误码分路——「被占用」这句对 EXDEV / ENOSPC 是错的，不能一句话糊过去。 */
+function describeRenameFailure(path: string, temp: string, cause: unknown): string {
+	const rawCode = (cause as { code?: unknown } | null)?.code;
+	const code = typeof rawCode === "string" ? rawCode : "";
+	const raw = cause instanceof Error ? cause.message : String(cause);
+	const head = `写不进 ${path} —— 内容是完整的，已经留在：${temp}`;
+	let why: string;
+	if (RENAME_BUSY_CODES.has(code)) {
+		why =
+			"目标文件多半正被别的程序占着（编辑器开着它、网盘在同步、杀软或索引器在扫）。\n" +
+			"关掉占用它的程序后重跑，或用 --out 换个落点；也可以直接把上面那份 .tmp 改名收走。";
+	} else if (code === "EXDEV") {
+		why = "临时文件与目标不在同一个卷上，改不了名。用 --out 把落点换到与源同一个盘。";
+	} else if (code === "ENOSPC") {
+		why = "磁盘没空间了。腾出空间后把上面那份 .tmp 改名收走即可，不用重跑。";
+	} else {
+		why = "用 --out 换个落点重试；上面那份 .tmp 是完整内容，可以直接改名收走。";
+	}
+	return `${head}\n${why}\n原始系统报错：${raw}`;
+}
+
+/**
+ * 临时文件写完后原子替换。
+ *
+ * 两个阶段的失败后果不同，处置也必须不同（change `fix-local-io-environment-failures` · design D4/D5）：
+ *
+ * | 阶段 | 内容完整？ | 处置 |
+ * |---|---|---|
+ * | 写 temp | 否 | 删 temp、原样抛 —— 不留半截 Markdown（本函数原有语义，一字不动） |
+ * | 替换目标 | **是** | 占用类码退避重试；仍失败则**保留 temp** + 人话 `Error` |
+ *
+ * ⚠️ **替换阶段失败 MUST NOT 删 temp。** 生产报错 `base_error#176`：用户的转写在云端跑完、
+ * 计过费、内容完整写进了 temp，然后被这里原来那个无差别的 `finally { rm(temp) }` 删掉——
+ * 十分钟里连丢三次。原注释「失败时不留下半截 Markdown」的射程只到写 temp 阶段，
+ * 替换阶段的 temp 不是半截，是**全部**。
+ */
 export async function writeMarkdownAtomic(path: string, markdown: string): Promise<void> {
 	await mkdir(dirname(path), { recursive: true });
 	const temp = `${path}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+	const io = atomicIo();
+
+	// ① 写 temp：失败 ⇒ 内容本来就不全，删掉、原样抛
 	try {
-		await writeFile(temp, markdown, "utf8");
-		await rename(temp, path);
-	} finally {
+		await io.writeFile(temp, markdown, "utf8");
+	} catch (e) {
 		await rm(temp, { force: true });
+		throw e;
 	}
+
+	// ② 替换目标：内容已完整，占用类失败值得等一等（非占用类码一次都不重试，等也没用）
+	let last: unknown;
+	for (let attempt = 0; attempt <= RENAME_BACKOFF_MS.length; attempt++) {
+		try {
+			await io.rename(temp, path);
+			await sweepStaleTemps(path);
+			return;
+		} catch (e) {
+			last = e;
+			const code = (e as { code?: unknown }).code;
+			if (typeof code !== "string" || !RENAME_BUSY_CODES.has(code)) break;
+			if (attempt === RENAME_BACKOFF_MS.length) break;
+			await io.sleep(RENAME_BACKOFF_MS[attempt]);
+		}
+	}
+	throw new Error(describeRenameFailure(path, temp, last));
 }
 
 /** 完整无头工作流；deps 可注入以离线测试，用户侧只写最终 Markdown。 */

@@ -71,6 +71,7 @@ import {
 	splitIntervalsAt,
 } from "../lib/audio-tighten";
 import { r3 } from "../lib/frame-domain";
+import { readJsonSync } from "../lib/read-json";
 
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
 // ★ 主理人 2026-08-19 拍板:BGM 垫底口径 -20dB=线性 0.10(契约 volume 只写线性,MUST NOT 写 dB——composition-contract-v1 §4)
@@ -1114,7 +1115,7 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	// 会让「客户端自动保存了一次」直接作废整轮。见下方工程读取②。
 	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
-	const transcript = JSON.parse(readFileSync(trPath, "utf8")) as {
+	const transcript = readJsonSync(trPath, "transcript.json") as {
 		material_id?: string | number;
 		duration?: number;
 		utterances: { id: string; st: number; ed: number }[];
@@ -1154,7 +1155,7 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	// 句界 = 每句 ed（末句除外）+ 片头 0（引导静音也该收）
 	const boundaries = [0, ...us.slice(0, -1).map((u) => u.ed)];
 	// 豁免 = 引用段（direct_slots）在轨上的区间
-	const plan = existsSync(planPath) ? (JSON.parse(readFileSync(planPath, "utf8")) as PlanShape) : undefined;
+	const plan = existsSync(planPath) ? (readJsonSync(planPath, "plan") as PlanShape) : undefined;
 	const protect: { st: number; ed: number }[] = (plan?.beats ?? []).flatMap((b) =>
 		(b.direct_slots ?? []).map((d) => ({ st: d.track_st, ed: d.track_ed })),
 	);
