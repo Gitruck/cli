@@ -240,8 +240,19 @@ face / hair / eyes / wardrobe / signature prop + do-not-change + one line on how
 描述稿落盘后**别收工**，把接力讲清（但这一步的「手」在外部平台和用户手里、必须停下等用户）：
 
 1. **交代出片**：让用户拿 `<project>/ai-drama/<beat_id>.md` 里的描述，去任意外部平台出片——中文版喂可灵 / 即梦 / Vidu；英文版喂 Veo / Runway / LTX / Luma；本地开源（Wan / Hunyuan 等）或成片 agent 平台（LibTV / OiiOii / TapNow）皆可，按下游平台的角色资产机制上传角色描述保一致。
-2. **优先标准包回填**：AI Drama Desk 出片后，找到每个项目的 `exports/aidrama/manifest.json`，执行：
-   `gtrk ai-drama lay --project "<工程目录>" --package "<B03 exports/aidrama>" --package "<B05 exports/aidrama>" --json`。
+2. **优先标准包回填 —— 用项目 id，别去找路径**：AI Drama Desk 出片后，用户手上有的是**项目 id**（工作台项目页可一键复制）。直接：
+
+   ```bash
+   gtrk ai-drama lay --project "<工程目录>" --desk-project proj-xxxx --desk-project proj-yyyy --json
+   ```
+
+   命令自己解析 id → 导出包目录，走两条**确定性**路径：① 工作台服务可达就问它；② 服务没起就读 `~/.gitruck/ai-drama-desk.json` 的落脚点。两条都不通会报错并给出路。
+
+   > ⚠️ **拿到 id 之后 MUST NOT 去磁盘上找导出包**（`find` / `ls -R` / 通配一律禁止）。这是 desk 仓 `agent-project-handoff`「仓库定位只在必要时发生」在 CLI 侧的镜像纪律——2026-09-18 真机就因为缺这条路而跑了一次跨盘全量扫描。解析不出来就如实报、请用户启动工作台或直接给路径，**别自己找**。
+   > 零命中时命令会列出「已查过哪些数据根」：源码部署与打包部署的数据根不同，项目找不到多半是**它在另一个部署里**，不是丢了。
+
+   已经手上就有目录路径（或用的是非标准平台）时，仍可用 `--package "<exports/aidrama>"`，两者可混用、按路径去重。
+
    命令会先按当刻口播工程重投影 beat 窗口，再把所有镜头复制到 `<gtrk目录>/assets/ai-drama/<slug>/`，共用一条新的 `video_track`；每个 beat 从起点顺排，最后一镜吸收到 beat 终点。既有 A-roll、BGM 与 B-roll 轨零改动。若已铺 AI 轨被用户手调过，缺省拒绝覆盖；只有用户明确同意丢弃手调时才加 `--replace-all`。
 3. **非标准平台才手动回铺**：外部平台没有 return-v1 清单时，才由用户把片段拖回 opencut 的 **AI_DRAMA 车道**，对齐该 beat 的 `track_st→track_ed`。AI 出片仍是外部异步、用户驱动；未拿到完整片段前要停下等用户，别替他假装出片 / 回轨完成。
 4. **回铺齐 ≠ 收口，还有两步**：你的片段回铺齐只意味着 **③ B-roll 底轨阶段**完成。接着 MUST 走 **④ 全局抽帧检查画面构图**（对三源合并后的最终底轨抽帧，看主体位置 / 安全区 / 画面朝向 / 明暗，**停下等用户确认**）→ 过了才交棒 **⑤ `/gtrk-mg`** 把 MG（含 ov）叠上 → 最后才 `gtrk render` 收口。

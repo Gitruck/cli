@@ -13,11 +13,14 @@ import { probeGeometry, type Geometry } from "../lib/media";
 import { compareWalls, wallFromDeclared, wallFromProbe } from "../lib/clock-adapter";
 import { log, routeLogsToStderr } from "../lib/log";
 import { readJson } from "../lib/read-json";
+import { resolveDeskProject, type DeskResolveVia } from "../lib/desk-locate";
 
 interface AiDramaOpts {
 	project?: string;
 	/** commander 将 `--package` 映射为单数属性；值本身由 collector 累加成数组。 */
 	package?: string[];
+	/** AI Drama Desk 的项目 id，可重复；由 desk-locate 解析成导出包目录后并入 package。 */
+	deskProject?: string[];
 	replaceAll?: boolean;
 	json?: boolean;
 }
@@ -65,6 +68,11 @@ export function registerAiDrama(program: Command, deps: AiDramaDeps = {}): void 
 		.description("AI 情景片段回填：消费 AI Drama Desk return-v1 导出包，新增一条独立 AI 视频轨（纯本地、零模型调用、零计费）")
 		.option("--project <dir>", "口播工程产物目录（定位 gtrk/project.gtrk）")
 		.option("--package <path>", "return-v1 导出目录或 manifest.json，可重复传", collectPath)
+		.option(
+			"--desk-project <id>",
+			"AI Drama Desk 项目 id，可重复传；先问服务、服务没起再读落脚点解析出导出包（不扫盘）",
+			collectPath,
+		)
 		.option("--replace-all", "已铺 AI 轨在客户端被编辑过时仍重置重铺（会覆盖该 AI 轨上的手调）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: AiDramaOpts) => {
@@ -146,7 +154,24 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 		throw new Error("用法：gtrk ai-drama lay --project <目录> --package <导出目录或manifest.json> [--package ...]");
 	}
 	if (!opts.project) throw new Error("ai-drama lay 需要 --project <目录>");
-	if (!opts.package?.length) throw new Error("ai-drama lay 至少需要一个 --package <导出目录或manifest.json>");
+	if (!opts.package?.length && !opts.deskProject?.length) {
+		throw new Error("ai-drama lay 至少需要一个 --package <导出目录或manifest.json> 或 --desk-project <id>");
+	}
+
+	// 按 id 解析：先问服务、服务没起再读落脚点；两条都不通就带着出路抛错，**绝不扫盘**。
+	// 解析出的路径与直接传入的 --package 汇成一个集合并按绝对路径去重，
+	// 之后走的是同一条校验与写回路径——解析方式不放宽任何既有判据。
+	const sources = new Map<string, { via: "byId" | "byPath"; resolvedVia?: DeskResolveVia; projectId?: string }>();
+	for (const p of opts.package ?? []) sources.set(manifestPathOf(p), { via: "byPath" });
+	for (const id of opts.deskProject ?? []) {
+		const hit = await resolveDeskProject(id);
+		const key = manifestPathOf(hit.packageDir);
+		// 同一个包既按 id 指认又直接给了路径时只回填一次；标注保留「按 id」这一侧，
+		// 因为排障时更想知道当刻连的是哪个部署。
+		sources.set(key, { via: "byId", resolvedVia: hit.via, projectId: id });
+		log.info(`--desk-project ${id} → ${hit.packageDir}（经${hit.via === "api" ? "工作台服务" : "落脚点"}解析）`);
+	}
+	const packageInputs = [...sources.keys()];
 
 	const baseDir = resolve(opts.project);
 	const gtrkPath = locateGtrk(baseDir);
@@ -160,7 +185,7 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 		throw new Error("已铺 AI 轨在客户端被编辑过，已拒绝覆盖；确认要丢弃该 AI 轨上的手调后再加 --replace-all");
 	}
 
-	const loaded = await Promise.all(opts.package.map(readPackage));
+	const loaded = await Promise.all(packageInputs.map(readPackage));
 	const beatIds = loaded.map((p) => p.pkg.beatId);
 	if (new Set(beatIds).size !== beatIds.length) throw new Error(`同一 beat 重复传包：${beatIds.join("、")}`);
 	log.step(`▶ AI 情景片段回填：${loaded.length} 个 beat / ${loaded.reduce((n, p) => n + p.pkg.items.length, 0)} 个镜头…`);
@@ -272,6 +297,11 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 		skipped,
 		reprojection: reproj.summary,
 		frame_grid: laid.summary.frameGrid,
+		// 「怎么找到的」与「找到了什么」同等重要：不标出来就没法判断当刻连的是哪个部署
+		package_sources: packageInputs.map((k) => {
+			const s2 = sources.get(k)!;
+			return { manifest: k, via: s2.via, ...(s2.resolvedVia ? { resolved_via: s2.resolvedVia } : {}), ...(s2.projectId ? { desk_project: s2.projectId } : {}) };
+		}),
 		// 时钟账面（add-cross-clock-adapter D3）：实测覆盖 / 回退自述计数 + manifest_mismatch 全量明细
 		clock,
 		...(integrity ? { integrity } : {}),

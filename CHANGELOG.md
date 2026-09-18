@@ -2,6 +2,10 @@
 
 ## 未发布
 
+### 加：`gtrk ai-drama lay` 可按工作台项目 id 取包（add-desk-project-resolution）
+
+新增 `--desk-project <id>`（可重复，与 `--package` 混用、按路径去重）：用户手上有的是 AI Drama Desk 的**项目 id**，命令自己解析成导出包目录，走两条确定性路径——服务可达就问 `GET /api/v1/projects/<id>` 取 `exportDir`（**字段缺席即判「尚未导出」**，不据 id 拼路径去试）；服务没起就读 `~/.gitruck/ai-drama-desk.json` 的 `instances[]` 逐条试。零命中会列出已查过哪些数据根（源码部署与打包部署的数据根不同，找不到多半是「在另一个部署里」），多命中报歧义不猜，两条都不通就报错并给出路。**全程不做任何目录遍历**——解析层有一条反向自证用例锁住这点。解析出的包走的仍是既有那条校验与写回路径，清单校验、不完整包整批拒收、路径穿越拒收、幂等与手调保护一律不放宽；`--json` 每个包多标 `via`（按 id / 按路径）与 `resolved_via`（服务 / 落脚点）。
+
 ### 加：推荐目录收一方 MG 排版技法族（add-first-party-technique-catalog-entry）
 
 `gtrk skills recommend` 多一个场景 `technique`：同合云自己的排版技法族（首个技法 doc-reveal：文献页叠放 / 发牌 / 局部强调）。技法不是栏目 MG 生产 skill——`gtrk skills add` 装完登记为 `routing:none` 且 `status: "first-party"`，由 agent 在 MG 步按槽位取用；显式 `--produces` 绑车道会照登记并告警一行。人读输出对一方条目印「一方维护」不印 star；`--json` 每条多 `origin`。`/gtrk-mg` 手册在「无匹配」与「有匹配缺省不用」两处各加一句指路，公约 §三‴ 补一方口径。
