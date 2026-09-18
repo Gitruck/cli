@@ -814,8 +814,8 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
   - 分发的 ffmpeg 为 GPLv3 构建，对应源码与二进制同处提供（见分发点 `SOURCE.md`）；**下载不附加任何使用限制**。
 - `gtrk upgrade [--check]` — 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装。
 - `gtrk skills install [--agents codex,workbuddy,comate,…] [--all] [--copy] [--dir <skills 目录>]` — 单独安装/刷新 Agent Skills；缺省由通用适配器与 gtrk 补充层自动检测。
-- `gtrk skills recommend [--scene <id>] [--json]` — 第三方 skill 推荐目录：不带 `--scene` 列九个场景（hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles），带场景按 tier 给条目（用途 / 安装命令 / 许可与依赖 / 登记命令）。**只推荐不打包**：目录随包分发、带快照日期、不联网不留痕；star 与许可以仓库页为准，装不装是你的选择。GPL / AGPL / 非商用 / 无许可证 / 只能经 MCP-SaaS 运行的不入目录。
-- `gtrk skills add <owner/repo> [--skill <name>]... [--produces MG|AI_DRAMA|FILM_BROLL|script|none] [--column <id>] [--agents ...] [--all] [--copy]` — 透传通用 `skills` 适配器安装第三方 skill，成功后把 `{id, ref: "<owner/repo>#<skill>", produces, status: "third-party"}` **追加**进栏目配置 `style.skills`（同 ref 幂等、失败不登记；`--produces` 缺省取目录值，目录外仓登记为 `routing:"none"`），之后 `gtrk mg` / `/gtrk-ai-drama` 按 `produces` 即可解析到它。
+- `gtrk skills recommend [--scene <id>] [--json]` — 第三方 skill 推荐目录：不带 `--scene` 列十个场景（hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique），带场景按 tier 给条目（用途 / 安装命令 / 许可与依赖 / 登记命令）。**只推荐不打包**：目录随包分发、带快照日期、不联网不留痕；star 与许可以仓库页为准，装不装是你的选择。GPL / AGPL / 非商用 / 无许可证 / 只能经 MCP-SaaS 运行的不入目录。目录也收同合云一方的 MG 排版技法族（`--scene technique`，条目 `origin: first-party`）：技法不当车道生产者，由 agent 在 MG 步按槽位取用。
+- `gtrk skills add <owner/repo> [--skill <name>]... [--produces MG|AI_DRAMA|FILM_BROLL|script|none] [--column <id>] [--agents ...] [--all] [--copy]` — 透传通用 `skills` 适配器安装第三方 skill，成功后把 `{id, ref: "<owner/repo>#<skill>", produces, status: "third-party"}`（一方条目 `status: "first-party"`）**追加**进栏目配置 `style.skills`（同 ref 幂等、失败不登记；`--produces` 缺省取目录值，目录外仓登记为 `routing:"none"`），之后 `gtrk mg` / `/gtrk-ai-drama` 按 `produces` 即可解析到它。
 
 ---
 

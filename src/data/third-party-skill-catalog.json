@@ -5,7 +5,8 @@
     "第三方 skill 推荐目录（change add-third-party-skill-catalog）。只登记引用，不分发第三方内容；推荐是建议，安装是用户自己的行为。",
     "入册门槛（主理人 2026-09-10 拍板 Q1）：≥100★ 或 2026 年内活跃或中文社区公认；GPL / AGPL / PolyForm 非商用 / 无许可证文件 / 只能经 MCP-SaaS 运行的一律不入。",
     "star 与更新日期为 snapshot_date 当日快照，推荐文案一律带「以仓库页为准」。",
-    "已核未入册（供下次刷目录复核）：remotion-dev/skills（仓无 LICENSE 文件）、vibe-motion/skills（仓级未标许可，个别件 CC BY-NC）、MiniMax-AI/MiniMax-H3（社区许可）、Pluviobyte/video-production-skills（未标许可）、Vincentwei1021/video-talkcraft（PolyForm 非商用）、geekjourneyx/hyperframes-motion-director（AGPL-3.0）、WEIFENG2333/VideoCaptioner 与 RainLib/AI-Storyboard（GPL-3.0）、clueso-ai/skills 与 MegaTroll222/VOX-COLLAGE-BROLL（绑 MCP-SaaS）。"
+    "已核未入册（供下次刷目录复核）：remotion-dev/skills（仓无 LICENSE 文件）、vibe-motion/skills（仓级未标许可，个别件 CC BY-NC）、MiniMax-AI/MiniMax-H3（社区许可）、Pluviobyte/video-production-skills（未标许可）、Vincentwei1021/video-talkcraft（PolyForm 非商用）、geekjourneyx/hyperframes-motion-director（AGPL-3.0）、WEIFENG2333/VideoCaptioner 与 RainLib/AI-Storyboard（GPL-3.0）、clueso-ai/skills 与 MegaTroll222/VOX-COLLAGE-BROLL（绑 MCP-SaaS）。",
+    "一方条目（origin: first-party，仓主 Gitruck；change add-first-party-technique-catalog-entry）：不设 star 门槛，门槛改为 ① 许可在允许集 ② 产物过 gtrk mg lint（契约同源）③ 技法≠模板（无示例文案、无栏目色板）；star 数不展示、不参与判据。技法族条目只挂 technique 场景、produces 恒 none——由 agent 在 MG 步按槽位取用，不当车道生产者。"
   ],
   "scenes": {
     "hook": {
@@ -43,6 +44,10 @@
     "principles": {
       "label": "动效原则 / 品味补课",
       "triggers": ["动效原则", "缓动", "节奏感", "迪士尼", "动画法则", "品味", "编舞"]
+    },
+    "technique": {
+      "label": "排版技法族（按 MG 槽位取用，不当车道生产者）",
+      "triggers": ["排版技法", "技法", "文献", "论文", "文献页", "文献展示", "引用这篇", "叠放", "发牌", "局部强调", "圈出来", "截图叠放"]
     }
   },
   "entries": [
@@ -695,6 +700,23 @@
       "lang": ["en"],
       "stars_snapshot": 54,
       "note": "ffmpeg 动效字幕配方：ASS 卡拉 OK、drawtext 弹跳、lower third、xfade 转场"
+    },
+    {
+      "id": "gtrk-mg-techniques",
+      "repo": "Gitruck/gtrk-mg-techniques",
+      "origin": "first-party",
+      "install": "npx skills add Gitruck/gtrk-mg-techniques --skill doc-reveal",
+      "skills": ["doc-reveal"],
+      "scenes": ["technique"],
+      "produces": "none",
+      "output": "html-gsap",
+      "deps": "local",
+      "license": "MIT",
+      "adapter": "gsap-emit",
+      "tier": "T1",
+      "lang": ["zh"],
+      "stars_snapshot": 0,
+      "note": "同合云一方 MG 排版技法族；doc-reveal 把论文首页 / 新闻截图 / 书页落成一叠、发牌亮出、镜头推近某一行荧光笔划过并落译名卡；技法≠模板——无示例文案无栏目色板，内容与节奏由 agent 按口播现场定；产物过 gtrk mg lint，MG 步按槽位取用、不当车道生产者"
     }
   ]
 }

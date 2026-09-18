@@ -47,7 +47,8 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
   4. **用文字模板**：同合云自家的文字特效模板库（`gtrk mg fetch --source text`，见下节「文字模板工作流」）。改字走 `gtrk mg compile`、改效果走 `gtrk mg edit --say`。
      ⚠️ **它的适用面由派单的 `visual_job` 决定，不由「省不省事」决定**（见下「按 visual_job 路由」）。
   另可查推荐目录（公约 §三‴）：`gtrk skills recommend --scene mg-explainer` 列第三方 MG 生产 skill，装完 `gtrk skills add <owner/repo> --produces MG` 登记即被本节解析到——本 skill 正文不点名任何仓、不点名任何块。
-- **有匹配时中性块与文字模板缺省都不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物 / 纯文字入场）时可**提议**「这一槽用中性块」或「这一槽用文字模板」，用户点头才用。
+  推荐目录另有一方**排版技法族**（`gtrk skills recommend --scene technique`）：技法不是生产者、不登记为 MG 车道（`routing:none`），某槽位的内容形态命中某技法（如引用文献页 / 截图局部强调）时由你按槽位取用——内容与节奏按口播定、栏目色未定时用技法自带的中性底；本 skill 正文同样不点名仓。
+- **有匹配时中性块与文字模板缺省都不用**：只当栏目 skill 明显不擅长某类（如数据图表 / 界面拟物 / 纯文字入场）时可**提议**「这一槽用中性块」或「这一槽用文字模板」，用户点头才用。技法族同理——槽位内容形态命中某技法时可**提议**「这一槽用技法」（`gtrk skills recommend --scene technique`），栏目色板与字体照栏目注入，用户点头才用。
 
 ## ★ 按 `visual_job` 路由（不是按省事路由）
 

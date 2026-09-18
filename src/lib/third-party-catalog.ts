@@ -7,6 +7,9 @@
  *
  * 场景闭集与触发词都住目录：图纸正文 MUST NOT 硬编任何仓名（skill-artifact-discipline「供应商中立」同理），
  * 目录变了守卫测试自动跟。
+ *
+ * 一方条目（change add-first-party-technique-catalog-entry）：`origin: "first-party"`（缺省即第三方；仓主 MUST 为 Gitruck）。
+ * 技法族住场景 `technique`：`produces` 恒 `none`、不当车道生产者，由 agent 在 MG 步按槽位取用；人读输出对一方条目不印 star。
  */
 import catalog from "../data/third-party-skill-catalog.json";
 
@@ -18,6 +21,8 @@ export type CatalogTier = "T1" | "T2";
 export interface CatalogEntry {
 	id: string;
 	repo: string;
+	/** 一方条目标记；缺省即第三方。 */
+	origin?: "first-party";
 	install: string;
 	skills?: string[];
 	scenes: string[];
@@ -66,6 +71,21 @@ export const INSTALL_PREFIXES: readonly RegExp[] = [/^npx /, /^git clone /, /^\/
 
 /** 目录快照的允许陈旧天数：超过即守卫红，提醒发版前刷目录。 */
 export const SNAPSHOT_MAX_AGE_DAYS = 90;
+
+/** 技法族场景 id：挂在此场景的条目 `produces` 恒 `none`，由 agent 在 MG 步按槽位取用，不当车道生产者。 */
+export const TECHNIQUE_SCENE = "technique";
+
+/** 一方条目的仓主：`origin: "first-party"` 的条目 `repo` MUST 以它开头（守卫测试用）。 */
+export const FIRST_PARTY_OWNER = "Gitruck";
+
+export function isFirstParty(entry: CatalogEntry): boolean {
+	return entry.origin === "first-party";
+}
+
+/** 技法族条目：不绑车道、按槽位取用（skills add 的提示与守卫测试共用同一判据）。 */
+export function isTechniqueEntry(entry: CatalogEntry): boolean {
+	return entry.scenes.includes(TECHNIQUE_SCENE);
+}
 
 const TIER_ORDER: Record<CatalogTier, number> = { T1: 0, T2: 1 };
 
@@ -129,15 +149,25 @@ function depsLine(entry: CatalogEntry): string {
 	return `付费依赖：${entry.deps.map((d) => d.replace(/^paid:/, "")).join("；")}`;
 }
 
+function registrationNote(entry: CatalogEntry): string {
+	if (isTechniqueEntry(entry)) return "（技法族：不绑车道（routing:none），MG 步按槽位取用）";
+	if (entry.produces === "script" || entry.produces === "none") return "（管线外，登记为 routing:none）";
+	return "";
+}
+
 /** 人读格式（走 stderr）。每条：用途 / 安装 / 许可与依赖 / 登记。 */
 export function formatHuman(entries: CatalogEntry[], cat: Catalog = loadCatalog()): string {
 	const lines: string[] = [];
 	for (const e of entries) {
-		lines.push(`◆ ${e.repo}（${e.tier} · ${e.stars_snapshot}★ 于 ${cat.snapshot_date}，以仓库页为准）`);
+		lines.push(
+			isFirstParty(e)
+				? `◆ ${e.repo}（一方维护 · ${e.tier} · 快照 ${cat.snapshot_date}）`
+				: `◆ ${e.repo}（${e.tier} · ${e.stars_snapshot}★ 于 ${cat.snapshot_date}，以仓库页为准）`,
+		);
 		lines.push(`   用途：${e.note}`);
 		lines.push(`   安装：${e.install}`);
 		lines.push(`   许可：${e.license}${e.license_note ? `（${e.license_note}）` : ""}；${depsLine(e)}`);
-		lines.push(`   登记：${registerCommandFor(e)}${e.produces === "script" || e.produces === "none" ? "（管线外，登记为 routing:none）" : ""}`);
+		lines.push(`   登记：${registerCommandFor(e)}${registrationNote(e)}`);
 	}
 	return lines.join("\n");
 }
@@ -147,6 +177,7 @@ export function toJson(entries: CatalogEntry[], cat: Catalog = loadCatalog()): R
 	return entries.map((e) => ({
 		id: e.id,
 		repo: e.repo,
+		origin: e.origin ?? null,
 		tier: e.tier,
 		scenes: e.scenes,
 		summary: e.note,

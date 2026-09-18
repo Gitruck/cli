@@ -19,6 +19,7 @@ import {
 	catalogSnapshotDate,
 	formatHuman,
 	isScene,
+	isTechniqueEntry,
 	listScenes,
 	lookupByRepo,
 	recommend,
@@ -479,6 +480,8 @@ export interface AddSkillResult {
 	columnId?: string;
 	entries: StyleSkillEntry[];
 	registrations: AppendStyleSkillResult[];
+	/** 登记后的提示（车道绑定来源 / 技法族 / 未绑定），与人读日志同文；供测试与机读。 */
+	notices: string[];
 	reason?: string;
 }
 
@@ -501,17 +504,20 @@ export function buildThirdPartyAdapterArgs(
 /**
  * 决定登记条目的 produces / routing：显式 `--produces` > 目录值 > 管线外（routing:none）。
  * `script` / `none` 恒带 `routing:"none"`（spec：管线外产物不猜车道）。
+ * `status` 取目录条目的 `origin`（一方 = "first-party"），无则 "third-party"；技法族（场景 technique）条目目录值即 none。
  */
 export function resolveRegistration(
 	repo: string,
 	skills: string[],
 	producesOpt?: string,
-): { entries: StyleSkillEntry[]; fromCatalog: boolean; unbound: boolean } {
+): { entries: StyleSkillEntry[]; fromCatalog: boolean; unbound: boolean; technique: boolean } {
 	const cat = lookupByRepo(repo);
+	const technique = Boolean(cat && isTechniqueEntry(cat));
+	const status = cat?.origin ?? "third-party";
 	const produces = (producesOpt ?? cat?.produces) as CatalogProduces | undefined;
 	const names = skills.length > 0 ? skills : cat?.skills?.length ? [cat.skills[0]] : [repo.split("/")[1]];
 	const entries: StyleSkillEntry[] = names.map((name) => {
-		const e: StyleSkillEntry = { id: name, ref: `${repo}#${name}`, status: "third-party" };
+		const e: StyleSkillEntry = { id: name, ref: `${repo}#${name}`, status };
 		if (produces) {
 			e.produces = produces;
 			if (produces === "script" || produces === "none") e.routing = "none";
@@ -520,12 +526,12 @@ export function resolveRegistration(
 		}
 		return e;
 	});
-	return { entries, fromCatalog: !producesOpt && Boolean(cat?.produces), unbound: !produces };
+	return { entries, fromCatalog: !producesOpt && Boolean(cat?.produces), unbound: !produces, technique };
 }
 
 /** `gtrk skills add <owner/repo>`：透传上游安装 → 成功才登记进栏目配置 `style.skills`（追加、去重、失败不登记）。 */
 export function addThirdPartySkill(repo: string, opts: AddSkillOptions = {}, deps: AddSkillDeps = {}): AddSkillResult {
-	const fail = (reason: string): AddSkillResult => ({ ok: false, repo, entries: [], registrations: [], reason });
+	const fail = (reason: string): AddSkillResult => ({ ok: false, repo, entries: [], registrations: [], notices: [], reason });
 	if (!REPO_SHAPE.test(repo)) return fail(`仓名格式应为 owner/repo：${repo}`);
 	if (opts.produces !== undefined && !PRODUCES_VALUES.includes(opts.produces as CatalogProduces)) {
 		return fail(`--produces 取值应为 ${PRODUCES_VALUES.join(" / ")}：${opts.produces}`);
@@ -556,7 +562,12 @@ export function addThirdPartySkill(repo: string, opts: AddSkillOptions = {}, dep
 	if (result.status !== 0) return fail(`上游 skills 适配器安装失败（退出码 ${result.status ?? "未知"}），未登记`);
 
 	const columnId = opts.column ?? (deps.defaultColumn ?? (() => readUserConfig().defaultColumn))() ?? "default";
-	const { entries, fromCatalog, unbound } = resolveRegistration(repo, opts.skill ?? [], opts.produces);
+	const { entries, fromCatalog, unbound, technique } = resolveRegistration(repo, opts.skill ?? [], opts.produces);
+	const notices: string[] = [];
+	const notice = (msg: string, level: "info" | "warn" = "info") => {
+		notices.push(msg);
+		log[level](msg);
+	};
 	const append = deps.appendEntry ?? appendStyleSkillEntry;
 	const registrations: AppendStyleSkillResult[] = [];
 	for (const entry of entries) {
@@ -566,15 +577,24 @@ export function addThirdPartySkill(repo: string, opts: AddSkillOptions = {}, dep
 			if (r.appended) log.ok(`已登记 ${entry.ref} → 栏目「${columnId}」${r.created ? "（新建配置文件）" : ""}：${r.path}`);
 			else log.info(`已登记过 ${entry.ref}，未重复追加：${r.path}`);
 		} catch (error) {
-			return { ok: false, repo, columnId, entries, registrations, reason: error instanceof Error ? error.message : String(error) };
+			return { ok: false, repo, columnId, entries, registrations, notices, reason: error instanceof Error ? error.message : String(error) };
 		}
 	}
-	if (fromCatalog) log.info(`车道绑定取自推荐目录：produces=${entries[0]?.produces}`);
-	if (unbound) log.info("未绑定车道（routing:none）；需要参与铺轨请用 --produces MG|AI_DRAMA|FILM_BROLL 指定。");
+	if (technique) {
+		const lane = opts.produces;
+		if (lane === undefined || lane === "none" || lane === "script") {
+			notice("技法族条目：不绑车道（routing:none），/gtrk-mg 在 MG 步按槽位取用，不当 MG 生产 skill。");
+		} else {
+			notice(`目录记该仓为技法族（不绑车道），已按你的指定登记为 ${lane} 生产者——它会被当作本栏目 ${lane} 生产 skill 解析。`, "warn");
+		}
+	} else if (fromCatalog) {
+		notice(`车道绑定取自推荐目录：produces=${entries[0]?.produces}`);
+	}
+	if (unbound) notice("未绑定车道（routing:none）；需要参与铺轨请用 --produces MG|AI_DRAMA|FILM_BROLL 指定。");
 	if (!opts.column && columnId === "default") {
 		log.info("未指定 --column 且 config.json 无 defaultColumn：已登记到栏目「default」；要让派单消费它，运行时传 --column default 或在 ~/.gitruck/config.json 设 defaultColumn。");
 	}
-	return { ok: true, repo, columnId, entries, registrations };
+	return { ok: true, repo, columnId, entries, registrations, notices };
 }
 
 export function registerSkills(program: Command): void {
@@ -582,8 +602,8 @@ export function registerSkills(program: Command): void {
 
 	skills
 		.command("recommend")
-		.description("第三方 skill 推荐目录：不带 --scene 列场景；--scene <id> 按场景给条目（用途 / 安装 / 许可 / 登记）。无状态、不联网")
-		.option("--scene <id>", "场景 id：hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles")
+		.description("skill 推荐目录（第三方 + 一方技法族）：不带 --scene 列场景；--scene <id> 按场景给条目（用途 / 安装 / 许可 / 登记）。无状态、不联网")
+		.option("--scene <id>", "场景 id：hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique（一方排版技法族）")
 		.option("--json", "机读：stdout 只输出 JSON，人读转 stderr")
 		.action((opts: { scene?: string; json?: boolean }) => {
 			const code = recommendSkills(opts);
