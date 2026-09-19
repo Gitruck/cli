@@ -276,7 +276,19 @@ export async function runTranscript(
 	log.info(`上传物：${basename(audio)}（仅音频衍生物）`);
 
 	log.step("③ 上传音频并提交 ASR…");
-	const payload = (fileId: string) => ({ file_id: fileId, language, word_level: true });
+	// `word_level` 决定的是**引擎**，不是一个参数（change: switch-transcript-to-selfhosted-asr）。
+	// 服务端按它选腿：要字级 ⇒ 外部厂商 ASR；不要 ⇒ 自部署引擎 + 服务端纠错。
+	//
+	// 这里恒传 `false`，判据是**产物**而不是成本：本命令的两个产物都只承载句级 ——
+	// Markdown 只渲染句子，`--json` 的 `utterances[]` 只有 `id/text/st/ed`（见 `:323` 起），
+	// 结构上没有任何字段放得下字级时码。索取一份产物容不下的东西，是为不可见的差异付费。
+	//
+	// 🔴 口径 MUST 对所有语种一致，**MUST NOT** 在这里按语种挑不同的值：
+	//    那要在 CLI 手抄一份「哪些码厂商引擎更好」的表，而正本在服务端引擎表里，
+	//    手抄的那份不会报错，只会在某天与引擎表悄悄分叉。粤语（`zh-HK`）确有质量代价，
+	//    它由**服务端**的语种白名单承接（infra `route-cantonese-asr-to-vendor-leg`），
+	//    CLI 一行都不必知道引擎的事。守卫见 `test/transcript-engine-routing.test.mjs`。
+	const payload = (fileId: string) => ({ file_id: fileId, language, word_level: false });
 	const submitted = await uploadAndSubmitTask(
 		deps.cfg,
 		audio,
