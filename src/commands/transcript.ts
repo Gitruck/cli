@@ -28,7 +28,7 @@ import { pollToolTask } from "../lib/tool-runner";
 import { resolveToolPricing, type ResolvedToolPricing } from "../lib/tool-pricing";
 import { invalidateUpload, uploadCached } from "../lib/upload-cache";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
-import { normalizeAsrOutput, renderTranscriptMarkdown } from "../lib/transcript";
+import { normalizeAsrOutput, renderTranscriptMarkdown, type NormalizedAsr } from "../lib/transcript";
 import { r3 } from "../lib/frame-domain";
 
 const TASK_TYPE = "asr";
@@ -55,6 +55,48 @@ export interface TranscriptResult {
 interface UploadResult {
 	fileId: string;
 	cached: boolean;
+}
+
+/** transcript.json 的 utterance（transcript v1：`words[]` 为契约字段，无字级时为空数组而非缺失）。 */
+export interface TranscriptUtterance {
+	id: string;
+	text: string;
+	st: number;
+	ed: number;
+	words: Array<{ w: string; st: number; ed: number }>;
+}
+
+/** 字级归属到句的容差（秒）= 整毫秒格：厂商字级与句级端点各自取整，边界词可能差 <1ms。 */
+const WORD_ATTACH_TOLERANCE_SEC = 0.001;
+
+/**
+ * ASR 归一产物 → transcript.json utterances（adjust-transcript-json-word-level）。
+ * 字级按时间归属到句：`word.start ≥ st − 1ms ∧ word.end ≤ ed + 1ms`；两者都按 `start` 升序，单指针推进。
+ * 落不进任何句的词（跨句 / 句间空隙里的碎片）不入产物、只计数交调用方 WARN。
+ */
+export function buildTranscriptUtterances(asr: NormalizedAsr): {
+	utterances: TranscriptUtterance[];
+	orphanWords: number;
+} {
+	const utterances: TranscriptUtterance[] = asr.sentences.map((s, i) => ({
+		id: `u${i + 1}`,
+		text: s.text,
+		st: r3(s.start),
+		ed: r3(Math.max(s.start, s.end)),
+		words: [],
+	}));
+	let orphanWords = 0;
+	let si = 0;
+	for (const word of asr.words) {
+		while (si < utterances.length && utterances[si].ed + WORD_ATTACH_TOLERANCE_SEC < word.end) si += 1;
+		const s = utterances[si];
+		if (s && word.start >= s.st - WORD_ATTACH_TOLERANCE_SEC && word.end <= s.ed + WORD_ATTACH_TOLERANCE_SEC) {
+			s.words.push({ w: word.text, st: r3(word.start), ed: r3(word.end) });
+		} else {
+			orphanWords += 1;
+		}
+	}
+	return { utterances, orphanWords };
 }
 
 export interface TranscriptDeps {
@@ -277,18 +319,22 @@ export async function runTranscript(
 
 	log.step("③ 上传音频并提交 ASR…");
 	// `word_level` 决定的是**引擎**，不是一个参数（change: switch-transcript-to-selfhosted-asr）。
-	// 服务端按它选腿：要字级 ⇒ 外部厂商 ASR；不要 ⇒ 自部署引擎 + 服务端纠错。
+	// 服务端按它选腿：要字级 ⇒ 字级腿（当前为外部厂商 ASR）；不要 ⇒ 自部署引擎 + 服务端纠错。
 	//
-	// 这里恒传 `false`，判据是**产物**而不是成本：本命令的两个产物都只承载句级 ——
-	// Markdown 只渲染句子，`--json` 的 `utterances[]` 只有 `id/text/st/ed`（见 `:323` 起），
-	// 结构上没有任何字段放得下字级时码。索取一份产物容不下的东西，是为不可见的差异付费。
+	// 按**产物消费面**分流（change: adjust-transcript-json-word-level，主理人 2026-09-19 口径）：
+	//  · 无 `--json`：只产 Markdown、只渲染句子 ⇒ 句级（false）——当小工具用，走 whisper + 纠错；
+	//  · `--json`：产 transcript.json 供工程生成 / 拆分 / 字幕消费，`utterances[].words[]` 承载字级
+	//    ⇒ 字级（true）——成片流程必须有字级，否则字幕拆行后的子行时间只能按字数摊分、
+	//    句末静音也会被算进最后一行（2026-09-19 真机：178 条同文本字幕 20 条偏差 > 0.2s）。
+	// 判据仍是**产物**，不是成本；CLI 不表达、不假设引擎名——服务端日后把字级接到自部署腿，这里零改动。
 	//
 	// 🔴 口径 MUST 对所有语种一致，**MUST NOT** 在这里按语种挑不同的值：
 	//    那要在 CLI 手抄一份「哪些码厂商引擎更好」的表，而正本在服务端引擎表里，
 	//    手抄的那份不会报错，只会在某天与引擎表悄悄分叉。粤语（`zh-HK`）确有质量代价，
 	//    它由**服务端**的语种白名单承接（infra `route-cantonese-asr-to-vendor-leg`），
 	//    CLI 一行都不必知道引擎的事。守卫见 `test/transcript-engine-routing.test.mjs`。
-	const payload = (fileId: string) => ({ file_id: fileId, language, word_level: false });
+	const wordLevel = Boolean(opts.json);
+	const payload = (fileId: string) => ({ file_id: fileId, language, word_level: wordLevel });
 	const submitted = await uploadAndSubmitTask(
 		deps.cfg,
 		audio,
@@ -328,16 +374,16 @@ export async function runTranscript(
 	await deps.writeMarkdown(output, markdown);
 
 	// --json 附加产物：transcript.json（结构门与 split loadTranscript 逐字段对齐：
-	// utterances[]{id,text,st,ed} + material_id + text_hash + duration；text_hash 口径 =
-	// sha256(utterances[].text join "\n")，与 infra transcript_emit / split 复算逐字节一致）
+	// utterances[]{id,text,st,ed,words[]} + material_id + text_hash + duration；text_hash 口径 =
+	// sha256(utterances[].text join "\n")，与 infra transcript_emit / split 复算逐字节一致；
+	// words[] 按时间归属到句（adjust-transcript-json-word-level），无字级时为空数组而非缺失）
 	let transcriptJson: string | undefined;
 	if (opts.json) {
-		const utterances = asr.sentences.map((s, i) => ({
-			id: `u${i + 1}`,
-			text: s.text,
-			st: r3(s.start),
-			ed: r3(Math.max(s.start, s.end)),
-		}));
+		const { utterances, orphanWords } = buildTranscriptUtterances(asr);
+		if (wordLevel && asr.words.length === 0) {
+			log.warn("本次响应无字级时码（服务端可能因语种不覆盖落回句级）：transcript.json 的 words 为空，字幕拆行后的时间将按字数摊分");
+		}
+		if (orphanWords > 0) log.warn(`${orphanWords} 个字级时码不落在任何句子区间内，已忽略`);
 		const doc = {
 			version: "v1",
 			source: sourceName,

@@ -100,7 +100,7 @@ export interface SubtitleLayResult {
 	laneElements: number;
 	/** 幂等替换掉的既有字幕 lane 条数。 */
 	replacedLanes: number;
-	/** 短于最小可读时长（0.8s，客户端同标尺）被丢弃的**回缝后**字幕单元数。 */
+	/** 被剪成残片且短于最小可读时长（0.8s，客户端同标尺）而丢弃的**回缝后**字幕单元数；完整句无论多短都不计入（不丢）。 */
 	droppedShort: number;
 	/**
 	 * 同句回缝（fix-subtitle-lay-duplicate-instances）并掉的投影实例数：智能剪辑把一句切成多片时，
@@ -304,7 +304,7 @@ export async function runSubtitleLay(opts: SubtitleLayOpts, deps: SubtitleLayDep
 			`同句回缝：${mergedCount} 个投影实例并回原句（阈值 ${CAPTION_RESEW_GAP_SEC}s，智能剪辑把一句切成多片，不并会出重复字幕；有字级时码时按时间线序拼接存活字）`,
 		);
 	if (droppedShort > 0) {
-		log.warn(`丢弃 ${droppedShort} 条短于最小可读时长（${MIN_CAPTION_SEC}s）的字幕单元`);
+		log.warn(`丢弃 ${droppedShort} 条被剪成残片且短于最小可读时长（${MIN_CAPTION_SEC}s）的字幕单元（完整句无论多短都保留）`);
 	}
 	if (bridgedCount > 0) log.info(`小 gap 桥接：${bridgedCount} 处（阈值 ${maxGapSec}s，消灭字幕闪烁）`);
 	if (captions.length === 0) {

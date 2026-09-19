@@ -11,7 +11,7 @@
  *   ⚠️ 2026-09-07 cli 侧先行（add-cross-clock-adapter D4：`attributeAndAlign` 兜底分支钳进父句包络 + `stats` 出参），
  *   客户端仓待同步（该 change 转出项）；黄金样本 `aligned / bridged` 逐字节未变（样本里无越出父句的行）。
  *   ⚠️ 2026-09-07 cli 侧再先行（unify-time-consumers-and-tolerance D2）：三种时间比较全部落到**整毫秒格**
- *   （`CAPTION_TIME_GRID_MS = 1`），匿名 `EPS = 1e-6` 与裸 `1e-3` 清退；客户端件镜像同一组常量与判据，
+ *   （`CAPTION_TIME_GRID_MS = 1`），匿名 ε 常量与裸 10⁻³ 清退；客户端件镜像同一组常量与判据，
  *   两仓共用测试向量 `test/fixtures/caption-align-grid.json`。
  * ★ 零 import 的代价：秒 → 整毫秒的换算在本文件**本地镜像**一份 `sec2ms`（与 `frame-domain.ts sec2ms` 逐字同体、
  *   MUST NOT 分叉）——这是全仓 `Math.round(x × 1000)` 机械判据的登记豁免行（同 `mg-lint.ts` 零依赖豁免），
@@ -35,6 +35,16 @@ export interface ProjectedUnit {
 	startTime: number;
 	endTime: number;
 	words: AlignedWord[] | null;
+	/**
+	 * 残片标记（adjust-caption-keep-complete-sentence / link-caption-keep-complete-sentence，2026-09-19）：
+	 * true = 本实例只覆盖了该 utterance 的一部分（有字级时码：存活字数 < 整句字数；
+	 * 无字级时码：句级求交区间小于整句区间）。最小可读时长过滤**只对残片生效**——
+	 * 完整句无论多短都保留（0.76s 的「这不是比喻」是内容，不是噪声；真机手修时被补回过）。
+	 * 缺席 = 按完整句处理：过滤宁可少丢、不可多丢。
+	 */
+	partial?: boolean;
+	/** 该 utterance 的整句字数（有字级时码时），回缝后据此重算 `partial`；无字级时码为 null / 缺席。 */
+	totalWords?: number | null;
 }
 
 /** 云端拆行接口的行（轨上秒）。 */
@@ -68,7 +78,7 @@ export const DEFAULT_BRIDGE_GAP_SECONDS = 1.5;
 /**
  * 字级时码的整毫秒格（unify-time-consumers-and-tolerance D2；capability `time-tolerance-whitelist` 白名单项）：
  * 本文件所有时间比较的**唯一**容差——「相邻 / 相同」= 整毫秒相等，「推进到下一父句」= 行起点 + 1 格 ≥ 父句终点。
- * MUST NOT 再引入 `1e-6` / `1e-3` 一类匿名 ε：审计与实现引用同一个常量。
+ * MUST NOT 再引入 10⁻⁶ / 10⁻³ 一类匿名 ε：审计与实现引用同一个常量。
  */
 export const CAPTION_TIME_GRID_MS = 1;
 
@@ -94,11 +104,18 @@ export function resewProjectedInstances(
 			prev.utteranceId === inst.utteranceId &&
 			sec2ms(inst.startTime - prev.endTime) <= sec2ms(gapSec)
 		) {
+			let survivingWords: number | null = null;
 			if (prev.words && inst.words) {
 				const merged = mergeWordsByTime(prev.words, inst.words);
 				prev.words = merged;
 				prev.text = merged.map((w) => w.w).join("");
+				survivingWords = merged.length;
 			}
+			// 回缝后重算残片：并回的存活字仍不足整句才算残片；无字级时码两片都是残片才仍算残片
+			// （合起来可能已覆盖整句，宁可不丢）。两侧都没标记时不凭空造键（存量调用方产物逐字节不变）。
+			const partial = mergedPartial(prev, inst, survivingWords);
+			if (partial !== undefined) prev.partial = partial;
+			if (prev.totalWords === undefined && inst.totalWords !== undefined) prev.totalWords = inst.totalWords;
 			prev.startTime = Math.min(prev.startTime, inst.startTime);
 			prev.endTime = Math.max(prev.endTime, inst.endTime);
 			mergedCount += 1;
@@ -110,9 +127,22 @@ export function resewProjectedInstances(
 			startTime: inst.startTime,
 			endTime: inst.endTime,
 			words: inst.words ? inst.words.map((w) => ({ ...w })) : null,
+			...(inst.partial !== undefined ? { partial: inst.partial } : {}),
+			...(inst.totalWords !== undefined ? { totalWords: inst.totalWords } : {}),
 		});
 	}
 	return { units, mergedCount };
+}
+
+function mergedPartial(
+	prev: ProjectedUnit,
+	inst: ProjectedUnit,
+	survivingWords: number | null,
+): boolean | undefined {
+	const total = prev.totalWords ?? inst.totalWords ?? null;
+	if (survivingWords !== null && total !== null) return survivingWords < total;
+	if (prev.partial === undefined && inst.partial === undefined) return undefined;
+	return prev.partial === true && inst.partial === true;
 }
 
 function mergeWordsByTime(a: AlignedWord[], b: AlignedWord[]): AlignedWord[] {
@@ -129,7 +159,11 @@ function mergeWordsByTime(a: AlignedWord[], b: AlignedWord[]): AlignedWord[] {
 	return out;
 }
 
-/** 最小可读时长过滤（MUST 在回缝之后、拆行之前）。 */
+/**
+ * 最小可读时长过滤（MUST 在回缝之后、拆行之前）。
+ * **只丢残片**（`partial === true` 且短于 `minSec`）；完整句无论多短都保留，交给后面的小 gap 桥接延长，
+ * 桥不到（后一行紧接）就按实际时长显示。未标记 `partial` 的单元按完整句处理。
+ */
 export function dropShortUnits(
 	units: ProjectedUnit[],
 	minSec: number,
@@ -137,7 +171,7 @@ export function dropShortUnits(
 	const kept: ProjectedUnit[] = [];
 	let droppedCount = 0;
 	for (const u of units) {
-		if (u.endTime - u.startTime < minSec) droppedCount += 1;
+		if (u.partial === true && u.endTime - u.startTime < minSec) droppedCount += 1;
 		else kept.push(u);
 	}
 	return { kept, droppedCount };

@@ -72,18 +72,49 @@ export function parseCanvas(raw: string | undefined): [number, number] {
 	return [w, h];
 }
 
+/** 提交给服务端的字级时码（transcript v1 `words[]` 形态，源时基秒）。 */
+export interface SubmitWord {
+	w: string;
+	st: number;
+	ed: number;
+}
+
 /** 提交给服务端的句级 utterance（transcript.json 归一形态）。 */
 export interface SubmitUtterance {
 	id: string;
 	text: string;
 	st: number;
 	ed: number;
+	/** 字级时码（adjust-transcript-json-word-level）：有则透传，服务端 `audio_project_struct` 按 `words?` 收；缺席 = 无字级。 */
+	words?: SubmitWord[];
+}
+
+/**
+ * `words[]` 逐词校验（畸形词跳过并计数、不整句作废——与客户端 `parseWords` 同姿势）。
+ * 非数组 / 空数组 ⇒ undefined（提交体不带该键，与改前逐字节一致）。
+ */
+function normalizeWordsForSubmit(raw: unknown): { words?: SubmitWord[]; skipped: number } {
+	if (!Array.isArray(raw) || raw.length === 0) return { skipped: 0 };
+	const words: SubmitWord[] = [];
+	let skipped = 0;
+	for (const item of raw) {
+		const w = (item ?? {}) as Record<string, unknown>;
+		const st = Number(w.st);
+		const ed = Number(w.ed);
+		if (typeof w.w !== "string" || !w.w || !Number.isFinite(st) || !Number.isFinite(ed) || st < 0 || ed <= st) {
+			skipped += 1;
+			continue;
+		}
+		words.push({ w: w.w, st: r3(st), ed: r3(ed) });
+	}
+	return words.length > 0 ? { words, skipped } : { skipped };
 }
 
 /**
  * 兜底路 transcript.json 归一：结构门与 `gtrk split` 的 loadTranscript 同族（utterances 数组 +
  * 逐条 text/st/ed），读出 {utterances, duration} 供提交体。id 缺省按序补 `u<N>`；
  * duration 缺省取末句 ed 包络（服务端契约要求显式传 duration）。
+ * `words[]` 有则透传（畸形词跳过并 WARN 计数），无则提交体与改前逐字节一致。
  */
 export function normalizeTranscriptForSubmit(
 	raw: unknown,
@@ -93,6 +124,7 @@ export function normalizeTranscriptForSubmit(
 	if (!t || typeof t !== "object" || !Array.isArray(t.utterances) || t.utterances.length === 0) {
 		throw new Error(`transcript.json 结构异常（缺 utterances 数组或为空）：${path}——请用 gtrk transcript <配音音频> --json 产出`);
 	}
+	let skippedWords = 0;
 	const utterances: SubmitUtterance[] = t.utterances.map((u, i) => {
 		const item = (u ?? {}) as Record<string, unknown>;
 		const text = typeof item.text === "string" ? item.text : "";
@@ -101,8 +133,17 @@ export function normalizeTranscriptForSubmit(
 		if (!text || !Number.isFinite(st) || !Number.isFinite(ed) || ed < st || st < 0) {
 			throw new Error(`transcript.json 第 ${i + 1} 条 utterance 非法（需 text 非空、0 ≤ st ≤ ed）：${path}`);
 		}
-		return { id: typeof item.id === "string" && item.id ? item.id : `u${i + 1}`, text, st: r3(st), ed: r3(ed) };
+		const { words, skipped } = normalizeWordsForSubmit(item.words);
+		skippedWords += skipped;
+		return {
+			id: typeof item.id === "string" && item.id ? item.id : `u${i + 1}`,
+			text,
+			st: r3(st),
+			ed: r3(ed),
+			...(words ? { words } : {}),
+		};
 	});
+	if (skippedWords > 0) log.warn(`transcript.json 有 ${skippedWords} 个畸形字级时码已跳过（需 w 非空、0 ≤ st < ed）`);
 	const declared = Number(t.duration);
 	const envelope = utterances.reduce((mx, u) => Math.max(mx, u.ed), 0);
 	const duration = Number.isFinite(declared) && declared > 0 ? r3(declared) : r3(envelope);

@@ -407,6 +407,11 @@ export interface ProjectedUtterance {
 	 * link-subtitle-lay-cloud-line-split）；缺席 / 空数组 = 无字级时码（TTS 产物），文本取整句。
 	 */
 	words?: Array<{ w: string; track_st: number; track_ed: number }>;
+	/**
+	 * 该 utterance 的整句字数（`ViewUtterance.total_words` 一路透传，adjust-caption-keep-complete-sentence）：
+	 * 存活字数 < 它 ⇒ 残片，最小可读时长过滤只对残片生效；缺席或 0 = 无字级明细，按完整句处理。
+	 */
+	total_words?: number;
 }
 
 export interface CaptionWindow {
@@ -682,12 +687,17 @@ export function toProjectedUnits(utterances: ProjectedUtterance[]): ProjectedUni
 						u.words.map((w) => ({ w: w.w, st: w.track_st, ed: w.track_ed })),
 					)
 				: null;
+		// 残片判定（adjust-caption-keep-complete-sentence）：有字级明细按存活字数 vs 整句字数；
+		// 无字级明细（TTS 产物）视图不带源区间、判不出残片 ⇒ 按完整句处理（过滤宁可少丢不可多丢）。
+		const totalWords = words && typeof u.total_words === "number" && u.total_words > 0 ? u.total_words : null;
 		out.push({
 			utteranceId: u.id ?? `__inst_${i}`,
 			text: words ? words.map((w) => w.w).join("") : u.text,
 			startTime: u.track_st,
 			endTime: u.track_ed,
 			words,
+			partial: words !== null && totalWords !== null ? words.length < totalWords : false,
+			totalWords,
 		});
 	});
 	return out;

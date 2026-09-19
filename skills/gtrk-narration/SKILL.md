@@ -56,6 +56,10 @@ description: 通用解说视频创作图纸（解说链正本）——把「一�
 > ⇒ 粤语 **SHOULD** 如实填 `zh-HK`（元数据诚实 + 备将来链路切换），但 **MUST NOT 以「粤语语种传错」
 > 为由重跑转写**：`la` 进 ASR 缓存键（`asr_result_cache.py:71-75`），换码必然 cache miss，
 > 白扣一次时长换回同一份结果。
+> ⟲ **2026-09-19 订正**：上段「写死 `word_level: true`」已过时。现口径按产物消费面分流
+> （cli `adjust-transcript-json-word-level`）：**无 `--json`** ⇒ 句级、走自部署引擎 + 服务端纠错（小工具用法）；
+> **`--json`**（本图纸的用法）⇒ 字级，transcript.json 带 `words[]`，字幕拆行后时间按语音贴。
+> 粤语在 `--json` 路照旧落厂商字级腿；无 `--json` 路的粤语代价见 `switch-transcript-to-selfhosted-asr`。
 
 ## 三、时序铺排三档（本图纸的技术正本）
 

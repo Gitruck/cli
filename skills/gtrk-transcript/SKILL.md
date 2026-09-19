@@ -40,6 +40,10 @@ description: 将用户本地视频或音频（自备配音）转成一个飞书�
 
    可选参数：`--out "D:/文字稿/采访.md"`、`--lang zh-CN`、`--ffmpeg-path <dir>`、`--reupload`。
 
+   > `--json` 与不带 `--json` 是两条识别口径（2026-09-19 起）：不带 `--json` 只出文字稿，走自部署引擎加服务端纠错、句级时码；
+   > 带 `--json` 是成片消费面，索取字级时码，`transcript.json` 的每句带 `words[]`，供工程生成 / 拆分 / 字幕按语音贴时间。
+   > 只是要一份可读的转写文档时不必加 `--json`。
+
 3. 解析 stdout 的唯一 JSON。仅当 `ok:true` 时继续；保存 `taskId`、`output`（以及 `transcriptJson`——`--json` 附带的句级时码稿路径，自备配音建工程时要交给 `gtrk project init --transcript`），并检查 `summaryPending:true`。人读进度在 stderr，不要把日志当成结果 JSON。
 4. 完整读取 `output` 指向的 Markdown，必须覆盖完整转写内容，不能只看开头几段。
 5. 若 `summaryPending:true`，只编辑 `## 总结` 与 `## 文字记录` 之间的内容：删除 `<!-- gtrk:agent-summary-pending -->` 及提示语，写入 3–7 条忠于原文的语义要点。不得改动 `## 文字记录` 和 `## 纯文本`，不得创建第二个文件。
