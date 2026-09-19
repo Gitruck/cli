@@ -11,10 +11,11 @@
  *
  * 失败一律降级：历史文件读写失败绝不影响铺轨或检索（选曲新鲜度是锦上添花，不是硬门禁）。
  */
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 import { readJsonSync } from "./read-json";
+import { writeSidecarSync } from "./sidecar-write";
 
 export interface BgmUseEntry {
 	/** 归一化标题键（去重主键）。 */
@@ -79,10 +80,12 @@ export function recordBgmUse(
 			{ key, title: args.title, ...(args.id ? { id: args.id } : {}), at: new Date().toISOString(), ...(args.project ? { project: args.project } : {}) },
 			...rest,
 		].slice(0, HISTORY_MAX);
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `${JSON.stringify({ entries }, null, 1)}\n`, "utf-8");
+		writeSidecarSync(path, `${JSON.stringify({ entries }, null, 1)}\n`, {
+			label: "BGM 使用历史",
+			consequence: "下次挑 BGM 不会避开这几首",
+		});
 	} catch {
-		/* 记账失败静默：不影响本次铺轨（良性降级） */
+		/* 读历史 / 算 key 出岔子也静默：不影响本次铺轨（写那步自己不抛，见 sidecar-write） */
 	}
 }
 

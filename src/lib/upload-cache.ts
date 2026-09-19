@@ -5,7 +5,7 @@
  */
 import { join } from "node:path";
 import { gitruckHome } from "./paths";
-import { stat, mkdir, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import {
 	CHUNK_THRESHOLD,
@@ -18,6 +18,7 @@ import { noticeOnce } from "./compliance-notice";
 import { crashReportNoticeOnce } from "./crash-report";
 import type { CloudConfig } from "./config";
 import { readJson } from "./read-json";
+import { writeSidecar } from "./sidecar-write";
 
 const CACHE_DIR = gitruckHome();
 const CACHE_FILE = join(CACHE_DIR, "upload-cache.json");
@@ -35,6 +36,11 @@ export type UploadCacheState = Record<string, CacheEntry>;
 
 export interface UploadCacheStore {
 	load(): Promise<UploadCacheState>;
+	/**
+	 * 旁路记账的写。⚠️ **实现 MUST NOT 抛**（spec local-io-resilience）——
+	 * 调用点 uploadCached 是在文件已经传完之后调它的，抛一次就把 fileId 一起弄丢
+	 * （base_error#202 就是这么来的）。自备实现时照此办理。
+	 */
 	save(cache: UploadCacheState): Promise<void>;
 }
 
@@ -63,11 +69,19 @@ async function load(): Promise<UploadCacheState> {
 }
 
 async function save(cache: UploadCacheState): Promise<void> {
-	await mkdir(CACHE_DIR, { recursive: true });
-	await writeFile(CACHE_FILE, JSON.stringify(cache, null, 2));
+	// 旁路记账：写不进去 MUST NOT 吃掉已经传完的 fileId（base_error#202）。
+	await writeSidecar(CACHE_FILE, JSON.stringify(cache, null, 2), {
+		label: "上传记账",
+		consequence: "下次同一个文件会重新上传",
+	});
 }
 
-const defaultUploadCacheDeps: UploadCacheDeps = {
+/**
+ * 生产用的 deps。**导出是给单测组合用的**：要证「记账写不进去也不吃掉 fileId」，
+ * 就 MUST 让用例走**真的** cacheStore、只在 fs 那一层注入失败 ——
+ * 若改成注入一个会抛的 cacheStore.save，那绕过的正是本件要证的那段代码。
+ */
+export const defaultUploadCacheDeps: UploadCacheDeps = {
 	stat,
 	uploadFile,
 	uploadChunked,
@@ -98,8 +112,11 @@ async function loadSessions(): Promise<Sessions> {
 }
 
 async function saveSessions(sessions: Sessions): Promise<void> {
-	await mkdir(CACHE_DIR, { recursive: true });
-	await writeFile(SESSION_FILE, JSON.stringify(sessions, null, 2));
+	// 旁路记账，且它是在**上传进行中**被调的：写不进去 MUST NOT 把传输拦腰打断。
+	await writeSidecar(SESSION_FILE, JSON.stringify(sessions, null, 2), {
+		label: "分片续传断点",
+		consequence: "断线后续不上，得从头传",
+	});
 }
 
 /** 文件版会话存取（~/.gtrk-cli/upload-sessions.json），供分片上传断点续传。 */

@@ -409,7 +409,19 @@ export function appendStyleSkillEntry(
 	skills.push({ ...entry });
 	style.skills = skills;
 	root.style = style;
-	mkdirSync(dir, { recursive: true });
-	writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+	// ⚠️ 用户此刻要的**交付物**（`gtrk skills` 是他按下的动作），写失败照旧抛、MUST NOT 吞
+	// （change `fix-sidecar-write-failure-kills-command` · design D6）。只把 Node 原文换成人话。
+	try {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+	} catch (e) {
+		const code = (e as { code?: unknown })?.code;
+		const why = typeof code === "string" ? code : e instanceof Error ? e.message : String(e);
+		throw new Error(
+			`栏目配置存不进 ${path}（${why}）。\n` +
+				`多半是那个文件正被别的程序占着，或者目录不让写。\n` +
+				`这次登记没落地；确认那个目录可写之后重跑。`,
+		);
+	}
 	return { path, appended: true, created };
 }

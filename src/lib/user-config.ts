@@ -58,9 +58,32 @@ export function readUserConfig(): UserConfig {
 	}
 }
 
-/** 合并写入（保留未传字段）。 */
+/**
+ * 合并写入（保留未传字段）。
+ *
+ * ⚠️ 写失败**照旧抛**，MUST NOT 走 `sidecar-write`
+ * （change `fix-sidecar-write-failure-kills-command` · design D6）：
+ * `gtrk init` 存 API Key 那次它是**交付物** —— 吞了用户会以为存上了，
+ * 下一条命令撞 401，那时离根因已经很远。
+ *
+ * 同一个函数被**崩溃告知留痕**调的那次确实是旁路，所以那一处由 `crash-report.ts` 在
+ * **自己的调用点**包 `try`（那里注释写着「落痕失败不阻断」）。
+ * ⇒ 判据挂调用点，不挂函数。
+ *
+ * 本次只把 Node 原文换成带路径与处置建议的人话；顺带它也就不再被判成崩溃。
+ */
 export function writeUserConfig(patch: UserConfig): void {
-	mkdirSync(DIR, { recursive: true });
-	const merged = { ...readUserConfig(), ...patch };
-	writeFileSync(FILE, JSON.stringify(merged, null, 2));
+	try {
+		mkdirSync(DIR, { recursive: true });
+		const merged = { ...readUserConfig(), ...patch };
+		writeFileSync(FILE, JSON.stringify(merged, null, 2));
+	} catch (e) {
+		const code = (e as { code?: unknown })?.code;
+		const why = typeof code === "string" ? code : e instanceof Error ? e.message : String(e);
+		throw new Error(
+			`配置存不进 ${FILE}（${why}）。\n` +
+				`多半是那个文件正被别的程序占着，或者目录不让写（企业策略 / 网盘同步 / 杀软）。\n` +
+				`处理：确认那个目录可写之后重跑；急用可以先设环境变量 GITRUCK_API_KEY 绕开配置文件。`,
+		);
+	}
 }
