@@ -12,11 +12,15 @@ import { ffmpegDir, fontsDir } from "../lib/paths";
 import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
 import {
 	fetchManifest,
+	fetchFontManifest,
 	installFfmpeg,
 	installFont,
 	resolvePlatformKey,
 	MANIFEST_URL,
+	FONT_MANIFEST_URL,
+	SUBTITLE_FONT_FILE,
 	type AssetManifest,
+	type CloudFontManifest,
 } from "../lib/runtime-assets";
 
 export function registerDeps(program: Command): void {
@@ -37,10 +41,24 @@ export function registerDeps(program: Command): void {
 		.description("从同合云镜像安装运行时资产（已存在则跳过）")
 		.option("--ffmpeg", "只装 ffmpeg/ffprobe")
 		.option("--font", "只装渲染字体")
+		// ⚠️ 占位符 MUST 用 ASCII：commander 判 variadic 的正则是 `/\w\.\.\.[>\]]$/`，
+		// `\w` 不含中文 ⇒ 写成 `<族名...>` 会被当成普通单值选项，回调里拿到字符串而非数组，
+		// 表现是 `families.map is not a function`（2026-09-16 真机撞到）。
+		.option(
+			"--font-family <family...>",
+			"指定要装的字体族（font_id / 中英族名任一，可多个）；缺省只装字幕字体",
+		)
 		.option("--force", "已存在也覆盖重装")
-		.action(async (opts: { ffmpeg?: boolean; font?: boolean; force?: boolean }) => {
-			await runInstall(opts);
-		});
+		.action(
+			async (opts: {
+				ffmpeg?: boolean;
+				font?: boolean;
+				fontFamily?: string[];
+				force?: boolean;
+			}) => {
+				await runInstall(opts);
+			},
+		);
 }
 
 function fmtMB(n: number): string {
@@ -95,17 +113,31 @@ export async function runStatus(ffmpegPath?: string): Promise<void> {
 			const mark = k === key ? "→" : " ";
 			log.info(`${mark} ${k.padEnd(10)} ${v.version.padEnd(20)} ${v.license}  源码 ${v.source}`);
 		}
-		for (const [name, v] of Object.entries(m.font)) {
-			log.info(`  字体 ${name}  ${v.license}`);
-		}
 		log.info(`合规说明：${m.base}/SOURCE.md`);
 		log.info("分发不附加任何使用限制（不限 gtrk 用户、不禁转发）");
+	}
+
+	// 字体清单是**另一条链路**（同合云字体库），与 ffmpeg 分发 manifest 各拉各的。
+	// 取不到只降级为少列一段，不影响上面的 ffmpeg 信息——两者没有依赖关系。
+	let fm: CloudFontManifest | null = null;
+	try {
+		fm = await fetchFontManifest();
+	} catch (e) {
+		log.warn(`取字体清单失败：${e instanceof Error ? e.message : String(e)}`);
+	}
+	if (fm) {
+		log.info(
+			`  字体库 ${FONT_MANIFEST_URL}（schema ${fm.schema}，${fm.family_count} 族 / ${fm.file_count} 款，生成于 ${fm.generated}）`,
+		);
+		log.info(`  缺省字幕字体 ${SUBTITLE_FONT_FILE}；其余按需：gtrk deps install --font-family <族名>`);
+		log.info("  与客户端同源（同一份服务端投影），故共享目录内同款字体只存一份");
 	}
 }
 
 export async function runInstall(opts: {
 	ffmpeg?: boolean;
 	font?: boolean;
+	fontFamily?: string[];
 	force?: boolean;
 }): Promise<void> {
 	// 都没指定 = 两样都装
@@ -141,7 +173,15 @@ export async function runInstall(opts: {
 
 	if (doFont) {
 		log.step("② 渲染字体");
-		const rs = await installFont(m, { force: opts.force, onProgress });
+		const fm = await fetchFontManifest();
+		log.info(
+			`字体库 schema ${fm.schema}，${fm.family_count} 族 / ${fm.file_count} 款，生成于 ${fm.generated}`,
+		);
+		const rs = await installFont(fm, {
+			force: opts.force,
+			families: opts.fontFamily,
+			onProgress,
+		});
 		log.tickEnd();
 		for (const r of rs) {
 			if (r.installed) log.ok(`已安装 ${r.detail}`);

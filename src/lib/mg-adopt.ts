@@ -15,7 +15,22 @@ import { estimateTimelineSec } from "./mg-lint";
 
 /** 契约铁律 5 指定的 GSAP CDN（lint CDN_OK 白名单）。 */
 export const CONTRACT_GSAP_SRC = "https://lib.baomitu.com/gsap/3.13.0/gsap.min.js";
-/** 缺省字体：我方运行时资产镜像里唯一可证的 CJK 字体（manifest `font` 项 `思源黑体 CN Bold`，别名 Source Han Sans CN Bold）。 */
+/**
+ * 缺省字体。
+ *
+ * ⟲ 2026-09-16（change: link-cloud-font-library）原注释「运行时资产镜像里**唯一**可证的 CJK 字体
+ * （manifest `font` 项）」已过时：字体源已统一到同合云字体库，可分发中文字体现有 **48 族 / 184 款**，
+ * 不再是唯一一款。本值保持不变——改它会改变存量颗粒的渲染结果，属行为变更、不在本件射程。
+ *
+ * 授权：对应字体 = 思源黑体 CN（SIL OFL），2026-09-16 实测在可分发清单内。
+ *
+ * ⚠️ **留碑：这个名字是「族名 + 字重」混写**，规范形态应是族名 `Source Han Sans CN` + `font-weight: 700`。
+ * 服务端 `font_services._assign_face_ids` 的注释记过这条的代价：把字重并进族名且不带 weight 描述符，
+ * 会让 CSS 认为该族只有 400 一档，请求 bold 时在**已经是粗体**的字形上再合成一层加粗。
+ * 本仓 `subtitle-lay.SUBTITLE_FONT_FAMILY`（`思源黑体 CN Bold`）是同一形态，但那条走 libass、
+ * 按 name 表 family 匹配而该文件确有此记录，故对字幕链**不是缺陷**；HTML/CSS 这条才是。
+ * 收口归另件，本件只登记不动值。
+ */
 export const DEFAULT_FONT = "Source Han Sans CN Bold";
 export const PARTICLE_W = 1920;
 export const PARTICLE_H = 1080;
