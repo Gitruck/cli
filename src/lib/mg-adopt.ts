@@ -282,6 +282,36 @@ function replaceFontFamilies(s: string, font: string): { out: string; count: num
 	return { out, count };
 }
 
+/** CSS token boundaries: quoted URLs and comments may themselves contain semicolons. */
+function stripCssImports(css: string): { css: string; count: number } {
+	const tokens = /\/\*[\s\S]*?\*\/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|@import\b/gi;
+	let out = "", start = 0, count = 0;
+	for (let m; (m = tokens.exec(css));) {
+		if (!/^@import$/i.test(m[0])) continue;
+		let quote = "", depth = 0, end = tokens.lastIndex;
+		for (; end < css.length; end++) {
+			const ch = css[end];
+			if (ch === "\\") { end++; continue; }
+			if (quote) { if (ch === quote) quote = ""; continue; }
+			if (ch === '"' || ch === "'") { quote = ch; continue; }
+			if (ch === "/" && css[end + 1] === "*") {
+				const close = css.indexOf("*/", end + 2);
+				if (close < 0) break;
+				end = close + 1; continue;
+			}
+			if (ch === "(") depth++;
+			if (ch === ")") depth--;
+			if (ch === ";" && depth === 0) break;
+		}
+		if (css[end] !== ";" || quote || depth !== 0) continue;
+		out += css.slice(start, m.index);
+		start = end + 1;
+		tokens.lastIndex = start;
+		count++;
+	}
+	return { css: out + css.slice(start), count };
+}
+
 // ── 预筛（发版期脚本与取块态共用）───────────────────────────────────────────
 
 /**
@@ -385,13 +415,20 @@ export function adoptBlock(srcHtml: string, opts: AdoptOptions): AdoptResult {
 	const stripSrcScripts = (s: string) => s.replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']+["'][^>]*>\s*<\/script>/gi, "");
 
 	// 2. 头部资源：字体 <link> / @import 去掉；头部 <style> 收集；头部内联脚本收集
-	const headStyles = [...headInner.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]);
+	let importN = 0;
+	const cleanCss = (css: string) => {
+		const r = stripCssImports(css);
+		importN += r.count;
+		return r.css;
+	};
+	const headStyles = [...headInner.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => cleanCss(m[1]));
 	const headInlineScripts = [...stripSrcScripts(headInner).matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]);
 	const droppedLinks = (headInner.match(/<link\b[^>]*>/gi) ?? []).length;
 	if (droppedLinks) log.push(`去掉头部 <link> ${droppedLinks} 个（字体外链 / preconnect）`);
 	// 根外（body 里根之后）的内联脚本 / 样式也收进来
 	const outsideScripts = [...stripSrcScripts(outside).matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]);
-	const outsideStyles = [...outside.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]);
+	const outsideStyles = [...outside.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => cleanCss(m[1]));
+	inner = inner.replace(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi, (_m, attrs, css) => `<style${attrs}>${cleanCss(css)}</style>`);
 	if (outsideScripts.length) log.push(`根外内联脚本 ${outsideScripts.length} 段移入根内末尾（客户端只执行 template 内脚本）`);
 	if (outsideStyles.length) log.push(`根外 <style> ${outsideStyles.length} 段收进根作用域`);
 
@@ -474,9 +511,6 @@ export function adoptBlock(srcHtml: string, opts: AdoptOptions): AdoptResult {
 	inner = inner.replace(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi, (m, a, css) => `<style${a}>${stripRootRuleBg(css)}</style>`);
 
 	// 9. 字体：所有 font-family 声明换成指定字体；@import 去掉
-	const importN = (scopedCss.match(/@import[^;]+;/gi) ?? []).length + (inner.match(/@import[^;]+;/gi) ?? []).length;
-	scopedCss = scopedCss.replace(/@import[^;]+;/gi, "");
-	inner = inner.replace(/@import[^;]+;/gi, "");
 	const f1 = replaceFontFamilies(scopedCss, font);
 	const f2 = replaceFontFamilies(inner, font);
 	const f3 = replaceFontFamilies(rootOpen, font);

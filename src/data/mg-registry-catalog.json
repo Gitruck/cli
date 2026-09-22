@@ -3,7 +3,7 @@
   "source": {
     "repo": "heygen-com/hyperframes",
     "commit": "8bf5b4423e704ea4578b9fd5dd988907fbfc45bf",
-    "snapshot_date": "2026-09-10",
+    "snapshot_date": "2026-09-22",
     "registry_path": "registry"
   },
   "mirrors": [
@@ -6784,9 +6784,10 @@
           "bytes": 12676
         }
       ],
-      "compat": "review",
+      "compat": "excluded",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲动画未生效，整段静止；暂不兼容"
       ]
     },
     {
@@ -6811,9 +6812,10 @@
           "bytes": 12743
         }
       ],
-      "compat": "review",
+      "compat": "excluded",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲动画未生效，整段静止；暂不兼容"
       ]
     },
     {
@@ -8001,9 +8003,10 @@
           "bytes": 17559
         }
       ],
-      "compat": "review",
+      "compat": "ok",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲抽样通过；内容与审美仍须改写"
       ]
     },
     {
@@ -8095,9 +8098,10 @@
           "bytes": 13398
         }
       ],
-      "compat": "review",
+      "compat": "excluded",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲动画未生效，整段静止；暂不兼容"
       ]
     },
     {
@@ -8458,9 +8462,10 @@
           "bytes": 13000
         }
       ],
-      "compat": "review",
+      "compat": "excluded",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲动画未生效，整段静止；暂不兼容"
       ]
     },
     {
@@ -8689,10 +8694,11 @@
           "bytes": 12854
         }
       ],
-      "compat": "review",
+      "compat": "ok",
       "compat_reasons": [
         "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
-        "铁律 8 高危形态（tags: halftone），待真渲验收"
+        "铁律 8 高危形态（tags: halftone），待真渲验收",
+        "云渲抽样通过；内容与审美仍须改写"
       ]
     },
     {
@@ -10774,9 +10780,10 @@
           "bytes": 20506
         }
       ],
-      "compat": "review",
+      "compat": "ok",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲抽样通过；内容与审美仍须改写"
       ]
     },
     {
@@ -11079,9 +11086,10 @@
           "bytes": 12764
         }
       ],
-      "compat": "review",
+      "compat": "excluded",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲动画未生效，整段静止；暂不兼容"
       ]
     },
     {
@@ -12313,9 +12321,10 @@
           "bytes": 14222
         }
       ],
-      "compat": "review",
+      "compat": "ok",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲抽样通过；内容与审美仍须改写"
       ]
     },
     {
@@ -12596,9 +12605,10 @@
           "bytes": 34939
         }
       ],
-      "compat": "review",
+      "compat": "ok",
       "compat_reasons": [
-        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看"
+        "含 <canvas>（WebGL / 2D）：客户端预览按 DOM 快照呈现不含画布像素，只有真渲能看",
+        "云渲抽样通过；内容与审美仍须改写"
       ]
     },
     {
