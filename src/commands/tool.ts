@@ -9,6 +9,9 @@
  * gated 工具（enabled=false）直调即报错「能力未开放」+ disabledReason、进程非 0、零上传零提交。
  */
 import type { Command } from "commander";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, extname, join, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
 import { submitTask, getTaskResult } from "../lib/cloud";
 import { uploadCached, invalidateUpload } from "../lib/upload-cache";
@@ -17,16 +20,29 @@ import { log, routeLogsToStderr } from "../lib/log";
 import {
 	TOOL_REGISTRY,
 	MULTI_INPUT_KINDS,
+	defaultExtsFor,
 	findTool,
 	validateRegistry,
 	type ToolDescriptor,
 } from "../lib/tool-descriptors";
-import { runCloudTool, downloadStream, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
+import { runCloudTool, downloadStream, resolveOutDir, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
+import {
+	DEFAULT_JOBS_CLOUD,
+	DEFAULT_JOBS_LOCAL,
+	batchBilling,
+	clampJobs,
+	defaultJobsFor,
+	manifestLine,
+	planBatch,
+	runPool,
+	summarize,
+} from "../lib/tool-batch";
 import { runMad, runMadSearch, type MadOpts } from "../lib/mad/mad";
 import { currentVersion } from "../lib/version";
 import { isTaskTypeOffline, primeCatalog } from "../lib/enum-catalog";
 import {
 	fetchToolPrices,
+	resolveToolPricing,
 	resolveToolPricingFromMap,
 	type ToolPriceMap,
 } from "../lib/tool-pricing";
@@ -59,7 +75,14 @@ export function configureToolCommand(cmd: Command, registry: ToolDescriptor[] = 
 		.option("--params-json <json>", "透传任意云端参数（JSON 对象）")
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg/ffprobe 所在目录（缺省 ~/.gitruck/ffmpeg → 系统 PATH）")
 		.option("--reupload", "强制重新上传，忽略本地上传缓存")
-		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON（给 agent/脚本解析）");
+		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON（给 agent/脚本解析）")
+		// 批次外壳（add-tool-batch-runner）：**缺席时单次路径一字不变**
+		.option("--batch <dir|清单>", "批量跑：目录（按本工具的输入类别认扩展名）/ .txt 一行一路径 / .json 字符串数组")
+		.option("--jobs <n>", `[batch] 并发数（云端缺省 ${DEFAULT_JOBS_CLOUD}，本地引擎类缺省 ${DEFAULT_JOBS_LOCAL}）`)
+		.option("--skip-existing", "[batch] 已有产物的条目直接跳过（断点续跑，不重复计费）")
+		.option("--manifest <out.jsonl>", "[batch] 逐条落 jsonl：输入、产物、耗时、结果、失败原因")
+		.option("--dry-run", "[batch] 只列清单，零提交零计费")
+		.option("--yes", "[batch] 跳过计费确认");
 	// 各 descriptor 的工具专属选项统一挂上（去重按 flag，防同名重复注册报错）
 	const seen = new Set<string>();
 	for (const d of registry) {
@@ -109,7 +132,23 @@ export async function runToolCommand(
 		const names = registry.map((d) => d.name).join(", ");
 		throw new Error(`未知工具「${name}」。可用工具：${names || "（空）"}（用 gtrk tool list 查看详情）`);
 	}
-	// 多文件类别（images/videos）消费全部剩余 positional（顺序即拼装顺序）；其余类别维持单输入
+	// 批次外壳（add-tool-batch-runner）：`--batch` **在这里分岔**，下面单次路径一字未动。
+	// ⚠️ 多文件类别（images/videos）的单次调用本身就吃多个输入，「一条输入 = 一次调用」
+	//    这个前提不成立，故不支持批次——报清楚比按「每个文件跑一次」猜一个语义强。
+	const bOpts = opts as ToolBatchOpts;
+	if (bOpts.batch) {
+		if (MULTI_INPUT_KINDS.has(descriptor.input.kind)) {
+			throw new Error(
+				`「${descriptor.name}」的输入是 ${descriptor.input.kind}（一次调用吃多个文件），` +
+					"「一条输入 = 一次调用」不成立，故不支持 --batch。要批量请自己分组后多次调用。",
+			);
+		}
+		if (descriptor.input.kind === "none") {
+			throw new Error(`「${descriptor.name}」不吃输入文件，没有可批的东西。`);
+		}
+		await runToolBatch(descriptor, bOpts, deps);
+		return undefined;
+	}
 	const inputArg = MULTI_INPUT_KINDS.has(descriptor.input.kind) ? words.slice(1) : words[1];
 	return runTool(descriptor, inputArg, opts, deps);
 }
@@ -248,4 +287,191 @@ async function runMadInTool(inputArg: string | undefined, opts: ToolOpts): Promi
 	if (opts.json) console.log(JSON.stringify(r));
 	if (r.ok) log.ok(`完成。产物目录：${r.outDir}`);
 	return { ok: r.ok, tool: r.tool, outDir: r.outDir, files: r.files };
+}
+
+// ───────────────────────── 批次外壳（add-tool-batch-runner）─────────────────────────
+
+/**
+ * 枚举批次输入。三种形态，**都不猜**：
+ *  · 目录 → 按该工具的 `input.kind` 认扩展名（`defaultExtsFor`，与单次路径同一份）
+ *  · `.txt` → 一行一个路径（`#` 开头与空行忽略）
+ *  · `.json` → 字符串数组
+ */
+async function enumerateBatchInputs(descriptor: ToolDescriptor, batch: string): Promise<string[]> {
+	const abs = resolve(batch);
+	if (!existsSync(abs)) throw new Error(`--batch 指向的路径不存在：${abs}`);
+	if (statSync(abs).isDirectory()) {
+		const exts = descriptor.input.exts ?? defaultExtsFor(descriptor.input.kind);
+		if (!exts?.length) {
+			throw new Error(
+				`「${descriptor.name}」的输入类别是 ${descriptor.input.kind}，没有扩展名可认，目录形态无从枚举——` +
+					"请给 .txt（一行一个路径）或 .json（字符串数组）清单",
+			);
+		}
+		const set = new Set(exts.map((e: string) => (e.startsWith(".") ? e : `.${e}`).toLowerCase()));
+		const files = readdirSync(abs)
+			.filter((f) => set.has(extname(f).toLowerCase()))
+			.sort((a, b) => a.localeCompare(b, "en", { numeric: true }))
+			.map((f) => join(abs, f));
+		if (!files.length) throw new Error(`${abs} 里没有 ${[...set].join(" / ")} 文件`);
+		return files;
+	}
+	const raw = readFileSync(abs, "utf8");
+	if (abs.toLowerCase().endsWith(".json")) {
+		const arr = JSON.parse(raw) as unknown;
+		if (!Array.isArray(arr) || !arr.every((x) => typeof x === "string")) {
+			throw new Error(`${abs}：JSON 清单必须是字符串数组`);
+		}
+		return (arr as string[]).map((p) => resolve(dirname(abs), p));
+	}
+	const lines = raw
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter((l) => l && !l.startsWith("#"));
+	if (!lines.length) throw new Error(`${abs}：清单是空的`);
+	return lines.map((p) => resolve(dirname(abs), p));
+}
+
+/**
+ * 「这个产物目录里有产物吗」。
+ *
+ * ⚠️ 判据 MUST NOT 是「目录存在」：上次跑到一半留下的空壳目录也存在，
+ * 按目录存在跳过会把半成品当成品交付。判据是**目录里有非面包屑文件**——
+ * 只剩 `task.json` 的目录是「提交了但没落产物」，那正是要重跑的那种。
+ */
+function hasBatchOutput(outDir: string): boolean {
+	if (!existsSync(outDir)) return false;
+	try {
+		return readdirSync(outDir).some((f) => !BATCH_BREADCRUMBS.has(f));
+	} catch {
+		return false; // 读不了当没有：宁可重跑一次，也别把没产物的当成已完成
+	}
+}
+
+const BATCH_BREADCRUMBS = new Set(["task.json", "result.json", "result-output.json"]);
+
+export interface ToolBatchOpts extends ToolOpts {
+	batch?: string;
+	jobs?: string | number;
+	skipExisting?: boolean;
+	manifest?: string;
+	dryRun?: boolean;
+	yes?: boolean;
+}
+
+/** 批次跑。单条仍走 `runTool` 这个黑盒——**单次路径一字未改**是结构性保证，不靠自觉。 */
+export async function runToolBatch(
+	descriptor: ToolDescriptor,
+	opts: ToolBatchOpts,
+	deps?: Partial<CloudToolDeps>,
+): Promise<Record<string, unknown>> {
+	const inputs = await enumerateBatchInputs(descriptor, opts.batch!);
+	const items = planBatch(
+		inputs.map((input) => ({ input, outDir: resolveOutDir(descriptor, input, undefined) })),
+		{ skipExisting: opts.skipExisting, hasOutput: hasBatchOutput },
+	);
+
+	// 计费**一次性前置**：MUST NOT 退化成逐条提示（跑 232 条刷 232 行，人会直接划过去）
+	let unitHint = "实时价格暂不可用，以服务端结算为准";
+	if (descriptor.kind !== "local" && descriptor.priceKey) {
+		try {
+			unitHint = (await resolveToolPricing(descriptor.priceKey, descriptor.pricingContext)).billingHint;
+		} catch {
+			/* 查不到价不阻断：单次路径同口径 */
+		}
+	} else if (descriptor.kind === "local") {
+		unitHint = "本地执行，零计费";
+	}
+	const billing = batchBilling(items, unitHint);
+
+	const jobsDefault = defaultJobsFor(descriptor.kind);
+	const jobs = opts.jobs === undefined ? jobsDefault : clampJobs(opts.jobs, jobsDefault);
+	if (descriptor.kind === "local" && jobs > 1) {
+		log.warn(
+			`「${descriptor.name}」是本地引擎类工具，缺省串行。--jobs ${jobs} 会并发压同一块卡——` +
+				"实测并发提交会把显存打满并触发驱动复位（本地 ComfyUI 那条线踩过）。确认硬件扛得住再用。",
+		);
+	}
+
+	log.step(`▶ 批次：${descriptor.title}（${descriptor.name}）｜${items.length} 条｜并发 ${jobs}`);
+	log.warn(billing.line);
+
+	if (opts.dryRun) {
+		log.ok("[dry-run] 只列清单，零提交零计费。");
+		for (const it of items) log.info(`   ${it.status === "skipped" ? "跳过" : "待跑"} ${it.input} → ${it.outDir}`);
+		const dryResult = { ok: true, mode: "batch", tool: descriptor.name, dry_run: true, billing, items };
+		if (opts.json) console.log(JSON.stringify(dryResult));
+		return dryResult;
+	}
+
+	// 确认：`--yes` 跳过；`--json`（agent 驱动）也跳过——那条路上没有人在终端前面，
+	// 计费总额已经在上面的 stderr 行里给过了，卡住只会变成挂死。
+	if (billing.billable > 0 && !opts.yes && !opts.json && process.stdin.isTTY) {
+		const rl = createInterface({ input: process.stdin, output: process.stderr });
+		const ans = (await rl.question(`确认提交 ${billing.billable} 条？[y/N] `)).trim().toLowerCase();
+		rl.close();
+		if (ans !== "y" && ans !== "yes") {
+			log.info("已取消，零提交。");
+			return { ok: true, mode: "batch", tool: descriptor.name, cancelled: true, billing, items };
+		}
+	}
+
+	const manifestPath = opts.manifest ? resolve(opts.manifest) : null;
+	if (manifestPath) mkdirSync(dirname(manifestPath), { recursive: true });
+
+	const t0 = Date.now();
+	await runPool(
+		items,
+		jobs,
+		async (item) => {
+			// 单条**照走既有单次路径**：--json 关掉（批次的 stdout 只有一行汇总），
+			// --out 显式给成本条的产物目录（与 planBatch 算的那个同源，否则续跑判据会与落点脱钩）
+			// suppressBillingHint：总额已在开跑前一次性给过，单次再逐条打一遍
+			// 就是 spec 明文禁止的「退化成逐条提示」（真机 18 条跑出 18 行）
+			const r = await runTool(
+				descriptor,
+				item.input,
+				{ ...opts, batch: undefined, json: false, out: item.outDir, suppressBillingHint: true },
+				deps,
+			);
+			if (!r.ok) throw new Error(`部分产物未落地（task_id=${r.taskId ?? "?"}）`);
+			return { files: r.files ?? [], taskId: r.taskId };
+		},
+		(done, total, item) => {
+			const mark = item.status === "ok" ? "✓" : "✗";
+			log.info(`   ${mark} ${done}/${total} ${basename(item.input)}${item.reason ? `：${item.reason}` : ""}`);
+			if (manifestPath) appendFileSync(manifestPath, `${manifestLine(item, descriptor.name)}\n`, "utf8");
+		},
+	);
+	// 跳过的条目也该进 manifest——对账时「这条为什么没跑」和「这条跑挂了」同样要有记录
+	if (manifestPath) {
+		for (const it of items.filter((i) => i.status === "skipped")) {
+			appendFileSync(manifestPath, `${manifestLine(it, descriptor.name)}\n`, "utf8");
+		}
+	}
+
+	const summary = summarize(items, Date.now() - t0);
+	if (summary.failed) {
+		log.err(`批次完成，但有 ${summary.failed} 条失败（其余已落地）：`);
+		for (const f of summary.failures.slice(0, 10)) log.err(`   · ${basename(f.input)}：${f.reason}`);
+		if (summary.failures.length > 10) log.err(`   …另有 ${summary.failures.length - 10} 条，全量见回执 / --manifest`);
+		process.exitCode = 1;
+	} else {
+		log.ok(`批次完成：${summary.ok} 成功 / ${summary.skipped} 跳过，用时 ${Math.round(summary.ms / 1000)}s`);
+	}
+
+	const result = {
+		mode: "batch",
+		tool: descriptor.name,
+		dry_run: false,
+		jobs,
+		billing,
+		...summary,
+		// `ok` MUST 排在展开之后：summary 里没有 ok，但展开在前会让将来给 summary 加 ok 时静默覆盖这里
+		ok: summary.failed === 0,
+		items,
+		...(manifestPath ? { manifest: manifestPath } : {}),
+	};
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
 }

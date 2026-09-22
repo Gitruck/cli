@@ -238,7 +238,13 @@ export interface ProjectionClips {
  * 回退扫**全部** audio 轨（而非最小号那条）：口播配音轨未必最小号（`gtrk audio lay` 的 BGM 落最大号 +1，
  * 但用户删轨重排后顺序会翻）；投影本就按 `material_id` 过滤，BGM / 音效轨天然不参与。
  */
-export function collectProjectionClips(gtrk: GtrkProject): ProjectionClips {
+/**
+ * 挑投影主轨并取其 clip。
+ *
+ * @param materialId 口播素材 id。**给定时**判据为「主轨上有没有命中它的 clip」；
+ *   缺省（历史调用方）退回旧判据「主轨上有没有 clip」——保留只为兼容，新调用方 SHALL 传。
+ */
+export function collectProjectionClips(gtrk: GtrkProject, materialId?: string): ProjectionClips {
 	const { laid, black } = laidTrackRegistry(gtrk);
 	const skipped: SkippedTrack[] = [];
 	const candidates: GtrkTrack[] = [];
@@ -259,18 +265,36 @@ export function collectProjectionClips(gtrk: GtrkProject): ProjectionClips {
 	}
 	const main = pickLowestIndexTrack(candidates);
 	const mainClips = main?.track_timeline ?? [];
-	if (mainClips.length) {
-		return { clips: [...mainClips], source: "video", track_index: main?.track_index ?? 0, skipped };
-	}
 	const audioTracks = (gtrk.audio_track ?? []).filter((t) => (t.track_timeline ?? []).length > 0);
-	if (audioTracks.length) {
-		return {
-			clips: audioTracks.flatMap((t) => t.track_timeline ?? []),
-			source: "audio",
-			track_index: pickLowestIndexTrack(audioTracks)?.track_index ?? 0,
-			skipped,
-		};
+	const audio = (): ProjectionClips => ({
+		clips: audioTracks.flatMap((t) => t.track_timeline ?? []),
+		source: "audio",
+		track_index: pickLowestIndexTrack(audioTracks)?.track_index ?? 0,
+		skipped,
+	});
+	const video = (): ProjectionClips => ({
+		clips: [...mainClips],
+		source: "video",
+		track_index: main?.track_index ?? 0,
+		skipped,
+	});
+
+	// ★ fix-projection-track-material-aware：判据是「有没有**命中** material_id 的 clip」，
+	//   不是「有没有 clip」。自产轨登记只覆盖 CLI 自己铺的轨，用户手工拖入的 video 轨不在册——
+	//   旧判据下它有 clip 即被选作主轨、随后零命中（真机：配音工程 + 一条手拖 overlay 轨
+	//   ⇒ subtitle lay 硬失败）。
+	const id = materialId === undefined ? undefined : String(materialId);
+	const hit = (t: GtrkTrack) =>
+		(t.track_timeline ?? []).some((c) => c.material != null && String(c.material) === id);
+
+	if (id !== undefined) {
+		if (mainClips.some((c) => c.material != null && String(c.material) === id)) return video();
+		if (audioTracks.some(hit)) return audio();
+		// 全局零命中：回落到「本应承载口播的 video 主轨」，使 relink 换 id 一类成因的
+		// 排查方向不被削弱（若改报 audio，会把人支去查音轨）。
 	}
+	if (mainClips.length) return video();
+	if (audioTracks.length) return audio();
 	return { clips: [], source: "none", track_index: null, skipped };
 }
 
@@ -319,7 +343,7 @@ const SKIP_TEXT: Record<SkippedTrack["why"], string> = {
  */
 export function describeProjectionSource(gtrk: GtrkProject, materialId: string): ProjectionSourceReport {
 	const id = String(materialId);
-	const picked = collectProjectionClips(gtrk);
+	const picked = collectProjectionClips(gtrk, id);
 	const skipWhy = new Map(picked.skipped.map((s) => [s.track_index, s.why]));
 	const matchedIn = (t: GtrkTrack) =>
 		(t.track_timeline ?? []).filter((c) => c.material != null && String(c.material) === id).length;
@@ -386,7 +410,7 @@ export function describeProjectionSource(gtrk: GtrkProject, materialId: string):
  */
 export function countMainTrackMaterialClips(gtrk: GtrkProject, materialId: string): number {
 	const id = String(materialId);
-	return collectProjectionClips(gtrk).clips.filter((c) => c.material != null && String(c.material) === id).length;
+	return collectProjectionClips(gtrk, id).clips.filter((c) => c.material != null && String(c.material) === id).length;
 }
 
 interface Instance {
@@ -420,7 +444,7 @@ export function projectTranscript(
 	opts: { words?: boolean; projectedAt?: string } = {},
 ): ProjectionView {
 	const materialId = String(transcript.material_id);
-	const clips = collectProjectionClips(gtrk)
+	const clips = collectProjectionClips(gtrk, materialId)
 		.clips.filter((c) => c.material != null && String(c.material) === materialId)
 		.map(normClip);
 

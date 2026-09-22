@@ -26,6 +26,7 @@ import {
 } from "../lib/projection";
 import { validateSplitDoc, buildLanding, renderSplitMarkdown, type SplitDoc } from "../lib/splitdoc";
 import { formatJobDistribution } from "../lib/mg-visual-job";
+import { mgCoverage, coverageLine } from "../lib/mg-coverage";
 import { resolveColumnConfig, effectiveVocab } from "../lib/column-config";
 import { readUserConfig } from "../lib/user-config";
 import { readJson } from "../lib/read-json";
@@ -295,6 +296,14 @@ async function runLand(
 	if (visualJobs && landing.dispatch.mg.length > 0) {
 		log.info(`   · MG 视觉职能分布：${formatJobDistribution(visualJobs)}`);
 	}
+	// [add-mg-coverage-report §1.3] 派单当场就报空档：接力的 agent 拿到 dispatch 就会照单全铺，
+	// 铺完报「N 颗全部成功」——**成功与覆盖是两件事**。2026-09-20 真机上 537s 的片只派了前 34s，
+	// 此前一路无声。只给事实、不判红、不改退出码（`mg-coverage` 文件头 §射程）。
+	const mgCov = mgCoverage(landing.dispatch.mg, typeof gtrk.duration === "number" ? gtrk.duration : 0);
+	{
+		const line = coverageLine(mgCov);
+		if (line) log.info(`   · ${line}`);
+	}
 	for (const s of landing.skipped) log.warn(`跳过 ${s.beat}：${s.reason}`);
 	for (const s of landing.shrunk) log.warn(`收缩 ${s.beat}：${s.dropped} 句被剪，按存活 ${s.kept} 句包络 → ${s.track_st}s…${s.track_ed}s（建议人工复核）`);
 	if (landing.unhandledLanes.length > 0) {
@@ -316,6 +325,8 @@ async function runLand(
 			film_broll: landing.dispatch.film_broll.length,
 			ai_drama: landing.dispatch.ai_drama.length,
 		},
+		// 新增字段（add-mg-coverage-report）：既有字段逐字不变，只多这一个
+		mg_coverage: mgCov,
 	};
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;

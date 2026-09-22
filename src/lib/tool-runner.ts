@@ -533,6 +533,17 @@ interface CommonOpts {
 	paramsJson?: string;
 	ffmpegPath?: string;
 	reupload?: boolean;
+	/**
+	 * 压住**单次**的提交前计费提示（add-tool-batch-runner）。
+	 *
+	 * 🩸 只由批次外壳设置。批次已在开跑前一次性给过「N 条 × 单价 = 总额」，
+	 * 单次路径再逐条打一遍就是 spec 明文禁止的「退化成逐条提示」——
+	 * 2026-09-21 真机 18 条跑出 18 行，人既看不清总额也会直接划过去。
+	 *
+	 * ⚠️ MUST NOT 暴露成 CLI flag：计费提示不是用户能关的东西，
+	 * 它只在「总额已经以更好的形式给过」这一个前提下才允许静音。
+	 */
+	suppressBillingHint?: boolean;
 	[k: string]: unknown;
 }
 
@@ -612,7 +623,7 @@ export async function runCloudTool(
 	} catch {
 		billingHint = "实时价格暂不可用，以服务端结算为准";
 	}
-	emitBilling(billingHint);
+	if (opts.suppressBillingHint !== true) emitBilling(billingHint);
 
 	// ④–⑥ 上传并提交 → 面包屑 → 轮询。新 file_id 延迟可见短退避，缓存 file_id 失效则强制重传一次；
 	// 零上传路径：跳过上传/6004 恢复（无上传物无失效面），payload 直提交。

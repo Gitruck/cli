@@ -22,6 +22,7 @@ import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { readFile, mkdir, copyFile } from "node:fs/promises";
+import { mgCoverage, coverageLine } from "../lib/mg-coverage";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 // [adjust-lay-frame-domain D2] 顶层 video_rate 与 matrix lay / ai-drama lay 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
 import { videoRateOf } from "../lib/gtrk-patch";
@@ -204,6 +205,27 @@ interface MgResult {
  * 阶段 B 拿「已铺但本次 items 未覆盖」的差集去**报因拒写**，阶段 A 拿**同一个集合**当**保留集**
  * 传给 layMgTracks 走增量合并（★ 阶段 A 已落地：只换了处置分支，本函数一字未动）。
  */
+/**
+ * 全片时长：取工程顶层 `duration`。读不到回 0 ——
+ * `mgCoverage` 见 0 会返回零覆盖而不是编一个占比（MUST NOT 猜）。
+ */
+function filmDurationSec(gtrkPath: string | undefined): number {
+	if (!gtrkPath || !existsSync(gtrkPath)) return 0;
+	try {
+		const { gtrk } = readGtrk(gtrkPath);
+		return typeof gtrk.duration === "number" ? gtrk.duration : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/** 人读一行覆盖读数。覆盖充分或算不出时不出声（MUST NOT 刷屏）。 */
+function reportCoverage(c: ReturnType<typeof mgCoverage>): void {
+	const line = coverageLine(c);
+	if (line) log.info(line);
+}
+
+
 function laidCompositionIds(gtrk: Record<string, unknown> | undefined): string[] {
 	if (!gtrk) return [];
 	const structMeta = gtrk.struct_meta as { mg?: StructMetaMg; rrv?: StructMetaMg } | undefined;
@@ -376,6 +398,8 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		// ok:false 一律连带非 0 退出（统一落在 done()）。
 		const lintOk = skipped.length === 0;
 		(lintOk ? log.ok : log.warn)(`lint-only：${items.length}/${queue.length} 通过，${skipped.length} 跳过（不铺轨）`);
+		const lintCoverage = mgCoverage(items, filmDurationSec(gtrkPath));
+		reportCoverage(lintCoverage);
 		return done(opts, {
 			ok: lintOk,
 			mode: "lay",
@@ -383,6 +407,8 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 			...(lintOk ? {} : { reason: "skipped" }),
 			passed: items.length,
 			skipped,
+			// 覆盖读数：纯事实，MUST NOT 据此拦截或改退出码（见 lib/mg-coverage 头注）。
+			coverage: lintCoverage,
 			reprojection: reproj.summary,
 		});
 	}
@@ -520,6 +546,13 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 	if (summary.laidTrack === null) log.warn(`未铺成任何颗粒：${tail}`); // laidTrack 为 null MUST NOT 打 ✅
 	else if (ok) log.ok(`铺轨完成：${tail}`);
 	else log.warn(`铺轨完成（有跳过）：${tail}`);
+	// 覆盖读数：纯事实，MUST NOT 据此拦截、升级告警或改退出码（见 lib/mg-coverage 头注）。
+	// 算的是**轨上现存**的全部条目（本次 + 保留），不是只算本次——用户关心的是成片有没有空档。
+	const coverage = mgCoverage(
+		mg.beats.filter((b) => b.laid).map((b) => ({ track_st: b.track_st, track_ed: b.track_ed })),
+		typeof written.duration === "number" ? written.duration : 0,
+	);
+	reportCoverage(coverage);
 	if (keptIds.length) {
 		const preview = keptIds.slice(0, 8);
 		log.warn(
@@ -545,6 +578,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 		skipped,
 		// 素材落盘自检：只在**真写回过**的路径上出现；字段缺席 = 「本次没查」（与 `gtrk matrix` 同形）
 		...(integrity ? { integrity } : {}),
+		coverage,
 		reprojection: reproj.summary,
 	});
 }

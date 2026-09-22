@@ -5,7 +5,7 @@
  */
 import { Command } from "commander";
 import { resolve, dirname, join, basename, extname } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { fmtTime, scanFinalCut, shouldFail, type QcItem, type QcReport, type QcSeverity } from "../lib/qc";
@@ -18,9 +18,19 @@ import { resolveDescribeUrl } from "../lib/describe";
 //    服务端已明示「矩阵 internal 而计费 external 则不豁免」，两条轴正交）。
 import { probeGcMemberType } from "../lib/matrix";
 import { loadConfig } from "../lib/config";
-import { requireFfmpeg } from "../lib/ffmpeg";
+import { requireFfmpeg, runFfmpeg } from "../lib/ffmpeg";
 import { sec2ms } from "../lib/frame-domain";
 import { readJson } from "../lib/read-json";
+import { tmpdir } from "node:os";
+import {
+	DEFAULT_CELL_WIDTH,
+	DEFAULT_COLS,
+	escapeDrawText,
+	labelFontSize,
+	labelsFromManifest,
+	paginate,
+	type SheetCell,
+} from "../lib/contact-sheet";
 
 interface QcOpts {
 	gtrk?: string;
@@ -77,8 +87,10 @@ function formatItem(it: QcItem): string {
 
 export function registerQc(program: Command): void {
 	program
-		.command("qc [成片]")
-		.description("成片质量扫描：闪帧/段内跳切/黑帧/冻结/爆音/静音/音画规整，产报告与时码定位")
+		// 形态铁律（沿 tool 族 D1 / patch 同一条）：**顶层命令 + 首个 positional 词内部分派**。
+		// 第二个 positional 是**新增的可选项**：不给时 commander 行为与本件上线前逐字一致。
+		.command("qc [成片] [子命令输入]")
+		.description("成片质量扫描：闪帧/段内跳切/黑帧/冻结/爆音/静音/音画规整，产报告与时码定位；`qc contact-sheet <目录|清单>` 拼带标签的联络表")
 		.option("--gtrk <path>", "工程感知模式：对表 clip 拼接边界，识别段内跳切、已知黑底空洞降级")
 		.option("--json <path>", "机读报告落点（缺省 = <成片同目录>/<成片名>.qc.json）")
 		.option("--fail-on <level>", "退出码门控：error（默认）| warn | never", "error")
@@ -93,7 +105,17 @@ export function registerQc(program: Command): void {
 		)
 		.option("--project <dir>", "[alignment] 工程产物目录（定位 gtrk/transcript/split 三件）")
 		.option("--yes", "[alignment] 跳过计费确认")
-		.action(async (input: string | undefined, opts: QcOpts) => {
+		.option("--cols <n>", `[contact-sheet] 列数（缺省 ${DEFAULT_COLS}）`)
+		.option("--cell-width <px>", `[contact-sheet] 单格宽（缺省 ${DEFAULT_CELL_WIDTH}）`)
+		.option("--label-from <manifest>", "[contact-sheet] 标签取自该清单（缺省找输入目录里的 manifest.json）")
+		.option("-o, --out <png>", "[contact-sheet] 产物落点（多页时自动加 -p<N>）")
+		.action(async (input: string | undefined, sub: string | undefined, opts: QcOpts & ContactSheetOpts) => {
+			// contact-sheet 走完全独立的路径，**不碰**下面成片扫描的任何分支与退出码门控
+			if (input === "contact-sheet") {
+				if (!sub) throw new Error("用法：gtrk qc contact-sheet <目录或 manifest.json> [--cols 6] [-o out.png]");
+				await runContactSheet(sub, opts);
+				return;
+			}
 			if (opts.alignment) {
 				await runAlignmentMode(input, opts);
 				return;
@@ -238,4 +260,117 @@ export async function runPostRenderQc(
 		log.warn(`渲染后质检未完成（${e instanceof Error ? e.message : String(e)}）——成片已出，可稍后手动跑 gtrk qc`);
 		return null;
 	}
+}
+
+// ───────────────────── 联络表（add-qc-contact-sheet）─────────────────────
+
+export interface ContactSheetOpts {
+	cols?: string | number;
+	cellWidth?: string | number;
+	labelFrom?: string;
+	out?: string;
+	ffmpegPath?: string;
+	json?: boolean;
+}
+
+const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp"]);
+
+/**
+ * 列格。两条来源，**都不猜**：
+ *  · `--label-from <manifest>`：标签与文件**同一条记录**里取，顺序按 shotIndex
+ *  · 目录：按文件名自然序，标签 = 去扩展名的文件名
+ *
+ * ⚠️ MUST NOT 混用（一边扫盘取文件、一边从 manifest 取标签再按各自的序配对）——
+ * 那正是错位的来源，而错位的联络表比没有联络表更有害。
+ */
+async function collectCells(input: string, opts: ContactSheetOpts): Promise<{ baseDir: string; cells: SheetCell[] }> {
+	const abs = resolve(input);
+	if (!existsSync(abs)) throw new Error(`联络表输入不存在：${abs}`);
+	const isManifest = statSync(abs).isFile();
+	const manifestPath = opts.labelFrom ? resolve(opts.labelFrom) : isManifest ? abs : join(abs, "manifest.json");
+
+	if (existsSync(manifestPath) && statSync(manifestPath).isFile()) {
+		const m = (await readJson(manifestPath, "联络表清单")) as { beatId?: unknown; items?: unknown };
+		const cells = labelsFromManifest(m);
+		if (!cells?.length) throw new Error(`${manifestPath}：读不出可用的 items（需要 beatId 与 items[].file）`);
+		const baseDir = isManifest ? dirname(abs) : abs;
+		for (const c of cells) {
+			c.file = resolve(baseDir, c.file);
+			if (!existsSync(c.file)) throw new Error(`清单里的图不在盘上：${c.file}`);
+		}
+		return { baseDir, cells };
+	}
+
+	if (isManifest) throw new Error(`${abs} 不是目录，也不是可读的清单`);
+	const files = readdirSync(abs)
+		.filter((f) => IMAGE_EXT.has(extname(f).toLowerCase()))
+		.sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
+	if (!files.length) throw new Error(`${abs} 里没有图片（认 ${[...IMAGE_EXT].join(" / ")}）`);
+	return { baseDir: abs, cells: files.map((f) => ({ file: join(abs, f), label: basename(f, extname(f)) })) };
+}
+
+export async function runContactSheet(input: string, opts: ContactSheetOpts = {}): Promise<Record<string, unknown>> {
+	if (opts.json) routeLogsToStderr();
+	const { ffmpeg } = requireFfmpeg(opts.ffmpegPath);
+	const { baseDir, cells } = await collectCells(input, opts);
+	const cols = opts.cols === undefined ? DEFAULT_COLS : Math.max(1, Math.floor(Number(opts.cols)));
+	const cellW = opts.cellWidth === undefined ? DEFAULT_CELL_WIDTH : Math.max(64, Math.floor(Number(opts.cellWidth)));
+	const pages = paginate(cells, cols);
+
+	const outDir = opts.out ? dirname(resolve(opts.out)) : baseDir;
+	const stem = opts.out ? basename(resolve(opts.out)).replace(/\.png$/i, "") : "contact-sheet";
+	mkdirSync(outDir, { recursive: true });
+
+	const fontSize = labelFontSize(cellW);
+	const written: Array<{ page: number; path: string; cells: number }> = [];
+	log.step(`▶ 联络表：${cells.length} 格 / ${cols} 列 → ${pages.length} 页`);
+
+	for (const page of pages) {
+		// 先把每格渲成等尺寸的带标签 PNG，再用 tile 拼。
+		// 为什么不一条 filter_complex 干完：232 个输入的 xstack 命令行会超长，
+		// 且任何一步的输入序都可能与标签序脱钩。分两步后，**格的顺序由文件名里的序号构造性决定**。
+		const work = mkdtempSync(join(tmpdir(), "gtrk-sheet-"));
+		try {
+			for (const [i, cell] of page.cells.entries()) {
+				const label = escapeDrawText(cell.label);
+				await runFfmpeg(ffmpeg, [
+					"-y", "-v", "error", "-i", cell.file,
+					"-vf",
+					`scale=${cellW}:-2,` +
+						// 标签压在左上角的半透明底上：直接画白字在亮画面上会读不出来
+						`drawbox=x=0:y=0:w=iw:h=${fontSize + 8}:color=black@0.55:t=fill,` +
+						`drawtext=text='${label}':x=6:y=4:fontsize=${fontSize}:fontcolor=white`,
+					"-frames:v", "1",
+					join(work, `cell_${String(i).padStart(5, "0")}.png`),
+				]);
+			}
+			const outPath = join(outDir, pages.length > 1 ? `${stem}-p${page.page}.png` : `${stem}.png`);
+			await runFfmpeg(ffmpeg, [
+				"-y", "-v", "error",
+				"-start_number", "0", "-i", join(work, "cell_%05d.png"),
+				"-vf", `tile=${page.cols}x${page.rows}:padding=4:margin=4:color=0x202020`,
+				"-frames:v", "1",
+				outPath,
+			]);
+			written.push({ page: page.page, path: outPath, cells: page.cells.length });
+			log.ok(`第 ${page.page}/${pages.length} 页：${page.cells.length} 格 → ${outPath}`);
+		} finally {
+			rmSync(work, { recursive: true, force: true });
+		}
+	}
+
+	const result = {
+		ok: true,
+		mode: "contact-sheet",
+		input: resolve(input),
+		cells: cells.length,
+		cols,
+		cell_width: cellW,
+		pages: written,
+		// 标签逐格回执：判读结论指错镜头是这类工具唯一致命的缺陷，
+		// 把「第几格是谁」写进回执，调用方能自己对一遍。
+		labels: cells.map((c, i) => ({ index: i, label: c.label, file: c.file })),
+	};
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
 }
