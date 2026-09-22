@@ -174,6 +174,7 @@ export interface AudioProjectStructResp {
 	gtrk: Record<string, unknown>;
 	transcript: Record<string, unknown>;
 	taskId: string | null;
+	warning?: string;
 }
 
 /** 调服务端 producer 同步口（裸 apikey Authorization；错误走 CloudError 带业务码，如 6004 归属）。 */
@@ -187,18 +188,21 @@ export async function callAudioProjectStruct(
 		headers: { Authorization: cfg.apiKey, "Content-Type": "application/json" },
 		body: JSON.stringify(payload),
 	});
-	const r = await parseJson<{ gtrk?: unknown; transcript?: unknown; task_id?: unknown }>(res);
-	const data = (r.data ?? {}) as { gtrk?: unknown; transcript?: unknown; task_id?: unknown };
+	const r = await parseJson<{ gtrk?: unknown; transcript?: unknown; task_id?: unknown; warning?: unknown }>(res);
+	const data = r.data ?? {};
 	const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 	if (r.code === 200 && isObj(data.gtrk) && isObj(data.transcript)) {
 		return {
 			gtrk: data.gtrk,
 			transcript: data.transcript,
 			taskId: data.task_id != null ? String(data.task_id) : null,
+			...(typeof data.warning === "string" && data.warning.trim() ? { warning: data.warning } : {}),
 		};
 	}
 	if (r.code === 200) throw new Error("工程生成响应缺 gtrk/transcript（非 audio_project_struct 契约响应）");
-	throw new CloudError(r.code, `工程生成失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
+	const message = r.msg ?? "未知错误";
+	const hint = r.code === 6034 && !message.includes("分批") ? "；请将配音稿分批提交" : "";
+	throw new CloudError(r.code, `工程生成失败 (code=${r.code ?? "?"})：${message}${hint}`);
 }
 
 export interface ProjectInitOpts {
@@ -229,6 +233,7 @@ export interface ProjectInitDeps {
 
 export interface ProjectInitResult {
 	ok: boolean;
+	warning?: string;
 	mode: "init";
 	outDir: string;
 	gtrkPath: string;
@@ -356,6 +361,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 		fileId = got.fileId;
 	}
 	if (resp.taskId) log.info(`task_id = ${resp.taskId}`);
+	if (resp.warning) log.warn(resp.warning);
 
 	// ── 落地 + materialize 路径改写 ──
 	log.step("② 落地产物目录（gtrk / transcript / result.json）…");
@@ -401,6 +407,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 
 	const result: ProjectInitResult = {
 		ok: Object.keys(errors).length === 0,
+		...(resp.warning ? { warning: resp.warning } : {}),
 		mode: "init",
 		outDir,
 		gtrkPath,
