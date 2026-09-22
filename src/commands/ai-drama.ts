@@ -335,6 +335,9 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 	const integrity = safeCheckMaterialIntegrity({ gtrk: laid.next, gtrkDir, log });
 	log.ok(`AI 轨回填完成：${laid.summary.beats} 个 beat / ${laid.summary.laidClips} 个镜头 → video_track ${laid.summary.laidTrack ?? "-"}`);
 	log.info("既有 A-roll、BGM 与 B-roll 轨均未改动；AI 片段已复制进工程 assets/ai-drama，可直接进客户端精剪。");
+	if (laid.summary.laidClips > 0 && laid.summary.laidTrack != null) {
+		log.info(`需要贴合口播切点时，可先运行 gtrk patch snap --project <工程目录> --track video:${laid.summary.laidTrack} --audio <口播音频路径> --dry-run 检查，再确认执行；之后用 patch seal 补缝。回轨不会自动改动切点。`);
+	}
 	if (integrity) reportMaterialIntegrity(integrity, log);
 	const result = {
 		ok: skipped.length === 0,

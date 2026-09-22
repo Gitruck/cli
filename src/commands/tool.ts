@@ -30,6 +30,8 @@ import {
 	DEFAULT_JOBS_CLOUD,
 	DEFAULT_JOBS_LOCAL,
 	batchBilling,
+	estimateBatchCredits,
+	type BatchEstimate,
 	clampJobs,
 	defaultJobsFor,
 	manifestLine,
@@ -373,16 +375,38 @@ export async function runToolBatch(
 
 	// 计费**一次性前置**：MUST NOT 退化成逐条提示（跑 232 条刷 232 行，人会直接划过去）
 	let unitHint = "实时价格暂不可用，以服务端结算为准";
+	let estimate: BatchEstimate = { status: "unavailable", reason: "实时价格不可用" };
 	if (descriptor.kind !== "local" && descriptor.priceKey) {
 		try {
-			unitHint = (await resolveToolPricing(descriptor.priceKey, descriptor.pricingContext)).billingHint;
+			const resolved = await (deps?.resolvePricing ?? resolveToolPricing)(descriptor.priceKey, descriptor.pricingContext);
+			unitHint = resolved.billingHint;
+			const { pricing } = resolved;
+			const pending = items.filter((i) => i.status === "pending");
+			if (pricing.available && pricing.price != null && pricing.exPrice != null) {
+				if (pricing.price === 0 && pricing.exPrice === 0) {
+					estimate = estimateBatchCredits([], 0, 0);
+				} else if (pricing.measure === "分钟" && ["video", "audio"].includes(descriptor.input.kind)) {
+					// 本地媒体时长只是预估；服务端仍以实际上传物的探测和账户额度结算。
+					const probe = deps?.probeDurationSec ?? probeDuration;
+					const units = pending.map((item) => {
+						const seconds = probe(item.input, opts.ffmpegPath);
+						return Number.isFinite(seconds) && seconds > 0 ? Math.max(0.01, Math.round(seconds / 60 * 100) / 100) : NaN;
+					});
+					estimate = estimateBatchCredits(units, pricing.price, pricing.exPrice);
+				} else if (["次", "个", "张"].includes(pricing.measure ?? "")) {
+					estimate = estimateBatchCredits(pending.map(() => 1), pricing.price, pricing.exPrice);
+				} else {
+					estimate = { status: "unavailable", reason: `计费单位「${pricing.measure ?? "未知"}」无法由输入清单可靠计量` };
+				}
+			}
 		} catch {
-			/* 查不到价不阻断：单次路径同口径 */
+			estimate = { status: "unavailable", reason: "查价或本地时长探测失败" };
 		}
 	} else if (descriptor.kind === "local") {
 		unitHint = "本地执行，零计费";
+		estimate = estimateBatchCredits([], 0, 0);
 	}
-	const billing = batchBilling(items, unitHint);
+	const billing = batchBilling(items, unitHint, estimate);
 
 	const jobsDefault = defaultJobsFor(descriptor.kind);
 	const jobs = opts.jobs === undefined ? jobsDefault : clampJobs(opts.jobs, jobsDefault);

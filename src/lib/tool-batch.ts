@@ -82,6 +82,33 @@ export function planBatch(
 	});
 }
 
+export interface BatchEstimate {
+	status: "available" | "unavailable";
+	standardCredits?: number;
+	excessCredits?: number;
+	quotaUnits?: number;
+	reason?: string;
+}
+
+/** 按每条任务先算积分再汇总；不能先把单位数加起来再取整。 */
+export function estimateBatchCredits(
+	units: readonly number[],
+	price: number,
+	exPrice: number,
+): BatchEstimate {
+	if (![price, exPrice].every((n) => Number.isFinite(n) && n >= 0) ||
+		units.some((n) => !Number.isFinite(n) || n <= 0)) {
+		return { status: "unavailable", reason: "价格或计量单位无效" };
+	}
+	const total = (rate: number) => units.reduce((sum, n) => sum + (rate === 0 ? 0 : Math.max(1, Math.ceil(n * rate))), 0);
+	return {
+		status: "available",
+		standardCredits: total(price),
+		excessCredits: total(exPrice),
+		quotaUnits: units.reduce((sum, n) => sum + Math.ceil(n), 0),
+	};
+}
+
 export interface BatchBilling {
 	/** 真要跑的条数（跳过的不计费）。 */
 	billable: number;
@@ -89,6 +116,7 @@ export interface BatchBilling {
 	unitHint: string;
 	/** 一次性总额提示行。 */
 	line: string;
+	estimate: BatchEstimate;
 }
 
 /**
@@ -98,16 +126,22 @@ export interface BatchBilling {
  * 一次性给「多少条 × 单价」，在**开跑之前**。
  * 跳过的条目不进分母——断点续跑的全部意义就是不重复计费。
  */
-export function batchBilling(items: ReadonlyArray<BatchItem>, unitHint: string): BatchBilling {
+export function batchBilling(items: ReadonlyArray<BatchItem>, unitHint: string, estimate?: BatchEstimate): BatchBilling {
 	const billable = items.filter((i) => i.status === "pending").length;
 	const skipped = items.length - billable;
+	const resolved = billable === 0 ? estimateBatchCredits([], 0, 0) :
+		(estimate ?? { status: "unavailable" as const, reason: "缺少价格或计量信息" });
+	const totalHint = resolved.status === "available"
+		? `预估总费用：标准价 ${resolved.standardCredits} 积分 / 超额价 ${resolved.excessCredits} 积分；额度包需 ${resolved.quotaUnits} 单位（实际扣费以服务端及账户额度为准）`
+		: `无法预估总费用：${resolved.reason}；实际扣费以服务端为准`;
 	return {
 		billable,
 		unitHint,
+		estimate: resolved,
 		line:
 			`本批 ${items.length} 条` +
 			(skipped ? `，其中 ${skipped} 条已有产物将跳过（不计费）` : "") +
-			`，实际提交 ${billable} 条。单条计费：${unitHint}`,
+			`，实际提交 ${billable} 条。单条计费：${unitHint}。${totalHint}`,
 	};
 }
 
