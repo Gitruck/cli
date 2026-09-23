@@ -1,3 +1,4 @@
+import { subtitleAssFontSizeToCss } from "./subtitle-font-metrics";
 /**
  * 字幕上轨纯函数面（add-subtitle-lay-command）——transcript 投影实例 → 客户端契约形态的
  * text 元素 → `.gtrk` 的 `struct_meta.client_visual_elements`（cve）text lane 幂等替换。
@@ -11,8 +12,8 @@
  *  - 元素构造：`build-subtitle-text-element.ts`（DOM 测量版）——本文件是它的**确定性静态几何**
  *    等价实现（design D3）：客户端折行按空白符分词（`split(/\s+/)`），CJK 无空格文本恒单
  *    「词」不折行 ⇒ content 只做归一；垂直落位只依赖行数（块高 = 行数×行高），水平落位在
- *    「7 预设边距全对称 + textAlign 恒 center」下恒 0。黄金样本实证（1920×1080 default 单行）：
- *    positionY = 1080 − 75 − 45 − 540 = 420，与客户端 DOM 测量产物同值。
+ *    「7 预设边距全对称 + textAlign 恒 center」下恒 0。字号先按字体度量从 ASS 转为 CSS，
+ *    垂直位置再由转换后的行高计算；历史黄金样本的旧字号/位置不作为新生成元素的标尺。
  *  - cve 形状与读侧信任边界：`tonghe/client-visual-elements.ts`（schema 1 / lane 白名单 /
  *    时间字段整数 tick / params 有限标量）。
  *  - 字幕身份判据：`subtitle-actions.ts` 的 `params.subtitleCue === true`
@@ -264,8 +265,8 @@ export function buildSubtitleParams({
 	const row = orientationOf(canvas) === "landscape" ? preset.landscape : preset.portrait;
 	const colorHex = SUBTITLE_COLORS[colorId];
 
-	// 字号：app 单位 = (Fontsize/PlayResY) × 90（客户端 fontSizeRatioOfPlayHeight × FONT_SIZE_SCALE_REFERENCE）。
-	const fontSizeApp = (row.fontSize / row.playResY) * FONT_SIZE_SCALE_REFERENCE;
+	// ASS real-dimension 字号先转换为 CSS em；其他尺寸参数仍保留 ASS 像素单位。
+	const fontSizeApp = (subtitleAssFontSizeToCss(row.fontSize) / row.playResY) * FONT_SIZE_SCALE_REFERENCE;
 	// 尺寸型参数（描边宽/投影偏移）：app = assPx × 90 / playResY（运算次序同客户端 toAppUnit）。
 	const toAppUnit = (assPx: number) => (assPx * FONT_SIZE_SCALE_REFERENCE) / row.playResY;
 
