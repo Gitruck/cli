@@ -30,9 +30,11 @@
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { noticeOnce } from "./compliance-notice";
+import { crashReportNoticeOnce } from "./crash-report";
 import { log } from "./log";
 import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import { readUserConfig } from "./user-config";
+import { RUBRIC_DEFAULT_BUCKET } from "./highlight-rubric";
 import type { MaterialDescribeMeta } from "./matrix";
 import type { SqlDb } from "./local-index";
 
@@ -327,6 +329,7 @@ export async function describeImages(
 	// 合规告知（add-compliance-notice 2.2）：素材理解的抽帧由此离机（matrix describe），
 	// 同挂同一个幂等入口，提交发生前告知。零输入不算出口，故在早退之后。
 	noticeOnce();
+	crashReportNoticeOnce();
 	const fetchFn = deps.fetchFn ?? fetch;
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;
@@ -382,6 +385,31 @@ export async function describeImages(
 
 // ── 索引库 describes 缓存（D1：键=(材料 id, ts_ms)，同帧免重复调用）──────────
 
+/**
+ * **服务端判据版本**（fix-describe-window-coverage §10，主理人 2026-09-09「按建议来」）。
+ *
+ * 缓存键实际上是 `(material_id, ts_ms, criteria_version)` —— 列没进主键，而是**读时比对**：
+ * 行还在、版本对不上就算未命中。这样旧行既不被删也不被静默当成新口径用。
+ *
+ * ## 为什么必须有它
+ *
+ * `describes` 缓存的是「这一帧长什么样」，其中 `usable_flags` 四维是**服务端判据**的产物。
+ * 判据一改（例如把取景器 HUD 纳入 `text_overlay` 正例、把被拍物体上的印字排除出 `watermark`），
+ * 同一帧的正确读数就变了 —— 而缓存键里没有判据版本的话，旧口径条目**永不重跑**，
+ * 用户拿到的还是旧判据的产物，且完全无感。
+ *
+ * ## MUST 同批 bump
+ *
+ * 服务端判据一改就在这里 bump，**同批发版**。首值对应 infra `link-describe-overlay-flag-recall`
+ * 的判据枚举化（2026-09-12 上线：叠加物两维扩枚举 + 按维分级）。
+ *
+ * ⚠️ bump 的代价是真金白银：旧口径帧在下一轮会**重新调用、重新计费**。这是有意的 ——
+ * 判据变了还端旧产物，比多花一次钱坏得多。`--json` 里 `cached_stale_criteria` 会如实把这批数报出来，
+ * 用户看得见自己为什么又被扣了一次。
+ */
+export const DESCRIBE_CRITERIA_VERSION = 'overlay-enum@2026-09-12';
+
+/** 客观层行（[fix-highlight-rubric-wiring] 起不含 highlight——看点层已迁 describe_highlights）。 */
 interface DescribeRow {
 	desc_text: string;
 	tags_json: string;
@@ -390,15 +418,40 @@ interface DescribeRow {
 	subject: string | null;
 	action: string | null;
 	shot_size: string | null;
-	highlight: number | null;
+	/** 本行产出时的服务端判据版本；NULL = 本列引入之前写下的（判据不可知，按旧口径处理）。 */
+	criteria_version: string | null;
 }
 
-export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): MaterialDescribe | undefined {
+/**
+ * 缓存读取（[fix-highlight-rubric-wiring] 两层）。
+ *
+ * **命中判据随准则分岔，这是零回归的关键**：
+ * - **缺省桶**（`rubricHash` 缺省或 `L0`）：命中判据 = 客观层行存在，**与本件之前逐字节一致**。
+ *   看点分取缺省桶，取不到就 null——本件之前那些 `highlight IS NULL` 的旧行本就走这一路。
+ * - **非缺省桶**（显式传了准则）：命中判据 = 客观层行存在 **且** 该桶有看点分。
+ *   客观层有、桶里没有 = 未命中 ⇒ 上层会重新调用看片通道。这不是浪费，是「换准则要重新打分」
+ *   的必然代价（免看片的文本级重打分要服务端轻通道，尚未上线）。
+ */
+export function getCachedDescribe(
+	db: SqlDb,
+	materialId: string,
+	tsMs: number,
+	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
+): MaterialDescribe | undefined {
 	const row = db.get<DescribeRow>(
-		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size, highlight FROM describes WHERE material_id = ? AND ts_ms = ?",
+		"SELECT desc_text, tags_json, mark, flags_json, subject, action, shot_size, criteria_version FROM describes WHERE material_id = ? AND ts_ms = ?",
 		[materialId, tsMs],
 	);
 	if (!row) return undefined;
+	// 判据版本闸（§10）：行在、版本对不上 ⇒ 未命中。旧行（NULL）同此路。
+	// MUST NOT 在这里删行——旧产物保留可读，是「用户上一轮看到的是什么」的唯一凭据。
+	if (row.criteria_version !== DESCRIBE_CRITERIA_VERSION) return undefined;
+	const hl = db.get<{ highlight: number | null }>(
+		"SELECT highlight FROM describe_highlights WHERE material_id = ? AND ts_ms = ? AND rubric_hash = ?",
+		[materialId, tsMs, rubricHash],
+	);
+	// 非缺省桶且本桶无分 ⇒ 未命中（须按新准则重新打分）。缺省桶不受此限，见函数注释。
+	if (!hl && rubricHash !== RUBRIC_DEFAULT_BUCKET) return undefined;
 	try {
 		return {
 			desc: row.desc_text,
@@ -408,7 +461,7 @@ export function getCachedDescribe(db: SqlDb, materialId: string, tsMs: number): 
 			subject: row.subject ?? "",
 			action: row.action ?? "",
 			shot_size: row.shot_size ?? null,
-			highlight: row.highlight ?? null,
+			highlight: hl?.highlight ?? null,
 		};
 	} catch {
 		return undefined; // 缓存行损坏当未命中（重新理解即自愈覆盖）
@@ -450,14 +503,44 @@ export function getNearestCachedMark(db: SqlDb, materialId: string, tsMs: number
  * ——旧缓存行没有这一维，当 0 会把老素材全部打成「零看点」静默沉底。
  * [fix-describe-cache-locality] 距离上限与 mark 同口径。
  */
-export function getNearestCachedHighlight(db: SqlDb, materialId: string, tsMs: number): number | undefined {
+export function getNearestCachedHighlight(
+	db: SqlDb,
+	materialId: string,
+	tsMs: number,
+	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
+): number | undefined {
+	// [fix-highlight-rubric-wiring] 看点层改查 describe_highlights 并**按桶过滤**：
+	// 甲准则打的分 MUST NOT 服务乙准则的排序（那是拿「判奇观地貌」的分去挑「大分量怼脸」的镜头）。
+	// 15s 就近窗口语义一字不改。
 	const row = db.get<{ highlight: number | null; ts_ms: number }>(
-		"SELECT highlight, ts_ms FROM describes WHERE material_id = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
-		[materialId, tsMs],
+		"SELECT highlight, ts_ms FROM describe_highlights WHERE material_id = ? AND rubric_hash = ? AND highlight IS NOT NULL ORDER BY ABS(ts_ms - ?) ASC LIMIT 1",
+		[materialId, rubricHash, tsMs],
 	);
 	if (!row) return undefined;
 	if (Math.abs(row.ts_ms - tsMs) > DESCRIBE_NEAREST_MAX_GAP_MS) return undefined;
 	return row.highlight ?? undefined;
+}
+
+/**
+ * 缓存写入（[fix-highlight-rubric-wiring] 分层落库）。
+ *
+ * 客观层进 `describes`（一帧一份，换准则重跑会原样覆盖成同样的内容——无害）；
+ * 看点分进 `describe_highlights` 的 `rubricHash` 桶（一帧 × N 套准则 N 份，互不覆盖）。
+ * ⚠️ `describes.highlight` / `describes.rubric_hash` **不再写**（冻结列，理由见 local-index 迁移块）。
+ */
+/**
+ * 该帧在库里**有行、但判据版本是旧的**吗（§10 报数分栏用）。
+ *
+ * `getCachedDescribe` 对这种行返回 undefined（未命中），于是它会进 pending 被重新调用。
+ * 但「第一次见这一帧」与「上轮见过、判据变了要重跑」对用户是两件事：后者要被扣的钱
+ * 是判据升级的代价，MUST 报得出来，别混进「新调用」里看着像凭空多花。
+ */
+export function hasStaleCriteriaRow(db: SqlDb, materialId: string, tsMs: number): boolean {
+	const row = db.get<{ criteria_version: string | null }>(
+		"SELECT criteria_version FROM describes WHERE material_id = ? AND ts_ms = ?",
+		[materialId, tsMs],
+	);
+	return !!row && row.criteria_version !== DESCRIBE_CRITERIA_VERSION;
 }
 
 export function putCachedDescribe(
@@ -465,10 +548,25 @@ export function putCachedDescribe(
 	materialId: string,
 	tsMs: number,
 	d: MaterialDescribe,
-	rubricHash?: string,
+	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
 ): void {
+	const now = new Date().toISOString();
+	// 客观层 **OR IGNORE 而非 OR REPLACE**：spec「换准则 MUST NOT 覆盖或失效客观层」。
+	// ⚠️ 这也正是本件之前的实际语义——那时客观层只在 `getCachedDescribe` 未命中（即行不存在）时才写，
+	//    REPLACE 从来没真的覆盖过任何一行。本件新增了「客观层在、看点桶不在 ⇒ 重新调用」这条路径，
+	//    继续用 REPLACE 就会让 VLM 每次的措辞漂移悄悄改写已落库的 desc（下游 at_sec / 叠加物交叉校验
+	//    读的都是它）。客观层的刷新口径不变：仍只由素材指纹变化的级联清除触发。
+	// ⟲ §10：**判据版本不同则整行刷新**，相同则维持上面那条 OR IGNORE 语义。
+	//    换准则（rubric）时版本不变 ⇒ 不覆盖，措辞漂移进不来，上面那条理由原样成立；
+	//    换判据时版本变 ⇒ 必须覆盖，否则新口径的 flags 永远落不进来、每轮重复计费还读到旧值。
+	//    `IS NOT` 在 SQLite 里对 NULL 也成立，旧行（NULL）照样被刷新。
 	db.run(
-		"INSERT OR REPLACE INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, highlight, rubric_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+		"INSERT INTO describes(material_id, ts_ms, desc_text, tags_json, mark, flags_json, subject, action, shot_size, created_at, criteria_version)" +
+			" VALUES (?,?,?,?,?,?,?,?,?,?,?)" +
+			" ON CONFLICT(material_id, ts_ms) DO UPDATE SET desc_text=excluded.desc_text, tags_json=excluded.tags_json," +
+			" mark=excluded.mark, flags_json=excluded.flags_json, subject=excluded.subject, action=excluded.action," +
+			" shot_size=excluded.shot_size, created_at=excluded.created_at, criteria_version=excluded.criteria_version" +
+			" WHERE describes.criteria_version IS NOT excluded.criteria_version",
 		[
 			materialId,
 			tsMs,
@@ -479,15 +577,167 @@ export function putCachedDescribe(
 			d.subject || null,
 			d.action || null,
 			d.shot_size,
-			d.highlight,
-			rubricHash ?? null,
-			new Date().toISOString(),
+			now,
+			DESCRIBE_CRITERIA_VERSION,
 		],
+	);
+	// 看点分缺席（旧服务端不给这一维）时不落桶——落一行 NULL 会让「本桶已打过分」与
+	// 「本桶没有分」不可分辨，正是 getCachedDescribe 的命中判据要区分的那件事。
+	if (d.highlight !== null && d.highlight !== undefined) {
+		db.run(
+			"INSERT OR REPLACE INTO describe_highlights(material_id, ts_ms, rubric_hash, highlight, created_at) VALUES (?,?,?,?,?)",
+			[materialId, tsMs, rubricHash, d.highlight, now],
+		);
+	}
+}
+
+// ── 叠加物交叉校验（add-describe-flag-desc-crosscheck）─────────────────────────────
+//
+// 起因（真机硬证据，260902）：本地索引库 `describes` 表里
+// `broll-local-e28be73e24d82c35 @111117ms` 一条，
+//   flags_json = {"black_border":false,"blurry":false,"text_overlay":false,"watermark":false}
+//   desc_text  = 「…画面左上角有'REC'等视频录制界面元素，似拍摄中的一帧。」
+// **模型在自己的 desc 里已经写出了取景器 HUD，`text_overlay` 仍判 false。**
+// 起草期一度怀疑是 CLI 只喂 512px 缩略帧「把字打瞎」，已被证伪：按 CLI 现行 512px 口径
+// 把该帧重抽出来目视核对，REC / RAW 16:9 / Menu / 时码 00:16:30:26 / 电量与 2 min 全部清晰可读
+// ⇒ 是「看见了却不打标」，不是「看不见」。真根因在服务端提示词的保守偏置
+// （`material_describe_handler.py:127` "when uncertain, use false"），由 infra 侧另件承接。
+//
+// 本零件做的是**纯本地、零计费、零额外调用**的兜底：desc 说了、flag 没打，就如实报一条。
+// 它独立于服务端提示词 —— 即使将来 prompt 回归，这条判据仍在。
+//
+// ⚠️ MUST NOT 据此覆写 flag。既有条款「CLI MUST NOT 依据 flags 自动剔除候选（信号归裁定层，
+//    零件不裁定）」同理适用于反向：CLI 报差异，裁定权仍在人/agent 手里。
+
+/** 交叉校验覆盖的三维「叠加物」信号（`blurry` 不是叠加物，不在射程内）。 */
+export type OverlayFlagDim = "text_overlay" | "watermark" | "black_border";
+
+/**
+ * desc 文本里的**叠加物特征词**。
+ *
+ * 词表是拿本机 341 条真实 describe 反复收敛出来的，**收紧是刻意的**——
+ * 判据要的是精确率不是召回率：报错一次，用户下次就不信这条提示了。
+ * 实测（341 条全库跑）：命中 2 条，其中 1 条 flag 已为 true（不报），
+ * 1 条正是上面那条 REC 漏判，**零误报**。
+ *
+ * 明确**排除**的高频陷阱词（各带全库实测计数，别再往回加）：
+ *   - `贴纸`：4 条命中全是**画面内**贴纸（自动售货机机身贴纸 ×2、木墙贴纸、门上卡通贴纸），
+ *     不是叠加层；
+ *   - `标识 / logo / 标志 / 招牌`：10 条命中全是**画面内**招牌（VENDOR 售货机、KIRIN 店招、
+ *     禁停标志、日文商品包装），不是台标水印；
+ *   - 光秃秃的 `文字 / 文本`：中日文街景里画面内文字遍地都是，单独当判据必然刷屏。
+ * ⇒ 只有**叠加语义自带**的词才进表（`叠加`/`字幕`/`时码`/`录制界面`/`水印`/`台标`/`黑边`…）。
+ */
+export const OVERLAY_DESC_CUES: Record<OverlayFlagDim, RegExp[]> = {
+	text_overlay: [
+		/字幕/,
+		/叠加(?:文字|文本|字幕|层)?/,
+		/时间码/,
+		/时码/,
+		/录制界面/,
+		/界面元素/,
+		/取景器/,
+		/花字/,
+		/弹幕/,
+		/标题卡/,
+		/\bHUD\b/i,
+		/\bREC\b/, // 大小写敏感：录制指示灯恒为大写 REC，小写 rec 多半是 record 的词根
+		/\bsubtitle/i,
+		/\btimecode\b/i,
+		/\bviewfinder\b/i,
+		/\boverlaid?\s+text\b/i,
+		/\btext\s+overlay\b/i,
+	],
+	watermark: [/水印/, /台标/, /频道标/, /角标/, /\bwatermark\b/i],
+	black_border: [/黑边/, /信箱式?画幅/, /上下(?:有|是)?黑(?:色)?(?:边|条|块|带)/, /左右(?:有|是)?黑(?:色)?(?:边|条|块|带)/, /\bletterbox/i, /\bpillarbox/i],
+};
+
+/**
+ * 单条产物的交叉校验：返回「desc 里提到了、flag 却是 false」的维度。
+ * 纯函数、零 IO。flag 已为 true 的维度不报（本来就打对了）。
+ */
+export function crossCheckFlagsAgainstDesc(d: Pick<MaterialDescribe, "desc" | "usable_flags">): OverlayFlagDim[] {
+	const text = d.desc ?? "";
+	if (!text) return [];
+	const out: OverlayFlagDim[] = [];
+	for (const dim of Object.keys(OVERLAY_DESC_CUES) as OverlayFlagDim[]) {
+		if (d.usable_flags?.[dim] === true) continue; // 已打标，无差异可报
+		if (OVERLAY_DESC_CUES[dim].some((re) => re.test(text))) out.push(dim);
+	}
+	return out;
+}
+
+export interface FlagDescMismatchItem {
+	materialId: string;
+	tsMs: number;
+	dims: OverlayFlagDim[];
+	/** desc 摘录（截断，只为让人认出是哪一帧）。 */
+	excerpt: string;
+}
+
+export interface FlagDescMismatchSummary {
+	/** 有差异的条目数（不是维度数）。 */
+	count: number;
+	/** 逐维计数（同一条可同时命中多维，各计各的）。 */
+	byDim: Partial<Record<OverlayFlagDim, number>>;
+	/** 逐条明细（全量，文案侧自行截断）。 */
+	items: FlagDescMismatchItem[];
+}
+
+/** 样本行在提示文案里的展示上限（多了刷屏，机读侧读 `items` 拿全量）。 */
+const MISMATCH_SAMPLE_LIMIT = 5;
+
+/**
+ * 批量汇总：对一轮 describe 的产物（**含缓存命中项**——缓存里的旧条目同样受检，
+ * 且这一路零调用零计费）逐条交叉校验。无差异返回 null（不打扰）。
+ */
+export function summarizeFlagDescMismatch(
+	rows: Array<{ materialId: string; tsMs: number; describe: MaterialDescribe | null }>,
+): FlagDescMismatchSummary | null {
+	const items: FlagDescMismatchItem[] = [];
+	const byDim: Partial<Record<OverlayFlagDim, number>> = {};
+	const seen = new Set<string>();
+	for (const r of rows) {
+		if (!r.describe) continue;
+		const key = `${r.materialId}@${r.tsMs}`;
+		if (seen.has(key)) continue; // 同帧多引用只报一次（与 describe 的唯一键去重同口径）
+		seen.add(key);
+		const dims = crossCheckFlagsAgainstDesc(r.describe);
+		if (dims.length === 0) continue;
+		for (const d of dims) byDim[d] = (byDim[d] ?? 0) + 1;
+		items.push({ materialId: r.materialId, tsMs: r.tsMs, dims, excerpt: r.describe.desc.slice(0, 60) });
+	}
+	if (items.length === 0) return null;
+	return { count: items.length, byDim, items };
+}
+
+/**
+ * 提示文案（良性降级打可读 INFO：这是「信号可能不全」的告知，不是失败，
+ * MUST NOT 抛成 warn/error 去吓人，也 MUST NOT 静默吞掉）。
+ */
+export function flagDescMismatchNote(s: FlagDescMismatchSummary): string {
+	const dimNote = (Object.keys(s.byDim) as OverlayFlagDim[]).map((d) => `${d} ${s.byDim[d]}`).join(" · ");
+	const lines = s.items
+		.slice(0, MISMATCH_SAMPLE_LIMIT)
+		.map((it) => `     · ${it.materialId} @${(it.tsMs / 1000).toFixed(1)}s [${it.dims.join("/")}] ${it.excerpt}`);
+	const more = s.items.length > MISMATCH_SAMPLE_LIMIT ? `\n     · …另 ${s.items.length - MISMATCH_SAMPLE_LIMIT} 条（--json 读 flag_desc_mismatch.items 拿全量）` : "";
+	return (
+		`叠加物交叉校验：${s.count} 项的 desc 自己描述了叠加元素、对应 usable_flags 仍为 false（${dimNote}）。\n` +
+		`   这是模型「看见了却没打标」的形态（真机 260902 已实证），⇒ MUST NOT 把 flag=false 当作「画面没有叠加元素」的证明，这几帧请人工复核：\n` +
+		`${lines.join("\n")}${more}\n` +
+		`   CLI 只报差异、不改写 flag（信号归裁定层，零件不裁定）。`
 	);
 }
 
-/** 注入 plan result 的裁剪形态（describe 字段随 plan 流转，broll-plan-contract delta）。 */
-export function toDescribeMeta(d: MaterialDescribe): MaterialDescribeMeta {
+/**
+ * 注入 plan result 的裁剪形态（describe 字段随 plan 流转，broll-plan-contract delta）。
+ *
+ * `atSec`（fix-describe-window-coverage）：本条产物出自的帧时刻（素材时基秒），写成 `at_sec`。
+ * ⚠️ **图片候选 MUST 不传**（缓存键 ts=0 是缓存键、不是时刻，写 0 就是误导性锚点：
+ * 会让下游以为「这条判决只代表第 0 秒那一段」，而图片的射程本就是整条素材）。
+ * 缺省时下游按 `segments[0]` 推定并标注为「推定」——见 `matrix.ts` 的 `describeScopeOf`。
+ */
+export function toDescribeMeta(d: MaterialDescribe, atSec?: number): MaterialDescribeMeta {
 	return {
 		desc: d.desc,
 		tags: d.tags,
@@ -497,7 +747,59 @@ export function toDescribeMeta(d: MaterialDescribe): MaterialDescribeMeta {
 		...(d.action ? { action: d.action } : {}),
 		...(d.shot_size ? { shot_size: d.shot_size } : {}),
 		...(d.highlight !== null && d.highlight !== undefined ? { highlight: d.highlight } : {}),
+		...(typeof atSec === "number" && Number.isFinite(atSec) ? { at_sec: atSec } : {}),
 	};
+}
+
+// ── 理解覆盖率（fix-describe-window-coverage：一帧的判决能代表多长的时间）─────────────
+
+/** 一轮 `--plan` 理解的**段覆盖率**账面。 */
+export interface DescribeCoverage {
+	/** 被理解的帧数（当前口径每候选恰一帧，恒 = 被注入的视频候选数）。 */
+	frames: number;
+	/** 这些候选携带的 segment 总数 —— 分母。**不是候选数**。 */
+	segments: number;
+	/** frames / segments；分母为 0 时为 1（没有段可覆盖 ⇒ 不报 0% 吓人）。 */
+	ratio: number;
+	/** 图片候选数：无时间轴、射程天然是整条素材 ⇒ **不进分子也不进分母**（matrix-describe spec）。 */
+	imageCandidates: number;
+}
+
+/**
+ * 段覆盖率统计（纯函数，零 IO）。
+ *
+ * 为什么这个数必须报出来：此前回写摘要只说「注入 N 条 result.describe」，**N 是候选数不是段数**，
+ * 读者（人与 agent）会读成「这 N 条候选都被看过了」。真机 260902 两份 plan 的真值是
+ * **32 帧 / 843 段 = 3.8%** —— 96.2% 的段一眼都没被看过。
+ * 走**非致命 INFO** 档（良性降级打可读 INFO）：它是「信号只覆盖了这么点」的告知，不是失败。
+ */
+export function summarizeDescribeCoverage(rows: Array<{ image: boolean; segments: number }>): DescribeCoverage {
+	let frames = 0;
+	let segments = 0;
+	let imageCandidates = 0;
+	for (const r of rows) {
+		if (r.image) {
+			imageCandidates++;
+			continue;
+		}
+		frames++;
+		// 无 segments 的退化候选按 1 段计：铺轨侧 segmentsOf 会给它合成一个整片伪段，
+		// 那一段确实被这一帧代表了 ⇒ 计 1/1，MUST NOT 计 0（0 会把分母做小、把覆盖率吹高）。
+		segments += Math.max(1, r.segments);
+	}
+	return { frames, segments, ratio: segments > 0 ? frames / segments : 1, imageCandidates };
+}
+
+/** 覆盖率人读文案（INFO 档）。措辞 MUST NOT 把 flags 说成候选级 / 素材级结论。 */
+export function describeCoverageNote(c: DescribeCoverage): string {
+	const pct = (c.ratio * 100).toFixed(1);
+	const img = c.imageCandidates > 0 ? `（另有 ${c.imageCandidates} 个图片候选：无时间轴，射程即整条素材，不进本比值）` : "";
+	return (
+		`理解覆盖率：${c.frames} 帧 / ${c.segments} 段 = ${pct}%${img}。\n` +
+		`   --plan 每个候选只抽 segments[0] 的 best **一帧** ⇒ 本条 describe（desc/tags/mark/usable_flags）` +
+		`只代表**该帧所属的那一段**，MUST NOT 读成候选级或素材级结论；其余段一眼都没被看过。\n` +
+		`   射程锚点已写进 result.describe.at_sec（素材时基秒），铺轨据此把 flags 收窄到射程内的段。`
+	);
 }
 
 // ── 理解编排（三输入形态共用：缓存短路 → 确认护栏 → 抽帧/直读 → 批调用 → 写缓存）──
@@ -518,7 +820,10 @@ export interface DescribeRunDeps {
 	extractFrame: (src: string, tsSec: number, outJpg: string) => Promise<boolean>;
 	/** 计费确认（--yes 跳过；测试注入）。 */
 	confirm: (msg: string) => Promise<boolean>;
-	/** internal 豁免探测（复用 probeGcMemberType；仅护栏触发时才探测——零多余云端调用）。 */
+	/** 计费身份豁免探测（复用 probeGcMemberType，**gc_member_type** 不是 matrix_member_type）。
+	 * [fix-describe-billing-report-honesty] 触发条件已由「护栏触发」改成「本次有实际调用」——
+	 * 护栏只消费结果，不再兼任探测开关；`pending` 为空（全缓存命中）时仍不调，保持零云端请求。
+	 * 单次 runDescribeItems 至多调一次（下方只有一个调用点）。 */
 	probeExempt: () => Promise<boolean>;
 	yes: boolean;
 	/** 抽帧临时目录（即传即弃，整目录清理兜底）。 */
@@ -526,6 +831,10 @@ export interface DescribeRunDeps {
 	onLog?: (line: string) => void;
 	/** 测试注入：direct 直传的文件读取。 */
 	readFileBase64?: (path: string) => string;
+	/** [fix-highlight-rubric-wiring] 本轮生效的看点准则分桶键（缺省 `L0`）。
+	 * 只影响缓存命中判据与落桶；**准则正文的上行归 `describeBatch` 闭包**（命令层组装），
+	 * 本函数不碰网络参数——否则同一件事会有两个真相来源。 */
+	rubricHash?: string;
 }
 
 export interface DescribeRunResult {
@@ -536,13 +845,23 @@ export interface DescribeRunResult {
 	described: number;
 	/** 缓存命中数（零调用零计费）。 */
 	cached: number;
+	/** pending 里**因判据版本变更而重跑**的张数（§10）。
+	 * 它是 `called` 的子集，不是额外开销 —— 分出来是为了让「这笔钱为什么又花一次」看得见：
+	 * 这些帧上一轮理解过，只是服务端判据升级了、旧产物不再作数。 */
+	staleCriteria: number;
 	/** 实际调服务端张数（= 计费张数口径）。 */
 	called: number;
 	/** 抽帧/读文件失败数（局部化：单帧失败不拖垮整轮）。 */
 	failed: number;
-	/** 预估积分（= called 计划值 × 单价；护栏与账面同源）。 */
+	/** 预估积分——**实耗口径**（fix-describe-billing-report-honesty）：豁免时恒 0。
+	 * 服务端 `skip_quota_check=is_internal_member(user_id)` 时预扣整段短路（record_id 恒 null，
+	 * 结算侧 `if record_id:` 二重兜底），豁免账号真扣 0；报原价就是报了一个不会发生的数。
+	 * 要原价读 `creditsWouldBe`。 */
 	estimatedCredits: number;
-	/** internal 豁免（仅护栏触发探测过时出现）。 */
+	/** 原价（= pending × 单价），恒出——供解释「省了多少」。 */
+	creditsWouldBe: number;
+	/** 计费身份豁免（`gc_member_type=internal`）。**有实际调用时恒出**；
+	 * pending 为空（全缓存命中、无扣费可报）时缺席。 */
 	exempt?: boolean;
 	/** 与入参 items 一一对位（null=该项失败/被跳过）。 */
 	results: (MaterialDescribe | null)[];
@@ -557,29 +876,49 @@ const keyOf = (it: DescribeWorkItem): string => `${it.materialId}@${it.tsMs}`;
  */
 export async function runDescribeItems(items: DescribeWorkItem[], deps: DescribeRunDeps): Promise<DescribeRunResult> {
 	const log = deps.onLog ?? (() => {});
+	const rubricHash = deps.rubricHash ?? RUBRIC_DEFAULT_BUCKET;
 	const resolved = new Map<string, MaterialDescribe | null>();
 	// ── 缓存短路：唯一键逐个查 describes（同素材同帧免重复调用——缓存即钱）──
+	// [fix-highlight-rubric-wiring] 命中判据带桶：缺省桶与本件之前逐字节一致；
+	// 非缺省桶要求该桶已有看点分，否则按未命中重新打分（换准则的必然代价，见 getCachedDescribe）。
 	const pending: DescribeWorkItem[] = [];
+	let staleCriteria = 0;
 	for (const it of items) {
 		const key = keyOf(it);
 		if (resolved.has(key)) continue;
-		const hit = getCachedDescribe(deps.db, it.materialId, it.tsMs);
+		const hit = getCachedDescribe(deps.db, it.materialId, it.tsMs, rubricHash);
 		if (hit) resolved.set(key, hit);
 		else {
 			resolved.set(key, null); // 占位（防同键重复进 pending）
+			// §10：未命中里再分一栏——「这一帧上轮理解过、只是判据版本变了」。
+			if (hasStaleCriteriaRow(deps.db, it.materialId, it.tsMs)) staleCriteria++;
 			pending.push(it);
 		}
 	}
 	const cached = resolved.size - pending.length;
-	const estimatedCredits = pending.length * DESCRIBE_CREDITS_PER_IMAGE;
+	const creditsWouldBe = pending.length * DESCRIBE_CREDITS_PER_IMAGE;
+
+	// ── 计费身份探测（fix-describe-billing-report-honesty）──────────────────────────────
+	// 此前这一句焊死在下方 `pending > 20` 的护栏内部 ⇒ **≤20 张的运行从不探身份**，
+	// `exempt` 恒 undefined、报数恒落非豁免分支按原价走。真机 260902 三条旅拍片
+	// 单次 pending 分别是 6 / 13 / 8 张，三次全落在这个洞里，执行方把相加得来的
+	// 「≈27 积分」当实耗转述给了用户——豁免账号被误告知要花钱，非豁免账号只是碰巧蒙对。
+	// 现在判据改成「本次有没有实际调用」：有调用就探一次（护栏只消费结果，不再兼任探测开关）。
+	// ⚠️ `pending` 为空（全缓存命中）SHALL NOT 探——那次运行既无扣费也无数可报，
+	//    MUST NOT 为了拿身份给零调用的运行白加一次云端请求。
+	// ⚠️ 全函数只有这一个探测点 ⇒ 单次运行至多一次 get_user_info（别在护栏里再探一次）。
+	let exempt: boolean | undefined;
+	if (pending.length > 0) exempt = await deps.probeExempt();
+	const estimatedCredits = exempt ? 0 : creditsWouldBe;
 
 	// ── 确认护栏（spec：单次将调用 >20 张时提示预估积分并确认）──
-	let exempt: boolean | undefined;
+	// ⚠️ 阈值 20 一字不动：本件只解耦探测，MUST NOT 顺手改护栏本身的触发条件。
 	if (pending.length > DESCRIBE_CONFIRM_THRESHOLD) {
-		exempt = await deps.probeExempt();
-		const hint =
-			`本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
-			`预估 ${estimatedCredits} 积分（${DESCRIBE_CREDITS_PER_IMAGE} 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）`;
+		const hint = exempt
+			? `本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
+				`原价 ${creditsWouldBe} 积分，本次实耗 0`
+			: `本次将实际调用素材理解 ${pending.length} 张（另 ${cached} 张缓存命中零计费），` +
+				`预估 ${estimatedCredits} 积分（${DESCRIBE_CREDITS_PER_IMAGE} 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）`;
 		if (exempt) {
 			log(`${hint}——同合云内部成员（gc_member_type=internal）计费豁免，免确认继续`);
 		} else if (deps.yes) {
@@ -593,9 +932,11 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 					declined: true,
 					described: cached,
 					cached,
+					staleCriteria,
 					called: 0,
 					failed: 0,
 					estimatedCredits,
+					creditsWouldBe,
 					...(exempt !== undefined ? { exempt } : {}),
 					results: items.map((it) => resolved.get(keyOf(it)) ?? null),
 				};
@@ -632,7 +973,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 				called = ready.length;
 				ready.forEach((r, i) => {
 					const d = outs[i]!;
-					putCachedDescribe(deps.db, r.item.materialId, r.item.tsMs, d);
+					putCachedDescribe(deps.db, r.item.materialId, r.item.tsMs, d, rubricHash);
 					resolved.set(keyOf(r.item), d);
 				});
 			}
@@ -646,9 +987,11 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 		ok: true,
 		described: cached + called,
 		cached,
+		staleCriteria,
 		called,
 		failed,
 		estimatedCredits,
+		creditsWouldBe,
 		...(exempt !== undefined ? { exempt } : {}),
 		results,
 	};

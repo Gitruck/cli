@@ -22,17 +22,19 @@
  */
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
 import { CloudError, cloudErrorCode, download as realDownload, getTaskResult, parseJson } from "../lib/cloud";
 import { invalidateUpload, uploadCached } from "../lib/upload-cache";
+import { readJson } from "../lib/read-json";
 import { DEFAULT_VISIBILITY_BACKOFF_MS } from "../lib/upload-submit";
 import { defaultExtsFor, extFromUrl, pickUrl } from "../lib/tool-descriptors";
 import { FORMAT_META } from "../lib/materialize";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
+import { r3 } from "../lib/frame-domain";
 
 // cli 域同步轻接口（SYNC_INLINE 家族）：cloud.ts 的 /task/${taskType} 模板天然拼出该路径
 const TASK_TYPE = "cli/audio_project_struct";
@@ -47,8 +49,6 @@ function timestamp(): string {
 	const p = (n: number) => String(n).padStart(2, "0");
 	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** positional 解析：仅支持 `init`（后续族命令在此扩展）。 */
 export function parseProjectPositional(words: string[] | undefined): "init" {
@@ -72,18 +72,49 @@ export function parseCanvas(raw: string | undefined): [number, number] {
 	return [w, h];
 }
 
+/** 提交给服务端的字级时码（transcript v1 `words[]` 形态，源时基秒）。 */
+export interface SubmitWord {
+	w: string;
+	st: number;
+	ed: number;
+}
+
 /** 提交给服务端的句级 utterance（transcript.json 归一形态）。 */
 export interface SubmitUtterance {
 	id: string;
 	text: string;
 	st: number;
 	ed: number;
+	/** 字级时码（adjust-transcript-json-word-level）：有则透传，服务端 `audio_project_struct` 按 `words?` 收；缺席 = 无字级。 */
+	words?: SubmitWord[];
+}
+
+/**
+ * `words[]` 逐词校验（畸形词跳过并计数、不整句作废——与客户端 `parseWords` 同姿势）。
+ * 非数组 / 空数组 ⇒ undefined（提交体不带该键，与改前逐字节一致）。
+ */
+function normalizeWordsForSubmit(raw: unknown): { words?: SubmitWord[]; skipped: number } {
+	if (!Array.isArray(raw) || raw.length === 0) return { skipped: 0 };
+	const words: SubmitWord[] = [];
+	let skipped = 0;
+	for (const item of raw) {
+		const w = (item ?? {}) as Record<string, unknown>;
+		const st = Number(w.st);
+		const ed = Number(w.ed);
+		if (typeof w.w !== "string" || !w.w || !Number.isFinite(st) || !Number.isFinite(ed) || st < 0 || ed <= st) {
+			skipped += 1;
+			continue;
+		}
+		words.push({ w: w.w, st: r3(st), ed: r3(ed) });
+	}
+	return words.length > 0 ? { words, skipped } : { skipped };
 }
 
 /**
  * 兜底路 transcript.json 归一：结构门与 `gtrk split` 的 loadTranscript 同族（utterances 数组 +
  * 逐条 text/st/ed），读出 {utterances, duration} 供提交体。id 缺省按序补 `u<N>`；
  * duration 缺省取末句 ed 包络（服务端契约要求显式传 duration）。
+ * `words[]` 有则透传（畸形词跳过并 WARN 计数），无则提交体与改前逐字节一致。
  */
 export function normalizeTranscriptForSubmit(
 	raw: unknown,
@@ -93,6 +124,7 @@ export function normalizeTranscriptForSubmit(
 	if (!t || typeof t !== "object" || !Array.isArray(t.utterances) || t.utterances.length === 0) {
 		throw new Error(`transcript.json 结构异常（缺 utterances 数组或为空）：${path}——请用 gtrk transcript <配音音频> --json 产出`);
 	}
+	let skippedWords = 0;
 	const utterances: SubmitUtterance[] = t.utterances.map((u, i) => {
 		const item = (u ?? {}) as Record<string, unknown>;
 		const text = typeof item.text === "string" ? item.text : "";
@@ -101,8 +133,17 @@ export function normalizeTranscriptForSubmit(
 		if (!text || !Number.isFinite(st) || !Number.isFinite(ed) || ed < st || st < 0) {
 			throw new Error(`transcript.json 第 ${i + 1} 条 utterance 非法（需 text 非空、0 ≤ st ≤ ed）：${path}`);
 		}
-		return { id: typeof item.id === "string" && item.id ? item.id : `u${i + 1}`, text, st: r3(st), ed: r3(ed) };
+		const { words, skipped } = normalizeWordsForSubmit(item.words);
+		skippedWords += skipped;
+		return {
+			id: typeof item.id === "string" && item.id ? item.id : `u${i + 1}`,
+			text,
+			st: r3(st),
+			ed: r3(ed),
+			...(words ? { words } : {}),
+		};
 	});
+	if (skippedWords > 0) log.warn(`transcript.json 有 ${skippedWords} 个畸形字级时码已跳过（需 w 非空、0 ≤ st < ed）`);
 	const declared = Number(t.duration);
 	const envelope = utterances.reduce((mx, u) => Math.max(mx, u.ed), 0);
 	const duration = Number.isFinite(declared) && declared > 0 ? r3(declared) : r3(envelope);
@@ -133,6 +174,7 @@ export interface AudioProjectStructResp {
 	gtrk: Record<string, unknown>;
 	transcript: Record<string, unknown>;
 	taskId: string | null;
+	warning?: string;
 }
 
 /** 调服务端 producer 同步口（裸 apikey Authorization；错误走 CloudError 带业务码，如 6004 归属）。 */
@@ -146,18 +188,21 @@ export async function callAudioProjectStruct(
 		headers: { Authorization: cfg.apiKey, "Content-Type": "application/json" },
 		body: JSON.stringify(payload),
 	});
-	const r = await parseJson<{ gtrk?: unknown; transcript?: unknown; task_id?: unknown }>(res);
-	const data = (r.data ?? {}) as { gtrk?: unknown; transcript?: unknown; task_id?: unknown };
+	const r = await parseJson<{ gtrk?: unknown; transcript?: unknown; task_id?: unknown; warning?: unknown }>(res);
+	const data = r.data ?? {};
 	const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 	if (r.code === 200 && isObj(data.gtrk) && isObj(data.transcript)) {
 		return {
 			gtrk: data.gtrk,
 			transcript: data.transcript,
 			taskId: data.task_id != null ? String(data.task_id) : null,
+			...(typeof data.warning === "string" && data.warning.trim() ? { warning: data.warning } : {}),
 		};
 	}
 	if (r.code === 200) throw new Error("工程生成响应缺 gtrk/transcript（非 audio_project_struct 契约响应）");
-	throw new CloudError(r.code, `工程生成失败 (code=${r.code ?? "?"})：${r.msg ?? "未知错误"}`);
+	const message = r.msg ?? "未知错误";
+	const hint = r.code === 6034 && !message.includes("分批") ? "；请将配音稿分批提交" : "";
+	throw new CloudError(r.code, `工程生成失败 (code=${r.code ?? "?"})：${message}${hint}`);
 }
 
 export interface ProjectInitOpts {
@@ -188,6 +233,7 @@ export interface ProjectInitDeps {
 
 export interface ProjectInitResult {
 	ok: boolean;
+	warning?: string;
 	mode: "init";
 	outDir: string;
 	gtrkPath: string;
@@ -272,12 +318,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 		}
 		const transcriptAbs = resolve(opts.transcript!);
 		if (!existsSync(transcriptAbs)) throw new Error(`找不到 transcript.json：${transcriptAbs}`);
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(await readFile(transcriptAbs, "utf8"));
-		} catch (e) {
-			throw new Error(`transcript.json 不是合法 JSON：${transcriptAbs}（${e instanceof Error ? e.message : String(e)}）`);
-		}
+		const parsed: unknown = await readJson(transcriptAbs, "transcript.json");
 		submitBody = normalizeTranscriptForSubmit(parsed, transcriptAbs);
 	}
 
@@ -320,6 +361,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 		fileId = got.fileId;
 	}
 	if (resp.taskId) log.info(`task_id = ${resp.taskId}`);
+	if (resp.warning) log.warn(resp.warning);
 
 	// ── 落地 + materialize 路径改写 ──
 	log.step("② 落地产物目录（gtrk / transcript / result.json）…");
@@ -365,6 +407,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 
 	const result: ProjectInitResult = {
 		ok: Object.keys(errors).length === 0,
+		...(resp.warning ? { warning: resp.warning } : {}),
 		mode: "init",
 		outDir,
 		gtrkPath,

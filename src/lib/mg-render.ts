@@ -122,9 +122,22 @@ export async function renderParticle(opts: MgRenderOpts, deps: MgRenderDeps = {}
 	const html = await readFile(fileAbs, "utf8");
 
 	// ── 几何拒绝（先于 lint，给专属话术）────────────────────────────────────────
+	//
+	// [add-text-ir-aspect-agnostic-layout] 口径从「首发仅 1920×1080」改成「须为正整数」。
+	//
+	// ⚠️ 原来那条**当初是对的**：`fix-particle-subcomposition-scale` 之前，颗粒声明尺寸
+	// 与根合成尺寸不等会被 `#stage` 裁掉、只渲左上一角，放行就是静默出坏片。
+	// 修复上线之后 `html_animate_render` 按颗粒声明的 `data-width/height` 挂载缩放、
+	// 根合成尺寸本就是 `flags.width/height` 参数 —— 那个失败形态已经不存在了。
+	// ⇒ 这里继续拦，拦的是**一个不存在的东西**，代价是竖屏工程永远出不了文字模板。
+	//
+	// 现在还拦什么：**非正整数几何**。那种颗粒进云渲会让根合成尺寸算成 0 或 NaN，
+	// 失败形态是空片而不是坏片，但同样不该提交（提交了要计费）。
 	const geo = parseGeometry(html);
-	if (geo && !(geo.width === 1920 && geo.height === 1080)) {
-		log.err(`颗粒几何 ${geo.width}×${geo.height}：gsap-emit v1 契约未开竖屏/异形口，首发仅 1920×1080——不静默出坏片。`);
+	const badGeo = geo && !(Number.isInteger(geo.width) && geo.width > 0
+		&& Number.isInteger(geo.height) && geo.height > 0);
+	if (badGeo) {
+		log.err(`颗粒几何 ${geo.width}×${geo.height}：宽高须为正整数——不提交云任务，零计费。`);
 		return { ok: false, mode: "render", reason: "geometry", geometry: geo };
 	}
 
@@ -165,7 +178,18 @@ export async function renderParticle(opts: MgRenderOpts, deps: MgRenderDeps = {}
 	const cfg = (deps.loadCfg ?? loadConfig)();
 	const payload = {
 		composition: {
-			video_size: { width: 1920, height: 1080 },
+			// 🩸 **根合成尺寸取颗粒自己声明的几何**（add-text-ir-aspect-agnostic-layout，
+			//    2026-09-16 竖屏云渲真机抓出来的）。
+			//
+			// 这里原先写死 `{1920, 1080}`。放开几道校验闸之后，一颗声明 1080×1920 的颗粒
+			// 能提单、能渲出片——**但出来的 MOV 是 1920×1080**：根合成仍按写死的尺寸开，
+			// 颗粒被 `scale(1920/1080, 1080/1920)` 非等比挂上去 ⇒ 横向拉 1.78 倍、纵向压到 0.56，
+			// 而**全链零报错**（lint 过、提单过、渲染完成、帧数正确、还真的在动）。
+			//
+			// ⚠️ 这条正是 tasks 6.1 写「MUST NOT 用读码结论代验」的理由：
+			// 读码结论是「根合成尺寸本就是 `flags.width/height` 参数」——**那句话没错**，
+			// 错的是**没人把颗粒的声明尺寸传进那个参数**。链路读通 ≠ 跑得通。
+			video_size: geo ? { width: geo.width, height: geo.height } : { width: 1920, height: 1080 },
 			tracks: [],
 			beats: [{ html, start: 0, duration: opts.duration }],
 			assets: { file_id: {} },

@@ -4,7 +4,9 @@
  * 与 broll 铺轨（matrix-lay）三处本质差异（fork 红线）：
  *   ① 操作 gtrk.beat_track（颗粒只能落这里；误落 video_track 会被 importer 静默丢弃）；
  *   ② 素材剥离面按**自产身份 × 零引用**判（不是 broll 的 clip.material），详见下「素材剥离键」；
- *   ③ 一对一（一 beat=一颗粒），无平铺/score/候选/下载——渲染是客户端出片期的事，CLI 不云渲。
+ *   ③ 一对一（一 beat=一颗粒），无平铺/score/候选/下载——**铺轨本身**不云渲。
+ *      颗粒的像素在出片期才烤：客户端云渲，或 `gtrk render`（add-render-overlay-compositing，
+ *      对未命中缓存的颗粒走 html_render_simple 再本地叠）。两端共用同一份内容寻址缓存。
  *
  * 幂等：struct_meta.mg.lay_tracks 登记自产 beat 轨，重铺先剥旧自产物再 append；用户手加轨零连带。
  * 读旧写新：登记键读并集 mg ∪ rrv（既有工程零迁移），写 mg 且 delete 旧 rrv 键防孤儿。
@@ -19,6 +21,14 @@
  * 会让旧素材匹配不上、剥不掉，新的又 append —— 每过一轮「客户端编辑 → 重铺」就囤一批重复 / 孤儿素材。
  * 改判两问：**谁的**（写侧 id 前缀 ∪ 写侧落点 `assets/mg/<composition_id>.html` × 自产 composition_id 账本）
  * × **还有人用吗**（写回后仍在轨上的 clip 才算引用）。判不准一律保留，绝不误删用户素材。
+ *
+ * **颗粒窗口落交付帧格**（adjust-lay-frame-domain D2，spec `mg-command`「颗粒窗口落交付帧格」）：
+ * HTML 颗粒是视频类元素（time-domain-discipline T1：叠加轨、按帧渲染，`html_animate_render` 以 fps 采样、客户端
+ * `resolve.ts` 对颗粒同样 `[st, ed)` 采样）——毫秒格的颗粒起点在两个消费方上会差一帧。写出时两端各取一次帧号
+ * `st_f = sec2frame(track_st)`、`ed_f = sec2frame(track_st + envelope)`，`track_st / track_ed = f2ms(帧号)`（向下投影），
+ * `duration` 恒为两端投影之差（`f2ms` 不可加）。拆分稿的 beat 毫秒包络 `envelope` 本身 MUST NOT 改写；同 beat 主 + aux
+ * 同窗 ⇒ 天然同一对帧号；aux ⊂ 主的包含关系由 `sec2frame` 单调性保持。`--only` 保留搬运的存量颗粒 MUST NOT 重投影。
+ * 帧率 = 顶层 `video_rate`（`videoRateOf`，与 `matrix lay` / `ai-drama lay` 同一读法，非正整数即抛）。
  */
 
 const MG_MATERIAL_PREFIX = "mg-";
@@ -55,9 +65,10 @@ function ownAssetCompositionId(p: unknown): string | undefined {
 // 本文件原为零 import 的自足模块；本条是唯一的例外（fix-mg-beat-clip-track-ed D2）：
 // 裁剪恒等式的判据 MUST 只有一份，复制一遍就是给「两份判据慢慢漂开」留门。
 // 已核不成环（matrix-lay 不引 mg-lay），无额外加载成本。
-import { assertTrimIdentity } from "./matrix-lay";
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+import { assertGtrkWriteInvariants, assertTrimIdentity } from "./gtrk-invariants";
+import { f2ms, r3, sec2frame } from "./frame-domain";
+import { type BeatTrackIdentity, identifyBeatTracks } from "./mg-track-identity";
+import { videoRateOf } from "./gtrk-patch";
 
 /**
  * 槽位包络（秒）= 落轨 clip 的唯一时长来源（铁律⑦「颗粒占满坑位 + 终态驻留」）。
@@ -84,24 +95,54 @@ export interface MgLayItem {
 export interface MgMetaBeat {
 	beat: string;
 	composition_id: string;
+	/** 已铺时 = 轨上 clip 的帧格投影值（与 clip 同一对象 spread，逐字节同源）；未铺（laid:null）时 = 派单窗口原值。 */
 	track_st: number;
 	track_ed: number;
-	/** 落轨包络事实 = r3(track_ed − track_st)，**不是** dispatch 的 duration_hint。 */
+	/** 落轨包络事实 = track_ed − track_st（已铺时为两端帧投影之差），**不是** dispatch 的 duration_hint。 */
 	duration: number;
 	html_path: string;
 	category?: string;
 	laid: { track_index: number } | null;
+}
+/**
+ * [gate-mg-visual-job §2.3] 一次显式放行的**留痕**。
+ *
+ * ⚠️ 这条存在的理由是「一个不用解释的放行，下次就会被当成常规做法用」。
+ * 理由留在工程里，日后翻工程的人看得见「当时为什么」——**命令行上的一句话会随终端消失，
+ * 工程文件不会**。
+ */
+export interface MgLayException {
+	/** 被放行的是哪一条闸。 */
+	gate: "x-text-for-relation";
+	/** 指名放行的 beat（逐 beat，不是全局开关）。 */
+	beats: string[];
+	/** `--why` 的原文。 */
+	why: string;
 }
 export interface StructMetaMg {
 	contract_version: "v1";
 	generated_at: string;
 	lay_tracks: number[];
 	beats: MgMetaBeat[];
+	/**
+	 * 本次铺轨用掉的显式例外。
+	 * ⚠️ **无例外时整个键不写**——没用过例外的工程，`struct_meta.mg` 与本件之前逐字节一致。
+	 * ⚠️ 每次铺轨**整体重写**（不累积）：这份账本描述的是「工程当前是什么样」，
+	 * 不是「历史上放行过几次」。不带 flag 重铺一次，例外就该消失——因为那一次它确实没被用。
+	 */
+	exceptions?: MgLayException[];
 }
 export interface MgLayResult {
 	next: Record<string, unknown>;
 	/** laidParticles = **本次**新铺数（语义不变）；keptParticles = 从被剥轨原样搬运回来的既有颗粒数。 */
 	summary: { laidTrack: number | null; laidParticles: number; keptParticles: number };
+	/**
+	 * 逐条 beat 轨的识别结论与依据（fix-mg-lay-track-identity）。
+	 *
+	 * ⚠️ 这不是调试信息：账本与实际对不上时，人第一个会去看的就是「哪条轨被认成我们的」。
+	 * 识别结论不可见 = 把一次「我判错了但没人知道」留在原地。
+	 */
+	tracks: ({ track_index: number | null } & BeatTrackIdentity)[];
 	mg: StructMetaMg;
 }
 
@@ -195,8 +236,21 @@ export function layMgTracks(opts: {
 	 * `laidCompositionIds` + orphans），本层不推断、不设守门。
 	 */
 	keep?: string[];
+	/** 写方自检里**存量**违例的 WARN 出口（gtrk-writer-invariants D2′）；命令层接 `log.warn`，纯函数单测可不传。 */
+	warn?: (message: string) => void;
+	/** 帧格化的人读 INFO 出口（包络量化后不足一帧、不落轨）；命令层接 `log.info`，纯函数单测可不传。 */
+	info?: (message: string) => void;
+	/**
+	 * [gate-mg-visual-job §2.3] 本次用掉的显式例外，原样写进 `struct_meta.mg.exceptions`。
+	 * 本层**不判断例外该不该给**（那是命令层 + lint 的事），只负责让它留在工程里。
+	 */
+	exceptions?: MgLayException[];
 }): MgLayResult {
 	const { gtrk, items, generatedAt } = opts;
+	// 帧率读法与 matrix lay / ai-drama lay 同源（fix-matrix-lay-frame-grid D7 整数判据）：缺席 / 非正 / 非整数即抛，
+	// 抛在一切构造之前 ⇒ 入参零改动。items 为空（只剥旧）同样要求合法帧率——同 matrix lay 的无条件预检，MUST NOT 因路径不同放宽。
+	const rate = videoRateOf(gtrk);
+	const info = opts.info ?? (() => {});
 	const beatTracks = [...((gtrk.beat_track as LooseTrack[] | undefined) ?? [])];
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}) };
@@ -205,8 +259,6 @@ export function layMgTracks(opts: {
 	const prevMg = structMeta.mg as PrevMeta;
 	const prevRrv = structMeta.rrv as PrevMeta;
 	const prevIndices = new Set<number>([...layTracksOf(prevMg), ...layTracksOf(prevRrv)]);
-	const removedTracks = beatTracks.filter((t) => typeof t.track_index === "number" && prevIndices.has(t.track_index));
-	const keptTracks = beatTracks.filter((t) => !(typeof t.track_index === "number" && prevIndices.has(t.track_index)));
 
 	// ── 自产颗粒的 composition_id 全集（fix-mg-material-strip-key，素材身份判据之二的定语）─────
 	// 三路取并集，都是**本层自己的账本**、与客户端改不改 id 无关：
@@ -215,17 +267,20 @@ export function layMgTracks(opts: {
 	//   ③ 本次 items（登记整个丢失时仍认得出自己刚要铺的那些）。
 	// 用途：把「path 落在 assets/mg/ 下」这条身份信号**再收紧一格**——只有文件名恰好是账本里的
 	// composition_id 才算自产物。用户往该目录塞的自有 html（文件名不在账本里）因此永远不进剥离面。
-	const ownCompositionIds = new Set<string>([
+	//
+	// ⚠️ **身份账本（`ledgerIds`）与素材剥离面（`ownCompositionIds`）是两个集合，MUST NOT 合并。**
+	// 第一版把它们写成一个，并且从「号在册的轨」上吸 id 补进去——那是个**循环**：
+	// 兜底靠号、身份又靠这个被号污染过的账本，绕一圈回到「只认号」，用户轨照样被误剥。
+	// （集成用例当场把它抓出来了；叶子模块的单测一条都没红——**接线格不可省**。）
+	//
+	// ⚠️ `priorIds` 与 `ledgerIds` 也要分开：**能不能用内容指纹，取决于「上一轮登记了什么」**，
+	// 与「本次要铺什么」无关。把 items 算进「有没有账本」会让老档（`beats:[]`）误判成有账本，
+	// 于是它的遗留轨被判成用户轨、永远剥不掉（老档回归用例当场红）。
+	const priorIds = new Set<string>([
 		...beatsOf(prevMg).map((b) => b.composition_id),
 		...beatsOf(prevRrv).map((b) => b.composition_id),
-		...items.map((it) => it.composition_id),
 	]);
-	for (const t of removedTracks) {
-		for (const c of t.track_timeline ?? []) {
-			const cid = clipCompositionId(c);
-			if (cid !== undefined) ownCompositionIds.add(cid);
-		}
-	}
+	const ledgerIds = new Set<string>([...priorIds, ...items.map((it) => it.composition_id)]);
 	/**
 	 * 一条 materials 条目是否为 **MG 自产物**（身份判据，双信号取并集，两条都是**写侧事实**）：
 	 *   ① `id` 前缀 `mg-` / `rrv-`（CLI 写侧 id 形态）；
@@ -238,6 +293,47 @@ export function layMgTracks(opts: {
 		const cid = ownAssetCompositionId(m.path);
 		return cid !== undefined && ownCompositionIds.has(cid);
 	};
+
+	// ── 识别哪几条轨是我们的（fix-mg-lay-track-identity）────────────────────────
+	// ⚠️ **主判据是内容指纹，不是 track_index**：那个号客户端每存一次就重发一遍
+	// （契约明写它会漂、且 MUST NOT 当身份判据）。只认号的旧实现有两种静默失败：
+	// **剥一半**（自产物被劈到两条轨、只剥走一条 ⇒ 重复叠加）与 **误剥用户轨**
+	// （重编号后用户自己的轨落到在册号上）。判据与三档命名照抄 `matrix-lay` 的成熟口径。
+	// ⚠️ **账本为空时回落到只认号**：老档可能 `beats:[]` 而轨上有 clip（去品牌化前的遗留形态），
+	// 此时没有内容指纹可比，号是唯一还剩的信号。这是**如实的降级**不是取巧——
+	// 有账本就用内容，没账本才认号，而不是反过来。
+	const identities = priorIds.size
+		? identifyBeatTracks(beatTracks, ledgerIds, prevIndices, clipCompositionId)
+		: beatTracks.map((t) => {
+				const reg = typeof t.track_index === "number" && prevIndices.has(t.track_index);
+				return {
+					verdict: (reg ? "self-produced" : "user-track") as "self-produced" | "user-track",
+					matched: 0,
+					total: (t.track_timeline ?? []).length,
+					indexRegistered: reg,
+					why: "上一轮登记为空（老档 beats:[]），无内容指纹可比 —— 回落到只认 track_index",
+				};
+			});
+	const removedTracks = beatTracks.filter((_, i) => identities[i].verdict !== "user-track");
+	const keptTracks = beatTracks.filter((_, i) => identities[i].verdict === "user-track");
+
+	// 素材剥离面 = 身份账本 ∪ **被判为自产的那些轨**上反查出来的 composition_id。
+	// 这一步 MUST 在识别**之后**做（见上面那段关于循环的说明）：先定哪几条轨是我们的，
+	// 再从那些轨上扩充素材面，用户轨上的 id 永远进不来。
+	const ownCompositionIds = new Set<string>(ledgerIds);
+	for (const t of removedTracks) {
+		for (const c of t.track_timeline ?? []) {
+			const cid = clipCompositionId(c);
+			if (cid !== undefined) ownCompositionIds.add(cid);
+		}
+	}
+	const trackReport = beatTracks.map((t, i) => ({ track_index: t.track_index ?? null, ...identities[i] }));
+	for (const r of trackReport) {
+		// 号漂了但内容对得上 = **良性降级**，打可读 INFO 说清楚，别让人以为出了故障。
+		if (r.verdict === "self-produced-edited") info(`beat 轨 ${r.track_index}：${r.why}`);
+		// 号在册却判成用户轨 —— 只认号的实现会在这里误剥用户内容，值得当面说一句。
+		else if (r.verdict === "user-track" && r.indexRegistered) info(`beat 轨 ${r.track_index}：${r.why}`);
+	}
 
 	// ── 保留集搬运（阶段 A）：按 composition_id 从**被剥轨**里捞回整条 clip，逐字段原样搬到新轨 ──
 	// ★ ⑤ 2026-07-26 拍板「原样搬运」：MUST NOT 从 struct_meta.mg.beats 重建 —— MgMetaBeat 没有 opaque
@@ -279,8 +375,22 @@ export function layMgTracks(opts: {
 			metaBeats.push({ ...toMetaBeat(it), laid: null });
 			continue;
 		}
+		// ── 帧格化（D2）：窗口两端各取一次帧号（起点对 track_st、终点对 track_st + envelope），毫秒是帧号的单向投影。
+		//    同 beat 主 + aux 同窗 ⇒ 同一 (stF, edF)；envelope（拆分稿毫秒包络）本身不改。
+		const stF = sec2frame(it.track_st, rate);
+		const edF = sec2frame(it.track_st + envelope, rate);
+		const stMs = f2ms(stF, rate);
+		const edMs = f2ms(edF, rate);
+		if (!(edMs > stMs)) {
+			// 包络 > 0 但量化后不足一帧（< 半帧的残片）：不落轨、登记「已产未铺」——零时长颗粒在轨上无意义。
+			info(`帧网格：颗粒 ${it.composition_id}（包络 ${it.track_st}–${r3(it.track_st + envelope)}）投影后不足一帧（帧 ${stF}→${edF}），不铺`);
+			metaBeats.push({ ...toMetaBeat(it), laid: null });
+			continue;
+		}
 		const materialId = `${MG_MATERIAL_PREFIX}${it.composition_id}`;
 		newMaterials.push({ id: materialId, path: it.html_rel });
+		// 写出值三件同一个对象：轨上 clip 与 struct_meta.mg.beats 登记从同一份 spread ⇒ 逐字节同源（D4 ⑤）
+		const timing = { track_st: stMs / 1000, track_ed: edMs / 1000, duration: (edMs - stMs) / 1000 };
 		const clip = {
 			// clip_id 取 composition_id（非 beat）：一 beat 可派生主 + N 个 -aux<n> 颗粒，
 			// 用 beat 会撞 clip_id；composition_id 全局唯一（add-aux-rrv-overlay-particle）。
@@ -288,17 +398,15 @@ export function layMgTracks(opts: {
 			material: it.composition_id, // = data-composition-id
 			html_material: materialId,
 			opaque: it.opaque,
-			track_st: it.track_st,
-			// 契约 §3 要求冗余时码两套都给。★ MUST 由 envelope 派生，MUST NOT 写 r3(it.track_ed)
-			// ——那会重演 fix-trim-identity-constructive 治过的「两端各自舍入差 1ms」。
-			// 缺这一键时 gtrk-patch 的 E2 因 edMs 为 NaN 被 Number.isFinite 守卫短路，
+			// 契约 §3 要求冗余时码两套都给。★ track_ed MUST 是终点帧号的投影、duration MUST 是两端投影之差，
+			// MUST NOT 写 r3(it.track_ed) 或 f2ms(帧数)——前者重演 fix-trim-identity-constructive 治过的「两端各自舍入差 1ms」，
+			// 后者撞 f2ms 不可加。缺 track_ed 键时 gtrk-patch 的 E2 因 edMs 为 NaN 被 Number.isFinite 守卫短路，
 			// 在 beat 轨上是**空转通过**：校验器在册、却什么都没校。
-			track_ed: r3(it.track_st + envelope),
-			duration: envelope,
+			...timing,
 		};
 		assertTrimIdentity(clip, `mg:${it.composition_id}`);
 		clips.push(clip);
-		metaBeats.push({ ...toMetaBeat(it), laid: { track_index: newIndex } });
+		metaBeats.push({ ...toMetaBeat(it, timing), laid: { track_index: newIndex } });
 	}
 
 	// 保留 + 本次合并落**一条**新轨，按 track_st 升序（保留 clip 带的是上一轮时码，混排照常排序）
@@ -341,6 +449,8 @@ export function layMgTracks(opts: {
 		generated_at: generatedAt,
 		lay_tracks: createdTracks.map((t) => t.track_index),
 		beats: [...carriedBeats, ...metaBeats],
+		// [gate-mg-visual-job §2.3] 空数组也不写键——见 StructMetaMg.exceptions 的逐字节兼容说明。
+		...(opts.exceptions?.length ? { exceptions: opts.exceptions } : {}),
 	};
 
 	// 写 mg + delete 旧 rrv 键（防孤儿：既有工程升级后不留双份登记）
@@ -353,6 +463,13 @@ export function layMgTracks(opts: {
 		beat_track: [...keptTracks, ...createdTracks],
 		struct_meta: nextStructMeta,
 	};
+	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：上面逐颗的 assertTrimIdentity 管不到相邻两颗之间——
+	// 本次颗粒与同轨**任一**邻居（含原样搬运的保留颗粒：它们带的是上一轮时码）零重叠在这里兜；
+	// 颗粒 material 无 duration ⇒ 上界恒跳过（D3），但接线不许漏。保留颗粒自身的存量违例只 WARN（D2′）。
+	assertGtrkWriteInvariants(next, "mg lay", {
+		ownClipIds: new Set(clips.map((c) => String(c.clip_id))),
+		warn: opts.warn,
+	});
 	return {
 		next,
 		summary: {
@@ -360,17 +477,20 @@ export function layMgTracks(opts: {
 			laidParticles: clips.length, // 语义不变 = **本次**新铺数（MUST NOT 混进保留数）
 			keptParticles: carriedClips.length,
 		},
+		tracks: trackReport,
 		mg,
 	};
 }
 
-function toMetaBeat(it: MgLayItem): Omit<MgMetaBeat, "laid"> {
+/**
+ * struct_meta.mg.beats 登记条目。已铺时传入与轨上 clip **同一个** `timing` 对象（帧格投影值），登记与轨上逐字节同源；
+ * 未铺（包络非正 / 不足一帧）时记派单窗口原值，如实说「这颗没铺、窗口本来在哪」。
+ */
+function toMetaBeat(it: MgLayItem, timing?: { track_st: number; track_ed: number; duration: number }): Omit<MgMetaBeat, "laid"> {
 	return {
 		beat: it.beat,
 		composition_id: it.composition_id,
-		track_st: it.track_st,
-		track_ed: r3(it.track_ed),
-		duration: slotEnvelope(it),
+		...(timing ?? { track_st: it.track_st, track_ed: r3(it.track_ed), duration: slotEnvelope(it) }),
 		html_path: it.html_rel,
 		...(it.category ? { category: it.category } : {}),
 	};

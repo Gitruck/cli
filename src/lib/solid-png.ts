@@ -26,8 +26,8 @@ export const BUILTIN_ASSET_DIR = "assets/builtin";
  */
 export const MAX_BED_DIM = 8192;
 
-/** PNG 签名（固定 8 字节）。 */
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+/** PNG 签名（固定 8 字节）。导出供 `mask-raster.ts`（灰度蒙版 PNG）复用同一套 chunk/CRC 零件。 */
+export const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /**
  * CRC-32(IEEE 802.3) 查表。**不用 `zlib.crc32`**：那是 node ≥20.15 才有的 API，
@@ -49,7 +49,11 @@ function crc32(buf: Buffer): number {
 	return (c ^ 0xffffffff) >>> 0;
 }
 
-/** 组一个 PNG chunk：len(4) + type(4) + data + crc(4)，CRC 覆盖 type+data。 */
+/** 组一个 PNG chunk：len(4) + type(4) + data + crc(4)，CRC 覆盖 type+data。导出供灰度蒙版 PNG 复用。 */
+export function pngChunk(type: string, data: Buffer): Buffer {
+	return chunk(type, data);
+}
+
 function chunk(type: string, data: Buffer): Buffer {
 	const len = Buffer.alloc(4);
 	len.writeUInt32BE(data.length, 0);

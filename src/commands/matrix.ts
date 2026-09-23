@@ -11,14 +11,17 @@
  * 检索域用户可见、本地与云端结果绝不静默混合；与仅云端语义的参数（--column/--material-class）互斥。
  */
 import type { Command } from "commander";
-import { resolve, join, dirname, basename } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
-import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
+import { resolve, join, dirname, basename, isAbsolute, relative, sep } from "node:path";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
 import { resolveColumnConfig } from "../lib/column-config";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
+// [fix-matrix-lay-frame-grid D7] 顶层 video_rate 与 gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
+import { videoRateOf } from "../lib/gtrk-patch";
+import { sec2ms } from "../lib/frame-domain";
 import {
 	BROLL_COVER_DIR,
 	BROLL_META_CANDIDATE_CAP,
@@ -32,16 +35,21 @@ import {
 	planBeatFills,
 	previewUrlFor,
 	projectHasShieldTrack,
-	wouldRefuseLay,
+	r3,
+	type AnchorOutcome,
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
+	type GapFillEntry,
 	type GapFillMode,
 	type MarkLookup,
+	type ProxyProbe,
 	type SourceLayer,
+	wouldRefuseLay,
 } from "../lib/matrix-lay";
-import { type ArrangeEndpoint, estimateGate, resolveArrangeUrl } from "../lib/arrange-client";
-import { type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
+import { type ArrangeEndpoint, estimateGate, type requestArrange, resolveArrangeUrl } from "../lib/arrange-client";
+import type { ArrangeRequest } from "../lib/arrange-wire";
+import { type ArrangeGateResult, type ArrangeMode, isLocalArrangeScope, resolveArrangeMode, runArrangeWithFallback } from "../lib/arrange-gate";
 import {
 	classifyCutsProbe,
 	emptyNotApplicable,
@@ -63,7 +71,8 @@ import {
 	imageStaticMaterialId,
 	type ImageMoveParams,
 } from "../lib/image-move";
-import { probeGeometry } from "../lib/media";
+import { probeGeometry, type Geometry } from "../lib/media";
+import { wallFromProbe } from "../lib/clock-adapter";
 import { uploadCached, invalidateUpload } from "../lib/upload-cache";
 import { submitTask, getTaskResult } from "../lib/cloud";
 import type { CloudFileTaskDeps } from "../lib/tool-runner";
@@ -106,6 +115,7 @@ import {
 	buildMaterialSearchBody,
 	decideLayUpsell,
 	decideMaterialUpsell,
+	deriveCopyrightLabel,
 	filterMaterialsByDuration,
 	materialEndpointFor,
 	parseMaterialDurationBounds,
@@ -118,15 +128,27 @@ import {
 } from "../lib/matrix-material";
 import {
 	describeImages,
+	flagDescMismatchNote,
 	getNearestCachedMark,
 	getNearestCachedHighlight,
 	resolveDescribeUrl,
 	runDescribeItems,
+	summarizeFlagDescMismatch,
+	summarizeDescribeCoverage,
+	describeCoverageNote,
+	type DescribeCoverage,
 	type DescribeEndpoint,
 	toDescribeMeta,
 	type DescribeWorkItem,
 	type MaterialDescribe,
+	type OverlayFlagDim,
 } from "../lib/describe";
+import {
+	parseRubricOption,
+	resolveHighlightRubric,
+	rubricUplinkNote,
+	type ResolvedRubric,
+} from "../lib/highlight-rubric";
 import { tmpDir } from "../lib/paths";
 import {
 	BALANCE_INSUFFICIENT_CODE,
@@ -151,6 +173,7 @@ import {
 	extractFrameJpg,
 	getCachedQueryVec,
 	indexLocalMaterials,
+	listMaterialFiles,
 	localIndexDbPath,
 	materialKindForPath,
 	openLocalIndexDb,
@@ -158,10 +181,11 @@ import {
 	type IndexRunResult,
 	type IndexSessionHooks,
 } from "../lib/local-index";
-import { loadLocalIndex, searchLoadedIndex, type LoadedIndex } from "../lib/local-search";
+import { loadLocalIndex, pathInDirs, searchLoadedIndex, type LoadedIndex } from "../lib/local-search";
 import { requireFfmpeg, resolveFfmpeg } from "../lib/ffmpeg";
 import { EXCLUDE_RECENT_DEFAULT, filterRecentlyUsed, recentBgmKeys } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
+import { readJson, readJsonSync } from "../lib/read-json";
 
 interface MatrixOpts {
 	/** matrix index：解码路径（speedup-matrix-index-proxy-decode）。 */
@@ -185,8 +209,13 @@ interface MatrixOpts {
 	/** `--local`：本地索引检索模式（显式开关，跳过身份探针，不触任何云端检索端点）。 */
 	local?: boolean;
 	/** `--dirs a,b`：本地素材**文件夹或单个素材文件**（index 的索引范围 / --local 的检索域）。
-	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。 */
-	dirs?: string;
+	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。
+	 *
+	 *  ⚠️ 类型是 `string | string[]`：commander 挂了 `collectPathArg`，**重复传即累加**，
+	 *  于是真实运行时恒为数组；单串形态保留是为了内部调用与既有测试（`{ dirs: "D:/x" }`）逐字兼容。
+	 *  MUST NOT 拿 `!!opts.dirs` 判「有没有传」——collect 无默认值，未传时仍是 `undefined`，
+	 *  但一旦有默认值 `[]` 就会恒真（本仓统一用 `parseDirsOption(...).length` 判，见 assertModeOptions）。 */
+	dirs?: string | string[];
 	/** `--scene-threshold`：matrix index 场景检测阈值（默认 0.3）。 */
 	sceneThreshold?: string;
 	/** `--stability-threshold`：matrix index 场景稳定性判定阈值（默认 0.05，保守值待标定）。 */
@@ -204,8 +233,9 @@ interface MatrixOpts {
 	// ── describe / 时间窗 / plan 编辑通路（add-matrix-describe-and-window）──
 	/** `--plan <path>`：matrix describe 的注入目标 plan / matrix lay 显式指定要消费的 plan 文件。 */
 	plan?: string;
-	/** `--materials <a,b,...>`：matrix describe 直接理解素材文件（视频按场景抽帧、图片直传）。 */
-	materials?: string;
+	/** `--materials <a,b,...>`：matrix describe 直接理解素材文件（视频按场景抽帧、图片直传）。
+	 *  与 `--dirs` 同口径（同一个 `collectPathArg` + `parseDirsOption`），可重复传累加。 */
+	materials?: string | string[];
 	/** `--source-window <start,end>`：--local 检索源时间窗过滤（秒；段级交集）。 */
 	sourceWindow?: string;
 	// ── 美观度权重（add-audio-project-atoms，仅 matrix lay）──
@@ -213,6 +243,9 @@ interface MatrixOpts {
 	markWeight?: string;
 	/** `--highlight-weight <0..1>`：看点权重（与 mark 正交）；默认 0 零回归。 */
 	highlightWeight?: string;
+	/** [fix-highlight-rubric-wiring] `--highlight-rubric <text|@file>`：看点评判准则（L1 层）。
+	 *  describe 用它决定上行什么、落哪个桶；lay 用它决定读哪个桶。不传 = L0（服务端缺省，零回归）。 */
+	highlightRubric?: string;
 	// ── 句界吸附（adjust-shot-cut-sentence-align）──
 	/** `--cut-align <ratio>`：字幕句起点吸附目标比例（默认 0.7；0=关闭回旧节奏切槽）。 */
 	cutAlign?: string;
@@ -228,6 +261,11 @@ interface MatrixOpts {
 	arrangeQc?: boolean;
 	/** `--arrange-estimate-only`：只报编排量，走到计价确认那一步就停（零云端调用、工程零改动）。 */
 	arrangeEstimateOnly?: boolean;
+	/** `--dump-request <file>`：把**实际上行的**云端编排请求体逐字节落到该文件（客服排障用）。
+	 *  缺省不写；MUST NOT 指向工程目录内（design §6「服务端一行不留」的客户端那一半）。 */
+	dumpRequest?: string;
+	/** `--explain`：外发调参仪表（缺省只回 `emptySlots` 供 upsell，其余诊断收在本开关后）。 */
+	explain?: boolean;
 	// ── 通用三态素材检索（add-matrix-material-search，仅 matrix material）──
 	/** `--scope clip|image|audio`：素材形态（缺省 audio）。 */
 	scope?: string;
@@ -257,6 +295,20 @@ export interface MatrixRunDeps {
 	videoSceneFrames?: (path: string) => Promise<{ materialId: string; frameTsSec: number[] }>;
 	/** matrix fetch 注入面（add-matrix-raw-fetch）：resign/下载替身透传给 lib 层（缺省 = 真实云链）。 */
 	matrixFetch?: MatrixFetchDeps;
+	/** matrix index 整轮替身（缺省 = 真实 indexLocalMaterials）。
+	 *  ⚠️ 只替换「索引这一轮」，命令层的域解析/枚举分项/诊断/退出码判定照常真跑 ——
+	 *  没有它，零枚举以外的结局（部分为空、断链上报）在单测里根本走不到：
+	 *  真索引一个素材必然要 ffprobe + 云端 embed，而单测两样都不许有。 */
+	indexRun?: typeof indexLocalMaterials;
+	/** 云端编排请求替身（缺省 = 真实 `requestArrange`，生产路恒 `undefined` ⇒ 行为逐字节不变）。
+	 *  ⚠️ 同 `indexRun` 的理由：没有它，命令层**一次云端编排响应都造不出来**——
+	 *  `arrange-gate` 侧的 `request` 注入到不了命令层（`arrangeWiring` 只注 endpoint），
+	 *  于是 `lay.arrange_run` 的端到端闸（自校验回落 / shadow / 回放 / 违约）一条都跑不起来。
+	 *  射程就这一个字段，MUST NOT 顺手加别的替身。 */
+	arrangeRequest?: typeof requestArrange;
+	/** 代理落盘即实测的 ffprobe 替身（add-cross-clock-adapter D2；缺省 = 真 `probeGeometry`）。
+	 *  单测注入 fake 离线跑「实测覆盖自述 / 失败回退 / 差 2 帧告警 / fps 不等告警」；生产路恒 `undefined`。 */
+	probe?: (abs: string) => Geometry;
 }
 
 export function registerMatrix(program: Command): void {
@@ -273,7 +325,9 @@ export function registerMatrix(program: Command): void {
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
 		.option(
 			"--dirs <a,b,...>",
-			"本地素材文件夹**或单个素材文件**（逗号分隔）——matrix index 的索引范围 / --local 的检索域；传文件即把检索域收窄到该素材",
+			"本地素材文件夹**或单个素材文件**（逗号分隔，或**重复传** --dirs 累加）——matrix index 的索引范围 / --local 的检索域；" +
+				"传文件即把检索域收窄到该素材。**路径里有英文半角逗号时用重复传**（整串在盘上存在时也会自动不拆；中文全角「，」从不参与拆分）",
+			collectPathArg,
 		)
 		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
 		.option(
@@ -294,7 +348,12 @@ export function registerMatrix(program: Command): void {
 			"--plan <path>",
 			"matrix describe：理解该 plan 的 top 候选并把产物写回 result.describe；matrix lay：显式指定要消费的 plan 文件（缺省 <project>/split/broll-plan.json）",
 		)
-		.option("--materials <a,b,...>", "matrix describe：直接理解素材文件（逗号分隔；视频按场景抽帧、图片直传）")
+		.option(
+			"--materials <a,b,...>",
+			"matrix describe：直接理解素材文件（逗号分隔，或**重复传** --materials 累加；视频按场景抽帧、图片直传）。" +
+				"**路径里有英文半角逗号时用重复传**（与 --dirs 共用同一解析口径）",
+			collectPathArg,
+		)
 		.option(
 			"--source-window <start,end>",
 			"--local 检索：只返回与源时间窗（秒）有交集的命中段（段边界不裁剪；图片候选不参与；窗口无命中返回空结果非错误）",
@@ -313,6 +372,12 @@ export function registerMatrix(program: Command): void {
 			"仅 matrix lay：看点权重 0..1（默认 0 关闭零回归）——与 --mark-weight 正交（mark=画面好不好看，highlight=有没有看点：信息量/戏剧性/情绪强度/稀缺性）；两权之和钳到 1，看点分取 describe 理解缓存，无缓存候选中性（权重回吐给 sim）",
 		)
 		.option(
+			"--highlight-rubric <text|@file>",
+			"仅 matrix describe / matrix lay：看点评判准则（≤2000 字符）。`@<路径>` 从文件读（多行准则的主用法，免命令行转义）。" +
+				"三级取用 L1 本参数 > L2 栏目配置 broll.highlight_rubric > L0 服务端领域无关缺省；" +
+				"**不传 = 整个字段不上行，行为与本参数引入前逐字节一致**。看点分按准则分桶缓存：换准则只重打分、不动客观描述缓存",
+		)
+		.option(
 			"--mark-weight <w>",
 			"仅 matrix lay：美观度权重 0..1（默认 0 关闭零回归）——候选融合分 = sim×(1-w)+(mark/100)×w，mark 取 describe 理解缓存（素材内就近帧）；无缓存候选按中性处理（融合分=sim，不惩罚不加分）",
 		)
@@ -323,7 +388,8 @@ export function registerMatrix(program: Command): void {
 		)
 		.option(
 			"--gap-fill <mode>",
-			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、再不够垫黑片；" +
+			"音频驱动工程主轨空洞填充 fast|solid|none（缺省 solid）：fast=放宽 score 地板从候选池随便填、耗尽延长相邻颗粒、" +
+				"再耗尽跨 beat 借候选、剩下短于最小镜头长的残洞也补真画面（补不满整段才垫黑片）——**尽量不留黑**；" +
 				"solid=黑片垫齐（精修时一眼看出「这里没匹配到」）；none=留 gap（客户端主轨磁吸开启时 gap 会被吸除、后续画面整体前移与配音错位，慎用）。" +
 				"口播工程主轨为 A-roll，本参数不适用（照旧留空语义）",
 		)
@@ -354,6 +420,19 @@ export function registerMatrix(program: Command): void {
 				"⚠️ 它省的是**云端那一次调用与其计费**（以及其后的候选下载与落轨），不是整条链：" +
 				"编排量的分母（beat 数/候选段数/轨数/标定遍数）本来就要读工程、读 plan、做重投影才算得出，该走的还得走。" +
 				"与 --yes 同时给时以本开关为准（--yes 的意思是「别问我」，不是「无论如何都跑」）",
+		)
+		.option(
+			"--dump-request <file>",
+			"排障用：把**实际上行的**云端编排请求体（投影后的 plan + opts + algo_pin + 本地预估编排量）逐字节写到该文件。" +
+				"服务端**一行不留**（它只存规模摘要，不存你的 plan），所以出了问题只有这份文件能复现——把它发给我们即可。" +
+				"缺省不写；**不能指向工程目录内**（那会让它随工程一起被分发出去）。" +
+				"开 --arrange-qc 时每一轮各写一份，第 N 轮落在 <file> 同名加 .roundN",
+		)
+		.option(
+			"--explain",
+			"外发调参仪表：缺省的机读账面只给「留空槽数」（够判断素材池是不是不够用），" +
+				"其余用于调参的细账（其中多少是窗口精修致空、跳剪避让枯竭放行了几次、取用了几个高运动/模糊段）收在本开关后。" +
+				"人读日志同口径。不影响任何决策，工程产物逐字节不变",
 		)
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
@@ -441,13 +520,108 @@ export function parseMatrixPositional(words: string[] | undefined): MatrixPositi
 	return { kind: "search", query };
 }
 
-/** `--dirs a,b` 解析（去空、resolve 绝对化）。 */
-export function parseDirsOption(raw: string | undefined): string[] {
-	return (raw ?? "")
-		.split(",")
-		.map((s) => s.trim())
-		.filter(Boolean)
-		.map((s) => resolve(s));
+/**
+ * 路径类参数的 commander 累加器（`--dirs` / `--materials`）。
+ *
+ * ⚠️ **无初值**：`prev` 首次为 `undefined`，未传时 `opts.dirs` 保持 `undefined`。
+ * MUST NOT 给它挂 `[]` 默认值——`assertModeOptions` 里 `!!opts.materials` 那几条互斥判据
+ * 会因为空数组恒真而全线误报（`--materials` 明明没传，describe 的 xor 却判「两个都给了」）。
+ *
+ * 修的另一个独立小坑：此前重复传 `--dirs "A" --dirs "B"` 是**后者静默覆盖前者**，
+ * A 无声消失。静默丢弃用户显式传入的参数值在任何情况下都不该发生。
+ */
+export function collectPathArg(v: string, prev: string[] | undefined): string[] {
+	return prev === undefined ? [v] : [...prev, v];
+}
+
+/** 一段 `--dirs` 原串的切分诊断（供零枚举时点名真因，见 runIndexMode）。 */
+export interface DirsArgSegment {
+	/** 切出来的原文（已 trim）。 */
+	text: string;
+	/** resolve 后的绝对路径（不存在的那些正是被凭空捏造出来的）。 */
+	abs: string;
+	exists: boolean;
+	/** 原文不是绝对路径 ⇒ 它被按 cwd 拼成了一条根本没人传过的路径。 */
+	relativeToCwd: boolean;
+}
+
+/** `--dirs` / `--materials` 的解析结果 + 切分诊断。 */
+export interface DirsArgAnalysis {
+	/** 原样收到的参数串（重复传即多条）。 */
+	raws: string[];
+	/** 解析后的绝对路径项（`parseDirsOption` 的返回值即此字段）。 */
+	dirs: string[];
+	/**
+	 * 可疑切分：原串含英文半角逗号、拆出 ≥2 段、且**至少一段不存在**。
+	 * 三个条件缺一不可——「检测到才说、说就点名」，MUST NOT 见逗号就喊
+	 * （`--dirs "X:/夹A,X:/夹B"` 两段都在盘上时是完全正常的旧写法）。
+	 */
+	commaSplits: { raw: string; segments: DirsArgSegment[] }[];
+}
+
+/**
+ * `--dirs a,b` / 重复传 解析（去空、resolve 绝对化）+ 切分诊断。
+ *
+ * ## 为什么要有「整串存在就不拆」这条前置短路
+ *
+ * 真机（2026-09-02 旅拍解说批）：一条 YouTube 下载的 B-roll 文件名带英文半角逗号
+ * （`Visit Ketchikan Alaska - Bears, Salmon and Adventure….mp4`），裸 `split(",")`
+ * 把它劈成两半、后半按 cwd resolve 成一条凭空捏造的相对路径，两半都不存在 ⇒
+ * `listFilesMatching` 逐项软失败跳过 ⇒ 枚举 0 个 ⇒ 打「✅ 索引完成 0/0」⇒ **退出码 0**
+ * （求证者单条命令、无管道、`rc=$?` 独立取值实测 `EXIT_CODE_IS=0`）。
+ * 同一轮里另一条片的文件名带的是**全角**「，」(U+FF0C)，`split(",")` 打不中、索引成功
+ * —— 用户凭直觉会觉得「逗号没事，我上一条就带逗号」，这条不对称对中文优先的工具尤其阴。
+ *
+ * 判据是「**一个真实存在的路径 > 一个假想的分隔语义**」。同仓已有先例：
+ * `local-index.ts` 的 `realBasenamePath` 就是「宁可多做一次 readdir 也不丢掉这个文件」。
+ *
+ * ## 兼容性（逐条钉死）
+ *
+ * - `--dirs a,b` 旧写法逐字兼容（整串 `a,b` 不存在 ⇒ 照旧拆）；
+ * - `--dirs "<夹>,<夹>/A.mp4"`（add-local-search-material-scope 立的用法）行为不变；
+ * - 唯一的行为变化是「整串恰为一个真实存在的路径」——该情形在本条落地前**必然**产出
+ *   零素材，没有可回归的正确行为。
+ *
+ * ## MUST NOT（proposal 已逐条判死，别复活）
+ *
+ * - MUST NOT 引入 `\,` 转义（Windows 优先的工具，`\` 就是路径分隔符，`C:\dir\,name` 是新歧义）；
+ * - MUST NOT 换分隔符为 `;` / `|`（前者在 Windows 路径里同样合法，后者要额外引用）；
+ * - MUST NOT 做「拆开后把不存在的相邻片段拼回去试」的贪心重组（可重复传已是无歧义解，
+ *   重组只会制造第二套隐式语义）。
+ */
+export function analyzeDirsOption(raw: string | string[] | undefined): DirsArgAnalysis {
+	const raws = raw === undefined ? [] : Array.isArray(raw) ? raw : [raw];
+	const dirs: string[] = [];
+	const commaSplits: DirsArgAnalysis["commaSplits"] = [];
+	for (const one of raws) {
+		const whole = one.trim();
+		// ① 自愈短路：整串原样就是盘上一条真实路径 ⇒ 不拆
+		if (whole && existsSync(whole)) {
+			dirs.push(resolve(whole));
+			continue;
+		}
+		// ② 旧口径：逗号拆分（去空、trim、resolve）
+		const texts = one
+			.split(",")
+			.map((s) => s.trim())
+			.filter(Boolean);
+		const segments: DirsArgSegment[] = texts.map((text) => ({
+			text,
+			abs: resolve(text),
+			exists: existsSync(text),
+			relativeToCwd: !isAbsolute(text),
+		}));
+		if (one.includes(",") && segments.length >= 2 && segments.some((s) => !s.exists)) {
+			commaSplits.push({ raw: one, segments });
+		}
+		for (const s of segments) dirs.push(s.abs);
+	}
+	return { raws, dirs, commaSplits };
+}
+
+/** `--dirs a,b` / 重复传 解析（去空、resolve 绝对化）。诊断面见 `analyzeDirsOption`。 */
+export function parseDirsOption(raw: string | string[] | undefined): string[] {
+	return analyzeDirsOption(raw).dirs;
 }
 
 /**
@@ -482,6 +656,14 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 	}
 	if (opts.markWeight !== undefined && pos.kind !== "lay") {
 		throw new Error("--mark-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
+	}
+	// [fix-highlight-rubric-wiring] --highlight-rubric 只在「打分」与「读分」两步有意义：
+	// describe 决定按哪套准则打、lay 决定读哪个桶。检索/索引口收了它也无处生效，
+	// 静默忽略等于让用户以为准则起了作用（本件治的正是这类静默）。
+	if (opts.highlightRubric !== undefined && pos.kind !== "describe" && pos.kind !== "lay") {
+		throw new Error(
+			"--highlight-rubric 仅用于 matrix describe（按该准则打分）与 matrix lay（读该准则的分桶），不做静默忽略",
+		);
 	}
 	if (pos.kind === "material") {
 		if (opts.local || dirs.length) {
@@ -564,7 +746,25 @@ export interface MatrixResult {
 	columnId?: string;
 	planPath?: string;
 	results?: PlanResult[];
-	counts: { beats: number; queries: number; results: number; errors: number };
+	counts: {
+		beats: number;
+		queries: number;
+		/** ⚠️ **去重前**逐 query 累加的检索响应条数（既有口径，MUST NOT 改）——
+		 * 15 条 query 各命中同一条素材时这里是 15，而 plan 落盘可能只有 8 行、只对应 1 个素材
+		 * （真机 P1 260902 实测）。要判「到底有多少料」读 `plan_results` / `distinct_clips`。 */
+		results: number;
+		errors: number;
+		// ⚠️ 以下三键 [add-broll-plan-summary-honesty] 只在**派单消费模式**（本命令产 plan 那一路）出现。
+		// ad-hoc `matrix search` 与 `matrix lay` 的 counts 逐字节不变（本件只动产 plan 这一路，
+		// 给它们补 0 等于把「没这个概念」和「测出来是 0」抹平成同一个数）。
+		/** 真·零产出的 query 条数：判据取**检索响应** `data.results.length === 0`，
+		 * MUST NOT 事后扫 plan 的 `results: []`（beat 内去重会把命中折进同 beat 兄弟 query，折叠 ≠ 零产出）。 */
+		zero_yield?: number;
+		/** plan **落盘后**实际 result 行数（去重后）。 */
+		plan_results?: number;
+		/** plan 内 distinct `clip_id` 数——「8 行 result 其实只有 1 条素材」这件事只有它说得出来。 */
+		distinct_clips?: number;
+	};
 	[k: string]: unknown;
 }
 
@@ -602,9 +802,18 @@ export interface MatrixIndexBilling {
 }
 
 export interface MatrixIndexResult {
+	/**
+	 * ⚠️ **机读契约变更**（fix-material-intake-path-and-enumeration §3）：
+	 * 此前恒为硬编码 `true`，现在**全域零枚举**（`materials.total === 0`）时为 `false`，
+	 * 退出码随之非 0。凡用 `--json` 的 `ok` 或退出码消费 `matrix index` 的脚本/skill 都看得见差别；
+	 * 但此前为 `true` 的那些场景全部是「什么都没索引到」，没有正确行为被打破。
+	 * 触发面 MUST 收窄到「全域」——多项 `--dirs` 里只有部分为空时仍为 `true`（那一轮确实干了活）。
+	 */
 	ok: boolean;
 	mode: "index";
 	dirs: string[];
+	/** 逐项交代（同上）：`--dirs` 每一项各自枚举到的素材数，供 agent 判「哪一句祈使句没兑现」。 */
+	per_dir: { dir: string; materials: number }[];
 	dbPath: string;
 	materials: { total: number; indexed: number; skipped: number; rebuilt: number; failed: number };
 	/** kind 分列计数（add-matrix-local-image-broll：图片/视频各自 total/indexed）。 */
@@ -612,8 +821,13 @@ export interface MatrixIndexResult {
 	scenes: number;
 	frames: number;
 	/** 稳定性收敛账面（add-index-stability-sampling：分列 stable/unstable 场景数与收敛省帧数；
-	 * 图片不参与，只计本轮实际入库的视频素材）。 */
-	stability: { stable_scenes: number; unstable_scenes: number; frames_saved: number };
+	 * 图片不参与，只计本轮实际入库的视频素材）。
+	 * `black_veto_*`（fix-index-gradual-transition-blindness）：因**含黑段**被否决 stable 的场景数，
+	 * 与该否决带来的**新增**抽帧数。⚠️ 与 `frames_saved` **分列不相抵**——一笔是省、一笔是增，
+	 * 合并成净值会把「成本为什么涨了」藏起来。旧库/未扫黑段的素材两键恒为 0（不是缺席）。 */
+	stability: { stable_scenes: number; unstable_scenes: number; frames_saved: number; black_veto_scenes: number; black_veto_frames: number };
+	/** 本轮入库视频素材里判为 VFR 的条数（add-frame-rate-table-vfr-detect；对应逐条 WARN，不落库）。 */
+	vfr_materials: number;
 	billing: MatrixIndexBilling;
 	elapsedSec: number;
 	[k: string]: unknown;
@@ -641,7 +855,7 @@ export async function runMatrix(
 	const cfg = loadConfig();
 
 	// ── 本地索引模式（matrix index）──
-	if (pos.kind === "index") return withEmbedJsonGuard("index", opts, () => runIndexMode(cfg, opts));
+	if (pos.kind === "index") return withEmbedJsonGuard("index", opts, () => runIndexMode(cfg, opts, deps));
 
 	// ── 理解零件（matrix describe：--plan 注入 / --materials 直接理解）──
 	if (pos.kind === "describe") return withEmbedJsonGuard("describe", opts, () => runDescribeMode(cfg, opts, deps));
@@ -686,10 +900,10 @@ export async function runMatrix(
 	if (tier === "external") {
 		// 死角要明示，绝不静默吞：显式要 concept = 报错退出；real_shot = 警告继续
 		if (opts.materialClass === "concept") {
-			throw new Error("external 档位服务端固定 real_shot+有版权素材，concept 不可用（--material-class concept 无法满足）");
+			throw new Error("external 档位服务端固定 real_shot + 可商用素材，concept 不可用（--material-class concept 无法满足）");
 		}
 		if (opts.materialClass) {
-			log.warn("external 档位服务端固定 real_shot+有版权素材，--material-class 参数不适用（已忽略）");
+			log.warn("external 档位服务端固定 real_shot + 可商用素材，--material-class 参数不适用（已忽略）");
 		}
 		if (broll && (broll.column_tag_ids?.length || broll.material_class_policy || broll.facet_defaults)) {
 			log.warn("当前身份为 external，栏目检索偏好（column_tag_ids/material_class/facets）不适用");
@@ -798,13 +1012,15 @@ export function composeIndexBilling(exempt: boolean, run: Pick<IndexRunResult, "
 }
 
 /** matrix index：本地素材免切片索引（进度行 + 计量会话 + --json 机读 summary）。 */
-async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts): Promise<MatrixIndexResult> {
-	const dirs = parseDirsOption(opts.dirs);
+async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts, deps: MatrixRunDeps = {}): Promise<MatrixIndexResult> {
+	const indexRun = deps.indexRun ?? indexLocalMaterials;
+	const analysis = analyzeDirsOption(opts.dirs);
+	const dirs = analysis.dirs;
 	const threshold = parseSceneThreshold(opts.sceneThreshold);
 	const stabilityThreshold = parseStabilityThreshold(opts.stabilityThreshold);
 	const endpoint = embedEndpointFor(cfg);
 	log.step(
-		`▶ 本地素材索引：${dirs.join("、")}（场景阈值 ${threshold} · 稳定阈值 ${stabilityThreshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`,
+		`▶ 本地素材索引：${formatDirsEcho(dirs)}（场景阈值 ${threshold} · 稳定阈值 ${stabilityThreshold}${opts.rebuild ? " · 强制全量重建" : ""}）…`,
 	);
 	log.info("免切片：只记场景时间戳，不产生任何切片文件；抽帧图 embed 后即删（素材本体不上云）。");
 	// 同合云内部成员（gc_member_type=internal）豁免：无 token 也放行图像且零计费 → 直接不开会话
@@ -815,8 +1031,33 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 	if (proxyWidth !== undefined && (!Number.isFinite(proxyWidth) || proxyWidth < 64)) {
 		throw new Error("--proxy-width 需为 ≥64 的数字");
 	}
-	const run = await indexLocalMaterials({
+	// 逐项交代（§3）：枚举一次、按项归属，再把这份清单**原样**交给 indexLocalMaterials
+	// （`listFiles` 注入面），全程只走一遍文件系统 —— MUST NOT 为了分项计数再枚举 N 遍，
+	// X 盘素材大本营那种上万文件的库会当场变慢 N 倍。
+	// ⚠️ 这里钉的是 `listMaterialFiles`（= indexLocalMaterials 的缺省枚举口，local-index.ts
+	//    `(opts.listFiles ?? listMaterialFiles)(opts.dirs)`）。两边 MUST 保持同一个函数：
+	//    枚举语义（单文件收窄 / 白名单 / 符号链接跟随）的任何演进都在它内部，命令层不复刻。
+	const enumerated = listMaterialFiles(dirs);
+	const perDir = dirs.map((dir) => ({ dir, materials: enumerated.filter((f) => pathInDirs(f, [dir])).length }));
+	const emptyDirs = perDir.filter((p) => p.materials === 0);
+	// 逐项报数**在开跑之前**说：这是枚举阶段的事实，用户不该等完一轮长跑才知道有一项是空的。
+	if (perDir.length > 1) {
+		log.info(`枚举分项：\n${perDir.map((p) => `     ${String(p.materials).padStart(5)} 个 · ${p.dir}`).join("\n")}`);
+	}
+	// 部分静默：今天只要 total>0 就一声不吭 ——`A.mp4` 成功 + 含逗号的 `B` 被劈丢时输出毫无异样。
+	// 用户显式传入的每一项都是一句祈使句，其中任何一句没兑现都要说出来。
+	// ⚠️ **只告警、MUST NOT 动退出码**：本轮确实干了活。硬失败的触发面 MUST 收窄到「全域零枚举」，
+	// 扩到「任何一项为空」会把「传一个空素材夹」这类正当场景一起判死（proposal §五已定夺）。
+	if (emptyDirs.length && emptyDirs.length < perDir.length) {
+		log.warn(
+			`以下 ${emptyDirs.length} 项一个素材都没枚举到（本轮其余项有产出，退出码仍 0）：\n` +
+				emptyDirs.map((p) => `  ${p.dir}`).join("\n") +
+				commaCulpritLines(analysis),
+		);
+	}
+	const run = await indexRun({
 		dirs,
+		listFiles: () => enumerated,
 		sceneThreshold: threshold,
 		stabilityThreshold,
 		rebuild: opts.rebuild === true,
@@ -826,6 +1067,14 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 		embed: (inputs, sessionToken) => embedInputs(endpoint, inputs, { sessionToken }),
 		session: exempt ? undefined : buildIndexSessionHooks(endpoint),
 		onProgress: (line) => log.info(line),
+		// 告警行（add-frame-rate-table-vfr-detect）：VFR / 帧率不可解析走 WARN 级，与事实行分级，不淹在 INFO 里
+		onWarn: (line) => log.warn(line),
+		// 长跑心跳（add-matrix-index-phase-progress）：本仓既有的 tick/tickEnd 口径（render / oralcut /
+		// transcript / long2short / music-visualizer / chunk-upload 六处在用），index 是唯一漏掉的长跑命令。
+		// 收口纪律在编排层：任何 onProgress 之前先 tickEnd，命令层这里只做直连、MUST NOT 自己再判。
+		// `--json` 下 routeLogsToStderr() 已把 humanOut 整体搬到 stderr ⇒ 心跳同走 stderr，stdout 仍纯 JSON。
+		onTick: (line) => log.tick(line),
+		onTickEnd: () => log.tickEnd(),
 	});
 	const m = run.materials;
 	const billing = composeIndexBilling(exempt, run);
@@ -840,41 +1089,162 @@ async function runIndexMode(cfg: ReturnType<typeof loadConfig>, opts: MatrixOpts
 					: "";
 	const kindNote = run.kinds.image.total > 0 ? `（视频 ${run.kinds.video.indexed}/${run.kinds.video.total} · 图片 ${run.kinds.image.indexed}/${run.kinds.image.total}）` : "";
 	const stab = run.stability;
+	// 黑段否决 stable 的账（fix-index-gradual-transition-blindness）：库侧早就分好了两笔，
+	// 这里是它们第一次出现在人读行与 --json 上。
+	// ⚠️ **两笔 MUST 分列、MUST NOT 相抵**：`framesSaved` 是**省**（stable 收敛少抽的帧），
+	// `blackVetoFrames` 是**增**（因含黑段被否决 stable 而多抽的帧，直接进 embed 计费，
+	// 真机那条 18.034s 场景由 1 帧 → 9 帧）。合成一个净值就把「成本为什么涨了」这件事藏起来了——
+	// 净值恰好为 0 的那一轮读者会以为「本轮没有任何成本变化」，而实际是省的和增的各发生了一批。
+	const blackNote = stab.blackVetoScenes > 0 ? `（含黑段否决 stable ${stab.blackVetoScenes} 段 · 增 ${stab.blackVetoFrames} 帧）` : "";
 	const stabNote =
 		stab.stableScenes + stab.unstableScenes > 0
-			? ` · stable 场景 ${stab.stableScenes} / unstable ${stab.unstableScenes}${stab.framesSaved ? `（收敛省 ${stab.framesSaved} 帧）` : ""}`
+			? ` · stable 场景 ${stab.stableScenes} / unstable ${stab.unstableScenes}${stab.framesSaved ? `（收敛省 ${stab.framesSaved} 帧）` : ""}${blackNote}`
 			: "";
-	// 零枚举告警（add-local-search-material-scope §2）：ok:true / 退出码 0 维持不变
-	// ——「没找到素材」不是失败，但**静默的成功**会让用户以为索引好了、然后在检索侧撞空。
-	if (run.materials.total === 0) {
-		log.warn(
-			`一个素材都没枚举到（域：${run.dirs.join("、")}）。三种可能，逐条排查：\n` +
-				"  ① `--dirs` 指的路径不存在或拼错了；\n" +
-				"  ② 传的是文件，但扩展名不在素材白名单里（图片/视频之外的一律不收）；\n" +
-				"  ③ 传的是文件夹，但里面（含 4 层子目录内）没有素材文件。\n" +
-				"索引本身没失败，只是这一轮无事可做。",
-		);
-	}
-	log.ok(
-		`索引完成：${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
-			`场景 ${run.scenes} · 帧 ${run.frames}${stabNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`,
-	);
+	// ── 全域零枚举硬失败（fix-material-intake-path-and-enumeration §3）──
+	//
+	// 此前：零枚举只 log.warn，`ok` 硬编码 true、退出码 0 —— 一条「什么都没索引到」的命令
+	// 报成功。真机 2026-09-02 的失败链条正断在这里：index「成功」⇒ agent 接着往下跑 ⇒
+	// 空候选一路流到成片，用户看到的第一个异常离病灶隔了三四步。
+	// **告警不是契约，退出码才是**：本命令的主要驱动者是 agent 与 `index … && describe …`
+	// 这样的 shell 串（skills/gtrk-travel-recap:211 就是这么写的），它们读退出码与 `ok`，
+	// 不读 stderr 上的中文段落。改成硬失败，那个 `&&` 会在正确的地方停住。
+	// MUST NOT 加 `--allow-empty` 之类让零枚举重新变成成功的逃生门。
+	const zeroAll = run.materials.total === 0;
+	if (zeroAll) log.warn(zeroEnumerationDiagnosis(analysis, dirs, readBrokenLinks(run)));
+	// VFR 计数（add-frame-rate-table-vfr-detect）：>0 才上摘要行（逐条 WARN 已在上面打过，这里是一眼总数）
+	const vfrMaterials = run.vfrMaterials ?? 0;
+	const vfrNote = vfrMaterials > 0 ? ` · VFR 素材 ${vfrMaterials}` : "";
+	const summary =
+		`${m.indexed}/${m.total} 个素材${kindNote}（跳过 ${m.skipped} · 重建 ${m.rebuilt}${m.failed ? ` · 失败 ${m.failed}` : ""}）· ` +
+		`场景 ${run.scenes} · 帧 ${run.frames}${stabNote}${vfrNote} · 耗时 ${(run.elapsedMs / 1000).toFixed(1)}s${billNote}`;
+	// MUST NOT 打出与正常完成无差别的成功行（真机就是被那句「✅ 索引完成：0/0」骗过去的）
+	if (zeroAll) log.err(`索引未产出任何素材：${summary}\n   判失败（退出码 1 · --json 的 ok=false）——「让这批素材可检索」这句祈使句没兑现。`);
+	else log.ok(`索引完成：${summary}`);
 	log.info(`索引落点：${run.dbPath}（绝对路径为键，跨机不可移植；属本机缓存，可随时重建）`);
 	const result: MatrixIndexResult = {
-		ok: true,
+		ok: !zeroAll,
 		mode: "index",
 		dirs: run.dirs,
+		per_dir: perDir,
 		dbPath: run.dbPath,
 		materials: run.materials,
 		kinds: run.kinds,
 		scenes: run.scenes,
 		frames: run.frames,
-		stability: { stable_scenes: stab.stableScenes, unstable_scenes: stab.unstableScenes, frames_saved: stab.framesSaved },
+		stability: {
+			stable_scenes: stab.stableScenes,
+			unstable_scenes: stab.unstableScenes,
+			frames_saved: stab.framesSaved,
+			// 与 frames_saved **并列独立成键**（见上方 blackNote 处的理由）：机读面同样不许相抵。
+			black_veto_scenes: stab.blackVetoScenes,
+			black_veto_frames: stab.blackVetoFrames,
+		},
+		// VFR 素材计数（add-frame-rate-table-vfr-detect D4）：机读对应逐条 WARN；不加 DB 列，恒带（0 = 本轮入库的都是 CFR / 未判）
+		vfr_materials: vfrMaterials,
 		billing,
 		elapsedSec: Math.round(run.elapsedMs / 100) / 10,
 	};
+	// 退出码对齐本仓既有写法（fetch / runPlanMode / runLayMode 三处同款）：ok:false ⇒ 非 0。
+	// 放在 result 构造之后、--json 打印之前，机读面与退出码 MUST NOT 互相矛盾。
+	if (!result.ok) process.exitCode = 1;
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
+}
+
+/**
+ * 域回显：多项时每项独占一行。
+ *
+ * MUST NOT 用「、」拼接 —— 例如一行同时包含 `素材库/…Bears` 与 `素材库/…Salmon and…` 时，
+ * 被英文逗号劈开的后半段长得像一条正常路径，**肉眼极难认出是同一个文件被切开**。
+ * 那是当时唯一的线索，而它实际不可读。
+ */
+function formatDirsEcho(dirs: string[]): string {
+	if (dirs.length === 0) return "(空)";
+	if (dirs.length === 1) return dirs[0]!;
+	return `${dirs.length} 项\n${dirs.map((d, i) => `   [${i + 1}] ${d}`).join("\n")}`;
+}
+
+/**
+ * 把检索域回抄成一条**可直接粘贴**的命令片段：每项各一次 `--dirs`。
+ *
+ * 此前是 `--dirs "a","b"`（JSON.stringify 后用逗号拼），两处都错：
+ *   · 逗号拼 —— 那形态在 shell 里会被并成一个参数值 `a,b` 再被逗号拆回来，纯属巧合可用；
+ *     一旦路径本身含英文逗号就当场错。重复传才是「路径里可能有任何字符」的唯一无歧义解；
+ *   · `JSON.stringify` —— Windows 路径会被转义成 `"C:\\Users\\x"`，**cmd.exe 里粘贴即错**
+ *     （它不认 `\\` 转义，会当成两个分隔符）。回抄的是给人粘的命令，用裸双引号即可
+ *     （Windows 文件名本就不允许 `"`）。
+ */
+function dirsAsRepeatedFlag(dirs: string[]): string {
+	if (dirs.length === 0) return "--dirs <素材夹或素材文件>";
+	return dirs.map((d) => `--dirs "${d}"`).join(" ");
+}
+
+/**
+ * 定向检测①：英文半角逗号切分。**检测到才说、说就点名**；没命中返回空串。
+ *
+ * MUST NOT 退化成「泛泛补一条『会不会是逗号』」——罗列可能原因不能代替检测。
+ */
+function commaCulpritLines(analysis: DirsArgAnalysis): string {
+	if (analysis.commaSplits.length === 0) return "";
+	const out: string[] = [];
+	for (const { raw, segments } of analysis.commaSplits) {
+		// ⚠️ 用「」包而不是 JSON.stringify：后者会把 Windows 路径的 `\` 全转义成 `\\`，
+		// 一条本来就难读的路径变成两倍难读——而这段文字的唯一职责就是让人**一眼看懂被切在哪**。
+		out.push(`  ❗ 这一串被英文半角逗号「,」切成了 ${segments.length} 段：「${raw}」`);
+		segments.forEach((s, i) => {
+			const rel = s.relativeToCwd ? `（不是绝对路径 ⇒ 被当成相对路径拼到了当前目录下：${s.abs}）` : "";
+			out.push(`     第 ${i + 1} 段「${s.text}」→ ${s.exists ? "存在" : "不存在"}${rel}`);
+		});
+	}
+	out.push("  若它本来就是**一条**含逗号的路径：改用重复传，每条各一次 —— 例如");
+	out.push('     gtrk matrix index --dirs "<路径一>" --dirs "<路径二>"');
+	out.push("  （中文全角「，」U+FF0C 从不参与拆分：同一轮里全角那条片索引成功、半角这条 0/0，就是这个不对称。）");
+	return `\n${out.join("\n")}`;
+}
+
+/**
+ * 断链上报的读取口（seam）。
+ *
+ * 跟随符号链接与 `brokenLinks` 计数在 `src/lib/local-index.ts` 落地（本 change §2），
+ * 由它把**断链的链接路径**上抛到 `IndexRunResult.brokenLinks`。这里按 duck-typing 读、
+ * 形状不符即退化为空数组：诊断段宁可少说一句，也 MUST NOT 因为上游形状变了就把整条命令带崩。
+ */
+function readBrokenLinks(run: IndexRunResult): string[] {
+	const v = (run as { brokenLinks?: unknown }).brokenLinks;
+	return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * 零枚举诊断：**先报已检出的真因，再报未能检出时的可能原因**。
+ *
+ * 此前只有后者，且被自称穷举成「三种可能」。真机两次零枚举命中的都不在那三条里：
+ * 逗号场景下路径没拼错、扩展名 `.mp4` 在白名单、传的不是文件夹 —— 三条全为假，
+ * 且会把人往错误方向带；symlink 场景下用户读到「里面没有素材文件」，而 `ls -la` 明明列着一个 .mp4。
+ * 所以措辞里 MUST NOT 再出现「三种可能」这类穷举自称（本轮命中的是第四、第五种）。
+ */
+function zeroEnumerationDiagnosis(analysis: DirsArgAnalysis, dirs: string[], brokenLinks: string[]): string {
+	const parts: string[] = [`一个素材都没枚举到（域：${formatDirsEcho(dirs)}）。`];
+	const comma = commaCulpritLines(analysis);
+	if (comma) parts.push(`已检出的真因：${comma}`);
+	// 定向检测②：断链符号链接 —— 遍历已跟随链接之后，断链仍会导致零枚举
+	if (brokenLinks.length) {
+		const head = comma ? "另一条已检出的真因：" : "已检出的真因：";
+		parts.push(
+			`${head}\n  ❗ ${brokenLinks.length} 条符号链接的目标不可达（链接在、真身没了）：\n` +
+				brokenLinks.slice(0, 10).map((p) => `     ${p}`).join("\n") +
+				(brokenLinks.length > 10 ? `\n     …（其余 ${brokenLinks.length - 10} 条略）` : ""),
+		);
+	}
+	if (!comma && brokenLinks.length === 0) {
+		parts.push(
+			"没检出确定的真因。以下是常见原因，逐条排查：\n" +
+				"  · `--dirs` 指的路径不存在或拼错了；\n" +
+				"  · 传的是文件，但扩展名不在素材白名单里（图片/视频之外的一律不收）；\n" +
+				"  · 传的是文件夹，但里面（含 4 层子目录内）没有素材文件；\n" +
+				"  · 素材在可移动盘/网络盘上，而那个盘当前没挂上。",
+		);
+	}
+	return parts.join("\n");
 }
 
 /** --scene-threshold 解析：(0,1) 浮点，非法值按默认（告警）。 */
@@ -906,18 +1276,96 @@ export interface MatrixDescribeResult {
 	described: number;
 	/** 缓存命中数（零调用零计费——缓存即钱）。 */
 	cached: number;
-	/** 实际调服务端张数（计费口径：1 积分/张同步计费）。 */
+	/** 实际调服务端张数（计费口径：1 积分/张，异步任务计费——提交预扣→完成结算，失败自动退款）。 */
 	called: number;
+	/** 其中**因服务端判据升级而重跑**的张数（`fix-describe-window-coverage` §10）。
+	 * 是 `called` 的子集，不是额外开销。分栏出来是为了让「上轮明明理解过、这轮怎么又扣」有答案：
+	 * 这些帧的旧产物出自更早的判据版本（`DESCRIBE_CRITERIA_VERSION`），不再作数。
+	 * 旧行**不删**，只是在新版本键下不算命中。 */
+	cached_stale_criteria: number;
 	/** 取帧失败被跳过数（局部化，不拖垮整轮）。 */
 	failed: number;
+	/** **实耗口径**（fix-describe-billing-report-honesty）：豁免时为 0。原价读 `credits_would_be`。
+	 * ⚠️ 下游若原先按原价读本键，改读 `credits_would_be`。 */
 	credits_estimated: number;
-	/** internal 豁免（仅确认护栏触发过探测时出现）。 */
+	/** 原价（= 实际调用张数 × 1 积分），恒与 `credits_estimated` 成对出现。 */
+	credits_would_be: number;
+	/** 计费身份豁免（`gc_member_type=internal`）：**有实际调用时恒出**；
+	 * 零调用（全缓存命中）时缺席——没扣费就没有计费可报。
+	 * ⚠️ 与 `matrix material` 的 `memberType`（matrix_member_type，矩阵检索维度）是两条正交的身份轴。 */
 	exempt?: boolean;
+	/** 计费身份探针失败：按非豁免继续报数，但「探不到」MUST NOT 呈现成「确定不豁免」。 */
+	exempt_probe?: "failed";
+	/** [add-describe-flag-desc-crosscheck] 叠加物交叉校验：desc 自述有叠加元素、对应 flag 仍为 false 的条目。
+	 * 纯本地判据（零调用零计费），**缓存命中项一并受检**。缺席 = 本轮零差异。
+	 * ⚠️ 只报差异，`usable_flags` 一字未改（信号归裁定层，零件不裁定）。 */
+	flag_desc_mismatch?: {
+		count: number;
+		by_dim: Partial<Record<OverlayFlagDim, number>>;
+		items: { material_id: string; ts_ms: number; dims: OverlayFlagDim[]; desc_excerpt: string }[];
+	};
+	/** [fix-describe-window-coverage] 段覆盖率（仅 `--plan` 形态）：`frames` 是**理解帧数**、
+	 * `segments` 是被理解候选携带的**段总数**——分母不是候选数。真机 260902 实测 32/843 = 3.8%。
+	 * ⚠️ 与 `injected`（候选数）是两个数：只读 `injected` 会以为「这些候选都被看过了」。
+	 * 图片候选无时间轴、射程即整条素材，单列 `image_candidates`，不进分子也不进分母。 */
+	describe_coverage?: { frames: number; segments: number; ratio: number; image_candidates: number };
 	/** 计费确认被拒：零服务端调用中止（ok:false + 非 0 退出码）。 */
 	reason?: string;
 	/** --materials 模式明细（--plan 模式产物在 plan 文件里）。 */
 	items?: { material_id: string; ts_ms: number; source: string; describe: MaterialDescribe | null }[];
 	[k: string]: unknown;
+}
+
+/**
+ * [add-broll-plan-summary-honesty] plan **落盘态**的候选账面（纯只读统计：零 IO、零检索、零计费）。
+ * 摘要行与 describe 的掏空风险清单共用这一份口径——两处各算各的迟早会对不上。
+ *
+ * ⚠️ 只回答「这个 beat 现在还剩几条候选」，**MUST NOT** 拿 `count === 0` 反推「那条 query 零产出」：
+ * beat 内去重（`dedupeBeatQueries`）会把某条 query 的命中折进同 beat 兄弟 query 的
+ * `also_matched_queries`，使它的 `results` 变空，而该 beat 的候选池（beat 级并集）一条都不少
+ * ——真机 260902 三份 plan 里 25 条 `results:[]` 全是这种折叠，genuine 零产出为 0。
+ * 零产出判据在检索响应侧（见 `runPlanMode` 的 `zeroYieldQueries`），两者 MUST NOT 互相顶替。
+ */
+export function summarizePlanCandidates(plan: BrollPlan): {
+	planResults: number;
+	distinctClips: number;
+	beatCandidateCounts: Array<{ beat: string; count: number }>;
+} {
+	let planResults = 0;
+	const clips = new Set<string>();
+	const beatCandidateCounts: Array<{ beat: string; count: number }> = [];
+	for (const beat of plan.beats ?? []) {
+		let count = 0;
+		for (const q of beat.queries ?? []) {
+			for (const r of q.results ?? []) {
+				planResults++;
+				count++;
+				if (typeof r.clip_id === "string" && r.clip_id) clips.add(r.clip_id);
+			}
+		}
+		beatCandidateCounts.push({ beat: beat.beat, count });
+	}
+	return { planResults, distinctClips: clips.size, beatCandidateCounts };
+}
+
+/** [add-broll-plan-summary-honesty] 掏空风险清单文案（候选数 ≤1 的 beat 逐个点名）。
+ * 纯函数：给定账面即出文案，`null` = 全 beat 候选 ≥2（不打扰）。
+ * **只补判据不夺裁定权**：CLI MUST NOT 依据本清单剔除/保留/改写任何 result 条目
+ * （`matrix.ts` 那句「剔除与否由你裁定」是设计意图，不是疏漏）。 */
+export function emptyRiskNote(counts: Array<{ beat: string; count: number }>): string | null {
+	const risky = counts.filter((c) => c.count <= 1);
+	if (risky.length === 0) return null;
+	const head = risky
+		.slice(0, 12)
+		.map((c) => `${c.beat}（${c.count === 0 ? "当前已零候选" : "仅 1 条，删掉即零候选"}）`)
+		.join("、");
+	return (
+		`剔除风险：${risky.length} 个 beat 的候选总数 ≤1 —— ${head}${risky.length > 12 ? ` 等 ${risky.length} 个` : ""}。\n` +
+		// 归宿两种都写：describe 这一路刻意不读工程（形态信息在 .gtrk 的 struct_meta.broll.black_track 里），
+		// 为一句提示去开工程等于给「只读统计」加 IO——本件明令 MUST NOT。宁可两种都说，让用户自己对号入座。
+		"掏空后的归宿看工程形态：音频驱动工程 ⇒ 该段整段黑屏，或由主轨 gap 填充从别的 beat 借画面（相关性更弱）；\n" +
+		"口播工程 ⇒ 该段露出主轨 A-roll。想留余地就先补素材重跑 `gtrk matrix`，别先删。"
+	);
 }
 
 /** --plan 模式取件：每 query 前 top-k 候选 → (材料 id, best 帧) 工作项；素材源缺失局部化跳过。 */
@@ -947,7 +1395,7 @@ function collectPlanDescribeItems(
 					log.warn(`clip ${r.clip_id} 无可取帧来源（缺 local_path/url），跳过理解`);
 					continue;
 				}
-				items.push({ materialId, tsMs: Math.round(bestSec * 1000), source: { kind: "frame", src, tsSec: bestSec } });
+				items.push({ materialId, tsMs: sec2ms(bestSec), source: { kind: "frame", src, tsSec: bestSec } });
 				targets.push(r);
 			}
 		}
@@ -977,7 +1425,7 @@ async function collectMaterialDescribeItems(
 			try {
 				const { materialId, frameTsSec } = await videoSceneFrames(p);
 				for (const ts of frameTsSec) {
-					items.push({ materialId, tsMs: Math.round(ts * 1000), source: { kind: "frame", src: p, tsSec: ts } });
+					items.push({ materialId, tsMs: sec2ms(ts), source: { kind: "frame", src: p, tsSec: ts } });
 				}
 			} catch (e) {
 				skipped++;
@@ -1004,6 +1452,24 @@ async function defaultVideoSceneFrames(path: string): Promise<{ materialId: stri
 	return { materialId: await brollLocalIdForFile(path), frameTsSec: scenes.map((s) => s.st + (s.ed - s.st) / 2) };
 }
 
+/**
+ * [fix-highlight-rubric-wiring] 看点准则决议（describe 与 lay 共用的**唯一**入口）。
+ *
+ * 三级：L1 `--highlight-rubric <text|@file>` > L2 栏目配置 `broll.highlight_rubric` > L0 缺省。
+ * 栏目 id 沿命令族既有口径 `--column` > `~/.gitruck` 的 defaultColumn。
+ *
+ * ⚠️ 栏目配置的加载告警此处**不复述**：describe/lay 不做检索，栏目配置只被读这一个字段，
+ * 把「栏目配置不存在，回落内置默认」原样打出来会让人以为准则出了问题——而那一路本就是 L0 正常路径。
+ */
+function resolveRubricFor(opts: MatrixOpts): ResolvedRubric {
+	const columnId = opts.column ?? readUserConfig().defaultColumn;
+	const flag = opts.highlightRubric !== undefined ? parseRubricOption(opts.highlightRubric) : undefined;
+	// flag 命中即短路：栏目配置连读都不用读（也就不会因为栏目配置损坏而拖累显式传参的那一路）
+	if (flag) return resolveHighlightRubric({ flag });
+	const columnRubric = columnId ? resolveColumnConfig({ columnId }).config.broll?.highlight_rubric : undefined;
+	return resolveHighlightRubric({ columnRubric, columnId });
+}
+
 /** matrix describe：三输入形态（--plan 注入 / --materials 视频按场景抽帧 / 图片直传）+ describes 缓存
  * + >20 张确认护栏（--yes 跳过、internal 豁免免确认仅提示）。 */
 async function runDescribeMode(
@@ -1012,18 +1478,38 @@ async function runDescribeMode(
 	deps: MatrixRunDeps,
 ): Promise<MatrixDescribeResult> {
 	const endpoint = { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey };
-	const describeBatch = deps.describeBatch ?? ((images: string[]) => describeImages(endpoint, images));
+	// [fix-highlight-rubric-wiring] 看点准则三级决议（L1 flag > L2 栏目配置 > L0 服务端缺省）。
+	// **这是全命令唯一的决议点**——describe 按它打分落桶、lay 按它读桶，两处各算各的哈希
+	// 就会把同一份准则拆成两个桶，用户看到的是「什么都没改又扣了一次看片钱」。
+	const rubric = resolveRubricFor(opts);
+	// ⚠️ 缺省（rubric.text 缺席）时 **MUST NOT 传 shotCard**：`describeImages` 只在
+	// `highlightRubric` 非空时才写请求体键，但这里连对象都不构造，让「整键缺席」在调用面就成立
+	// ——零回归靠结构保证，不靠下游记得判空。
+	const describeBatch =
+		deps.describeBatch ??
+		((images: string[]) => describeImages(endpoint, images, {}, rubric.text ? { highlightRubric: rubric.text } : undefined));
 	const extractFrame =
 		deps.extractFrame ?? (async (src: string, tsSec: number, outJpg: string) => extractFrameJpg(requireFfmpeg().ffmpeg, src, tsSec, outJpg));
+	// 计费身份探针（fix-describe-billing-report-honesty）：
+	// ① memo 一次——runDescribeItems 里只有一个调用点，这层再兜一道，防日后有人加第二个探测点；
+	// ② 失败置位 `probeFailed`——「探不到所以按非豁免」与「探到了、确实不豁免」是两件事，
+	//    报成同一件就是拿不确定冒充确定（机读侧靠 `exempt_probe:"failed"` 区分）。
+	let probeFailed = false;
+	let probedExempt: boolean | undefined;
 	const probeExempt =
 		deps.probeExempt ??
 		(async () => {
+			if (probedExempt !== undefined) return probedExempt;
 			try {
-				return (await probeGcMemberType(cfg)) === "internal";
+				probedExempt = (await probeGcMemberType(cfg)) === "internal";
 			} catch (e) {
-				log.warn(`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（1 积分/张同步计费）继续`);
-				return false;
+				log.warn(
+					`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（1 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）继续`,
+				);
+				probeFailed = true;
+				probedExempt = false;
 			}
+			return probedExempt;
 		});
 	const topK = opts.topK ? Number(opts.topK) : undefined;
 
@@ -1036,7 +1522,7 @@ async function runDescribeMode(
 	if (opts.plan) {
 		planPath = resolve(opts.plan);
 		if (!existsSync(planPath)) throw new Error(`找不到 plan 文件：${planPath}`);
-		planObj = JSON.parse(await readFile(planPath, "utf8")) as BrollPlan;
+		planObj = await readJson(planPath, "plan") as BrollPlan;
 		const got = collectPlanDescribeItems(planObj, topK);
 		items = got.items;
 		targets = got.targets;
@@ -1049,6 +1535,12 @@ async function runDescribeMode(
 		skipped = got.skipped;
 		log.step(`▶ 理解素材文件：${paths.length} 个文件 → ${items.length} 帧（视频按场景中点、图片直传）…`);
 	}
+
+	// 上行告知（fix-highlight-rubric-wiring）：**只说「已上行」不说「已生效」**——
+	// 服务端对扩参是宽松超集，未升级时整段忽略且产物形状完全一致，CLI 拿不到任何回执。
+	// 把不可回执的事说成确定的事，正是本件在修的那类静默。缺省（L0）无此行，不打扰。
+	const uplink = rubricUplinkNote(rubric);
+	if (uplink) log.info(uplink);
 
 	// ── 缓存短路 + 护栏 + 批调用（describes 缓存宿主 = 本地索引库）──
 	const db = await openLocalIndexDb();
@@ -1063,6 +1555,7 @@ async function runDescribeMode(
 			yes: opts.yes === true,
 			frameDir: join(tmpDir(), `describe-${process.pid}`),
 			onLog: (line) => log.info(line),
+			rubricHash: rubric.hash,
 		});
 	} finally {
 		db.close();
@@ -1079,9 +1572,12 @@ async function runDescribeMode(
 			described: run.described,
 			cached: run.cached,
 			called: 0,
+			cached_stale_criteria: run.staleCriteria,
 			failed: run.failed,
 			credits_estimated: run.estimatedCredits,
+			credits_would_be: run.creditsWouldBe,
 			...(run.exempt !== undefined ? { exempt: run.exempt } : {}),
+			...(probeFailed ? { exempt_probe: "failed" as const } : {}),
 			reason: "describe_billing_declined",
 		};
 		process.exitCode = 1;
@@ -1091,19 +1587,45 @@ async function runDescribeMode(
 
 	// ── --plan 注入回写（result.describe 字段随 plan 流转；MUST NOT 依据 flags 剔除任何候选）──
 	let injected = 0;
+	let coverage: DescribeCoverage | undefined;
 	if (planObj && planPath && targets) {
+		// 射程锚点（fix-describe-window-coverage）：写出这一条 describe 出自的**帧时刻**。
+		// 取值来源恒是 `items[i]` 本身——那是这一轮真的送去理解的那一帧，不是重算出来的猜测
+		// （`items` / `targets` / `run.results` 三条数组由 collectPlanDescribeItems 逐条同序推入）。
+		// ⚠️ 抽帧口径**一字未动**：仍是每候选一帧、仍取 `segments[0].best`，服务端调用张数与计费零变化。
+		// 图片候选走 `direct`（缓存键 ts=0 是缓存键不是时刻）⇒ anchor 恒 undefined，不写误导性锚点。
+		const covRows: { image: boolean; segments: number }[] = [];
 		targets.forEach((r, i) => {
 			const d = run.results[i];
 			if (d) {
-				r.describe = toDescribeMeta(d);
+				const src = items[i]?.source;
+				r.describe = toDescribeMeta(d, src && src.kind === "frame" ? src.tsSec : undefined);
 				injected++;
+				covRows.push({ image: r.kind === "image", segments: r.segments?.length ?? 0 });
 			}
 		});
+		coverage = summarizeDescribeCoverage(covRows);
+		// [fix-highlight-rubric-wiring] 评分口径随 plan 走：钉本轮的桶与来源，lay 据此取同一个桶，
+		// 用户无需再传一遍准则。缺省桶也照钉——「这份 plan 用的是缺省准则」与「这份 plan 没被本版理解过」
+		// 是两件事，只有钉了才分得开。
+		planObj.rubric_hash = rubric.hash;
+		planObj.rubric_source = rubric.source;
 		await writeFile(planPath, JSON.stringify(planObj, null, 2));
 		log.ok(
 			`理解完成并回写 plan：注入 ${injected} 条 result.describe（缓存命中 ${run.cached} · 实际调用 ${run.called} 张${run.failed ? ` · 取帧失败 ${run.failed}` : ""}${skipped ? ` · 无源跳过 ${skipped}` : ""}）→ ${planPath}`,
 		);
+		// ⚠️ 覆盖率必须紧跟在上面那句「注入 N 条」后面：N 是**候选数**，单独出现会被读成
+		// 「这 N 条候选都被看过了」。真机 260902 两份 plan 的真值是 32 帧 / 843 段 = 3.8%。
+		// 非致命 INFO 档：这是「信号只覆盖了这么点」的告知，MUST NOT 抛 warn/error，也 MUST NOT
+		// 因此跳过或改变回写。
+		log.info(describeCoverageNote(coverage));
 		log.info("usable_flags 只是给你的信号：剔除与否由你编辑 plan 裁定（删 result 条目后 gtrk matrix lay），CLI 不会替你剔。");
+		// [add-broll-plan-summary-honesty] 把裁定权交出去的同时得给判据：候选数 ≤1 的 beat 逐个点名。
+		// 真机 260902 P3 八个 beat 里七个全 beat 只有 1 条候选——按 text_overlay 信号删掉那一条，
+		// 该 beat 立刻零候选，而此前 CLI 全程没点过一次名（gap 填充 INFO 是事后、间接、不点 beat 名的聚合信号）。
+		// 数据顺着 planObj 遍历就有：零额外 IO、零额外检索、零额外计费。
+		const risk = emptyRiskNote(summarizePlanCandidates(planObj).beatCandidateCounts);
+		if (risk) log.warn(risk);
 	} else {
 		log.ok(
 			`理解完成：${run.described} 项（缓存命中 ${run.cached} · 实际调用 ${run.called} 张${run.failed ? ` · 取帧失败 ${run.failed}` : ""}${skipped ? ` · 跳过 ${skipped}` : ""}）`,
@@ -1122,10 +1644,35 @@ async function runDescribeMode(
 			});
 		}
 	}
+	// ── [add-describe-flag-desc-crosscheck] 叠加物交叉校验（纯本地、零调用、零计费）──────
+	// 真机 260902 硬证据：`broll-local-e28be73e24d82c35 @111117ms` 的 desc 亲口写了
+	// 「左上角有'REC'等视频录制界面元素」，`text_overlay` 仍是 false。那一帧按 CLI 现行 512px
+	// 口径重抽出来目视核对，HUD 文字清晰可读 ⇒ 模型是**看见了却没打标**，不是看不见
+	// （最初「提高抽帧分辨率」的假设据此被推翻，改判到服务端提示词偏置，由 infra 侧另件承接）。
+	// 本条只做「模型自己都说了、flag 却没打」的差异告知：
+	//   ① 独立于服务端提示词——将来 prompt 回归了这条判据仍在；
+	//   ② **缓存命中项一并受检**（读的是缓存里的 desc_text），既有旧条目零成本受益；
+	//   ③ 只报差异 MUST NOT 覆写 flag——覆写就是 CLI 越权裁定，与「零件不裁定」直接冲突。
+	// 放在计费文案之前、两种输入形态之后 ⇒ --plan 与 --materials 两路共用一份文案（不各写一份）。
+	const mismatch = summarizeFlagDescMismatch(
+		items.map((it, i) => ({ materialId: it.materialId, tsMs: it.tsMs, describe: run.results[i] ?? null })),
+	);
+	if (mismatch) log.info(flagDescMismatchNote(mismatch));
+
+	// 计费文案（fix-describe-billing-report-honesty）：报的必须是**服务端本次真会扣多少**。
+	// 豁免那一档此前只在 >20 张的运行里才可能出现（探测被焊在护栏里），≤20 张恒落非豁免分支
+	// 言之凿凿地告诉豁免账号「≈N 积分」。正面范例在同一个文件里：`matrix material` 的 internal 档
+	// 写的是「0 积分（矩阵成员免费…）」——describe 是掉队的那个。
+	// 口径统一为**异步**：describe 自 2026-08-12 已改异步任务计费（提交预扣→完成结算，失败自动退款），
+	// 而命令层三处措辞还停在「同步」那套旧说法，同一条命令两套说法本身就是报数不诚实的一种。
+	// （防回潮：全仓 grep 这四个字应零命中，故此处也不复述那个词。）
 	const billNote = run.exempt
-		? "计费豁免（同合云内部成员）"
+		? `计费豁免（同合云内部成员，gc_member_type=internal）——原价 ${run.creditsWouldBe} 积分，本次实耗 0`
 		: run.called > 0
-			? `实际调用 ${run.called} 张 ≈ ${run.called * 1} 积分（1 积分/张同步计费）`
+			// ⚠️ 这里刻意仍用 `called * 1` 而非 `creditsWouldBe`（= pending × 1）：取帧失败的帧不上送也不扣费，
+			// 非豁免档的**数字**要与本件落地前逐字一致（本件只订正措辞与豁免档，不改这一档的算法）。
+			? `实际调用 ${run.called} 张 ≈ ${run.called * 1} 积分（1 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）` +
+				(probeFailed ? "；⚠️ 计费身份没探到，这里按**非豁免**保守报数，实际可能不扣" : "")
 			: "零调用零计费（全部缓存命中）";
 	log.info(`计费：${billNote}；理解产物已入本地缓存（同素材同帧下次零调用）。`);
 
@@ -1136,9 +1683,36 @@ async function runDescribeMode(
 		described: run.described,
 		cached: run.cached,
 		called: run.called,
+		cached_stale_criteria: run.staleCriteria,
 		failed: run.failed,
 		credits_estimated: run.estimatedCredits,
+		credits_would_be: run.creditsWouldBe,
 		...(run.exempt !== undefined ? { exempt: run.exempt } : {}),
+		...(probeFailed ? { exempt_probe: "failed" as const } : {}),
+		...(coverage
+			? {
+					describe_coverage: {
+						frames: coverage.frames,
+						segments: coverage.segments,
+						ratio: Math.round(coverage.ratio * 10000) / 10000,
+						image_candidates: coverage.imageCandidates,
+					},
+				}
+			: {}),
+		...(mismatch
+			? {
+					flag_desc_mismatch: {
+						count: mismatch.count,
+						by_dim: mismatch.byDim,
+						items: mismatch.items.map((m) => ({
+							material_id: m.materialId,
+							ts_ms: m.tsMs,
+							dims: m.dims,
+							desc_excerpt: m.excerpt,
+						})),
+					},
+				}
+			: {}),
 		...(planObj
 			? {}
 			: {
@@ -1174,7 +1748,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 	if (!existsSync(planPath)) {
 		throw new Error(`找不到 plan 文件：${planPath}（先 gtrk matrix --project <目录> --lay 0 产 plan，或用 --plan 显式指定）`);
 	}
-	const plan = JSON.parse(await readFile(planPath, "utf8")) as BrollPlan;
+	const plan = await readJson(planPath, "plan") as BrollPlan;
 
 	// ── 可编辑面白名单校验（matrix-command spec：不可编辑字段改坏即拒并明示；纯结构面）──
 	const violations = validatePlanForLay(plan);
@@ -1196,6 +1770,31 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 				`clip_id/local_path/url/几何字段不可编辑：\n  - ${violations.join("\n  - ")}`,
 		);
 	}
+
+	// ── [fix-highlight-rubric-wiring] 看点桶决议：读哪一套准则打出来的分 ──
+	// 位置刻意贴着 plan 校验、在任何工程动作（重投影/读 .gtrk/铺轨）之前：串桶是**配置错**，
+	// 该在动工程之前就拦下，而不是等干了一半才报。
+	// plan 钉存优先（`describe --plan` 写下的评分口径随 plan 走，用户不必再传一遍）；
+	// 显式传了 `--highlight-rubric` 就要求与钉存**同源**。
+	const pinnedRubric = typeof plan.rubric_hash === "string" && plan.rubric_hash ? plan.rubric_hash : undefined;
+	// 决议**恒做**（不是只在传了 flag 时才做）：否则栏目配置那一级在 lay 侧读不到，
+	// 三级取用会退化成「describe 认 L2、lay 不认 L2」的两套口径。
+	const layRubric = resolveRubricFor(opts);
+	if (opts.highlightRubric !== undefined && pinnedRubric && layRubric.hash !== pinnedRubric) {
+		// 硬失败，**不择一继续**：择哪一个都是拿甲准则的分服务乙准则的排序，
+		// 而成片一旦出来就没人会回头查那条告警 —— 静默用错准则事后无从分辨。
+		throw new Error(
+			`看点准则与本 plan 钉存的不是同一份（plan rubric_hash=${pinnedRubric} · 本次 --highlight-rubric 解析出 ${layRubric.hash}，来源 ${layRubric.source}）。
+` +
+				`  这份 plan 的看点分是按前者打的，直接换准则排序等于拿甲准则的分服务乙准则，且事后无从分辨。
+` +
+				`  要按新准则排序，先重新打分：gtrk matrix describe --plan ${planPath} --highlight-rubric ${opts.highlightRubric?.startsWith("@") ? opts.highlightRubric : "<同一份准则>"}
+` +
+				`  要沿用 plan 现有口径，去掉 --highlight-rubric 即可（lay 自动读 plan 钉存的桶）。`,
+		);
+	}
+	// 优先级：plan 钉存 > 本次解析 > 缺省桶。plan 钉存缺席 = 本件之前产出的旧 plan，按缺省桶消费（零回归）。
+	const layRubricHash = pinnedRubric ?? layRubric.hash;
 
 	const layN = parseLay(opts.lay);
 	if (layN === 0) throw new Error("matrix lay 的 --lay 不能为 0（lay 就是铺轨这一步；只要 plan 不铺请直接编辑 plan 文件）");
@@ -1270,7 +1869,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 			highlightLookup = (clipId, tsMs) => {
 				const key = `${clipId}@${tsMs}`;
 				if (cache.has(key)) return cache.get(key);
-				const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs);
+				const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs, layRubricHash);
 				cache.set(key, v);
 				return v;
 			};
@@ -1283,19 +1882,23 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 				highlightLookup = (clipId, tsMs) => {
 					const key = `${clipId}@${tsMs}`;
 					if (cache.has(key)) return cache.get(key);
-					const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs);
+					const v = getNearestCachedHighlight(db, brollMaterialIdFor(clipId), tsMs, layRubricHash);
 					cache.set(key, v);
 					return v;
 				};
 			} else {
 				log.warn(
 					`--highlight-weight ${highlightWeight}：本地索引库不存在（${dbPath2}），无任何理解缓存——全部候选按中性处理。先跑 gtrk matrix describe 产看点分再开权重才有效`,
+					// 零调用零计费：lay MUST NOT 为补分自行发起看片（计费动作恒由用户显式发起）
 				);
 			}
 		}
 		if (highlightLookup) {
 			log.info(
-				`看点权重开启（wh=${highlightWeight}）：融合分 = sim×${Math.max(0, 1 - markWeight - highlightWeight)}+(mark/100)×${markWeight}+(highlight/100)×${highlightWeight}；看点分取 describe 理解缓存（素材内就近帧），无缓存候选按中性处理（权重回吐给 sim）`,
+				`看点权重开启（wh=${highlightWeight}）：融合分 = sim×${Math.max(0, 1 - markWeight - highlightWeight)}+(mark/100)×${markWeight}+(highlight/100)×${highlightWeight}；` +
+					`看点分取 describe 理解缓存（素材内就近帧）的**准则桶 ${layRubricHash}**` +
+					`${pinnedRubric ? `（随 plan 钉存${plan.rubric_source ? ` · 来源 ${plan.rubric_source}` : ""}）` : layRubric.text ? `（本次决议 · 来源 ${layRubric.source}）` : "（缺省准则）"}，` +
+					`无该桶缓存的候选按中性处理（权重回吐给 sim）`,
 			);
 		}
 	}
@@ -1364,11 +1967,11 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 		// 点名用户实际传的路径：MUST NOT 给出一条会枚举到零素材的命令形态
 		// （`--dirs` 现在既吃文件夹也吃单个素材文件，照抄回去至少是可跑的那一条）
 		throw new Error(
-			`本地索引不存在（${dbPath}）——先建索引：gtrk matrix index --dirs ${dirs.map((d) => JSON.stringify(d)).join(",")}\n` +
+			`本地索引不存在（${dbPath}）——先建索引：gtrk matrix index ${dirsAsRepeatedFlag(dirs)}\n` +
 				"（--dirs 可传素材文件夹，也可直接传单个素材文件——一稿对一片时钉到那一部片，邻片候选就抢不走了）",
 		);
 	}
-	log.step(`▶ 本地检索模式：载入索引（域：${dirs.join("、")}）…`);
+	log.step(`▶ 本地检索模式：载入索引（域：${formatDirsEcho(dirs)}）…`);
 	const db = await openLocalIndexDb(dbPath);
 	let index: LoadedIndex;
 	try {
@@ -1378,8 +1981,8 @@ async function buildLocalSearchCtx(cfg: ReturnType<typeof loadConfig>, opts: Mat
 	}
 	if (index.frames.length === 0) {
 		throw new Error(
-			`索引里没有该检索域的素材帧（域：${dirs.join("、")}）——这些路径未索引过。\n` +
-				`对它们本身、或它们所在的文件夹跑：gtrk matrix index --dirs ${dirs.map((d) => JSON.stringify(d)).join(",")}\n` +
+			`索引里没有该检索域的素材帧（域：${formatDirsEcho(dirs)}）——这些路径未索引过。\n` +
+				`对它们本身、或它们所在的文件夹跑：gtrk matrix index ${dirsAsRepeatedFlag(dirs)}\n` +
 				"（文件消失 / 扩展名不在素材白名单 / 从没索引过，三者都会走到这里）",
 		);
 	}
@@ -1462,7 +2065,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	}
 	if (!existsSync(dispatchPath)) throw new Error(`找不到派单清单：${dispatchPath}（先跑 gtrk split <拆分稿> 落地派单）`);
 
-	const dispatch = JSON.parse(await readFile(dispatchPath, "utf8")) as Dispatch;
+	const dispatch = await readJson(dispatchPath, "派单清单") as Dispatch;
 	const rawQueue: FilmDispatch[] = Array.isArray(dispatch.film_broll) ? dispatch.film_broll : [];
 
 	// ── 现场重投影（add-consume-side-reprojection 6.1）：在**发起第一次检索之前**完成 ──
@@ -1500,6 +2103,10 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	let okCount = 0;
 	let errCount = 0;
 	let resultCount = 0;
+	// [add-broll-plan-summary-honesty] 真·零产出名单。判据 MUST 取**检索响应**的 results 长度，
+	// 且 MUST 在这里（`buildPlanBeat` 去重之前）落账——去重之后再扫 plan 会把 beat 内折叠
+	// （命中被折进兄弟 query 的 also_matched_queries）误算成零产出，那是完全不同的两件事。
+	const zeroYieldQueries: string[] = [];
 	for (const entry of queue) {
 		const outcomes: QueryOutcome[] = [];
 		// 锚 query 并入同一检索链（add-keyword-anchored-broll）：与普通 queries 同口同参跑；
@@ -1516,8 +2123,11 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 			try {
 				const data = await ctx.search(q, entry);
 				outcomes.push({ query: q, data });
+				// ⚠️ `okCount` 的判据是「`ctx.search` 没抛异常」= **执行**成功，与有没有产出无关。
+				// 这条语义此前被摘要行的「N/N query 成功」四个字含混掉了，故下面单独记零产出。
 				okCount++;
 				resultCount += data.results?.length ?? 0;
+				if ((data.results?.length ?? 0) === 0) zeroYieldQueries.push(q);
 				log.info(`${entry.beat}「${q}」${isAnchorQ ? "（锚）" : ""}→ ${data.results?.length ?? 0} 条候选（召回 ${data.recalled ?? "?"}）`);
 			} catch (e) {
 				// embed 端点硬失败绝不局部化吞掉：本地模式没有查询向量=整体不可用（MUST NOT 静默降级）
@@ -1569,7 +2179,27 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	await mkdir(splitDir, { recursive: true });
 	const planPath = join(splitDir, "broll-plan.json");
 	await writeFile(planPath, JSON.stringify(plan, null, 2));
-	log.ok(`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query 成功 · ${resultCount} 条候选）`);
+	// [add-broll-plan-summary-honesty] 摘要行三段数：「执行成功」「有产出」「落盘还剩多少」是三件事。
+	// 真机 P1 260902：`resultCount` 报 15 条候选，plan 里只有 8 行 result、且全指向 **1 条**素材
+	// ——只看那一个数会让调用方判「料够了」，而实际上这个 beat 一删就空。
+	const planStats = summarizePlanCandidates(plan);
+	log.ok(
+		`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query **执行**成功` +
+			` · 其中 ${zeroYieldQueries.length} 条零候选 · plan 落盘 ${planStats.planResults} 行 / ${planStats.distinctClips} 个素材` +
+			`；逐条日志里的 ${resultCount} 条候选是**去重前**口径）`,
+	);
+	// 零产出点名（非致命）：此前调用方只能去 57 行 dim 灰 info 里自己扒 `→ 0 条候选`。
+	// ⚠️ 这条 warn MUST NOT 改退出码、MUST NOT 触发任何补检索——只是把已知事实说出来。
+	// `--lay 0`（只出 plan 不铺轨）下同样会走到这里：lay 侧的 emptySlots / upsell 通道那时整段不执行，
+	// 本条是该场景下唯一的告警通道。
+	if (zeroYieldQueries.length > 0) {
+		const head = zeroYieldQueries.slice(0, 5).map((q) => `「${q}」`).join("、");
+		log.warn(
+			`${zeroYieldQueries.length} 条 query 执行成功但**零候选**：${head}${zeroYieldQueries.length > 5 ? ` 等 ${zeroYieldQueries.length} 条` : ""}。\n` +
+				"这些词在索引域里一条都没检出（≠ 被 beat 内去重折叠——折叠的那种仍在同 beat 兄弟 query 名下，池子不少料）。\n" +
+				"想补：换更具象的检索词，或给这些 beat 补素材后重跑。",
+		);
+	}
 	if (isLocal) {
 		log.info("清单只含引用不含素材：本地素材以绝对路径直引（local_path，无 url 签名/过期语义）；封面铺轨时现抽。");
 	} else {
@@ -1634,7 +2264,16 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 		...(laid?.integrity ? { integrity: laid.integrity } : {}),
 		...(layUpsell ? { upsell: layUpsell } : {}),
 		reprojection: reproj.summary,
-		counts: { beats: beats.length, queries: totalQueries, results: resultCount, errors: errCount },
+		counts: {
+			beats: beats.length,
+			queries: totalQueries,
+			results: resultCount,
+			errors: errCount,
+			// [add-broll-plan-summary-honesty] 新增三键纯增量：既有四键取值与语义一字不改
+			zero_yield: zeroYieldQueries.length,
+			plan_results: planStats.planResults,
+			distinct_clips: planStats.distinctClips,
+		},
 	};
 	if (!result.ok) process.exitCode = 1;
 	if (layUpsell && !opts.json) log.warn(layUpsell.message);
@@ -1699,7 +2338,7 @@ async function runArrangeQcHere(
 }> {
 	const dispatchPath = join(baseDir, "split", "dispatch.json");
 	const dispatch = existsSync(dispatchPath)
-		? (JSON.parse(readFileSync(dispatchPath, "utf8")) as { film_broll?: Array<{ beat?: string; span?: { from?: string } }> })
+		? (readJsonSync(dispatchPath, "派单清单") as { film_broll?: Array<{ beat?: string; span?: { from?: string } }> })
 		: undefined;
 	const leads = leadSentencesFrom(dispatch, reproj.utteranceIndex);
 	if (leads.length === 0) {
@@ -1778,13 +2417,25 @@ async function runArrangeQcHere(
 function arrangeWiring(
 	opts: MatrixOpts,
 	cfg: { base: string; apiKey: string } | undefined,
-): { arrangeMode?: ArrangeMode; arrangeCostCap?: number; arrangeEndpoint?: ArrangeEndpoint; arrangeEstimateOnly?: boolean } {
+): {
+	arrangeMode?: ArrangeMode;
+	arrangeCostCap?: number;
+	arrangeEndpoint?: ArrangeEndpoint;
+	arrangeEstimateOnly?: boolean;
+	arrangeDumpRequest?: string;
+	explain?: boolean;
+} {
 	const arrangeMode = parseArrangeMode(opts.arrange);
 	const costCap = parseArrangeCostCap(opts.arrangeCostCap);
 	const qc = opts.arrangeQc === true;
 	return {
 		...(arrangeMode !== undefined ? { arrangeMode } : {}),
 		...(costCap !== undefined ? { arrangeCostCap: costCap } : {}),
+		// 两个开关都是**纯透传**：路径合法性要拿到 baseDir 才判得了（工程目录内不许写），
+		// 那件事留在 layIntoProject 做，这里 MUST NOT 提前 resolve 成绝对路径——
+		// 提前解析会让「相对哪儿」的答案在两处各有一份。
+		...(opts.dumpRequest !== undefined ? { arrangeDumpRequest: opts.dumpRequest } : {}),
+		...(opts.explain === true ? { explain: true } : {}),
 		// ★ 端点只在**显式 local** 时不解析。抽芯后不传 `--arrange` 是 auto，
 		//   本地素材路会定档 cloud —— 那时端点必须已经在手，否则 auto 永远走不到云端。
 		...(arrangeMode !== "local" && cfg ? { arrangeEndpoint: { url: resolveArrangeUrl(cfg.base), apiKey: cfg.apiKey } } : {}),
@@ -1912,8 +2563,6 @@ function buildDefaultImageMoveGenerator(): NonNullable<MatrixRunDeps["generateIm
 	};
 }
 
-const r3num = (n: number): number => Math.round(n * 1000) / 1000;
-
 /** 运镜产物材料条目：ffprobe 实测（matrix-lay-tracks spec）；探测失败按生成参数兜底登记。 */
 function mvMaterialEntry(
 	materialId: string,
@@ -1930,9 +2579,9 @@ function mvMaterialEntry(
 	return {
 		id: materialId,
 		path: rel,
-		duration: geo && geo.duration > 0 ? r3num(geo.duration) : fallback.duration,
+		duration: geo && geo.duration > 0 ? r3(geo.duration) : fallback.duration,
 		video_size: geo && geo.width > 0 && geo.height > 0 ? [geo.width, geo.height] : [fallback.canvas[0], fallback.canvas[1]],
-		...(geo && geo.fps > 0 ? { video_rate: r3num(geo.fps) } : {}),
+		...(geo && geo.fps > 0 ? { video_rate: r3(geo.fps) } : {}),
 	};
 }
 
@@ -2126,6 +2775,211 @@ function reportLayRefusal(keptEditedTracks: number[], warnings: string[]): void 
 }
 
 /**
+ * 锚落位名次的人读一行（fix-anchor-top-hit-guarantee 3.3）。
+ *
+ * **只在 `sim_rank > 1` 时返回文案，完美钉位返回 null**——落到队首是本件承诺兑现的样子，
+ * 为它再打一行等于把「一切正常」也变成噪声，用户下次就不看这类行了。
+ *
+ * 措辞按本仓「良性降级打可读 INFO」：这是**已知根因**的降级（top-1 的去向就在 `top_by` 里），
+ * 所以 MUST NOT 抛天书、MUST NOT 升级成 warn/异常——画面仍然来自本锚 query 的合格命中，
+ * 片子能看，只是没能钉到最贴的那一段。真正该 warn 的是 degraded（那条在上面，锚整个没钉住）。
+ *
+ * ⚠️ 文案**按机读 code 现渲染**，MUST NOT 直接印 outcome 里的字段拼串：
+ * 同 `directWhy` 的理由——人读文案内嵌数值会在 JS/Python 之间产生 `"1"` vs `"1.0"` 的纯格式差，
+ * 一旦那种串进了跨语言逐字节对拍面就是永久噪声。故 `top_miss` 只过 code、数值本地格式化。
+ *
+ * ⚠️ `top_by` 可能在 `top_miss === "consumed"` 时仍然缺席（消费归属账是**纯诊断**的旁路，
+ * 库层没记上就是没记上），此处 MUST NOT 印出 `undefined` —— 分支兜住，如实说「去向未记账」。
+ */
+function anchorRankNote(d: AnchorOutcome): string | null {
+	if (typeof d.sim_rank !== "number" || d.sim_rank <= 1) return null;
+	const whither =
+		d.top_miss === "consumed"
+			? d.top_by
+				? `已被 ${d.top_by} 取用`
+				: "已被别处取用（消费去向未记账）"
+			: d.top_miss === "reserved"
+				? "被另一个锚预留着（两锚争同一段时 at_sec 更早的先得）"
+				: d.top_miss === "unfit"
+					? "在本锚窗口用不上（供长不足 / 同 beat 跨轨归属互斥 / 精修后不足最小镜头长）"
+					: "去向未记账";
+	const sim = typeof d.sim === "number" ? r3(d.sim) : "?";
+	const top = typeof d.top_sim === "number" ? r3(d.top_sim) : "?";
+	return (
+		`${d.beat} 锚「${d.keyword}」取的是 sim 第 ${d.sim_rank} 名（${sim}）——top-1（${top}）${whither}。\n` +
+		"   画面仍来自本锚 query 的合格命中（不是无关素材），属良性降级；" +
+		"想钉到 top-1：给这条 query 补更贴的素材，或让占用方另有可用画面后重跑。"
+	);
+}
+
+/**
+ * `--dump-request <file>` 的落点解析（add-broll-arrange-atom 1.3 / design §6「排障」）。
+ *
+ * **两条硬约束，缺一不可**：
+ *
+ * ① **MUST NOT 落在工程目录内**。工程目录是要被打包、被拷给别人、被同步到网盘的东西；
+ *    这份文件里是完整的上行请求体（beat 名 + 检索词 + 候选 clip_id + 全部配方参数）。
+ *    掉进工程里就意味着它会跟着工程走到我们无从预料的地方——而它存在的全部理由，
+ *    恰恰是「服务端一行不留、所以这份东西只该待在你自己机器上」。
+ *    判据用 `relative()` 而不是字符串前缀比：`/x/proj-2` 不是 `/x/proj` 的子目录，
+ *    前缀比会把它误判成子目录并拒掉一个合法路径。
+ *
+ * ② **缺省不写**。整条链上只有显式传了 `--dump-request` 才会有字节落盘。
+ */
+export function resolveDumpRequestPath(raw: string, baseDir: string): string {
+	const abs = resolve(raw);
+	const rel = relative(resolve(baseDir), abs);
+	// rel === "" ⇒ 就是工程目录本身；不以 ".." 开头且不是绝对路径 ⇒ 在工程目录内
+	if (rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel))) {
+		throw new Error(
+			`--dump-request 不能指向工程目录内（${abs}）。\n` +
+				"这份文件里是完整的上行请求体（beat 名、检索词、候选 id 与全部配方参数)——" +
+				"放进工程目录，它就会跟着工程被打包、被拷贝、被同步出去。\n" +
+				"换个工程外的路径，比如系统临时目录或桌面。",
+		);
+	}
+	return abs;
+}
+
+/** `<file>` → 第 n 轮的落点：`plan.json` ⇒ `plan.round1.json`（无扩展名则直接追加 `.roundN`）。 */
+function dumpRoundPath(primary: string, round: number): string {
+	const dot = basename(primary).lastIndexOf(".");
+	if (dot <= 0) return `${primary}.round${round}`;
+	const cut = primary.length - (basename(primary).length - dot);
+	return `${primary.slice(0, cut)}.round${round}${primary.slice(cut)}`;
+}
+
+/**
+ * 请求体落盘器。**每一轮各写一份**，MUST NOT 覆盖同一个文件。
+ *
+ * 覆盖看起来更整洁，代价是把出问题的那一轮抹掉：开 `--arrange-qc` 时最多真调 3 次，
+ * 而客服要复现的往往正是中间某一轮（比如第 2 轮换了候选之后才开始不对）。
+ * 只留最后一轮 = 把证据丢了，与 `summarizeArrangeRun` 的 `rounds` 恒在是同一条纪律。
+ */
+function makeArrangeDumper(rawPath: string, baseDir: string): { files: string[]; write: (req: ArrangeRequest) => void } {
+	const primary = resolveDumpRequestPath(rawPath, baseDir);
+	const files: string[] = [];
+	return {
+		files,
+		write(req: ArrangeRequest): void {
+			const target = files.length === 0 ? primary : dumpRoundPath(primary, files.length);
+			mkdirSync(dirname(target), { recursive: true });
+			// ★ 与 `requestArrange` 用**同一种**序列化（那里是裸 `JSON.stringify(req)`，无缩进无排序）：
+			//   同一个对象两次 stringify 逐字节相同 ⇒ 这份文件就是真上行的那串字节，
+			//   拿它 `curl --data-binary @file` 能命中同一个服务端幂等键。
+			//   ⚠️ MUST NOT 为了「好看」加缩进或 sort_keys：那会变成一份**看着像**上行体的东西，
+			//      而幂等键、请求体摘要全都对不上，复现出来的是另一个请求。
+			writeFileSync(target, JSON.stringify(req));
+			files.push(target);
+		},
+	};
+}
+
+/** 机读的云端编排归因（fix-arrange-selfcheck-json-surface）。
+ *
+ * ## 它治的病
+ *
+ * 2026-09-03 真机：凯奇坎那一轮**服务端已执行、已计费 40 编排量、产物被自校验判为
+ * 8 处不一致而整份丢弃**，CLI 回落本地编排。这件事**只出现在人读 stderr**——
+ * `ok` 恒 true（`refused === undefined && !declined`）、退出码 0、lay JSON 里
+ * 零个 arrange 键 ⇒ 对 agent 而言，这一轮与「云端顺利产出」**在机读面上无从分辨**。
+ * 更糟：日志里被「…另有 N 处」吞掉的差异明细，此前在任何地方都拿不到。
+ *
+ * ## 出现条件是**黑名单**，MUST NOT 退回白名单
+ *
+ * 默认出键；只有下面两种「本来就没有云端编排这个概念」的形态整键缺席：
+ *
+ * | 被采纳那一轮的形态 | 出键？ |
+ * |---|---|
+ * | `mode === "local"`（总闸压回 / 素材矩阵路缺省档） | ❌ |
+ * | `fallback === "out_of_scope"`（矩阵路显式点了云端档仍留本地） | ❌ |
+ * | 其余全部：unreachable / rejected / malformed / decision_pin_mismatch / self_check_failed / cloud 采纳 / **shadow** | ✅ |
+ *
+ * ⚠️ **判别位是 `mode === "local"` 不是 `fallback === "kill_switch"`**：素材矩阵路的缺省档
+ * 在 `arrange-gate.ts` 那条早返回里**根本不出 `fallback` 键**（只有 `requestedMode !== "local"`
+ * 才写它），只认 `fallback` 会把 `matrix` 主流量全部误命中——那就是「绝大多数工程的 lay JSON 无故改字节」。
+ *
+ * ⚠️ **MUST NOT 改回「`source === "cloud"` 或 `fallback` 属于某四种」那条白名单**：它**漏 shadow 档**。
+ * shadow 返回的是 `source: "local"` 且**不带 `fallback`**，与总闸压回本地在这两个字段上完全同形，
+ * 而前者真发过请求、真计过费、真有 diffs。白名单的失效模式是**静默漏项**——今天漏 shadow，
+ * 明天新增一个 `FallbackReason` 照漏，而漏了没有任何一处会红；黑名单的失效模式是多出一个键
+ * （吵，但看得见）。本键的整个论点就是「静默比吵更坏」，判据自己 MUST NOT 反着来。
+ *
+ * ⚠️ 如实登记一处**过报**（本轮自裁：照出，不收窄）：`unreachable` 含「未配置编排端点」那一支
+ * ——严格说没有字节离开本机。照出键是因为那一路恰恰是本键要治的病（用户以为走云端、
+ * 实际悄悄换了本地引擎），且它 `units` / `diffs` 双缺席 ⇒ **不谎报任何计费**。
+ *
+ * ## 三条形态纪律
+ *
+ * 1. **`rounds` 恒在**（长度 = 真调用次数，单次也是长度 1）：键的定义是「每一次真调用一条」，
+ *    少一条就是缺项而不是压缩——这让「只留最后一轮」那个 bug 类别**结构上不可复发**。
+ * 2. **`units_total` = Σ 已知的那些，跳过回放轮**。开 `--arrange-qc` 时第 2 次调用的上行字节
+ *    与第 1 次相同 ⇒ 几乎必然命中服务端幂等回放，不看标记就累加会把同一笔账数两遍。
+ *    某轮拿不到 `units` 时 `rounds[i].units` **如实缺席**（MUST NOT 补 0）——
+ *    `malformed` 那一路是**已计费但数不知道**，补 0 是假话。
+ * 3. **`diff_count` 与 `diffs` 成对**出现或成对缺席。没对拍过（unreachable / rejected /
+ *    malformed / decision_pin_mismatch 几路）时整对缺席，MUST NOT 出 `diff_count: 0` + `diffs: []`
+ *    ——那读作「对拍过且逐字节一致」，与「压根没对拍成」是两件相反的事。
+ *    `diffs` **全量投出，MUST NOT 截断**：人读日志的 5 条上限只属于日志。
+ *
+ * ★ 导出**仅供测试**（`test/matrix-arrange-surface.test.mjs`）：多轮累加要开 `--arrange-qc`，
+ *   而那条闭环在进程内跑不起来（真 ffmpeg + 真素材理解端点），偏偏「只留最后一轮」正是本函数要防的 bug。
+ *
+ * @param adopted 被**采纳**的那一轮（开 QC 时 = 最后一轮）。顶层 `source` / `mode` / `fallback` /
+ *   `diff_count` / `diffs` 取它——它才是产物的来源；逐轮的账在 `rounds` 里。
+ */
+export function summarizeArrangeRun(
+	calls: ArrangeGateResult[],
+	adopted: ArrangeGateResult | undefined,
+	/** `--dump-request` 实际写出的文件（按轮次顺序）。缺省空数组 ⇒ 两个键都不出。 */
+	dumps: string[] = [],
+): Record<string, unknown> | undefined {
+	if (!adopted || calls.length === 0) return undefined;
+	// ★ 黑名单：只有这两种形态整键缺席（见上表），其余一律出键
+	if (adopted.mode === "local" || adopted.fallback === "out_of_scope") return undefined;
+	// units 逐轮求和：跳过回放轮（零新增计费）与 units 缺席的轮（那几轮「数不知道」，补 0 是假话）
+	const unitsTotal = calls.reduce((a, c) => a + (c.idempotentReplay === true || typeof c.units !== "number" ? 0 : c.units), 0);
+	const anyBilled = calls.some((c) => c.idempotentReplay !== true);
+	const rounds = calls.map((c, i) => ({
+		round: i,
+		mode: c.mode,
+		source: c.source,
+		...(c.fallback ? { fallback: c.fallback } : {}),
+		...(typeof c.units === "number" ? { units: c.units } : {}),
+		...(c.idempotentReplay === true ? { idempotent_replay: true } : {}),
+		...(c.idempotencyRecorded === false ? { idempotency_recorded: false } : {}),
+		// 成对纪律的逐轮半边：没对拍过就整个不出（MUST NOT 补 0）
+		...(c.diffs ? { diff_count: c.diffs.length } : {}),
+		...(c.decisionPin ? { decision_pin: c.decisionPin } : {}),
+	}));
+	return {
+		calls: calls.length,
+		source: adopted.source,
+		mode: adopted.mode,
+		...(adopted.fallback ? { fallback: adopted.fallback } : {}),
+		units_total: unitsTotal,
+		billed: anyBilled,
+		// ⚠️ 幂等登记按**任一轮**判：只要有一轮没登记成，「重跑会命中幂等、不二次计费」这句承诺就作不得数。
+		//    这是一句关于钱的承诺，取值宁可保守。
+		...(calls.some((c) => c.idempotencyRecorded === false) ? { idempotency_recorded: false } : {}),
+		// ★ 成对出：有对拍过才有这两个。差异明细**全量**（人读日志只打前 5 条 + 「…另有 N 处」，
+		//   被吞掉的那几处此前无处可取，而跨语言决策分叉恰恰要逐槽比对才认得出根因与级联）
+		...(adopted.diffs ? { diff_count: adopted.diffs.length, diffs: adopted.diffs } : {}),
+		// 决策层版本核对结论（link-arrange-decision-pin-echo）：本对象与 rounds[i] **两处**都出，
+		// 沿用同一条条件键纪律 —— 拿到过响应才有；`server: null` 是「服务端没给」，
+		// 整键缺席才是「这一档没跑到」。MUST NOT 预留空字段或补 null。
+		...(adopted.decisionPin ? { decision_pin: adopted.decisionPin } : {}),
+		// `--dump-request` 回执：**没传就整键缺席**（缺省不写一个字节，也不出一个键）。
+		// ⚠️ `dump_request` 恒是**用户给的那个路径**（第 0 轮）；只有真写了不止一份时才补
+		//    `dump_request_files` 全量清单。MUST NOT 让调用方按命名规则自己拼后几轮的路径——
+		//    那等于把一条私下的约定塞进机读面，改个命名就全线断。
+		...(dumps.length ? { dump_request: dumps[0], ...(dumps.length > 1 ? { dump_request_files: dumps } : {}) } : {}),
+		// ★ 恒在，不为单轮做特例
+		rounds,
+	};
+}
+
+/**
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
  * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
  * → layBrollTracks → 原子写回 → 素材落盘自检（只读）。
@@ -2174,6 +3028,11 @@ async function layIntoProject(
 		arrangeEstimateOnly?: boolean;
 		/** 素材理解端点（QC 判定用；缺省由 apiBase 推导）。 */
 		describeEndpoint?: DescribeEndpoint;
+		/** `--dump-request <file>`（design §6 排障）：**实际上行的**请求体逐字节落盘路径。
+		 *  缺省缺席 ⇒ 一个字节都不写。路径合法性在本函数里判（要 baseDir）。 */
+		arrangeDumpRequest?: string;
+		/** `--explain`（design §2）：外发调参仪表。缺省缺席 ⇒ `lay.dedup` 只带 `emptySlots`。 */
+		explain?: boolean;
 	} = { imageBroll: true, yes: false, deps: {} },
 ): Promise<LayOutcome | undefined> {
 	const imageOpts = layOpts;
@@ -2187,6 +3046,10 @@ async function layIntoProject(
 	// 的秒~分钟级收回毫秒级（fix-lay-refuse-order-and-qc-holes 1.2；也是 broll_arrange 网络往返的地基）。
 	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
+	// ── 帧率预检（fix-matrix-lay-frame-grid D7）：写出侧帧格化锚在顶层 video_rate；缺席 / 非正 / 非整数在这里就抛
+	//    （与 gtrk patch / layBrollTracks 同一读法与话术）——此刻零云端调用、零下载、零改动，MUST NOT 静默退回毫秒路。
+	//    决策层（planBeatFills / 云端 broll_arrange）不认识帧率：帧格化只在 layBrollTracks 写出前发生。
+	videoRateOf(gtrk);
 
 	// ── ②-B 拒铺**前置**（fix-lay-refuse-order-and-qc-holes 1.1）─────────────────────────
 	// 公约「计费动作恒在停点之后」：能不能铺是本命令的停点，而运镜生成是真计费动作
@@ -2221,7 +3084,7 @@ async function layIntoProject(
 	const cutRatio = layOpts.cutAlign ?? CUT_ALIGN_DEFAULT;
 	let cutStarts: number[] | undefined;
 	if (cutRatio > 0) {
-		const starts = [...new Set([...(reproj.utteranceIndex?.values() ?? [])].map((u) => Math.round(u.track_st * 1000)))]
+		const starts = [...new Set([...(reproj.utteranceIndex?.values() ?? [])].map((u) => sec2ms(u.track_st)))]
 			.sort((a, b) => a - b)
 			.map((v) => v / 1000);
 		if (starts.length) {
@@ -2261,7 +3124,16 @@ async function layIntoProject(
 	// 本地素材路走 cloud，素材矩阵路走 local（逐字不动）。显式档位恒优先。
 	// 云端档只承担本地素材上轨铺排；素材矩阵路由 isLocalArrangeScope 挡在门外，
 	// 那不是回滚，是终裁「按业务线切，不按算法切」的执行面。
-	let arrangeMode = resolveArrangeMode(resolveAutoArrangeMode(layOpts.arrangeMode, plan));
+	// ⚠️ **两个变量不是一回事，MUST NOT 合成一个**（2026-09-03 实测抓出的一处静默）：
+	//    · `requestedArrangeMode` = 定档结果，**未经总闸**。它是交给 gate 的那个参数。
+	//    · `arrangeMode`          = 过完总闸的实际取数路。命令层自己的门（预估确认 /
+	//                               `--arrange-estimate-only` 的 applicable）看的是它。
+	//    合成一个的后果**不是**档位算错（两次 resolve 幂等），而是 gate 里
+	//    `requestedMode !== "local"` 这个判别位被抹平 ⇒ 总闸压回本地时
+	//    `fallback: "kill_switch"` 与那句 log.info **双双不触发** ⇒ 悄悄换了引擎而无人知情。
+	//    那正是 §0.2「人读机读双静默」记的病灶，且它在命令层根本不可达（只有 gate 单测能看见）。
+	const requestedArrangeMode = resolveAutoArrangeMode(layOpts.arrangeMode, plan);
+	let arrangeMode = resolveArrangeMode(requestedArrangeMode);
 	// ★ 抽芯的实质：本地素材路**不再自动回落本地**。
 	//   端点不可达 / 服务端业务拒绝 / 产物结构违约 ⇒ 明确报错，而不是悄悄换一套算法把活干完。
 	//   理由是诚实性：回落产出的是**另一套算法**的结果，用户以为自己拿到的是云端那套。
@@ -2271,9 +3143,24 @@ async function layIntoProject(
 	// 无条件 `loadConfig()`，缺 Key 在这之前几百行就已经明确报错了 —— 那个分支不可达。
 	// 不可达的兜底 + 跑不起来的测试，比没有更糟（它会让人以为这条路被守住了）。
 	const strictCloud = isLocalArrangeScope(plan);
+	// ── `--dump-request <file>`（design §6「排障」）──────────────────────────────
+	//    立在**计价确认之前**：路径写错是参数错误，该在花钱之前就炸，
+	//    而不是让用户付完钱、跑完编排，再在写文件那一步失败。
+	const dumper = layOpts.arrangeDumpRequest !== undefined ? makeArrangeDumper(layOpts.arrangeDumpRequest, baseDir) : undefined;
 	// ── 只预估不执行（add-arrange-estimate-only）：停在**计价确认之前**，与确认门同一处取值 ──
 	//    MUST NOT 另算一份编排量——两处各算一遍，预估与实收迟早会漂，而漂了没人会发现。
 	//    结局是**成功**：「我在做决定」不是「我拒绝了」，压成同一个 declined 会让调用方分不清。
+	//
+	// ⚠️ **键名判别（本块出的是 `lay.arrange`，不是 `lay.arrange_run`）**
+	//    ——fix-arrange-selfcheck-json-surface §0.1 兜底档，两处各写一份，因为下一个人只会读到其中一处：
+	//
+	//    · `lay.arrange`     ⟺ **只预估、零云端调用**。这里的 `units` 是**本地规模公式算出的预估值**，
+	//                           服务端一个字节都没跑过，**MUST NOT 拿它去核账**。
+	//    · `lay.arrange_run` ⟺ 本轮**走上了云端取数路**（含 shadow、含没跑成的那几路）。
+	//                           那里的 `units_total` 是**服务端复算的实收量**，是账单上的数。
+	//
+	//    两处叫同一个名字迟早被人当同一个数去核账 —— 那正是「读起来自洽的错数」，
+	//    而自洽的错数没人会去质疑。另一份判别注释在本文件 `summarizeArrangeRun` 的投影点旁。
 	if (layOpts.arrangeEstimateOnly) {
 		const applicable = arrangeMode !== "local" && isLocalArrangeScope(plan);
 		if (!applicable) {
@@ -2346,14 +3233,29 @@ async function layIntoProject(
 		}
 	}
 	const gateLog = { info: (m: string) => log.info(m), warn: (m: string) => log.warn(m) };
-	const arrangeOnce = (p: BrollPlan) =>
-		runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, arrangeMode, {
+	// ★ 逐轮登记（fix-arrange-selfcheck-json-surface §1.4）：`--arrange-qc` 下 `arrangeOnce`
+	//   最多真调 **3 次**（`arrange-qc.ts` MAX_QC_ROUNDS=2），而下面只留最后一轮的 `arrangeRes`
+	//   ⇒ 前几轮的 units 与 fallback 整体蒸发。计费是**逐轮发生**的，只报最后一轮就是少报。
+	//   包一层采集，任何调用路径（含 QC 内部）都跑不掉，MUST NOT 改成在 QC 里各记一份。
+	const arrangeCalls: ArrangeGateResult[] = [];
+	const arrangeOnce = async (p: BrollPlan) => {
+		// ⚠️ 传的是 `requestedArrangeMode`（**未过总闸**）不是 `arrangeMode`：总闸由 gate 自己再压一次，
+		//    这样它才分得清「用户点的是云端、被我们压回了本地」与「本来就该走本地」——
+		//    传已压过的值等于把这个判别位抹平，`kill_switch` 归因与那句 log.info 会双双静默。
+		const r = await runArrangeWithFallback(p, layN, scoreFloor, decisionOpts, requestedArrangeMode, {
 			runLocal: () => planBeatFills(p, layN, scoreFloor, decisionOpts),
 			...(layOpts.arrangeEndpoint ? { endpoint: layOpts.arrangeEndpoint } : {}),
 			...(layOpts.arrangeCostCap !== undefined ? { costCap: layOpts.arrangeCostCap } : {}),
 			...(strictCloud ? { strictCloud: true } : {}),
+			// 测试替身（MatrixRunDeps.arrangeRequest）：生产路恒缺席 ⇒ gate 走真 `requestArrange`
+			...(layOpts.deps.arrangeRequest ? { request: layOpts.deps.arrangeRequest } : {}),
+			// `--dump-request`：gate 在**发请求之前**回调，故连不上 / 被拒的那几路同样留得下证据
+			...(dumper ? { dumpRequest: dumper.write } : {}),
 			log: gateLog,
 		});
+		arrangeCalls.push(r);
+		return r;
+	};
 
 	// 编排期 QC（P3.2）：缺省关 ⇒ 与开工前逐字节一致。开启时把「铺完→渲→看→重铺→再渲」
 	// 那两轮收成落轨前的一个闭环，全程零渲染。它对本地档与云端档**一样成立**——
@@ -2369,6 +3271,16 @@ async function layIntoProject(
 	const { fills, clipIds, stats: fillStats, pinnedOutcome, markStats, anchors: anchorOutcomes, cutAlign: cutAlignStats, gapFills, direct: directOutcomes } = arrangeRes.outcome;
 	if (arrangeRes.source === "cloud") {
 		log.info(`本轮 B-roll 编排由云端产出（编排量 ${arrangeRes.units ?? "?"}）——本地复算自校验一致。`);
+	}
+	// 机读归因：**在早返回之前算好**——下面还有两条 post-arrange 早返回（图片运镜拒付 / 拒铺），
+	// 那两条也已经真发过请求真计费了，同样要带上归因，MUST NOT 只在正常出口出。
+	const arrangeRun = summarizeArrangeRun(arrangeCalls, arrangeRes, dumper?.files ?? []);
+	if (dumper && dumper.files.length > 0) {
+		log.info(
+			`上行请求体已落盘（--dump-request）：${dumper.files.join("、")}。\n` +
+				"服务端不保存 plan 全文，所以复现这一次调用只能靠这份文件——排障时把它发给我们即可。" +
+				"⚠️ 它含你的 beat 名与检索词，别往公开渠道贴。",
+		);
 	}
 	void qcResidual;
 
@@ -2410,6 +3322,8 @@ async function layIntoProject(
 				log.info(
 					`${d.beat} 锚「${d.keyword}」@ ${d.at_sec}s → clip ${d.clip_id} 钉 ${d.track_st}s（提前量 0.5s${d.status === "pinned" ? " · 用户钉选候选占锚槽" : ""}）`,
 				);
+				const note = anchorRankNote(d);
+				if (note) log.info(note);
 			}
 		}
 		log.info(`关键词锚：钉位 ${cnt.planned} · 用户钉选 ${cnt.pinned} · 降级 ${cnt.degraded}（共 ${anchorOutcomes.length} 锚）`);
@@ -2477,7 +3391,7 @@ async function layIntoProject(
 	// 信号覆盖率（add-signal-coverage-reporting）：分母是**参与融合的候选段总数**——
 	// 靠 fix-arrange-diagnostics-granularity 把 markStats 换成段粒度之后这个数才算得准
 	// （此前是 Set<clip_id>，二创单素材场景下恒 1/1）。
-	const covOf = (hit: number, neutral: number): number | undefined => (hit + neutral > 0 ? r3num(hit / (hit + neutral)) : undefined);
+	const covOf = (hit: number, neutral: number): number | undefined => (hit + neutral > 0 ? r3(hit / (hit + neutral)) : undefined);
 	const markCov = markOn ? covOf(markStats.hit, markStats.neutral) : undefined;
 	const hlCov = hlOn ? covOf(markStats.hlHit, markStats.hlNeutral) : undefined;
 	const pct = (v: number): string => `${Math.round(v * 1000) / 10}%`;
@@ -2507,7 +3421,8 @@ async function layIntoProject(
 	if (zeroCov.length) {
 		log.warn(
 			`${zeroCov.join(" 与 ")}权重开了但**本片零缓存覆盖**：全部候选按中性处理，排序与不开权重完全一致（权重已回吐给语义分）。` +
-				`根因通常是本 plan 未经理解——先跑 gtrk matrix describe --plan <plan 路径> 再重跑 lay 才有效；` +
+				`根因通常是本 plan 未经理解——先跑 gtrk matrix describe --plan <plan 路径> 再重跑 lay 才有效` +
+				`（看点一维还要求 describe 那次带的是**同一份 --highlight-rubric**：换了准则就是换了桶，旧桶的分不会串过来）；` +
 				`手写 plan（免索引直排）也走这条路，此时美观度/看点/模糊降权三条信号一并不生效`,
 		);
 	}
@@ -2552,8 +3467,22 @@ async function layIntoProject(
 	});
 	if (prep.declined) {
 		log.err(
-			"已取消：图片运镜计费确认被拒绝——本轮铺轨中止，工程文件零改动、零云端调用（broll-plan.json 照常可用）。" +
-				"可用 --yes 跳过确认，或 --no-image-broll 排除图片候选后重跑。",
+			"已取消：图片运镜计费确认被拒绝——本轮铺轨中止，工程文件零改动。" +
+				// ⟲ 2026-09-03 订正（fix-arrange-selfcheck-json-surface §1.3）：
+				//   原文这里写「**零云端调用**」，那是**错误陈述**——本分支位于 arrangeOnce 之后，
+				//   云端编排早已执行并计费。把「图片运镜这一步零调用」说成「本轮零调用」，
+				//   会让用户以为这一轮没花钱。零调用的只有图片运镜那一项。
+				//   ⚠️ 后半句的「重跑会命中幂等」MUST 与 `idempotency_recorded === false` 联动：
+				//     登记没写成时**不许**这么承诺——那种情形下字节相同的重发会真的重算并重新计费
+				//     （`arrange-gate.ts` 已有同款告警）。承诺错了比不承诺更坏：用户会照着它重跑。
+				(arrangeRun
+					? `\n⚠️ 注意：本轮的 **B-roll 云端编排已经跑过并计费**（编排量 ${arrangeRun.units_total ?? "?"}），零调用的只是图片运镜这一步 ⇒ 这笔编排量已经花掉了。\n` +
+						"plan 与编排产物照常可复用；" +
+						(arrangeRun.idempotency_recorded === false
+							? "⚠️ 但服务端本轮**幂等登记未写成** ⇒ 重跑同参数会**重新执行并重新计费**，不受幂等保护。"
+							: "重跑时同参数会命中服务端幂等（24h 内不二次计费）。")
+					: "零云端调用。") +
+				"（broll-plan.json 照常可用）可用 --yes 跳过确认，或 --no-image-broll 排除图片候选后重跑。",
 		);
 		return {
 			declined: true,
@@ -2567,6 +3496,8 @@ async function layIntoProject(
 				blackTrack: null,
 				blackBedHoleSec: 0,
 				blackBedHoles: [],
+				// post-arrange 早返回同样要带归因：这一路钱已经花了，机读面 MUST NOT 静默
+				...(arrangeRun ? { arrange_run: arrangeRun } : {}),
 			},
 		};
 	}
@@ -2590,6 +3521,21 @@ async function layIntoProject(
 	// 备好全部槽位 clip 的素材引用（按 clip_id 幂等复用）
 	const downloads = new Map<string, DownloadedProxy>();
 	const dlStats = { preview: 0, raw: 0, reused: 0, failed: 0, local: 0 };
+	// ── 代理落盘即实测（add-cross-clock-adapter D2）：每颗落盘代理（新下载 / 缓存命中 / 回落原片）ffprobe **一次**
+	//    → SourceWall（preview 代理 = preview_proxy 钟；回落原片 = source_container 钟）。失败只记原因，
+	//    纯函数据此回退自述 + unverified；这里 MUST NOT 抛——探不到不是铺不了。本地素材路不探（索引期已实测，恒等）。
+	const probe = layOpts.deps.probe ?? probeGeometry;
+	const proxyProbes = new Map<string, ProxyProbe>();
+	const probeLanded = (clipId: string, abs: string, source: "preview" | "raw"): void => {
+		try {
+			const geo = probe(abs);
+			const wall = wallFromProbe(geo, source === "raw" ? "source_container" : "preview_proxy");
+			if (!wall) throw new Error(`ffprobe 时长无效（${geo.duration}）`);
+			proxyProbes.set(clipId, { wall, width: geo.width, height: geo.height, fps: geo.fps });
+		} catch (e) {
+			proxyProbes.set(clipId, { error: e instanceof Error ? e.message : String(e) });
+		}
+	};
 	for (const clipId of clipIds) {
 		const cand = candById.get(clipId);
 		if (!cand) continue;
@@ -2613,6 +3559,7 @@ async function layIntoProject(
 			const prev = prevSource.get(clipId);
 			if (prev !== "raw") {
 				downloads.set(clipId, { rel, source: prev ?? "preview" });
+				probeLanded(clipId, abs, prev ?? "preview"); // 缓存命中同样实测：首轮成本，条目描述文件本身
 				dlStats.reused++;
 				continue;
 			}
@@ -2620,10 +3567,12 @@ async function layIntoProject(
 			const retried = await downloadProxy(cand, abs, { previewOnly: true });
 			if (retried === "preview") {
 				downloads.set(clipId, { rel, source: "preview" });
+				probeLanded(clipId, abs, "preview");
 				dlStats.preview++;
 				log.info(`clip ${clipId} 代理已补产,已从原片回落态换回 preview`);
 			} else {
 				downloads.set(clipId, { rel, source: "raw" });
+				probeLanded(clipId, abs, "raw");
 				dlStats.reused++;
 			}
 			continue;
@@ -2631,6 +3580,7 @@ async function layIntoProject(
 		const got = await downloadProxy(cand, abs);
 		if (got) {
 			downloads.set(clipId, { rel, source: got });
+			probeLanded(clipId, abs, got);
 			dlStats[got]++;
 		} else {
 			dlStats.failed++;
@@ -2655,7 +3605,7 @@ async function layIntoProject(
 		);
 	}
 
-	let { next, summary, warnings } = layBrollTracks({
+	let { next, summary, warnings, infos } = layBrollTracks({
 		gtrk: freshGtrk,
 		plan,
 		lay: layN,
@@ -2663,6 +3613,7 @@ async function layIntoProject(
 		downloads,
 		covers,
 		injectedMaterials: prep.injected,
+		proxyProbes,
 		sourceLayer: layOpts.sourceLayer,
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
@@ -2688,6 +3639,8 @@ async function layIntoProject(
 				blackTrack: null,
 				blackBedHoleSec: 0,
 				blackBedHoles: [],
+				// 拒铺同样是 post-arrange：云端编排早已执行并计费，机读面 MUST NOT 静默
+				...(arrangeRun ? { arrange_run: arrangeRun } : {}),
 				downloads: dlStats,
 			},
 			// 拒铺前运镜可能已生成（产物留在 assets/broll-move/ 供下轮复用）——账面如实报
@@ -2718,7 +3671,7 @@ async function layIntoProject(
 					gapSolidUsed ? "、主轨黑片填充一并回退（留 gap——客户端若开主轨磁吸请注意与配音错位的风险）" : ""
 				}，候选轨照常。`,
 			);
-			({ next, summary, warnings } = layBrollTracks({
+			({ next, summary, warnings, infos } = layBrollTracks({
 				gtrk: freshGtrk,
 				plan,
 				lay: layN,
@@ -2726,6 +3679,7 @@ async function layIntoProject(
 				downloads,
 				covers,
 				injectedMaterials: prep.injected,
+				proxyProbes,
 				sourceLayer: layOpts.sourceLayer,
 				generatedAt: new Date().toISOString(),
 				planPath: "split/broll-plan.json",
@@ -2769,15 +3723,87 @@ async function layIntoProject(
 			`（代理 ${dlStats.preview} · 原片回落 ${dlStats.raw} · 复用 ${dlStats.reused}${dlStats.local ? ` · 本地直引 ${dlStats.local}` : ""}${dlStats.failed ? ` · 失败 ${dlStats.failed}` : ""}${imageNote}）${bedNote}${keptNote}`,
 	);
 	log.info("opencut 打开工程即见候选轨：轨道头小眼睛可开关对比；确认下载原片属挑选 UI（E-P1）。");
+	// 帧网格明示（fix-matrix-lay-frame-grid 2.4）：写出侧统计一行 + 每次前移 / 弃置一行（良性、已知根因 ⇒ info 级，不升告警）
+	if (summary.frameGrid) {
+		const fg = summary.frameGrid;
+		log.info(
+			`帧网格：${fg.rate}fps · 候选轨 ${fg.slots} 颗 / 黑底 ${fg.black_bed} 颗全部落在整帧上` +
+				(fg.shifted ? ` · 越段界宁短一帧 ${fg.shifted} 次（明细见下）` : ""),
+		);
+	}
+	for (const m of infos) log.info(m);
 	// 主轨 gap 填充明示（adjust-main-track-gap-fill）：生效才出（口播 / none / 不适用零噪音）
 	if (summary.gapFill) {
 		const gf = summary.gapFill;
-		const cnt = { candidate: 0, extend: 0, solid: 0 };
+		// ⚠️ 这份计数器 MUST 覆盖 `GapFillEntry["kind"]` 的**全部**取值——
+		//    漏一个取值 tsc 会红（本次新增 `borrowed` 即由它抓到），别改成 Record<string, number> 绕过去
+		const cnt: Record<GapFillEntry["kind"], number> = { candidate: 0, extend: 0, solid: 0, borrowed: 0, subfloor: 0 };
 		for (const f of gf.fills) cnt[f.kind]++;
+		// 「主轨零 gap」不再无条件陈述（fix-gapfill-eps-boundary-residue D6）：由决策层对填充后主轨产物的
+		// 整毫秒格实扫（summary.gapFill.residual_gaps，条件键）得出——有 ≥ 1ms 缝即如实报数，判据与实现同一份。
+		const rg = gf.residual_gaps;
+		const verdict = rg
+			? `主轨仍有 ${rg.count} 处缝共 ${rg.sec}s（整毫秒格实扫：${rg.items.slice(0, 5).map((h) => `${h.beat}=${h.sec}s`).join("、")}${rg.count > 5 ? ` 等 ${rg.count} 处` : ""}）`
+			: "主轨零 gap（整毫秒格实扫），客户端主轨磁吸安全";
 		log.info(
 			gf.fills.length
-				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend} · 黑片 ${cnt.solid}）——主轨零 gap，客户端主轨磁吸安全`
-				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填（主轨本就零 gap）`,
+				? `主轨 gap 填充（${gf.mode}）：${gf.fills.length} 处共 ${gf.filledSec}s（候选 ${cnt.candidate} · 延长 ${cnt.extend}` +
+						`${cnt.borrowed ? ` · 跨 beat 借 ${cnt.borrowed}` : ""}${cnt.subfloor ? ` · 次地板补画面 ${cnt.subfloor}` : ""}` +
+						` · 黑片 ${cnt.solid}）——${verdict}`
+				: `主轨 gap 填充（${gf.mode}）已开启：本轮无洞可填——${verdict}`,
+		);
+		if (rg) {
+			log.warn(
+				`主轨 gap 填充后仍有 ${rg.count} 处 ≥ 1ms 的缝（合计 ${rg.sec}s，逐条明细见 lay.gap_fill.residual_gaps）。\n` +
+					"客户端若开主轨磁吸，这些缝会被吸除、其后画面整体前移并与配音错位——请在客户端核对这几处，或补素材后重跑 `gtrk matrix`。",
+			);
+		}
+		// 跨 beat 借候选如实告知（relax-gapfill-cross-beat-borrow）：MUST NOT 静默——
+		// 借来的画面取自**别的 beat 的检索词**，与本段稿子的相关性天然弱于本 beat 自己的候选，
+		// 那是本件的真实代价，用户有权知道并据此决定要不要去补素材。
+		if (cnt.borrowed) {
+			const items = gf.fills.filter((f) => f.kind === "borrowed");
+			const head = items.slice(0, 5).map((f) => `${f.beat}=${f.sec}s`).join("、");
+			log.warn(
+				`有 ${cnt.borrowed} 处画面是**跨 beat 借**来的（合计 ${r3(items.reduce((n, f) => n + f.sec, 0))}s）：` +
+					`${head}${items.length > 5 ? ` 等 ${items.length} 处` : ""}。\n` +
+					"这些段自己的候选被别的 beat 先用掉了，为避免整段黑屏而从全片其它检索结果里取了料——\n" +
+					"**画面与这几句稿子的相关性会弱一些**。想消掉：给这些 beat 补更贴的素材后重跑 `matrix search`。",
+			);
+		}
+		// 次地板补画面如实告知（relax-gapfill-subfloor-picture）：这些槽**短于最小镜头长**，
+		// 是快切。它们本来会是同样长的黑闪——换成画面是改善，但用户仍有权知道自己的成片里
+		// 有几处不到 1.2s 的快切，以及它们在哪。
+		if (cnt.subfloor) {
+			const items = gf.fills.filter((f) => f.kind === "subfloor");
+			const head = items.slice(0, 5).map((f) => `${f.beat}=${f.sec}s`).join("、");
+			log.info(
+				`有 ${cnt.subfloor} 处残洞短于最小镜头长（合计 ${r3(items.reduce((n, f) => n + f.sec, 0))}s），` +
+					`已填**真画面**而非黑片：${head}${items.length > 5 ? ` 等 ${items.length} 处` : ""}。\n` +
+					"这些是快切（不到 1.2s）——它们本来会是同样长的黑闪。槽长与切点未变，只换了内容。",
+			);
+		}
+	}
+	// ── [add-broll-plan-summary-honesty] 零候选 beat 出口 ─────────────────────────────
+	// 决策层早就在 `matrix-lay.ts` 里算了 `beatsWithCandidates`（进了 LayResult.summary），
+	// 但命令层这段是**逐键重投影**，没人把它投出去 ⇒ 事实上的死指标。名单侧同理：
+	// 唯一会喊「这段底下没画面」的黑底空洞告警，恰好把「整 beat 零候选」显式豁免掉了
+	// （matrix-lay-tracks spec:526 的沉默条件 + `metaBeats.filter((b) => b.laid.length > 0)`）。
+	// ⚠️ 纯只读统计：本段 MUST NOT 参与任何铺轨决策，写回的 .gtrk 逐字节不受影响。
+	// ⚠️ 名单口径 MUST 与 `summary.beatsWithCandidates` 同源（都走 `mergedCandidates` 的 beat 级并集），
+	//    否则 `beatsWithCandidates + emptyBeats.length === plan.beats.length` 这条自洽式会破。
+	const emptyBeats = plan.beats.filter((b) => mergedCandidates(b).length === 0).map((b) => b.beat);
+	if (emptyBeats.length > 0) {
+		// 归宿判据与 `matrix-lay.ts` 的 `gapFillOn` 同源：summary.gapFill 有键 ⟺ 填充真开着
+		// （`gapFillOn && gapFillReq` 才写这个键），不必在命令层重算一遍那五个条件。
+		const gapFillOn = summary.gapFill !== undefined;
+		log.warn(
+			`${emptyBeats.length} 个 beat **零候选**（整段没有任何可铺的画面）：${emptyBeats.slice(0, 12).join("、")}` +
+				`${emptyBeats.length > 12 ? ` 等 ${emptyBeats.length} 个` : ""}。\n` +
+				(gapFillOn
+					? "已开主轨 gap 填充：这些段最终会是黑片，或从别的 beat 借来的画面（相关性天然更弱，逐条明细见 lay.gap_fill.fills）。"
+					: "未开 gap 填充：这些段会露出主轨 A-roll（音频驱动工程跳铺黑底时则是画布底色）。") +
+				"\n给这些 beat 补素材或换检索词后重跑 `gtrk matrix` 即可消掉。",
 		);
 	}
 	for (const w of warnings) log.warn(w);
@@ -2785,22 +3811,54 @@ async function layIntoProject(
 		log.warn("部分候选无 preview 代理已回落原片（体积较大）——服务端 backfill 后重跑本命令可换回代理。");
 	}
 	if (integrity) reportMaterialIntegrity(integrity, log);
+	// ── `--explain` 的人读那一半（add-broll-arrange-atom 4.2）────────────────────
+	//    与机读面**同一个口径、同一个开关**：不开就一个字都不说。
+	//    分成两处写是必须的（一处机读一处人读），但判据只有 `layOpts.explain` 这一个——
+	//    两处判据一旦分叉，收拢就会从某一侧漏出去，而漏了没有任何一处会红。
+	if (layOpts.explain) {
+		log.info(
+			`调参仪表（--explain）：留空槽 ${fillStats.emptySlots} 个` +
+				`（其中窗口精修致空 ${fillStats.emptySlotsByRefine}）、跳剪避让枯竭放行 ${fillStats.adjacentWaived} 次、` +
+				`取用高运动段 ${fillStats.hotSlotsPlaced} 处、取用模糊段 ${fillStats.blurrySlotsPlaced} 处。\n` +
+				"这几个数只用于调参诊断，不影响任何决策；缺省不出（机读面同口径，见 lay.dedup）。",
+		);
+	}
 	return {
 		lay: {
 			refused: false,
 			sourceLayer: summary.sourceLayer,
-			// 全局不二用统计（add-broll-dedup-and-layering）：宁空不重复的空槽事件数 + 跳剪避让枯竭放行数
+			// 全局不二用统计（add-broll-dedup-and-layering）。
+			//
+			// ── 诊断收拢（add-broll-arrange-atom 4.2，design §2）────────────────────
+			// **缺省只出 `emptySlots`**，其余四个是**调参仪表**、只在 `--explain` 时外发。
+			//
+			// 判据是「这个数拿来干什么」：
+			//   · `emptySlots` = 素材池够不够用的直接信号，upsell 通道（`decideLayUpsell`）
+			//     真在读它，且用户看得懂 ⇒ **恒出**；
+			//   · 其余四个（精修致空 / 跳剪枯竭放行 / 取用高运动段 / 取用模糊段）是我们调常量时
+			//     才看的仪表 —— 它们把「哪几条降权规则在什么密度下会被突破」按工程逐份外发，
+			//     等于把阈值结构做成可回归拟合的监督信号。同 design §2 判 `fused/rank` 数值
+			//     MUST NOT 回传是同一条理由：**决策产物该给，产生它的仪表不该白送**。
+			//
+			// ⚠️ 收拢 MUST 只做在**命令层投影**这一层：`planBeatFills` 的返回值（`FillStats`）
+			//    逐字段不动、金样 expected 一个字节不变。决策层少算一个数就是另一套算法了。
+			// ⚠️ 人读日志同口径（见下方 `--explain` 那行 log.info），MUST NOT 一边收机读面
+			//    一边从日志里漏出去 —— 那样收拢只是看起来做了。
 			dedup: {
 				scope: layOpts.dedupScope ?? "scene",
 				emptySlots: fillStats.emptySlots,
-				// 其中因窗口精修（残片收缩后不足最小槽长）而留空的部分——SLIVER_MIN_SEC 的真实代价
-				// 只可能在此显形（候选充足时恒 0，候选稀疏工程才可能非 0）
-				emptySlotsByRefine: fillStats.emptySlotsByRefine,
-				// 取用了高运动段的槽位数（降权不排除，候选稀疏时仍会取——让「为什么这颗抖」可追溯）
-				hotSlotsPlaced: fillStats.hotSlotsPlaced,
-				// 同款：取用了 describe 判模糊候选的槽位数（fix-describe-cache-locality）
-				blurrySlotsPlaced: fillStats.blurrySlotsPlaced,
-				adjacentWaived: fillStats.adjacentWaived,
+				...(layOpts.explain
+					? {
+							// 其中因窗口精修（残片收缩后不足最小槽长）而留空的部分——SLIVER_MIN_SEC 的真实代价
+							// 只可能在此显形（候选充足时恒 0，候选稀疏工程才可能非 0）
+							emptySlotsByRefine: fillStats.emptySlotsByRefine,
+							// 取用了高运动段的槽位数（降权不排除，候选稀疏时仍会取——让「为什么这颗抖」可追溯）
+							hotSlotsPlaced: fillStats.hotSlotsPlaced,
+							// 同款：取用了 describe 判模糊候选的槽位数（fix-describe-cache-locality）
+							blurrySlotsPlaced: fillStats.blurrySlotsPlaced,
+							adjacentWaived: fillStats.adjacentWaived,
+						}
+					: {}),
 			},
 			// mark 融合账面（add-audio-project-atoms）：仅开启时出现（默认 0 时 lay JSON 逐字节不变）
 			...(markOn ? { mark_weight: layOpts.markWeight, mark_hit: markStats.hit, mark_neutral: markStats.neutral } : {}),
@@ -2858,6 +3916,22 @@ async function layIntoProject(
 							clip_id: d.clip_id,
 							status: d.status,
 							...(d.reason ? { reason: d.reason } : {}),
+							// 名次五键（fix-anchor-top-hit-guarantee 第三刀）：数据早就在 outcome 上了，
+							// 这里只是**渲染**——真机 2026-09-02 验收时去 result.json 找 `anchor_details`，
+							// 五个字段一个都没有：库层算了、命令层没投，等于白算。
+							//
+							// ⚠️ 一律**条件键**（有才带），MUST NOT 写成 `sim_rank: d.sim_rank ?? null`：
+							//   · degraded 的锚**没落位**，「第几名」这件事根本不存在——补 null 是把
+							//     「不适用」谎报成「有值且为空」，消费侧被迫多写一层判空；
+							//   · `top_miss`/`top_by` 的**缺席本身就是信号**（缺席 ⟺ 完美钉位取到队首），
+							//     补 null 会把这条信号抹掉，跨语言逐字节对拍面也会多出五个恒定噪声键。
+							//   与同一份 lay JSON 里 `mark_weight` / `signal_coverage` / `pinned` 的
+							//   「没开这一维就整键缺席、MUST NOT 补 0」是同一条纪律。
+							...(d.sim_rank !== undefined ? { sim_rank: d.sim_rank } : {}),
+							...(d.sim !== undefined ? { sim: d.sim } : {}),
+							...(d.top_sim !== undefined ? { top_sim: d.top_sim } : {}),
+							...(d.top_miss !== undefined ? { top_miss: d.top_miss } : {}),
+							...(d.top_by !== undefined ? { top_by: d.top_by } : {}),
 						})),
 					}
 				: {}),
@@ -2891,6 +3965,11 @@ async function layIntoProject(
 				: {}),
 			laidTracks: summary.laidTracks,
 			laidClips: summary.laidClips,
+			// [add-broll-plan-summary-honesty] 候选覆盖账面：`beatsWithCandidates` 决策层早就算了，
+			// 但一直没人在这段逐键重投影里补它 ⇒ 到不了产物。两键恒满足
+			// `beatsWithCandidates + emptyBeats.length === plan.beats.length`（同源于 mergedCandidates）。
+			beatsWithCandidates: summary.beatsWithCandidates,
+			emptyBeats,
 			removedTracks: summary.removedTracks,
 			keptEditedTracks: summary.keptEditedTracks,
 			blackTrack: summary.blackTrack,
@@ -2908,6 +3987,8 @@ async function layIntoProject(
 							fills: summary.gapFill.fills,
 							// 过短黑片账面（add-short-black-fill-warning）：条件键，无则整键缺席
 							...(summary.gapFill.short_solid ? { short_solid: summary.gapFill.short_solid } : {}),
+							// 主轨残缝账面（fix-gapfill-eps-boundary-residue D6）：条件键，零缝整键缺席；有则 count / sec / items 全量
+							...(summary.gapFill.residual_gaps ? { residual_gaps: summary.gapFill.residual_gaps } : {}),
 						},
 					}
 				: {}),
@@ -2915,6 +3996,17 @@ async function layIntoProject(
 			// agent 无需真机看片即可回报哪几段是纯黑（MUST NOT 按告警阈值过滤）。
 			blackBedHoleSec: summary.blackBedHoleSec,
 			blackBedHoles: summary.blackBedHoles,
+			// 写出侧帧网格统计（fix-matrix-lay-frame-grid 2.4，纯诊断）：rate = 顶层 video_rate，
+			// slots / black_bed = 本轮落在网格上的候选轨 clip 数 / 黑底 clip 数，shifted = 越段界宁短一帧的次数
+			...(summary.frameGrid ? { frame_grid: summary.frameGrid } : {}),
+			// 时钟账面（add-cross-clock-adapter D2）：代理实测 / 回退自述 / 本地恒等计数 + proxy_mismatch / proxy_fps_mismatch 全量明细
+			//（人读只汇总一行，机读 MUST NOT 按阈值过滤——后者是交 infra 核查代理生成的真机证据）
+			...(summary.clock ? { clock: summary.clock } : {}),
+			// 云端编排归因（fix-arrange-selfcheck-json-surface）：**真发过请求才出现**。
+			// ⚠️ 键名是 `arrange_run` 不是 `arrange`——`arrange` 已被 `--arrange-estimate-only`
+			//    那条路占用且形态不同（`{applicable, units, scale}` 的预估形态）。两条路的语义
+			//    一个是「将要花多少」、一个是「实际发生了什么」，MUST NOT 合形、MUST NOT 互相顶替。
+			...(arrangeRun ? { arrange_run: arrangeRun } : {}),
 			downloads: dlStats,
 			// 运镜失败明细（D6 机读 summary）：仅图片候选参与本轮时出现；失败槽位已静态兜底
 			...(prep.hasImage ? { image_move_failures: prep.failures } : {}),
@@ -3015,7 +4107,9 @@ function materialLines(r: MaterialResult, idx: number, scope: MaterialScope): st
 	if (r.audio_type) bits.push(r.audio_type === "song" ? "song（歌曲）" : r.audio_type === "pure" ? "pure（纯音乐）" : String(r.audio_type));
 	if (typeof r.score === "number") bits.push(`score ${r.score}`);
 	// external 档没有 is_copyright 字段——如实不显示（MUST NOT 补假值当「不可商用」讲）
-	if (typeof r.is_copyright === "boolean") bits.push(r.is_copyright ? "可商用" : "非商用");
+	// [align-copyright-semantics-cli handoff 4.1] 复用词表正本常量：同一个位此前有两套词
+	// （人读「非商用」/ 机读 `copyright_label` 的「不可商用」），转述的人会以为是两件事。
+	if (typeof r.is_copyright === "boolean") bits.push(deriveCopyrightLabel(r.is_copyright) ?? "");
 	if (typeof r.material_class === "string") bits.push(r.material_class);
 	const lines = [`${bits.join(" · ")}（id ${r.id}）`];
 	if (typeof r.download_url === "string" && r.download_url) lines.push(`   ${scope === "audio" ? "试听/下载" : "下载"}：${r.download_url}`);

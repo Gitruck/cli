@@ -1,6 +1,11 @@
 /**
  * MG 颗粒静态 lint（add-rrv-lay，去品牌化前 rrv-lint）——六铁律的**机器可判定静态子集**，纯本地零云端。
  *
+ * **零 import 自足**是既有设计（本文件不依赖仓内任何模块）。代价：铁律⑦静态估长里的三位小数舍入
+ * `Math.round(raw * 1000) / 1000`（`estimateTimelineLength`）是 `frame-domain.ts r3` 的本地同体副本——
+ * unify-time-consumers-and-tolerance 登记为全仓 `Math.round(x × 1000)` 机械判据的**豁免行**（与 `caption-align.ts`
+ * 的零 import 镜像同类）；MUST 与正本逐字同体、MUST NOT 分叉。
+ *
  * 契约正本 contracts/gsap-emit-v1.md。**只查静态可判定项**——逐帧非冻结只有真 Hyperframes 能判
  * （契约明令禁本地无头模拟），留客户端出片期，不在此。
  *
@@ -25,6 +30,8 @@
  *   致命性**按项声明**（语义上允许致命），但**本期落地的三项 `c-filter-*` 全部非致命**；
  *   提为致命须另走独立 change（spec 写死两项前提：MAD 出成片路线已立项 + 生产语料全量复扫零命中），
  *   **MUST NOT** 用 env / 配置项 / 运行期开关翻转。
+ * - ⚠️ 数字前缀里的**致命**项之一是 `4-html-size`（add-particle-html-size-lint）：HTML 超过客户端硬上限
+ *   2,000,000 字符——**别按「`4-*` 皆非致命」的旧印象读**；它命中即短路（其余项不跑）。同组 `4-html-size-heavy` 非致命。
  *
  * 顺带从颗粒 HTML 的 background 声明推导 opaque（权威源是颗粒作者，非可缺省的 dispatch.bg）。
  * 推导面 = **根 style ∪ 根下首个全幅子层 style**（契约铁律4④）——2026-07-26 r69 真渲实测：
@@ -45,6 +52,12 @@ export interface LintResult {
 	 * 有非透明底=true(满屏盖底) / 两处皆无或皆 transparent=false(透明叠加)。
 	 */
 	opaque: boolean;
+	/**
+	 * 颗粒三态身份（add-text-template-source）：`ir` = 模板颗粒且未被改过、云端可调；
+	 * `detached` = 被直接改过、云端调不动；`html` = 普通颗粒（绝大多数）。
+	 * 调用方没传 `opts.identity` 时为 `undefined`——**本文件算不了它**（要 sha256，而本文件零 import）。
+	 */
+	identity?: "ir" | "detached" | "html";
 	/** 解析到的 data-composition-id（拿不到=undefined） */
 	compositionId?: string;
 }
@@ -100,11 +113,46 @@ function firstChildTag(html: string, rootTagStr: string | null): string | null {
 		const m = /^<([a-zA-Z][\w-]*)\b[^>]*>/.exec(html.slice(i));
 		if (!m) return null;
 		const name = m[1].toLowerCase();
+		// [add-text-ir-scrim] 压板层跳过，继续找下一个全幅子层。
+		//
+		// scrim 是「压暗底轨」而非「盖掉底轨」的半透明层，而它恰好落在根下第一个渲染子层的
+		// 位置 —— 正是本函数的取样点。不跳的话 `bgOf` 会把 `#000000A6` 判成非透明
+		// （它只认 transparent/none/rgba(...,0) 三种形态），于是**一块压板被登记成合格实心底**：
+		// 满屏槽位据此过闸，出片时底轨从压板后面透出来。
+		// `deriveOpaque` 头注写的保守方向是「把实心误判成透明只是少一次优化，
+		// 把透明误判成实心会黑掉底轨」——这里正是后者，所以必须跳。
+		//
+		// ⚠️ 判据取**编译器自产的显式标记**，不取颜色解析：颜色侧的 alpha 识别（见 `bgOf`）
+		// 面大易漏（#RRGGBBAA / #RGBA / rgba() / hsla() 四种写法），漏一种就是静默失守。
+		// 显式声明优于推断——这是我方编译器产的层，它自己知道自己是什么。
+		if (/\bdata-gtrk-scrim\b/i.test(m[0])) {
+			i += skipElement(html, i, name, m[0]);
+			continue;
+		}
 		if (!NON_RENDERING.includes(name)) return m[0];
 		// 跳过整块：有闭合标签的（style/script/title）连内容一起跳，自闭合的（meta/link）只跳标签
 		const close = new RegExp(`</${name}\\s*>`, "i").exec(html.slice(i));
 		i += close ? close.index + close[0].length : m[0].length;
 	}
+}
+
+/**
+ * 从 `html[at]` 处的开标签起，返回**整个元素**（含内容与闭合标签）的长度。
+ *
+ * 按同名标签配对计深度，不靠「找第一个 `</div>`」——scrim 现在恒是空 div，
+ * 但手写颗粒里塞了内容的压板一样该被整块跳过，朴素切法会在那里把深度算错、
+ * 把 scrim 内部的某个子层当成「根下第一个全幅子层」。
+ * 闭合标签缺失（非法 HTML）时只跳开标签，不吞掉文档剩余部分。
+ */
+function skipElement(html: string, at: number, name: string, openTag: string): number {
+	const re = new RegExp(`<${name}\\b[^>]*>|</${name}\\s*>`, "gi");
+	re.lastIndex = at + openTag.length;
+	let depth = 1;
+	for (let m = re.exec(html); m; m = re.exec(html)) {
+		depth += m[0].startsWith("</") ? -1 : 1;
+		if (depth === 0) return m.index + m[0].length - at;
+	}
+	return openTag.length;
 }
 
 /**
@@ -128,13 +176,100 @@ function isFullBleed(tagStr: string): boolean {
 	return isFullBleedStyle(attr(tagStr, "style") ?? "");
 }
 
+/**
+ * 某个开标签的**有效样式** = 内联 `style` ＋ `<style>` 块里命中它的类/id/标签规则
+ * （gate-fullscreen-slot-needs-solid-bed）。
+ *
+ * ## 为什么要补这一路
+ *
+ * 合规的写法允许把全幅性与底色写在 `<style>` 的类规则里（`.bgfill{position:absolute;inset:0;...}`），
+ * 而 `deriveOpaque` 原先只读内联 `style` ⇒ 这种颗粒**画出来了但登记成透明**，
+ * 成片时按透明叠加处理，两边都不报错。
+ *
+ * ⚠️ 这不是新能力：**同一个文件里** CSS 成本那条路早就在解析 `<style>` 规则体
+ * （`styleBlockRules` + `isFullBleedStyle`）。原先是自家两套口径，本函数把它收成一套。
+ *
+ * ## 射程（刻意不做的部分）
+ *
+ * 只做**最朴素的选择器匹配**：`.cls` / `#id` / `tag`，以及它们前面带祖先前缀的形式
+ * （取选择器最后一节判）。MUST NOT 往「真 CSS 选择器引擎」方向长——
+ * 这里要的是「别把合规写法漏判成透明」，不是复刻浏览器。
+ * 匹配不上就当没有，**判不准一律回落到「不透明=false」**（保守方向：
+ * 把实心误判成透明只是少一次优化，把透明误判成实心会黑掉底轨）。
+ */
+function effectiveStyle(tagStr: string, rules: { selector: string; own: string }[]): string {
+	const inline = attr(tagStr, "style") ?? "";
+	const cls = new Set(
+		(attr(tagStr, "class") ?? "")
+			.split(/\s+/)
+			.filter(Boolean)
+			.map((c) => c.toLowerCase()),
+	);
+	const id = (attr(tagStr, "id") ?? "").toLowerCase();
+	const tag = /^<([a-zA-Z][\w-]*)/.exec(tagStr)?.[1]?.toLowerCase() ?? "";
+	const hits: string[] = [];
+	for (const { selector, own } of rules) {
+		// 逗号分组逐个判；每一支取**最后一节**（祖先前缀不参与匹配，见上「射程」）
+		for (const one of selector.split(",")) {
+			const last = one.trim().split(/\s+|>/).filter(Boolean).pop();
+			if (!last) continue;
+			const s = last.toLowerCase();
+			const ok =
+				(s.startsWith(".") && cls.has(s.slice(1))) ||
+				(s.startsWith("#") && id === s.slice(1)) ||
+				(/^[a-z][\w-]*$/.test(s) && s === tag);
+			if (ok) {
+				hits.push(own);
+				break;
+			}
+		}
+	}
+	// ⚠️ 内联排**最前**：`bgOf` 用的是 `String.match`（非全局）⇒ 取**第一条** `background` 声明。
+	//    要让「内联优先于类规则」这条 CSS 语义成立，内联就得排在前面。
+	//    （`isFullBleedStyle` 是存在性判断，与次序无关。）
+	//    第一版写成 `hits + inline` 并注释「取最后一条」——想当然了，`match` 不是那么工作的。
+	return `${inline};${hits.join(";")}`;
+}
+
 /** 从一段 style 串里取 background 声明 → 有无声明 / 是否非透明。 */
 function bgOf(style: string): { declared: boolean; opaque: boolean } {
 	const bg = style.match(/background(?:-color)?\s*:\s*([^;"']+)/i);
 	if (!bg) return { declared: false, opaque: false };
 	const val = bg[1].trim().toLowerCase();
-	const transparent = val === "transparent" || val === "none" || /rgba\([^)]*,\s*0\s*\)/.test(val);
+	const transparent =
+		val === "transparent" || val === "none" || /rgba\([^)]*,\s*0\s*\)/.test(val) || hasAlpha(val);
 	return { declared: true, opaque: !transparent };
+}
+
+/**
+ * 颜色值是否带 **alpha < 1**（[add-text-ir-scrim] 的**兜底**，不是主路）。
+ *
+ * 治的是同一件事：半透明底此前一律被判成 `opaque=true`，于是一块压板能冒充实心底过闸。
+ * 我方编译器产的 scrim 走显式 `data-gtrk-scrim` 标记（见 `firstChildTag`）；
+ * 这条只为**手写颗粒**兜底。
+ *
+ * ⚠️ **闸 MUST NOT 依赖本函数**：四种写法（`#RRGGBBAA` / `#RGBA` / `rgba()` / `hsla()`）
+ * 漏一种就是静默失守，而「静默失守」正是这类推断式判据的固有失败形态。
+ * 主路永远是上游那个显式标记；这里只是让漏网的少一点。
+ * 保守方向与 `deriveOpaque` 一致：**宁可把实心误判成透明**（少一次优化），
+ * 也不能把透明误判成实心（会黑掉底轨）。所以边界上一律往「透明」判。
+ */
+function hasAlpha(val: string): boolean {
+	const hex8 = /^#([0-9a-f]{6})([0-9a-f]{2})$/.exec(val);
+	if (hex8) return parseInt(hex8[2], 16) < 255;
+	const hex4 = /^#([0-9a-f]{3})([0-9a-f])$/.exec(val);
+	if (hex4) return parseInt(hex4[2], 16) < 15;
+	const fn = /^(?:rgba?|hsla?)\(([^)]*)\)$/.exec(val);
+	if (fn) {
+		// 逗号式 `rgba(0,0,0,.65)` 与斜杠式 `rgb(0 0 0 / 65%)` 都收——
+		// 后者是现代 CSS 的常规写法，漏了它等于这条兜底对半数手写颗粒失效。
+		const slash = fn[1].split("/");
+		const raw = (slash.length > 1 ? slash[1] : fn[1].split(",")[3] ?? "").trim();
+		if (!raw) return false;
+		const a = raw.endsWith("%") ? parseFloat(raw) / 100 : parseFloat(raw);
+		return Number.isFinite(a) && a < 1;
+	}
+	return false;
 }
 
 /** `deriveOpaque` 的完整推导结果（align-particle-solid-backdrop-contract：推导面由「根」扩为「根 ∪ 首个全幅子层」）。 */
@@ -164,11 +299,28 @@ export interface OpaqueDerivation {
  * **两处都声明时取「有任一非透明底即 opaque」**：颗粒画出的不透明像素只要有一层是满幅的，成片里就盖住底轨——
  * 这与 `clip.opaque` 要表达的事实（「该颗粒是否满屏不透明」）同义。
  */
-function deriveOpaque(rootTagStr: string | null, childTagStr: string | null): OpaqueDerivation {
+function deriveOpaque(
+	rootTagStr: string | null,
+	childTagStr: string | null,
+	/**
+	 * `<style>` 块里的规则（`styleBlockRules(html)`）。不传 = 只看内联，行为与本 change 之前逐字相同。
+	 *
+	 * ⚠️ **射程如实声明：只解析根与第一个渲染子层，MUST NOT 往深处走。**
+	 * 更深的层（比如把 1920×1080 的 shape 塞进 `.ly > .ct > .sh`）**看着满屏、但静态判不出来**——
+	 * 它的覆盖面取决于祖先的定位与 transform，而那是几何推理，CSS 文本给不出保证。
+	 * 硬判会产生**假阳性**：把其实没盖满的颗粒登记成 `opaque=true` ⇒ 成片时黑掉底轨。
+	 * 假阳性比假阴性糟得多，所以这里宁可漏判。
+	 * ⇒ 要满屏实心底，正道是 IR 写 `canvas.bg`（编译器产的就是根下第一个全幅子层，
+	 * 正好落在本函数看得见的位置），或手写时自己放一个全幅首子层。
+	 */
+	rules: { selector: string; own: string }[] = [],
+): OpaqueDerivation {
 	if (!rootTagStr) return { opaque: false, declared: false, solidOnRoot: false, solidOnChild: false };
-	const root = bgOf(attr(rootTagStr, "style") ?? "");
-	const childFull = childTagStr !== null && isFullBleed(childTagStr);
-	const child = childFull ? bgOf(attr(childTagStr as string, "style") ?? "") : { declared: false, opaque: false };
+	const root = bgOf(effectiveStyle(rootTagStr, rules));
+	const childFull = childTagStr !== null && isFullBleedStyle(effectiveStyle(childTagStr, rules));
+	const child = childFull
+		? bgOf(effectiveStyle(childTagStr as string, rules))
+		: { declared: false, opaque: false };
 	return {
 		opaque: root.opaque || child.opaque,
 		declared: root.declared || child.declared,
@@ -297,7 +449,7 @@ export function estimateTimelineSec(html: string): TimelineEstimate {
 		else chain += span;
 	}
 	const raw = Math.max(chain, maxEnd);
-	const est = Number.isFinite(raw) ? Math.round(raw * 1000) / 1000 : raw;
+	const est = Number.isFinite(raw) ? Math.round(raw * 1000) / 1000 : raw; // 零 import 豁免行：= frame-domain.r3（见文件头）
 	return { est, parsed, skipped, hasInfiniteRepeat };
 }
 
@@ -1248,6 +1400,27 @@ export interface SeekSignals {
  * `window.__timelines[…] = <非裸标识符>`（合规注册恒为 `__timelines[id] = tl`，故裸标识符 RHS **不报**，
  * 真机 21/21 与全部 exemplar 均为该形 → 零误伤）。
  */
+/**
+ * 半透明面积探测（契约「Alpha 交付口径」哨兵 `x-soft-alpha`）。静态正则只认"写法"，不算真实面积：
+ * rgba/hsla 末位在 (0,1) 开区间、#RRGGBBAA 末两位既非 ff 也非 00、渐变里的 transparent、
+ * 带 blur 的 text-shadow/box-shadow（偏移量可为不带单位的 0）、**CSS 声明里**的 opacity 在 (0,1) 开区间。
+ * 刻意不认 GSAP 补间参数里的 `opacity:0`（淡入淡出的端点是 0/1，不是驻留的半透明面积）。
+ * 全部按 GSAP 与 CSS 的直通语义理解；命中项只用于提醒文案，不进 ok 判定。
+ */
+export function detectSoftAlpha(html: string): string[] {
+	const hits: string[] = [];
+	if (/\b(rgba|hsla)\(\s*[^)]*?,\s*0?\.\d*[1-9]\d*\s*\)/.test(html)) hits.push("rgba/hsla 半透明色");
+	const hex8 = html.match(/#[0-9a-fA-F]{8}\b/g) || [];
+	if (hex8.some((c) => !/(ff|00)$/i.test(c))) hits.push("#RRGGBBAA 半透明色");
+	if (/(linear|radial|conic)-gradient\([^)]*transparent/i.test(html)) hits.push("渐变到 transparent");
+	if (/(text-shadow|box-shadow)\s*:[^;"]*?(?:-?\d+(?:px)?)\s+(?:-?\d+(?:px)?)\s+([1-9]\d*)px/.test(html)) hits.push("带 blur 的 text-shadow/box-shadow");
+	// 只认 CSS 声明（style="…" 属性或 <style> 块），且取值落在 (0,1) 开区间
+	const cssOpacity = /(?:style="[^"]*|[{;]\s*)\bopacity\s*:\s*0?\.\d*[1-9]\d*\b/;
+	const styleBlocks = (html.match(/<style[^>]*>[\s\S]*?<\/style>/gi) || []).join("\n");
+	if (cssOpacity.test(html.replace(/<script[\s\S]*?<\/script>/gi, "")) || /\bopacity\s*:\s*0?\.\d*[1-9]\d*\b/.test(styleBlocks)) hits.push("静态 opacity<1");
+	return hits;
+}
+
 export function detectSeekSignals(html: string): SeekSignals {
 	// (a) 回调体内的 DOM 写入
 	const hooks = new Set<string>();
@@ -1718,6 +1891,110 @@ export function detectFilterCost(html: string): FilterCostFindings {
 	return { animated, staticFullBleed, staticTransformed, indeterminate };
 }
 
+// ── 体积（add-particle-html-size-lint）─────────────────────────────────────────────
+/**
+ * 颗粒 HTML 体积硬上限——**同源自客户端颗粒运行时**，不是本仓的取舍：
+ * - `gitruck-opencut-rewrite/apps/web/src/tonghe/particle-runtime-protocol.ts`：
+ *   `MAX_PARTICLE_HTML_LENGTH = 2_000_000` / `MAX_PARTICLE_SNAPSHOT_LENGTH = 2_000_000`
+ *   （`createParticleBootstrapMessage` 超限返回 null ⇒ 颗粒根本不会被送进 iframe）；
+ * - 同仓 `apps/web/public/tonghe/player-runtime.js`：`MAX_HTML_LENGTH` / `MAX_SNAPSHOT_LENGTH` 同值
+ *   （`bootstrap()` 超限 throw "invalid particle bootstrap HTML"；`sendSnapshot()` 每次 seek 取
+ *   `root.outerHTML` 整份回传、超限只报错不发快照）。
+ * 量纲 = JS `String.length`（UTF-16 码元，**不是字节**），比较符 = `>`（恰好等于放行）——
+ * 两者 MUST 与客户端逐字相同；`mg lay` 原样复制文件，两边算出的数才一致。
+ * ⚠️ 客户端若改上限，MUST 同批立 cli link- 件改这里；本仓测试不依赖姊妹仓在盘上，漂移只能靠这条纪律。
+ */
+export const MAX_PARTICLE_HTML_LENGTH = 2_000_000;
+/**
+ * 预览帧率告警线（产品口径，不是客户端限值；design D3）：客户端每次 seek 都把颗粒根节点的
+ * outerHTML 整份快照 postMessage 回父帧（结构化克隆 + 父侧再解析），体积与每次 seek 的固定开销成正比。
+ * 不给帧率数——没测过，不编。两条阈值都是常量，MUST NOT 做成 env / 配置项 / 开关。
+ */
+export const HEAVY_PARTICLE_HTML_LENGTH = 500_000;
+
+export interface DataUriHit {
+	/** `data:` 与首个 `;` / `,` 之间的 mime；RFC 2397 缺省 `text/plain` */
+	mime: string;
+	base64: boolean;
+	/** 整段 data URI 在 HTML 里占的字符数（含 `data:` 前缀与参数） */
+	chars: number;
+	/** 解码后字节数：base64 按 3/4 折算并扣 padding；非 base64（percent-encoding）不折算 = null */
+	bytes: number | null;
+	/** 落点：css `url()` / `src=` 类属性 / 其它（JS 字符串等） */
+	site: "css-url" | "src-attr" | "other";
+	/** 起点偏移 */
+	at: number;
+}
+
+/** data URI 终止符：引号 / 右括号 / 尖括号 / 空白。base64 折行写法会被截短（现网颗粒不折行，接受）。 */
+const DATA_URI_END = /["')<>\s]/g;
+/** `data:` 到首个 `,` 之间须形如 `mime(;param)*`——JS 对象字面量 `{ data: 1 }` 之类不会被误收。 */
+const DATA_URI_HEADER = /^[a-z0-9.+\/-]*(?:;[a-z0-9.+=_-]+)*$/i;
+
+/** 扫出 HTML 里全部 `data:` URI（线性一趟，6M 字符量级毫秒级）。 */
+export function detectDataUris(html: string): DataUriHit[] {
+	const out: DataUriHit[] = [];
+	const re = /data:/gi;
+	for (let m = re.exec(html); m; m = re.exec(html)) {
+		const at = m.index;
+		DATA_URI_END.lastIndex = at + 5;
+		const endHit = DATA_URI_END.exec(html);
+		const end = endHit ? endHit.index : html.length;
+		const uri = html.slice(at, end);
+		const comma = uri.indexOf(",");
+		if (comma < 0) continue;
+		const header = uri.slice(5, comma);
+		if (!DATA_URI_HEADER.test(header)) continue;
+		const params = header.split(";");
+		const mime = params[0] || "text/plain";
+		const base64 = params.slice(1).some((p) => p.toLowerCase() === "base64");
+		const payload = uri.slice(comma + 1);
+		let bytes: number | null = null;
+		if (base64) {
+			const pad = /=+$/.exec(payload)?.[0].length ?? 0;
+			bytes = Math.floor(((payload.length - pad) * 3) / 4);
+		}
+		const before = html.slice(Math.max(0, at - 24), at);
+		const site: DataUriHit["site"] = /url\(\s*["']?$/i.test(before)
+			? "css-url"
+			: /\b(?:src|href|srcset|poster)\s*=\s*["']?$/i.test(before)
+				? "src-attr"
+				: "other";
+		out.push({ mime, base64, chars: uri.length, bytes, site, at });
+		re.lastIndex = end;
+	}
+	return out;
+}
+
+const fmtInt = (n: number): string => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+const fmtBytes = (b: number): string =>
+	b >= 1_000_000 ? `${(b / 1_000_000).toFixed(2)} MB` : b >= 1_000 ? `${(b / 1_000).toFixed(1)} KB` : `${b} B`;
+const SITE_LABEL: Record<DataUriHit["site"], string> = {
+	"css-url": "css url()",
+	"src-attr": "src= 类属性",
+	other: "其它位置（JS 字符串等）",
+};
+const IMAGE_FIX =
+	"出路：① 按它在颗粒里的**实际显示尺寸**裁剪缩放后再内嵌（1920×1080 画幅里显示 800×450 就别塞 2400×1350 原图）；" +
+	"② 不透明图改 JPEG / WebP，只有需要 alpha 才留 PNG；" +
+	"③ 仍超就不该内嵌——大图放图片素材轨（gtrk matrix material / 本地图片 B-roll），颗粒只留透明叠加层";
+
+/** 体积项文案的 data URI 段：点名**最大的一段**（作者要修的就是它，列全表是噪音）；没有就如实归因，不误导成图片问题。 */
+function dataUriClause(html: string, hits: DataUriHit[]): string[] {
+	if (!hits.length)
+		return ["未见 data: URI——体积来自标记与脚本本身（巨型 SVG 路径 / 内联数据数组）；出路：路径抽稀、数值降精度、数据集下采样"];
+	const top = hits.reduce((a, b) => (b.chars > a.chars ? b : a));
+	const sum = hits.reduce((acc, h) => acc + h.chars, 0);
+	const pct = ((sum / html.length) * 100).toFixed(1);
+	const bytes =
+		top.bytes === null ? "非 base64、不折算字节" : `解码后 ${fmtInt(top.bytes)} 字节（${fmtBytes(top.bytes)}；base64 膨胀 4/3）`;
+	return [
+		`最大的一段 data: URI：${top.mime}${top.base64 ? " base64" : ""}，占 ${fmtInt(top.chars)} 字符，${bytes}，落点 ${SITE_LABEL[top.site]}；` +
+			`共 ${hits.length} 段 data: URI，合计 ${fmtInt(sum)} 字符、占整份 HTML ${pct}%`,
+		IMAGE_FIX,
+	];
+}
+
 export function lintParticle(
 	html: string,
 	opts: {
@@ -1730,14 +2007,77 @@ export function lintParticle(
 		dispatchIds?: string[];
 		category?: string;
 		/**
+		 * 目标工程画幅 `[w, h]`（add-text-ir-aspect-agnostic-layout）。
+		 * 给了就比对颗粒声明尺寸；不给只判正整数（裸 lint 无从知道目标工程）。
+		 */
+		canvas?: [number, number];
+		/**
 		 * 该颗粒的槽位包络（秒）。给了才跑铁律⑦启发式；裸 lint / 未命中派单时不给 → 整项跳过。
 		 * 契约明令「逐帧与总长只有真渲染引擎能判」，故本项**恒非致命**、只做提醒。
 		 */
 		slotDuration?: number;
+		/**
+		 * 颗粒三态身份，由调用方用 `particle-identity.ts` 算好传进来（本文件零 import 算不了）。
+		 * 给 `detached` 时报非致命哨兵 `x-ir-detached`；不给则整项跳过。
+		 */
+		identity?: "ir" | "detached" | "html";
+		/**
+		 * [gate-mg-visual-job] 该槽位声明的视觉职能（`statement` / `relation` / `data` / `decor`）。
+		 * `relation` / `data` 两档**不许用文字模板颗粒交差**——它们是「要为这个意思专门设计」的那两档。
+		 * 不给则整项跳过（裸 lint / 未命中派单时无从判断）。
+		 */
+		visualJob?: string;
+		/**
+		 * 该槽位的 `visual_brief`。判红时**打进错误消息**——它是 agent 自己写下的设计意图，
+		 * 与交上来的模板颗粒直接冲突，那句话本身就是最强的说明。
+		 */
+		visualBrief?: string;
+		/**
+		 * 逐 beat 的显式放行（`--allow-text-for-relation <beatId> --why "<一句话>"`）。
+		 * ⚠️ 由命令层解析并只对**指名的那个 beat** 传 true，MUST NOT 做成全局开关或配置项：
+		 * 一个能在配置里长期打开的 flag，等价于这条闸不存在。
+		 */
+		allowTextForRelation?: boolean;
 	} = {},
 ): LintResult {
 	const v: LintViolation[] = [];
 	const push = (law: string, fatal: boolean, msg: string) => v.push({ law, fatal, msg });
+
+	// 根解析先行：体积项短路时也要把 compositionId / opaque 带回去（`--json` 消费方的既有字段）。
+	const root = rootTag(html);
+	const cid = root ? attr(root, "data-composition-id") : undefined;
+
+	// 铁律4⑤ 体积（add-particle-html-size-lint）：上限同源自客户端颗粒运行时（见常量注释）。
+	// 超硬上限**短路**——超限颗粒必须重做，重做后本就要重跑 lint，此刻报出的其它项全是对一份
+	// 将被替换的文件的诊断；且现行全套在 5.87M 字符输入上实测 1.4 s（design D6）。heavy 档不短路。
+	if (html.length > MAX_PARTICLE_HTML_LENGTH) {
+		push(
+			"4-html-size",
+			true,
+			[
+				`颗粒 HTML ${fmtInt(html.length)} 字符，超过客户端硬上限 ${fmtInt(MAX_PARTICLE_HTML_LENGTH)}` +
+					"（opencut particle-runtime-protocol.ts MAX_PARTICLE_HTML_LENGTH；player-runtime.js 同值）——" +
+					"客户端 bootstrap 超限直接拒载、每次 seek 的快照同限，这颗在客户端**永远加载不出来**，而 lint / lay / 云渲此前全部照过",
+				...dataUriClause(html, detectDataUris(html)),
+				"其余检查项本次未跑（超限颗粒必须重做），缩图后重跑 lint",
+			].join("\n   "),
+		);
+		const { opaque } = deriveOpaque(root, firstChildTag(html, root), styleBlockRules(html));
+		return { ok: false, violations: v, opaque, ...(opts.identity ? { identity: opts.identity } : {}), compositionId: cid };
+	}
+	if (html.length > HEAVY_PARTICLE_HTML_LENGTH)
+		push(
+			"4-html-size-heavy",
+			false,
+			[
+				`颗粒 HTML ${fmtInt(html.length)} 字符，超过预览帧率告警线 ${fmtInt(HEAVY_PARTICLE_HTML_LENGTH)}` +
+					`（硬上限 ${fmtInt(MAX_PARTICLE_HTML_LENGTH)}，超了在客户端加载不出来）——` +
+					"客户端每次 seek 都把颗粒根节点的 outerHTML 整份快照回传父帧（postMessage 结构化克隆 + 父侧解析），体积直接决定预览帧率；" +
+					"快照是挂载后的 outerHTML（GSAP 给每个被驱动元素写内联 style），离上限越近越可能在 seek 时超限、不发快照",
+				...dataUriClause(html, detectDataUris(html)),
+				"本项非致命、不拦铺轨",
+			].join("\n   "),
+		);
 
 	// 铁律1：<template> 包裹 + 根 data-* 三件
 	if (!/<template[\s>]/i.test(html)) push("1-template", true, "缺 <template> 包裹根元素（裸 div 整片渲染失败）");
@@ -1756,8 +2096,6 @@ export function lintParticle(
 				);
 		}
 	}
-	const root = rootTag(html);
-	const cid = root ? attr(root, "data-composition-id") : undefined;
 	if (!root || !cid) push("1-composition-id", true, "根元素缺 data-composition-id");
 	// 期望 id 一致性：opts.compositionId 是**期望值**（铺轨=派单 id / lint=形如 cid 的 basename），不再覆盖 cid。
 	// 不等 = 复制 <id>.html 改名时漏改内部 id → 落轨会写出以期望 id 命名的 clip/material，
@@ -1770,8 +2108,38 @@ export function lintParticle(
 				`按期望 id 落轨会写出 clip_id/material 指向「${opts.compositionId}」，而本文件注册的是 __timelines["${cid}"]，渲染必错`,
 		);
 	if (root) {
-		if (attr(root, "data-width") !== "1920") push("1-width", true, `根 data-width 应为 "1920"（实为 ${attr(root, "data-width") ?? "缺"}）`);
-		if (attr(root, "data-height") !== "1080") push("1-height", true, `根 data-height 应为 "1080"（实为 ${attr(root, "data-height") ?? "缺"}）`);
+		// [add-text-ir-aspect-agnostic-layout] 画幅闸从「必须 1920×1080」改成「必须是正整数，
+		// 且与期望画幅相符」。
+		//
+		// ⚠️ 原来那条**当初是对的**：`fix-particle-subcomposition-scale` 之前，颗粒声明尺寸
+		// 与根合成尺寸不等就会被 `#stage` 裁掉、只渲左上一角。修复上线之后那个失败形态
+		// 就不存在了 —— 引擎按颗粒声明的 `data-width/height` 挂载缩放，根合成尺寸本就是
+		// `flags.width/height` 参数。留着它，拦的是**一个已经不存在的东西**
+		// （同型教训见 `fix-embedded-ir-carrier-breaks-render` 的停发闸：过时的闸会白卡一次发版）。
+		//
+		// ⚠️ 但**不能无条件放开**：挂载用的是**非等比** `scale(w/dw, h/dh)`，
+		// 跨比例是拉伸变形不是加黑边。所以口径不是「随便什么尺寸都行」，是
+		// **「声明尺寸 MUST 等于目标画幅」**——不等就说明这颗没按工程画幅编，判红。
+		// 目标画幅由调用方给（`opts.canvas`）；不给则只判「是不是正整数」，
+		// 那是裸 lint 的场景（手上只有一个文件，无从知道它要放进什么工程）。
+		const dw = Number(attr(root, "data-width"));
+		const dh = Number(attr(root, "data-height"));
+		const posInt = (v: number) => Number.isInteger(v) && v > 0;
+		if (!posInt(dw)) push("1-width", true, `根 data-width 须为正整数（实为 ${attr(root, "data-width") ?? "缺"}）`);
+		if (!posInt(dh)) push("1-height", true, `根 data-height 须为正整数（实为 ${attr(root, "data-height") ?? "缺"}）`);
+		if (opts.canvas && posInt(dw) && posInt(dh)) {
+			const [cw, ch] = opts.canvas;
+			if (dw !== cw || dh !== ch) {
+				push(
+					"1-canvas-match",
+					true,
+					`颗粒声明 ${dw}×${dh}，工程画幅是 ${cw}×${ch}——挂载走的是**非等比** scale(w/dw, h/dh)，` +
+						`跨比例会把颗粒拉伸变形（不是加黑边），而两边都不报错。` +
+						`文字模板按目标画幅重编即可（IR 住在 1920 参考系，画幅是编译入参）；` +
+						`手写颗粒请按工程画幅重做`,
+				);
+			}
+		}
 	}
 
 	// 铁律2：paused timeline + __timelines 注册且 id 匹配（空白宽容；接受字面量与 var 常量两惯例）
@@ -1817,7 +2185,13 @@ export function lintParticle(
 
 	// 铁律4 后半：透明与否必须显式 + 实心底 MUST 下沉子层（align-particle-solid-backdrop-contract）。
 	// 推导面 = 根 style ∪ 根下首个全幅子层 style，与契约铁律4④ 同源。
-	const { opaque, declared, solidOnRoot, solidOnChild } = deriveOpaque(root, firstChildTag(html, root));
+	// [gate-fullscreen-slot-needs-solid-bed] 把 `<style>` 类规则一起喂进去——合规写法允许
+	// 把全幅性与底色写在类规则里，只读内联会把那种颗粒漏判成透明（画出来了但登记不上）。
+	const { opaque, declared, solidOnRoot, solidOnChild } = deriveOpaque(
+		root,
+		firstChildTag(html, root),
+		styleBlockRules(html),
+	);
 	if (root && !declared)
 		push(
 			"4-bg-explicit",
@@ -1877,16 +2251,113 @@ export function lintParticle(
 				`静态正则分不清「驱动画面」与其它用途（如一次性布局测量），故只提醒、不拦`,
 		);
 
+	// 三态身份（add-text-template-source）：**由调用方传入**，本文件不自己算——
+	// 判定要 sha256，而本文件是**零 import 自足**的（见文件头注：它要能被内嵌到别处，
+	// 连 node: 内置也不引）。正本算法在 `particle-identity.ts`。
+	//
+	// 顺带记一笔免得后人"顺手"加免检分支：内嵌的 `<script type="application/json" data-gtrk-ir>`
+	// 本就不在任何检查射程内——铁律4 的自包含只查 `<script src>`，确定性那批只查可执行代码，
+	// 内嵌 JSON 既没有 src 也不执行。
+	if (opts.identity === "detached")
+		push(
+			"x-ir-detached",
+			false,
+			"这颗带内嵌 IR 但 HTML 已被改过——它**不再是模板颗粒**，`gtrk mg edit` 与客户端属性面板的" +
+				"云端改写会拒绝它。颗粒本身照常能渲能铺，故非致命。" +
+				"想恢复云端可调：把内嵌的 IR 取出存成 .ir.json，改完跑 `gtrk mg compile` 重编；" +
+				"想继续手改：可以，但从此只能靠本地 AI 改",
+		);
+
+	// 契约「Alpha 交付口径」（2026-09-14 增补）：含半透明面积的颗粒，剪映交付依赖管线预乘配方——
+	// **恒非致命**、不要求改写；只提醒「剪映真机格 MUST 用这颗验，实心颗粒验不出预乘错配」。
+	const soft = detectSoftAlpha(html);
+	if (soft.length)
+		push(
+			"x-soft-alpha",
+			false,
+			`含半透明面积（${soft.join("、")}）——合法且不必改写。但剪映 qtrle 交付依赖渲染管线在编码前**预乘 alpha**` +
+				`（infra fix-qtrle-premultiplied-alpha-for-jianying；剪映按预乘合成，直通 alpha 的软边会塌成实心，2026-09-14 真机）。` +
+				`剪映路径的真机格 MUST 用这颗本身验，MUST NOT 拿实心颗粒代验；颗粒与 CLI MUST NOT 自行预乘（会双重压暗）`,
+		);
+
 	// 派生：composition_id 对齐 dispatch。**用 HTML 内解析出的 cid** 比对——
 	// 旧实现拿调用方传入的期望 id 自比自（铺轨模式下恒有值）＝恒真检查，等于没查。
 	if (opts.dispatchIds && cid && !opts.dispatchIds.includes(cid))
 		push("x-dispatch", false, `composition_id "${cid}" 不在 dispatch.mg 派单中`);
 
-	// 品类↔opaque 对账（裁决⑩，声明+校验；以 HTML 反推 opaque 为准，不符只告警）
+	// 品类↔opaque 对账（裁决⑩）。
+	//
+	// [gate-fullscreen-slot-needs-solid-bed] **「声明要满屏、产物没有底」这一档升为致命。**
+	//
+	// 为什么单这一档升：它是**派单说了一件事、产物没做、两边都不吭声**的那种失败。
+	// 2026-09-15 实测 t04 有 10 个槽位声明 `category:"fullscreen"`、t07 有 3 个，
+	// **一个都没兑现**；信号确实打了（就是这条），但走的是 info 灰字、夹在一模一样的
+	// `x-soft-alpha` 之间、exit 0 ⇒ 等于没打。
+	//
+	// ⚠️ 而且原文案本身就是问题的一部分：「以 HTML 为准落 clip.opaque=false」
+	// **把认输写成了结论**——它没说「你要的满屏底没兑现」，它说的是「好的，那就按透明算」。
+	//
+	// ⚠️ 判据只取**产物**，MUST NOT 取出身（是不是文字模板颗粒）：
+	// 文字模板**能不能**有实心底是 profile 的取舍（`add-text-ir-canvas-bg` 已开这一档），会变；
+	// 「这颗有没有实心底」是产物事实，不会变。按出身写的闸在加档上线当天就错了。
+	// 按产物写还多拦一类：**手写颗粒漏了底**，此前完全拦不住。
+	//
+	// 反方向（声明透明、产物却是实心）**仍非致命**：那只是多盖了底轨，看得见、改得动，
+	// 不是「以为有其实没有」的静默落空。
 	if (opts.category && opts.category in CATEGORY_EXPECTED_OPAQUE) {
 		const expect = CATEGORY_EXPECTED_OPAQUE[opts.category];
-		if (expect !== opaque)
-			push("x-category-opaque", false, `category「${opts.category}」期望${expect ? "不透明满屏" : "透明叠加"}，但颗粒 HTML 反推为${opaque ? "不透明满屏" : "透明叠加"}（以 HTML 为准落 clip.opaque=${opaque}）`);
+		if (expect !== opaque) {
+			const missingBed = expect && !opaque;
+			push(
+				"x-category-opaque",
+				missingBed,
+				missingBed
+					? `槽位声明 category「${opts.category}」（要盖住画面），但这颗颗粒**没有满屏实心底**——` +
+							"声明不会自己兑现，成片时它是透明叠加、底轨会透出来。两条出路：" +
+							"① 这颗本来就该是叠加 ⇒ 把派单的 category 改成 overlay；" +
+							"② 确实要盖住画面 ⇒ 给它一个满幅实心底（IR 写 `canvas.bg` 即可，" +
+							"编译器会产成根下第一个全幅子层；手写颗粒就自己放一个 " +
+							'<div style="position:absolute;inset:0;background:<底色>"> 作首子层）'
+					: `category「${opts.category}」期望透明叠加，但颗粒 HTML 反推为不透明满屏（以 HTML 为准落 clip.opaque=true）`,
+			);
+		}
+	}
+
+	// [gate-mg-visual-job] ★ 关系槽位不得用文字模板颗粒交差。
+	//
+	// 这是本件**唯一不可绕过**的那一条，它之所以能硬，是因为来源**可从产物直接判、不靠自述**：
+	// 文字模板产的颗粒内嵌 `v:"text-v0"` 的 IR，`composition_id` 被改写成 beat id 之后仍在
+	// （2026-09-15 实证：t04 工程 19 颗全被改名成 `t04-B03` 这类 id，identity() 仍判 ir 态、
+	// 仍读得出内嵌 IR）；手写 GSAP 颗粒没有内嵌 IR，是 html 态。
+	//
+	// ⚠️ 判据取**产物内容**，MUST NOT 取文件名、目录或 agent 的自述——颗粒会被改名、
+	//    会被内容寻址重命名，而**自述正是本件要防的那个东西**。
+	//
+	// ⚠️ 被禁的是「从库里捞一个套上」，**不是「用文字」**：用排版画关系的手写颗粒
+	//    （并置两列 + 破折号那种）正是要保住的东西，它没有内嵌 IR，本条不拦。
+	//    区别不在媒介，在**有没有为这个意思专门做设计**。
+	if (opts.visualJob === "relation" || opts.visualJob === "data") {
+		const fromTemplateLibrary = /<template[^>]*\bdata-gtrk-ir\b|data-gtrk-ir/.test(html) && /"v"\s*:\s*"text-v0"/.test(html);
+		if (fromTemplateLibrary) {
+			if (opts.allowTextForRelation) {
+				push(
+					"x-text-for-relation-allowed",
+					false,
+					`已按显式放行通过：槽位 visual_job=${opts.visualJob} 却用了文字模板颗粒。理由随工程留痕（struct_meta.mg）`,
+				);
+			} else {
+				push(
+					"x-text-for-relation",
+					true,
+					`槽位声明 visual_job=${opts.visualJob}（要为这个意思专门设计一个视觉），` +
+						"却交上来一颗**文字模板库里的**颗粒（内嵌 v:\"text-v0\" 的 IR）。" +
+						(opts.visualBrief ? `\n   你自己写的 visual_brief 是：「${opts.visualBrief}」——模板给不出这个。` : "") +
+						"\n   ⚠️ 被禁的是「从库里捞一个套上」，**不是「用文字」**：用排版画关系的手写颗粒" +
+						"（并置两列 + 破折号那种）正是要保住的东西，本条不拦它。" +
+						"\n   确实非用不可 ⇒ `--allow-text-for-relation <beatId> --why \"<一句话>\"`（逐 beat、必带理由、随工程留痕）",
+				);
+			}
+		}
 	}
 
 	// 铁律⑦：颗粒应占满坑位并终态驻留。静态估长只能给**下界**，故恒非致命（含下面两条提示）——
@@ -1977,5 +2448,5 @@ export function lintParticle(
 				"若是，按 `c-filter-animated` 的改法处理。本项恒非致命、不拦铺轨",
 		);
 
-	return { ok: !v.some((x) => x.fatal), violations: v, opaque, compositionId: cid };
+	return { ok: !v.some((x) => x.fatal), violations: v, opaque, ...(opts.identity ? { identity: opts.identity } : {}), compositionId: cid };
 }

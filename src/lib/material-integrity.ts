@@ -20,11 +20,10 @@
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { r3 } from "./frame-domain";
 
 /** 人读逐条清单上限（截断时明示总数）；机读侧 MUST NOT 截断。 */
 export const INTEGRITY_LIST_CAP = 10;
-
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** `materials[].path` 的四种形态。 */
 export type MaterialPathKind = "relative" | "absolute" | "remote" | "none";
@@ -85,8 +84,13 @@ export function classifyMaterialPath(p: unknown): { kind: MaterialPathKind; path
 	return { kind: "relative", path };
 }
 
-/** 相对路径形态归一（客户端可能写反斜杠或 `./` 前缀）：只归一形态，MUST NOT 改变基准语义。 */
-const normalizeRel = (p: string): string => p.replace(/\\/g, "/").replace(/^\.\//, "");
+/**
+ * 相对路径形态归一（客户端可能写反斜杠或 `./` 前缀）：只归一形态，MUST NOT 改变基准语义。
+ *
+ * 已导出：`ai-drama swap` 要落到与本文件自检**同一个**解析结果上——
+ * 两处各写一份归一规则迟早分叉，那时「自检说文件在、swap 说不在」谁也说不清。
+ */
+export const normalizeRel = (p: string): string => p.replace(/\\/g, "/").replace(/^\.\//, "");
 
 /** clip 的时间线结束时刻：有 `track_ed` 直接取，否则由 `track_st + duration` 推得（真机客户端形态）。 */
 function clipTrackEd(clip: Record<string, unknown>): number | null {

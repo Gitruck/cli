@@ -36,22 +36,33 @@ export const QUICK_START_URL = "https://cloud.ai-mcn.tv/zh-CN/docs/quick-start";
  * `gtrk init` 收尾的 `afterConfigDoctor()` 与本模块的首跑块**共用这份常量**，
  * 防同一句话在两处各写一遍、改一处漏一处（本仓 compliance-notice 立过同样的守卫）。
  */
+/**
+ * 「客户端里没有 AI 对话框」的心智模型指路（change add-agent-handoff-signpost，2026-09-10）。
+ * 客户反馈：很多人装了客户端就去找「AI 对话框」，找不到就卡住——他们不知道 Agent 能和客户端联动。
+ * 当前模式 = **在 Agent 里对话、在客户端里看效果**；客户端内置对话是未来项、现阶段资源有限只能这样过渡。
+ * 这一句同时进首跑块与 `gtrk init` 收尾（单一副本），与官网 / 飞书教程 / 客户端自检页四处同口径。
+ */
+export const AGENT_HANDOFF_LINE =
+	"💡 客户端（同合智创）目前没有 AI 对话框：在你的 AI Agent 里对话产出工程，到客户端里看效果、微调、导出；客户端内的对话功能后续会上线，现阶段开发资源有限，先以这种方式过渡。";
+
 export const FIRST_RUN_USAGE_LINES: readonly string[] = [
 	'① 命令行直接剪：gtrk oralcut "<毛片.mp4>" --script "<文字稿.txt>"（无稿就别加 --script）',
 	"② 刷新你常用的 AI Agent，在它的 Skills 入口选择或点名 gtrk-oralcut；不同客户端也都可以直接描述剪辑需求触发。",
+	AGENT_HANDOFF_LINE,
 ];
 
 /**
  * 首跑教程块（无 ANSI 的纯文本行）。**MUST ≤6 行**：主要使用者是 agent，多余输出实打实污染上下文。
- * 细节归教程正本，CLI 只负责指路 —— 这里只放「看哪里」+「最小三步」。
+ * 细节归教程正本，CLI 只负责指路 —— 这里只放「看哪里」+「最小三步」+「对话框在哪」一句心智模型。
+ * 为给心智模型那一句腾出行位，两条链接并作一行（spec 只要求各出现一次、不重复）。
  */
 export const FIRST_RUN_TUTORIAL_LINES: readonly string[] = [
 	"👋 第一次用 gtrk？三步跑通第一条口播：",
 	"   1) gtrk install   —— 装依赖与运行时资产",
 	"   2) gtrk init      —— 填 API Key、认剪映草稿目录（跑完会自动体检）",
 	`   3) ${FIRST_RUN_USAGE_LINES[0]}`,
-	`   使用教程 ${TUTORIAL_URL}`,
-	`   快速开始 ${QUICK_START_URL}`,
+	`   ${AGENT_HANDOFF_LINE}`,
+	`   使用教程 ${TUTORIAL_URL} · 快速开始 ${QUICK_START_URL}`,
 ];
 
 /** 留痕写失败时的降级提示（良性降级：只影响「下次会再提示一次」，不构成执行障碍）。 */

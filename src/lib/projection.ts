@@ -98,9 +98,30 @@ export interface ProjectionView {
 	utterances: ViewUtterance[];
 }
 
-/** 3 位小数（对齐 transcript / gtrk 秒值精度），消除浮点尾差。 */
-function r3(n: number): number {
-	return Math.round(n * 1000) / 1000;
+import { r3 } from "./frame-domain";
+
+/**
+ * 源区间 `[s, e)` 经 clip 映射到轨道时基——**起点取整一次，终点由时长导出**
+ * （adjust-lay-frame-domain D3，spec `timeline-projection`「投影端点取整规则」）：
+ * `track_st = r3(clip.track_st + (s − clip_st))`、`len = r3(e − s)`、`track_ed = r3(track_st + len)`
+ * （`track_st` 与 `len` 都已在毫秒格上，外层 `r3` 只消浮点尾差，不是第二次取整）。
+ * MUST NOT 两端各自 `r3`——非整毫秒相位下那会让 `track_ed − track_st ≠ r3(len)`，正是 fix-trim-identity-constructive
+ * 在写方禁掉的形状（批 0 T2）。投影产物**留在整毫秒域**：消费者是字幕文本 lane 与 beat 包络（T1 例外），
+ * 帧格化只在各 lay 写出时发生（`matrix lay` / `mg lay` / `ai-drama lay`），MUST NOT 在这里吸帧。
+ *
+ * 时钟对声明（add-cross-clock-adapter D7，T5 点名的具名适配器之一）：`asr_extract → timeline`——
+ *   · 误差来源：`s / e` 是转写时码，所在钟是上传前抽出的 16k 音频 / 720p 代理（`asr_extract`），与原片容器
+ *     （`source_container`）的时长差由 `media.ts assertDurationConsistent` 在上传前守（那 1.0s 是计费护栏、不是时基容差）；
+ *     clip 的 `clip_st / track_st` 在原片钟与轨道钟上。两钟同起点、同速率，视为恒等，偏差只来自抽取物容器的 ±1 帧头尾；
+ *   · 钳位对象：`[s, e)` 先与 clip 源区间 `[clip_st, clip_ed)` 求交（调用方 `clipSpanOf` / `surviving` 的夹逼），越出 clip 的
+ *     部分不投影——投影值天然落在 `[clip.track_st, clip.track_ed]` 内，无需第二道上界；
+ *   · 越界处置：整词 / 整句落在所有 clip 之外 ⇒ 丢词 / `dropped`，由既有 `kept_words / total_words / dropped` 报告，
+ *     MUST NOT 静默吞。
+ */
+function projectSpan(clipTrackSt: number, clipSt: number, s: number, e: number): { track_st: number; track_ed: number } {
+	const track_st = r3(clipTrackSt + (s - clipSt));
+	const len = r3(e - s);
+	return { track_st, track_ed: r3(track_st + len) };
 }
 
 /** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + duration 推。 */
@@ -217,7 +238,13 @@ export interface ProjectionClips {
  * 回退扫**全部** audio 轨（而非最小号那条）：口播配音轨未必最小号（`gtrk audio lay` 的 BGM 落最大号 +1，
  * 但用户删轨重排后顺序会翻）；投影本就按 `material_id` 过滤，BGM / 音效轨天然不参与。
  */
-export function collectProjectionClips(gtrk: GtrkProject): ProjectionClips {
+/**
+ * 挑投影主轨并取其 clip。
+ *
+ * @param materialId 口播素材 id。**给定时**判据为「主轨上有没有命中它的 clip」；
+ *   缺省（历史调用方）退回旧判据「主轨上有没有 clip」——保留只为兼容，新调用方 SHALL 传。
+ */
+export function collectProjectionClips(gtrk: GtrkProject, materialId?: string): ProjectionClips {
 	const { laid, black } = laidTrackRegistry(gtrk);
 	const skipped: SkippedTrack[] = [];
 	const candidates: GtrkTrack[] = [];
@@ -238,18 +265,36 @@ export function collectProjectionClips(gtrk: GtrkProject): ProjectionClips {
 	}
 	const main = pickLowestIndexTrack(candidates);
 	const mainClips = main?.track_timeline ?? [];
-	if (mainClips.length) {
-		return { clips: [...mainClips], source: "video", track_index: main?.track_index ?? 0, skipped };
-	}
 	const audioTracks = (gtrk.audio_track ?? []).filter((t) => (t.track_timeline ?? []).length > 0);
-	if (audioTracks.length) {
-		return {
-			clips: audioTracks.flatMap((t) => t.track_timeline ?? []),
-			source: "audio",
-			track_index: pickLowestIndexTrack(audioTracks)?.track_index ?? 0,
-			skipped,
-		};
+	const audio = (): ProjectionClips => ({
+		clips: audioTracks.flatMap((t) => t.track_timeline ?? []),
+		source: "audio",
+		track_index: pickLowestIndexTrack(audioTracks)?.track_index ?? 0,
+		skipped,
+	});
+	const video = (): ProjectionClips => ({
+		clips: [...mainClips],
+		source: "video",
+		track_index: main?.track_index ?? 0,
+		skipped,
+	});
+
+	// ★ fix-projection-track-material-aware：判据是「有没有**命中** material_id 的 clip」，
+	//   不是「有没有 clip」。自产轨登记只覆盖 CLI 自己铺的轨，用户手工拖入的 video 轨不在册——
+	//   旧判据下它有 clip 即被选作主轨、随后零命中（真机：配音工程 + 一条手拖 overlay 轨
+	//   ⇒ subtitle lay 硬失败）。
+	const id = materialId === undefined ? undefined : String(materialId);
+	const hit = (t: GtrkTrack) =>
+		(t.track_timeline ?? []).some((c) => c.material != null && String(c.material) === id);
+
+	if (id !== undefined) {
+		if (mainClips.some((c) => c.material != null && String(c.material) === id)) return video();
+		if (audioTracks.some(hit)) return audio();
+		// 全局零命中：回落到「本应承载口播的 video 主轨」，使 relink 换 id 一类成因的
+		// 排查方向不被削弱（若改报 audio，会把人支去查音轨）。
 	}
+	if (mainClips.length) return video();
+	if (audioTracks.length) return audio();
 	return { clips: [], source: "none", track_index: null, skipped };
 }
 
@@ -298,7 +343,7 @@ const SKIP_TEXT: Record<SkippedTrack["why"], string> = {
  */
 export function describeProjectionSource(gtrk: GtrkProject, materialId: string): ProjectionSourceReport {
 	const id = String(materialId);
-	const picked = collectProjectionClips(gtrk);
+	const picked = collectProjectionClips(gtrk, id);
 	const skipWhy = new Map(picked.skipped.map((s) => [s.track_index, s.why]));
 	const matchedIn = (t: GtrkTrack) =>
 		(t.track_timeline ?? []).filter((c) => c.material != null && String(c.material) === id).length;
@@ -365,7 +410,7 @@ export function describeProjectionSource(gtrk: GtrkProject, materialId: string):
  */
 export function countMainTrackMaterialClips(gtrk: GtrkProject, materialId: string): number {
 	const id = String(materialId);
-	return collectProjectionClips(gtrk).clips.filter((c) => c.material != null && String(c.material) === id).length;
+	return collectProjectionClips(gtrk, id).clips.filter((c) => c.material != null && String(c.material) === id).length;
 }
 
 interface Instance {
@@ -399,7 +444,7 @@ export function projectTranscript(
 	opts: { words?: boolean; projectedAt?: string } = {},
 ): ProjectionView {
 	const materialId = String(transcript.material_id);
-	const clips = collectProjectionClips(gtrk)
+	const clips = collectProjectionClips(gtrk, materialId)
 		.clips.filter((c) => c.material != null && String(c.material) === materialId)
 		.map(normClip);
 
@@ -413,13 +458,7 @@ export function projectTranscript(
 				// 与 clip 源区间夹逼后相交（严格重叠，零长不算存活）
 				const s = Math.max(word.st, clip.clip_st);
 				const e = Math.min(word.ed, clip.clip_ed);
-				if (e > s) {
-					surviving.push({
-						w: word.w,
-						track_st: r3(clip.track_st + (s - clip.clip_st)),
-						track_ed: r3(clip.track_st + (e - clip.clip_st)),
-					});
-				}
+				if (e > s) surviving.push({ w: word.w, ...projectSpan(clip.track_st, clip.clip_st, s, e) });
 			}
 			if (surviving.length) {
 				instances.push({
@@ -434,14 +473,7 @@ export function projectTranscript(
 				// kept_words 保持 0（total_words 亦 0，语义如实：无词级明细，句级在轨）。
 				const s = Math.max(utt.st, clip.clip_st);
 				const e = Math.min(utt.ed, clip.clip_ed);
-				if (e > s) {
-					instances.push({
-						track_st: r3(clip.track_st + (s - clip.clip_st)),
-						track_ed: r3(clip.track_st + (e - clip.clip_st)),
-						kept_words: 0,
-						words: [],
-					});
-				}
+				if (e > s) instances.push({ ...projectSpan(clip.track_st, clip.clip_st, s, e), kept_words: 0, words: [] });
 			}
 		}
 		if (!instances.length) {

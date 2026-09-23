@@ -6,9 +6,21 @@
  * 并入 report；部分 dropped → 按存活包络收缩、标 shrunk。落地产 struct_meta.split 快照 + dispatch 派单清单。
  */
 import type { ProjectionView } from "./projection";
+import {
+	VISUAL_JOBS,
+	briefLooksSingular,
+	emptyDistribution,
+	findTemplateIdRef,
+	formatJobDistribution,
+	isVisualJob,
+	needsVisualJobNote,
+	type JobDistribution,
+	type VisualJob,
+} from "./mg-visual-job";
 // 「span → 存活实例包络」的**唯一**实现（add-consume-side-reprojection）：split 落地与 mg/matrix
 // 消费侧共用同一份 —— 两侧相等是「同一段代码 × 同一份输入」的构造性保证，MUST NOT 两处各算一遍。
 import { buildSpanIndex, envelopeForSpan } from "./reproject";
+import { r3 } from "./frame-domain";
 
 export const BASE_TRACKS = ["真人出镜", "口播继续", "旁白主导"] as const;
 export const LANES = ["A_ROLL", "MG", "AI_DRAMA", "FILM_BROLL"] as const;
@@ -50,7 +62,17 @@ export type Lane = (typeof LANES)[number];
 
 /**
  * 关键词锚（add-keyword-anchored-broll）：FILM_BROLL beat 的 `handoff.anchors` 条目——agent 圈定的
- * 「听到关键词的瞬间看到对应画面」锚点，铺轨时锚 query 的最高分命中钉在关键词说出时刻。
+ * 「听到关键词的瞬间看到对应画面」锚点，铺轨时锚 query 的**原始 sim 最高的合格命中**
+ * （原始检索相似度，不是 mark/highlight 融合分）钉在关键词说出时刻。
+ * 锚预留**优先于**普通序贯槽消费（铺轨前先为每锚锁住 sim 第一名，落位或降级后立即释放）；
+ * 取不到第一名时锚 outcome 如实报名次与去向，MUST NOT 静默当成钉准。
+ *
+ * 措辞为什么要写这么死（fix-anchor-top-hit-guarantee）：旧口径只写「最高分命中」，实现取的却是
+ * 「池内首个未被消费的合格对」，两次真机复现——2026-08-23 黄石锚落其池第 7 名（0.2801），
+ * 2026-09-02 武汉「十二中校门」锚落 36 条命中里 sim 第 29 名（画面是《三色绘恋》户外广告牌，
+ * 而 sim 第 1 名的校门段被前序 B02 一条泛化 query 以 0.3531 < 0.4274 的更低分先消费掉）。
+ * 旧口径「最高分」这三个字含糊到能同时指融合分与首个可用对，正是那次事故的一半病灶。
+ *
  * 拆分层只写语义（哪个词、哪句、什么画面）；说出时刻（at_sec）由消费侧（matrix plan）现场内插。
  */
 export interface SplitAnchor {
@@ -95,9 +117,20 @@ export interface SplitAuxLayer {
 	fallback?: string;
 	/**
 	 * 颗粒派单入参（add-aux-rrv-overlay-particle）：仅 `type==="overlay"` 的 aux 承接——
-	 * 镜像 MG lane 的 handoff。`duration_hint`（正数秒）必填，其余可选透传给派生颗粒。
+	 * 镜像 MG lane 的 handoff。`duration_hint`（正数秒）与 `visual_job`（四档）必填，
+	 * 其余可选透传给派生颗粒。
+	 * ⚠️ `visual_job` 在**类型上**仍是可选：旧派单稿里它不在，校验器负责判红，
+	 * 类型层若写成必填，读旧稿的代码会先在编译期炸掉、错过那条说人话的校验消息。
 	 */
-	handoff?: { duration_hint: number; category?: string; slug_hint?: string; theme?: string; bg?: string };
+	handoff?: {
+		duration_hint: number;
+		visual_job?: unknown;
+		visual_brief?: unknown;
+		category?: string;
+		slug_hint?: string;
+		theme?: string;
+		bg?: string;
+	};
 }
 
 export interface SplitBeat {
@@ -151,6 +184,15 @@ export interface ValidationCtx {
 export interface ValidationResult {
 	errors: string[];
 	warnings: string[];
+	/**
+	 * [gate-mg-visual-job] MG 槽位的四档职能分布（`statement` / `relation` / `data` / `decor`）。
+	 *
+	 * ⚠️ **观测归观测，裁决归裁决**：本字段 MUST NOT 被用作任何判红依据。
+	 * 它是给人看的信号——一眼看出「这片子 20 个槽位全是 statement」，比任何阈值都直接。
+	 * ⚠️ `decor` MUST 单列：它是必要但可被滥用的一档（「标成 decor 就不用想视觉了」），
+	 * **异常多本身就是信号**，并进 statement 就看不见了。
+	 */
+	visualJobs?: JobDistribution;
 }
 
 function isNonEmptyStr(v: unknown): v is string {
@@ -159,6 +201,21 @@ function isNonEmptyStr(v: unknown): v is string {
 
 function enumOk<T extends readonly string[]>(v: unknown, list: T): boolean {
 	return typeof v === "string" && (list as readonly string[]).includes(v);
+}
+
+/**
+ * 有限集合拒绝理由的合法值提示（add-split-doc-field-completeness）。
+ *
+ * 为什么单开一个 helper：2026-09-02 真机复盘里 `irreplaceability` 按字面意思填了自然语言，
+ * 整稿被拒，而报错只说「四枚举之一」——**同一个 forEach 里相邻的 lane 那行却把四个值摆出来了**。
+ * 于是写稿人只能退出去翻 `skills/gtrk-splitter/references/field-schema.md` 才知道那四个值是什么。
+ * 报错自带答案，就把「文档缺失」降级成一次无害重试。七处有限集合判定统一走这里，免得日后再分叉。
+ *
+ * ⚠️ 入参 MUST 是代码常量或**当次生效**的栏目 vocab 引用；本函数内 MUST NOT 出现任何硬编码字面值——
+ * 手抄一份副本必然与正本漂移，而**漂移的合法值列表比不列更坏**（把人引向一个当次并不生效的答案）。
+ */
+function enumHint(list: readonly string[]): string {
+	return `（合法值：${list.join(" | ")}）`;
 }
 
 /**
@@ -203,6 +260,8 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 	// 逐 beat 校验，同时收集合法区间供重叠检测
 	const ranges: { id: string; from: number; to: number }[] = [];
 	const seenBeatIds = new Set<string>();
+	// [gate-mg-visual-job] 四档计数。**观测归观测、裁决归裁决** —— 本分布 MUST NOT 判红。
+	const dist: JobDistribution = emptyDistribution();
 
 	(d.beats as unknown[]).forEach((raw, i) => {
 		const tag = (() => {
@@ -226,13 +285,16 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 			if (!isNonEmptyStr(b.narrative)) errors.push(`${tag}：缺 narrative`);
 			if (!isNonEmptyStr(b.container_stage)) errors.push(`${tag}：缺 container_stage`);
 		} else {
-			if (!enumOk(b.base_track, vocab.base_track)) errors.push(`${tag}：base_track 非法（栏目词表：${vocab.base_track.join(" | ")}）`);
-			if (!enumOk(b.narrative, vocab.narrative)) errors.push(`${tag}：narrative 非法（不在栏目词表内）`);
-			if (!enumOk(b.container_stage, vocab.container_stage)) errors.push(`${tag}：container_stage 非法（不在栏目词表内）`);
+			// 三项回显 **当次生效** 的 vocab：栏目覆写后内置八/七枚举就不作数了，
+			// 回显一张当次没在用的表 = 把人引向错误答案，故入参只能是 vocab.*、不能是 NARRATIVES/CONTAINER_STAGES
+			if (!enumOk(b.base_track, vocab.base_track)) errors.push(`${tag}：base_track 非法${enumHint(vocab.base_track)}`);
+			if (!enumOk(b.narrative, vocab.narrative)) errors.push(`${tag}：narrative 非法${enumHint(vocab.narrative)}`);
+			if (!enumOk(b.container_stage, vocab.container_stage)) errors.push(`${tag}：container_stage 非法${enumHint(vocab.container_stage)}`);
 		}
-		// lane 双名认旧：遗留品牌值（如 RRV_MG）归一后放行，不判非法（既有工程零迁移）
-		if (!normalizeLane(b.lane)) errors.push(`${tag}：lane 非法（四选一：${LANES.join(" | ")}）`);
-		if (!enumOk(b.irreplaceability, IRREPLACEABILITY)) errors.push(`${tag}：irreplaceability 非法（四枚举之一）`);
+		// lane 双名认旧：遗留品牌值（如 RRV_MG）归一后放行，不判非法（既有工程零迁移）。
+		// 提示只列中性新名：遗留别名是读旧兼容，不是给写稿人挑的答案。
+		if (!normalizeLane(b.lane)) errors.push(`${tag}：lane 非法${enumHint(LANES)}`);
+		if (!enumOk(b.irreplaceability, IRREPLACEABILITY)) errors.push(`${tag}：irreplaceability 非法${enumHint(IRREPLACEABILITY)}`);
 		if (!isNonEmptyStr(b.rhythm)) errors.push(`${tag}：缺 rhythm（人读节奏标签）`);
 		if (!isNonEmptyStr(b.visual_task)) errors.push(`${tag}：缺 visual_task（一句话视觉任务）`);
 
@@ -256,6 +318,14 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 		// handoff 按 lane 分型
 		validateHandoff(tag, b, errors, warnings);
 
+		// [gate-mg-visual-job] 视野隔离的机器代理：整条 beat（含 handoff / aux）扫模板 id。
+		// ⚠️ 扫的是**整条**而不是某几个具名字段：模板 id 可能落在 theme / slug_hint /
+		//    visual_brief / 甚至一个将来才加的字段里。按字段名白名单扫，加一个字段就漏一个。
+		validateNoTemplateIdLeak(tag, b, errors);
+
+		// 职能分布（观测，MUST NOT 判红）
+		countVisualJobs(b, dist);
+
 		// 关键词锚（add-keyword-anchored-broll）：utterance ∈ span 复用上方 fromIdx/toIdx 判定
 		validateAnchors(tag, b, idIndex, fromIdx, toIdx, ctx.utteranceTexts, errors, warnings);
 
@@ -276,7 +346,37 @@ export function validateSplitDoc(doc: unknown, ctx: ValidationCtx): ValidationRe
 		}
 	}
 
-	return { errors, warnings };
+	// [gate-mg-visual-job] 全片没有任何关系型视觉（relation + data 为 0）⇒ 顶层要具名一句。
+	//
+	// ⚠️ **MUST NOT 实现成比例阈值。** 比例阈值（「模板占比 ≤ 60%」）是代理指标，两头都不成立：
+	// 误伤合法形态（纯字卡包装的口播片本来就该全是模板），又可被「宣告一个例外槽位」绕过，
+	// 且任何具体的 N 都给不出依据（主理人 2026-09-15 当场否掉初版的 60%）。
+	// 换成「一个都没有时要求具名一句」——「这片子完全不需要非模板的东西」是个**质的判断**，
+	// 可以要求交代；「不超过 N%」是个**量的判断**，交代不了。
+	const hasMgSlot = dist.statement + dist.relation + dist.data + dist.decor > 0;
+	if (hasMgSlot && needsVisualJobNote(dist) && !isNonEmptyStr(d.mg_visual_job_note)) {
+		errors.push(
+			`本片未声明任何关系型视觉（visual_job 分布：${formatJobDistribution(dist)}）——` +
+				"顶层须具名 mg_visual_job_note，一句话说明为什么通篇只有单一陈述。" +
+				"（纯字卡包装的口播片是**合法**形态，本条只要求它是个有意识的选择）",
+		);
+	}
+
+	return { errors, warnings, visualJobs: dist };
+}
+
+/** 统计一条 beat（含 aux）贡献的四档计数。缺失/非法不计——那由校验负责判红。 */
+function countVisualJobs(b: Record<string, unknown>, dist: JobDistribution): void {
+	const bump = (h: unknown) => {
+		const job = (h as Record<string, unknown> | undefined)?.visual_job;
+		if (isVisualJob(job)) dist[job as VisualJob]++;
+	};
+	if (b.lane === "MG" || b.lane === "RRV_MG") bump(b.handoff);
+	if (Array.isArray(b.aux_layers)) {
+		for (const a of b.aux_layers as Record<string, unknown>[]) {
+			if (a?.kind === "overlay" || a?.type === "overlay" || a?.handoff) bump(a.handoff);
+		}
+	}
 }
 
 function validateHandoff(
@@ -298,8 +398,9 @@ function validateHandoff(
 		}
 		// category 可选软校验（裁决⑩，lane 不新增故宽松：非法只告警不拒）；已知集含新旧品类键，遗留值不告警
 		if (handoff && handoff.category !== undefined && !isKnownCategory(handoff.category)) {
-			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${MG_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类${enumHint(MG_CATEGORIES)}，已透传但下游按 opaque 反推`);
 		}
+		validateVisualJob(tag, handoff, errors, warnings);
 		return;
 	}
 	if (lane === "FILM_BROLL") {
@@ -310,6 +411,79 @@ function validateHandoff(
 		return;
 	}
 	// AI_DRAMA：字段全可选，下游有推断默认——不强校验
+}
+
+/**
+ * 视觉职能校验（change: gate-mg-visual-job）。
+ *
+ * 判据是「**这段的意思里有没有第二个东西与它并置**」：
+ * 就一句话 / 一个词 / 一个标题 ⇒ `statement`；出现对比 / 并置 / 因果 / 包含 / 递进 / 聚合 / 循环
+ * ⇒ `relation`；具体的量、步骤或拓扑 ⇒ `data`；不承载信息 ⇒ `decor`。
+ *
+ * ⚠️ **判的是意思的结构，不是用什么画。** 一块「温柔—坚定 / 和善—有立场」的并置面板
+ * 是纯文字画的，但它表达的是对照关系 ⇒ `relation`，**不是** `statement`。
+ *
+ * ⚠️ MUST 必填、MUST NOT 带缺省值：可选字段在存量派单与偷懒路径上都会走缺省，闸等于没开。
+ */
+function validateVisualJob(
+	tag: string,
+	handoff: Record<string, unknown> | undefined,
+	errors: string[],
+	warnings: string[],
+): void {
+	const job = handoff?.visual_job;
+	if (job === undefined) {
+		errors.push(`${tag}：handoff.visual_job 必填${enumHint(VISUAL_JOBS)}（判据是「这段的意思里有没有第二个东西与它并置」，与用不用文字无关）`);
+		return;
+	}
+	if (!isVisualJob(job)) {
+		errors.push(`${tag}：handoff.visual_job「${String(job)}」不在枚举内${enumHint(VISUAL_JOBS)}`);
+		return;
+	}
+	if (job === "relation") {
+		const brief = handoff?.visual_brief;
+		if (!isNonEmptyStr(brief)) {
+			// ⚠️ brief **MUST NOT 被要求是非文字的**：「两列并置、破折号连起来、右列更重」
+			// 与「三个齿轮咬合」是同一类合格答案。要求「必须非文字」会把**用排版画关系**
+			// 这条路堵死，而那恰恰是要保住的东西。
+			errors.push(`${tag}：visual_job=relation 须填 handoff.visual_brief（一句话说清这个关系靠什么视觉手段成立；用排版画关系同样合格）`);
+		} else if (briefLooksSingular(brief)) {
+			// 告警不判红：自动识别「这句话里有没有关系」不可靠，硬闸会误伤排版型答案。
+			warnings.push(`${tag}：visual_brief 读起来只有一个东西——若这段其实是单一陈述，改判 statement 更诚实`);
+		}
+	}
+}
+
+/**
+ * 视野隔离的机器代理（change: gate-mg-visual-job）。
+ *
+ * 派单产物的**任何自由文本字段**里出现 `tfx-*` 形状的模板 id ⇒ 判红。
+ * 它是「这一步看过库」的直接证据。
+ *
+ * ⚠️ 理由是**锚定**：光把判断点前移还不够——若库仍在视野里，agent 会
+ * **从「库里有什么」倒推「这段需要什么」**。正确的形态不是早点判，
+ * 是**判的时候那个选项根本不存在**。
+ *
+ * ⚠️ 射程如实声明：本条**无法保证** agent 的上下文里没有模板库。
+ * 能做到的只有「图纸与工具面不提供」＋「产物里留下痕迹就判红」。**提高代价，不是杜绝。**
+ */
+function validateNoTemplateIdLeak(tag: string, obj: unknown, errors: string[], path = ""): void {
+	if (typeof obj === "string") {
+		const hit = findTemplateIdRef(obj);
+		if (hit) {
+			errors.push(`${tag}：${path || "文本"} 里出现模板 id「${hit}」——派单阶段 MUST NOT 引用具体模板（判「这段要什么」的那一步不该看见模板库）`);
+		}
+		return;
+	}
+	if (Array.isArray(obj)) {
+		obj.forEach((v, i) => validateNoTemplateIdLeak(tag, v, errors, `${path}[${i}]`));
+		return;
+	}
+	if (obj && typeof obj === "object") {
+		for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+			validateNoTemplateIdLeak(tag, v, errors, path ? `${path}.${k}` : k);
+		}
+	}
 }
 
 /**
@@ -382,17 +556,21 @@ function validateAux(
 		return;
 	}
 	const a = raw as Record<string, unknown>;
-	if (!enumOk(a.type, AUX_TYPES)) errors.push(`${tag}：type 非法（八类之一）`);
+	if (!enumOk(a.type, AUX_TYPES)) errors.push(`${tag}：type 非法${enumHint(AUX_TYPES)}`);
 	if (!isNonEmptyStr(a.role)) errors.push(`${tag}：缺 role（职责）`);
 	// overlay 叠层颗粒类型（add-aux-rrv-overlay-particle）：强校验 handoff.duration_hint 正数
 	// （该 aux 要生成颗粒，无时长不成立）；category 走软校验（非法告警不拒，同 lane 分型纪律）。
 	if (a.type === "overlay") {
 		const handoff = a.handoff as Record<string, unknown> | undefined;
+		// [gate-mg-visual-job] overlay aux 派生的是颗粒槽位，与 MG 主层同样必填 visual_job。
+		// aux 多为「B-roll 底轨之上叠透明概念图解」，**正是最该判 relation 的一档**——
+		// 漏掉它等于把最需要原创的那批放掉。
+		validateVisualJob(tag, handoff, errors, warnings);
 		if (!handoff || typeof handoff.duration_hint !== "number" || !(handoff.duration_hint > 0)) {
 			errors.push(`${tag}：overlay aux 缺颗粒时长（handoff.duration_hint 必填且须为正数）`);
 		}
 		if (handoff && handoff.category !== undefined && !isKnownCategory(handoff.category)) {
-			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类（${MG_CATEGORIES.join("/")}），已透传但下游按 opaque 反推`);
+			warnings.push(`${tag}：handoff.category「${String(handoff.category)}」非已知品类${enumHint(MG_CATEGORIES)}，已透传但下游按 opaque 反推`);
 		}
 	}
 	const m = a.mount;
@@ -487,6 +665,17 @@ export interface MgDispatch {
 	duration_hint: number | null;
 	/** 品类子类型（可选；缺省=向后兼容，下游回落颗粒 HTML 反推 opaque）。 */
 	category?: unknown;
+	/**
+	 * [gate-mg-visual-job §1.1] 这一槽的**视觉职能**（四档），原样透传自 handoff。
+	 * 生产侧据它判 `relation` / `data` 两档能不能收文字模板颗粒。
+	 * ⚠️ 类型写 `unknown` 而不是 `VisualJob`：**旧派单里它不在**，下游 MUST 按「可能缺」处理。
+	 */
+	visual_job?: unknown;
+	/**
+	 * `relation` 档的一句话视觉说明，**为了错误消息**而透传——判红时把 agent 自己写的这句
+	 * 摆在它交上来的东西旁边，比任何我们写的措辞都更说明问题。
+	 */
+	visual_brief?: unknown;
 	theme?: unknown;
 	bg?: unknown;
 	slug_hint?: unknown;
@@ -555,11 +744,6 @@ export interface Landing {
  * 落地：把（已校验通过的）拆分稿 × 投影视图 → struct_meta.split 快照 + dispatch 派单清单 + 收缩/跳过报告。
  * 纯函数，不写文件。整 beat 全 dropped 跳过；部分 dropped 按存活包络收缩。
  */
-/** 3 位小数（对齐 transcript / gtrk 秒值精度，与投影层 r3 同式）。 */
-function r3(n: number): number {
-	return Math.round(n * 1000) / 1000;
-}
-
 export function buildLanding(
 	doc: SplitDoc,
 	view: ProjectionView,
@@ -634,6 +818,12 @@ export function buildLanding(
 				duration: r3(track_ed - track_st),
 				duration_hint: typeof h.duration_hint === "number" ? h.duration_hint : null,
 				...(h.category !== undefined ? { category: h.category } : {}),
+				// [gate-mg-visual-job] 职能与 brief 必须进派单：生产侧硬闸判的就是
+				// 「这个槽位声明了什么职能」，而 lint / lay 只读 dispatch，读不到 split 稿。
+				// ⚠️ `visual_brief` 一并带上是**为了错误消息**：判红时把 agent 自己写的那句
+				//    brief 打出来——它与交上来的东西直接冲突，那句话本身就是最强的说明。
+				visual_job: h.visual_job,
+				...(h.visual_brief !== undefined ? { visual_brief: h.visual_brief } : {}),
 				theme: h.theme,
 				bg: h.bg,
 				slug_hint: h.slug_hint,
@@ -709,6 +899,8 @@ export function buildLanding(
 				duration: r3(auxTrackEd - auxTrackSt),
 				duration_hint: ah && typeof ah.duration_hint === "number" ? ah.duration_hint : null,
 				category: "overlay",
+				visual_job: ah?.visual_job,
+				...(ah?.visual_brief !== undefined ? { visual_brief: ah.visual_brief } : {}),
 				theme: ah?.theme,
 				bg: ah?.bg,
 				slug_hint: ah?.slug_hint,

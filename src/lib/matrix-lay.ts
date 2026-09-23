@@ -31,6 +31,11 @@
  * 恒不漏出底下的 A-roll 口播。默认开，`--no-black-bed` 关。
  */
 import type { BrollPlan, PlanBeat, PlanResult } from "./matrix";
+// [fix-describe-window-coverage] 值导入（此前只有 import type）：射程判据的**唯一实现**在 matrix.ts
+// ——那是契约模块，`describe.at_sec` 的语义与缺省推定口径都写在它的头注里。
+// `matrix.ts` 不 import 本文件（本文件的 LOCAL_CLIP_PREFIX 在那边是独立声明的、注释里点名「避免环依赖」）
+// ⇒ 无环。MUST NOT 在本文件另写一份等价判定：两处各写一遍就会漂，而漂了没有任何测试会红。
+import { describeScopeOf, segInDescribeScope } from "./matrix";
 import {
 	BLACK_BED_HEX,
 	SOLID_MATERIAL_PREFIX,
@@ -38,6 +43,14 @@ import {
 	solidMaterialId,
 	solidRelPath,
 } from "./solid-png";
+// [fix-matrix-lay-frame-grid D1 / D2″] 帧域三件套直接从 frame-domain 接（与 gtrk-patch.ts 同一份 import），
+// MUST NOT 在本文件复刻第二份取整。决策层（slotTimes / 实数游标 / 毫秒黑底合并）一字未动、仍在毫秒域；
+// 帧格化只在 layBrollTracks 的**写出侧**发生（projectSlotsToFrameGrid，见下）。
+import { f2ms, ms2sec, r3, sec2frame, sec2ms } from "./frame-domain";
+import { VFR_MISMATCH_RATIO } from "./media";
+import { compareWalls, wallFromDeclared, type SourceWall } from "./clock-adapter";
+import { videoRateOf } from "./gtrk-patch";
+import { assertGtrkWriteInvariants, assertTrackContinuity, assertTrimIdentity } from "./gtrk-invariants";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
 /** 本地素材封面目录（工程内相对路径；铺轨时 ffmpeg 现抽 best 帧落此，add-matrix-local-search 4.2）。 */
@@ -96,9 +109,16 @@ export const MIN_SHOT_SEC = 1.2;
  * 异景残片，端点就近**收缩**至切点消除；端点恰落切点上视为无残片。
  *
  * 取 1.0s（tune-shot-rhythm-thresholds，主理人 2026-08-19 走查裁定）：判据不是「残片有多短」
- * 而是**节奏断裂**——「一下慢，一下突然间快，一下又慢」比短镜头本身更难受。铺轨自身的槽长
- * 地板 MIN_SHOT_SEC=1.2s 保证我方从不排出更短的槽，故屏幕上 <1.0s 的镜头必然来自「窗口跨过
- * 源切点且切点贴近端点」，是可修的我方责任。与 QC 的 flashMaxSec 同为 1.0s（防与查同一条线）。
+ * 而是**节奏断裂**——「一下慢，一下突然间快，一下又慢」比短镜头本身更难受。
+ * 与 QC 的 flashMaxSec 同为 1.0s（防与查同一条线）。
+ *
+ * ⚠️ **原头注有一句已不再成立，改在这里**（relax-gapfill-subfloor-picture，2026-09-02）：
+ * 原文说「槽长地板 MIN_SHOT_SEC=1.2s 保证我方从不排出更短的槽，故屏幕上 <1.0s 的镜头**必然**
+ * 来自窗口跨过源切点」。那句话**当时就已经是错的**——gap 填充落黑片时排出的就是次地板槽
+ * （真机 proj2-C 的 B11 = 0.219s 黑片），只是没人注意到地板从来只拦真画面、不拦黑。
+ * 现在次地板档会在同一个槽里把黑换成画面，于是 <1.0s 的真画面镜头有了**第二个**来源。
+ * 排查 <1.0s 镜头时 MUST 先看 `gap_fill.fills` 里有没有 `kind:"subfloor"`：
+ * 有 ⇒ 那是本档的正常产物（槽长由残洞决定，与它本会落的黑片等长），不是窗口收缩的锅。
  *
  * **MUST NOT 再上抬到 1.5s 及以上**：实测那是代价拐点——槽位数被迫增加（打样 51→53，节奏反而
  * 变快）、时间线扰动过半（26/51），并开始吃进源素材真实的 1.0–1.5s 镜头（打样素材有 9 条）。
@@ -121,9 +141,10 @@ export const MAX_SLOTS_PER_BEAT = 32;
 
 /** 句界吸附目标比例缺省（--cut-align 覆盖；0=关闭回旧行为）。 */
 export const CUT_ALIGN_DEFAULT = 0.7;
-/** 对齐判定容差（秒）：句起点与槽位边界距离 ≤ 此值即算「恰逢切点」。
- * 0.1s ≈ 2–3 帧@24–30fps——帧网格吸附（refineWindow）的 ≤1 帧漂移恒在容差内。 */
-export const CUT_ALIGN_EPS = 0.1;
+/** 对齐判定窗口（秒，**业务阈值**不是浮点容差——fix-gapfill-eps-boundary-residue B 档由 `CUT_ALIGN_WINDOW_SEC` 改名、值不改）：
+ * 句起点与槽位边界距离 ≤ 此值即算「恰逢切点」。
+ * 0.1s ≈ 2–3 帧@24–30fps——帧网格吸附（refineWindow）的 ≤1 帧漂移恒在窗口内。 */
+export const CUT_ALIGN_WINDOW_SEC = 0.1;
 /** 吸附带宽系数（相对节奏区间 [shotMin, shotMax]）：吸附候选带 =
  * [max(MIN_SHOT_SEC, 0.75×shotMin), min(1.25×shotMax, remaining)]。
  * ±25% 下探/上探才够到相邻句距的实测分布（黄石句距 p10=2.12s / p90=4.97s，节奏下限 2.24–2.96s
@@ -139,7 +160,9 @@ export type GapFillMode = "fast" | "solid" | "none";
 /** gap 填充明细（summary gap_fill.fills 条目；track_st/track_ed = 被该动作覆盖的时间区间）。 */
 export interface GapFillEntry {
 	beat: string;
-	kind: "candidate" | "extend" | "solid";
+	/** ⚠️ `borrowed` 是**新增取值**（relax-gapfill-cross-beat-borrow）：跨 beat 借来的候选。
+	 *  消费方（arrange-apply / lay JSON / 客户端）MUST 容错未知 kind。 */
+	kind: "candidate" | "extend" | "solid" | "borrowed" | "subfloor";
 	track_st: number;
 	track_ed: number;
 	sec: number;
@@ -174,7 +197,7 @@ export function measureCutAlignment(opts: {
 	starts: number[];
 	eps?: number;
 }): { starts_total: number; aligned: number; ratio: number } {
-	const eps = opts.eps ?? CUT_ALIGN_EPS;
+	const eps = opts.eps ?? CUT_ALIGN_WINDOW_SEC;
 	const cuts: number[] = [];
 	for (const b of opts.beats) for (const s of b.slots) cuts.push(s.track_st, s.track_ed);
 	cuts.sort((a, b) => a - b);
@@ -182,7 +205,7 @@ export function measureCutAlignment(opts: {
 	let total = 0;
 	let aligned = 0;
 	for (const s of opts.starts) {
-		const key = Math.round(s * 1000);
+		const key = sec2ms(s);
 		if (seen.has(key)) continue;
 		if (!opts.beats.some((b) => s >= b.track_st - eps && s < b.track_ed - eps)) continue;
 		seen.add(key);
@@ -251,14 +274,29 @@ export type DedupScope = "scene" | "material";
 /** 来源层（D2 层序铁律，写死不配置）：自上而下 local > concept > common（common 最下、紧贴口播/黑底之上）。 */
 export type SourceLayer = "local" | "concept" | "common";
 /** 层带语义序（自上而下 local > concept > common）。
- * ★ fix-broll-zorder-contract-drift（2026-08-19 打样实锤）：gtrk v1 契约与客户端一致为
+ * ★ fix-broll-zorder-contract-drift（2026-08-19 打样实锤）：gtrk v1 契约为
  * **track_index 越大越靠前（上层）**（composition-contract-v1 §video_track:「最小=底轨 main，
- * 越大越靠前」；客户端 project-to-timeline 同口径）——本模块此前以相反世界观（小=上层）分配
+ * 越大越靠前」）——本模块此前以相反世界观（小=上层）分配
  * index：黑底落 bandEnd 最大号=按契约盖住全部候选轨、层带 local 落最小号=按契约沉底，
  * 与层序铁律「local 最上」正好相反。音频驱动工程首个客户端走查（黑片压顶截图）拍出实锤。
  * 修正后分配：黑底=baseIndex（最小、垫底），带区自 baseIndex+1 起按 common→concept→local
  * 升号排布（local 号最大=契约上层=铁律「本地最上」）。本常量保持**语义序**（自上而下）不变，
- * index 分配处按其反序遍历。 */
+ * index 分配处按其反序遍历。
+ *
+ * ⟲ link-broll-zorder-contract-recheck（2026-09-16）订正上面那句论据，**结论不变、依据换掉**：
+ * 原文写「客户端 project-to-timeline 同口径」。那只对客户端的**导出**侧成立；**导入**侧当时恰恰相反
+ * （小=上），由 opencut `fix-gtrk-import-overlay-z-order` 于 2026-09-05 修正。而用户在客户端里看到的
+ * 层序是**导入**侧决定的 ⇒ 08-19 那条论据链有一环是错的。
+ *
+ * 那张「黑片压顶」截图本身是真的，推理也没断，只是成因不是它看上去的那个：音频驱动工程没有口播视频轨，
+ * 主选按「最小 track_index = main」会选中一条 **B-roll 候选轨**当主画面；黑底取 bandEnd（最大号）
+ * 在当时客户端的「小=上」下落到 overlay 最末 = 紧贴 main 之上 ⇒ 它盖住的正是那条被当作主画面的 B-roll。
+ * 黑底原本的意图是「B-roll 期间遮住口播 A-roll」，可那个位置上的不是 A-roll、是主内容。
+ *
+ * ⇒ 两侧当年各自绕开症状、谁都没修中间那条方向不一致。根因已由主件修掉，
+ * 至此契约 / 本模块 / 后端 / 客户端导入 / 客户端导出**五处同向**。
+ * ⚠️ 本模块的方向依据 SHALL 只认**契约条文**，MUST NOT 拿任一消费方当下的实现当锚（对侧会改）。
+ * 正本见 spec `broll-source-layering`「层序铁律的 track_index 落法」。 */
 export const SOURCE_LAYER_ORDER: readonly SourceLayer[] = ["local", "concept", "common"];
 
 const isSourceLayer = (v: unknown): v is SourceLayer => v === "local" || v === "concept" || v === "common";
@@ -297,8 +335,12 @@ export interface FillStats {
 	/** 落成槽位中取用了**高运动段**的数量（add-material-motion-signal）：降权只改排序不作排除，
 	 * 候选稀疏时仍会取高运动段——如实记录，让「为什么这颗抖」可追溯。 */
 	hotSlotsPlaced: number;
-	/** 落成槽位中取用了**模糊候选**的数量（fix-describe-cache-locality）：与 hotSlotsPlaced 同款——
-	 * 降权只改排序不作排除，候选稀疏时仍会取糊帧，如实记录让「为什么这颗糊」可追溯。 */
+	/** 落成槽位中取用了**模糊段**的数量（fix-describe-cache-locality）：与 hotSlotsPlaced 同款——
+	 * 降权只改排序不作排除，候选稀疏时仍会取糊帧，如实记录让「为什么这颗糊」可追溯。
+	 * ⚠️ [fix-describe-window-coverage] 分子口径随 `Pair.blurry` 一起收窄为**段级**：
+	 * 只有落在 describe 射程内、且那一帧被判糊的段才计数。射程外的段即使同属该候选也**不计**
+	 * ——它们的清晰与否从未被看过，记进来就是拿一帧的判决替 87.4% 没看过的画面背书。
+	 * 「有多少落位坑位压根没被看过」是另一本账，见 {@link measureDescribeScopeOverlap}。 */
 	blurrySlotsPlaced: number;
 	/** pinned 未能入选数（冲突后到让位/候选枯竭/被排除）——**按段计**（`segDiagKey`），
 	 * 与 `pinnedPlaced` 同分母。 */
@@ -387,12 +429,22 @@ export interface StructMetaBroll {
 	beats: BrollMetaBeat[];
 }
 
-/** 黑底段合并容差（秒）：间隙/重叠 ≤ 此值即并为一段。 */
-export const BLACK_BED_MERGE_EPS = 0.001;
+/**
+ * 黑底段合并 / gap 填充的合并容差（**整毫秒格**；fix-gapfill-eps-boundary-residue，由秒域 `BLACK_BED_MERGE_EPS = 0.001` 改名改域）：
+ * 两个时点经 `sec2ms` 后整数差 < 此值（即 0ms）视为相邻 / 并为一段；≥ 此值即「有量」（残量 / 间隙 / 可延长量）。
+ * 恰等 1ms 恒判有量 ⇒ 恒进既有延长链（②a 借尾 / ②a′ 借头）、由前一颗吸收（主理人 2026-09-07 拍板）。
+ * ⚠️ MUST NOT 退回秒域浮点 `x > 0.001`：同一行在不同时间线位置上会因浮点相位给出两种答案
+ * （0–300s 毫秒格上 `r3(t + 0.001) − r3(t)` 65.08% 的位置 `> 1e-3`、34.92% 的位置 `≤ 1e-3`），
+ * 真机 proj2-B 落 0.001s 黑片而 proj2-C 留 0.001s 裸缝即此。法源：时间基公约 T4（相邻 = 整数格相等，容差只许具名 1ms / 1 帧）。
+ * 与 infra `broll_arrange/gapfill.py` 同批同名同值（parity 对拍，决策 pin v5）。
+ */
+export const BLACK_BED_MERGE_TOL_MS = 1;
+/** 整毫秒格上的时点差 `sec2ms(b) − sec2ms(a)`：全部合并容差判据只经此处取差，MUST NOT 各自 `b − a` 再比浮点（那正是相位病）。 */
+const msGap = (a: number, b: number): number => sec2ms(b) - sec2ms(a);
 
 /**
  * 黑底时窗合并（纯函数）：入参为**已落成候选轨的 beat 包络**，按 track_st 升序合并
- * （重叠或间隙 ≤ EPS 者并为一段），输出不重叠升序段。
+ * （重叠、或整毫秒格上间隙 < BLACK_BED_MERGE_TOL_MS 者并为一段——恰等 1ms 的间隙**不并**），输出不重叠升序段。
  *
  * 口径铁律（主理人 2026-07-25 拍板）：黑底按 **beat 包络整条**铺，MUST NOT 做槽位收集或
  * 跨轨槽位并集——黑底时窗因此完全不依赖种子化随机的槽位切分，确定性只由 beat 端点决定。
@@ -409,7 +461,7 @@ export function mergeBlackBedSegments(
 	const out: { track_st: number; track_ed: number }[] = [];
 	for (const e of valid) {
 		const last = out[out.length - 1];
-		if (last && e.track_st - last.track_ed <= BLACK_BED_MERGE_EPS) {
+		if (last && msGap(last.track_ed, e.track_st) < BLACK_BED_MERGE_TOL_MS) {
 			if (e.track_ed > last.track_ed) last.track_ed = e.track_ed;
 			continue;
 		}
@@ -433,7 +485,7 @@ export interface BlackBedHole {
 
 /**
  * 黑底空洞检测（纯函数，**只读统计**）：空洞 = 该 beat 的黑底包络 − 该 beat 内**全部候选轨槽位的并集**
- * （跨轨取并，不是逐轨算）。并集合并与「算不算空洞」的容差沿用既有 `BLACK_BED_MERGE_EPS`。
+ * （跨轨取并，不是逐轨算）。并集合并与「算不算空洞」的容差沿用同一份 `BLACK_BED_MERGE_TOL_MS`（整毫秒格）。
  *
  * 定位（主理人 2026-07-26 拍板）：黑底按 beat 包络整条铺、填不满处即纯黑，是粗剪期**预期内的产物**，
  * 兜底手段是用户手动调整。本函数只负责把「哪几段是纯黑、各多长、在哪」算出来，
@@ -452,7 +504,7 @@ export function computeBlackBedHoles(opts: {
 }): { holes: BlackBedHole[]; totalSec: number } {
 	const holes: BlackBedHole[] = [];
 	for (const b of opts.beats) {
-		if (!(b.track_ed - b.track_st > BLACK_BED_MERGE_EPS)) continue;
+		if (msGap(b.track_st, b.track_ed) < BLACK_BED_MERGE_TOL_MS) continue;
 		// 槽位先钳进包络再取并（槽位理论上恒在包络内，钳一道防越界数据把空洞算负）
 		const covered = mergeBlackBedSegments(
 			b.slots.map((s) => ({
@@ -463,7 +515,7 @@ export function computeBlackBedHoles(opts: {
 		const push = (st: number, ed: number): void => {
 			const track_st = r3(st);
 			const track_ed = r3(ed);
-			if (track_ed - track_st > BLACK_BED_MERGE_EPS) {
+			if (msGap(track_st, track_ed) >= BLACK_BED_MERGE_TOL_MS) {
 				holes.push({ beat: b.beat, track_st, track_ed, sec: r3(track_ed - track_st) });
 			}
 		};
@@ -505,10 +557,11 @@ export function previewDims(width?: number, height?: number): [number, number] |
 	return [640, h];
 }
 
-/** 三位小数舍入。⚠️ `Math.round` 是**半上入**（含 `Math.round(-0.5) === -0`），
- * 与 Python `round()` 的半偶入**不同**——移植 MUST 用 `math.floor(x*1000+0.5)/1000`。
- * 导出供 golden fixture 生成器直取真身。 */
-export const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+/** 三位小数舍入（毫秒就近）。正本已迁 `./frame-domain`（link-time-domain-discipline T3，全仓唯一定义）；
+ * 此处 re-export 保既有 import（golden fixture 生成器 / `commands/matrix.ts` 直取真身）不变。
+ * ⚠️ `Math.round` 是**半上入**（含 `Math.round(-0.5) === -0`），
+ * 与 Python `round()` 的半偶入**不同**——移植 MUST 用 `math.floor(x*1000+0.5)/1000`。 */
+export { r3 } from "./frame-domain";
 
 // ── 平铺填充 ──────────────────────────────────────────────────────────────
 
@@ -530,7 +583,9 @@ interface Pair {
 	rank: number;
 	/** 该段是否判为高运动（p50 > MOTION_HOT_P50）——summary 计数与诊断用。 */
 	hot: boolean;
-	/** [fix-describe-cache-locality] 该候选是否被 describe 判为模糊（usable_flags.blurry）。 */
+	/** [fix-describe-cache-locality] 该**段**是否被 describe 判为模糊（usable_flags.blurry）。
+	 * [fix-describe-window-coverage] 语义已由「候选级」收窄为「段级」：flag 只在**射程内**的段上为 true
+	 * （射程 = 那一帧所属的段，判据 `segInDescribeScope`）；射程外恒 false = 中性，不是「判清晰」。 */
 	blurry: boolean;
 }
 
@@ -548,7 +603,7 @@ interface Pair {
  * 在诊断口径上本就该并；MUST NOT 为消除折叠改用区间键（`start-end`）——那正是上面那条分家。
  */
 export function segDiagKey(clipId: string, seg: { best: number }): string {
-	return `${clipId}@${Math.round(seg.best * 1000)}`;
+	return `${clipId}@${sec2ms(seg.best)}`;
 }
 
 /** mark/highlight 融合统计收集器（按**段**去重，键 = `segDiagKey`；planBeatFills 聚合进 summary）。
@@ -616,69 +671,165 @@ function slotTimes(
 	return { clip_st: csMs / 1000, clip_ed: (csMs + durMs) / 1000, track_st: tsMs / 1000, track_ed: teMs / 1000 };
 }
 
-/**
- * 写方自检：裁剪恒等式（fix-trim-identity-constructive §3.1）。
- *
- * ★ 为什么必须是**写方**自检，而不是只靠 `gtrk-patch.ts` 的 E1/E2：
- * 那条校验器只在用户**主动悔棋**（跑 `gtrk patch`）时才经过，于是违约可以长期无声
- * 存在——实测存量 55/352 槽位（15.6%），而全套测试照样绿、客户端也不报错，
- * 唯一的症状是「成片可能用陈旧出点」和「悔棋通道在自家产物上失效」。
- *
- * 判据与 `gtrk-patch.ts` 逐字同源：**整毫秒域、零容差**。
- * MUST NOT 在这里放宽成「差 1ms 以内可接受」——那正是本缺陷的形状。
- */
-export function assertTrimIdentity(
-	c: { clip_st?: number; clip_ed?: number; track_st?: number; track_ed?: number; duration: number },
-	where: string,
-): void {
-	const ms = (v: number | undefined): number | undefined => (typeof v === "number" ? Math.round(v * 1000) : undefined);
-	const [cs, ce, ts, te, du] = [ms(c.clip_st), ms(c.clip_ed), ms(c.track_st), ms(c.track_ed), ms(c.duration)!];
-	if (cs !== undefined && ce !== undefined && ce - cs !== du) {
-		throw new Error(
-			`铺轨自检失败（${where}）：clip_ed − clip_st = ${ce - cs}ms ≠ duration ${du}ms。` +
-				"裁剪恒等式须**构造性成立**（composition-contract-v1 §3），" +
-				"两个端点 MUST NOT 各自舍入——见 slotTimes 头注。",
-		);
-	}
-	if (ts !== undefined && te !== undefined && te - ts !== du) {
-		throw new Error(`铺轨自检失败（${where}）：track_ed − track_st = ${te - ts}ms ≠ duration ${du}ms。`);
-	}
+// ── 写方不变量断言（add-lay-writer-self-check D1）────────────────────────────────────────
+// `assertTrimIdentity`（fix-trim-identity-constructive）与 `assertTrackContinuity`（fix-slot-seam-continuity）
+// 原本长在本文件；批 1 起搬到共用模块 `gtrk-invariants.ts`（头注随迁、判据一字未改），三个写方共用一份。
+// 这里保留 re-export：既有 `import { assertTrimIdentity } from "./matrix-lay"`（mg-lay 等）路径零改动。
+// ⚠️ MUST NOT 在本文件重新长出这两条的副本——判据只许有一份。
+export { assertTrimIdentity, assertTrackContinuity } from "./gtrk-invariants";
+
+// ── 写出侧帧格化（fix-matrix-lay-frame-grid D2″）────────────────────────────────────────
+//
+// 决策层（fillSlots / layAnchored / gap 填充 / refineWindow / slotTimes / mergeBlackBedSegments）**一个字不动**：
+// 实数游标、毫秒槽位、金样、MANIFEST、DECISION_ALGO_PIN、infra broll_arrange 平价全部保持。
+// 帧格化是 layBrollTracks 写出前对**每条轨的槽位序列**做的一次纯变换——「同一时刻只取整一次」：
+// 每颗槽位的两端各由实数位置一次 sec2frame 得帧号（不来自逐段帧数相加），毫秒是帧号的单向投影（f2ms）。
+//
+// 为什么不在决策层取整（D2 已实测作废）：槽长在决策层取整帧让 remaining 跨过 MIN_SHOT_SEC、句界吸附计数错位、
+// 两份真机金样选段翻转、127/556 槽位 track_st 累计漂到 +5 帧、71 颗 clip_st 被居中窗带着动。三条红同一个根。
+
+/** 写出侧帧格统计（summary.frameGrid / --json 的 frame_grid）。shifted = 越段界 / 越素材上界前移次数。 */
+export interface FrameGridSummary {
+	rate: number;
+	slots: number;
+	black_bed: number;
+	shifted: number;
 }
 
 /**
- * 写方自检：同轨零重叠（fix-slot-seam-continuity）。
- *
- * ★ 为什么与 `assertTrimIdentity` 分两条：那条管的是**单颗槽位内部**两个时基自洽，
- * 这条管的是**相邻两颗之间**。前者全绿时后者照样可以塌——上一版就是这么塌的：
- * 恒等式构造性成立了，接缝却在非整毫秒相位上差 1ms，而 `gtrk render` 对同轨重叠
- * 是零容差硬拒（E9），真机三条工程全部渲不出来，全套测试却是绿的。
- *
- * 判据与 `gtrk-patch.ts` 的 E9 逐字同源：**整毫秒域、零容差**。
- *
- * ⚠️ 本条只判**重叠**，不判空洞：候选枯竭造成的留空是有意为之（填槽循环里
- * 「宁空不重复」那条铁律的正常产物），在这里看不出与违约的区别——
- * 「相邻两颗中间有没有过一次空槽推进」这个信息只在填槽循环内存在，到组装期已经丢了。
- * 所以**严格接缝**（两个方向都管，含 1ms 空洞）由填槽循环内那条断言负责，
- * 本条是覆盖全轨的兜底网：重叠在任何情况下都不合法，无需分流即可判。
+ * 代理落盘即实测（add-cross-clock-adapter D2）：命令层在下载落地处（含缓存命中）对代理文件 ffprobe **一次**的结果，
+ * 以 clip_id 为键交给纯函数。`wall` 的钟由命令层定（preview 代理 = `preview_proxy`；回落原片 = `source_container`）；
+ * `error` = 探测失败（无 ffprobe / 文件损坏 / 时长为 0），写方回退云端自述并计 `unverified`，MUST NOT 让 lay 失败。
  */
-export function assertTrackContinuity(
-	clips: { clip_id?: string; track_st?: number; track_ed?: number }[],
-	where: string,
-): void {
-	const ms = (v: number | undefined): number | undefined => (typeof v === "number" ? Math.round(v * 1000) : undefined);
-	const ordered = clips.filter((c) => typeof c.track_st === "number" && typeof c.track_ed === "number").sort((a, b) => a.track_st! - b.track_st!);
-	for (let i = 0; i + 1 < ordered.length; i++) {
-		const prevEd = ms(ordered[i]!.track_ed)!;
-		const nextSt = ms(ordered[i + 1]!.track_st)!;
-		if (nextSt < prevEd) {
-			throw new Error(
-				`铺轨自检失败（${where}）：同轨相邻槽位重叠 ${prevEd - nextSt}ms` +
-					`（${ordered[i]!.clip_id ?? "?"} 的 track_ed=${ordered[i]!.track_ed} > ` +
-					`${ordered[i + 1]!.clip_id ?? "?"} 的 track_st=${ordered[i + 1]!.track_st}）。` +
-					"接缝两侧 MUST 由同一个表达式求值——见 slotTimes 头注。",
+export type ProxyProbe = { wall: SourceWall; width: number; height: number; fps: number } | { error: string };
+
+/** 时钟账面（summary.clock / --json 的 lay.clock）：代理实测覆盖 / 回退自述 / 本地恒等 三档计数 + 两类不一致明细。 */
+export interface ClockSummary {
+	/** 代理文件实测成功、`materials[]` 条目按文件真值写出的 material 数。 */
+	proxy_probed: number;
+	/** 回退云端自述写出的 material 数（探测失败或纯函数调用方未探测）。 */
+	unverified: number;
+	/** 本地素材路（`source: local`）声明 `source_container` 恒等的 material 数（索引期 ffprobe 值，免代理免重探）。 */
+	local_source_container: number;
+	/** 代理实测时长 vs 云端自述差 > 1 帧（按云端 fps；fps 缺席退 1ms）的明细——真机证据，交 infra 核查代理生成。 */
+	proxy_mismatch: Array<{ clip_id: string; declared_ms: number; probed_ms: number; frames: number | null }>;
+	/** 代理实测帧率 ≠ 云端自述：`refineWindow` 仍按云端 fps 吸附（云本平价），这里只把事实记下来。 */
+	proxy_fps_mismatch: Array<{ clip_id: string; declared_fps: number; probed_fps: number }>;
+}
+
+// 帧率相等判据（代理 vs 自述）：与 `media.ts VFR_MISMATCH_RATIO` **同一常量、同一相对差公式**
+// （unify-time-consumers-and-tolerance D4；T6 判据只许一份）——`|declared − probed| / probed > 1%` 才算不等，
+// `29.97` 与 `30000/1001` 差 3e-5 视为同一帧率。此前本地 `PROXY_FPS_EPS = 0.01` 按**绝对差**比，与头注「1% 以内」不符。
+
+export interface FrameGridProjection<T> {
+	/** 变换后的槽位（保持入参原序；被弃的槽位不在内）。 */
+	slots: T[];
+	/** 越上界前移次数（每次 1 帧）。 */
+	shifted: number;
+	/** 投影后零帧而被弃的槽位数（不足半帧的决策残片；亚帧残量在写出侧结构性消失）。 */
+	dropped: number;
+	/** 人读 INFO（每次前移 / 弃槽一行；纯函数不做 IO，交命令层打印）。 */
+	info: string[];
+}
+
+/**
+ * 槽位序列 → 帧网格（纯函数、零 IO）。对**同一条轨、同一个 beat**的槽位序列按 track_st 排序后：
+ *
+ *   shift = 0
+ *   for slot:
+ *     st_f = sec2frame(track_st) + shift
+ *     ed_f = sec2frame(track_ed) + shift          # 决策层接缝毫秒逐字节相等 ⇒ 相邻 ed_f == 下一颗 st_f
+ *     dur_ms = f2ms(ed_f) − f2ms(st_f)            # 投影不可加：时长恒为两端投影之差，MUST NOT 用 f2ms(dur_frames)
+ *     dur_ms ≤ 0 ⇒ 弃该槽（INFO）；shift 不变
+ *     有上界且 clip_st_ms + dur_ms > bound_ms ⇒ ed_f −= 1; shift −= 1（宁短一帧；后续槽位整体前移 ⇒ 接缝仍相等）
+ *     写出 track_st = f2ms(st_f)/1000、track_ed = f2ms(ed_f)/1000、clip_st 逐字节不动、clip_ed = clip_st + dur_ms
+ *
+ * 性质：① 选段身份与 clip_st 逐字节不变；② 任一端点与决策层毫秒时刻差 ≤ 半帧 + 1ms（有 shift 时再加 |shift| 帧）；
+ * ③ 相邻接缝由同一帧号构成（字面逐字节相等）；④ assertTrimIdentity / assertTrackContinuity 在变换**之后**跑，
+ * 判据零改动。boundMsOf 给的是 clip_ed 的整毫秒上界（段界严格 ∧ 素材时长 +1ms，由调用方合成）；缺省 = 无上界；
+ * 上界只约束量化多出的部分——决策层 clip_ed 本就越界的槽位不动（留给 T5 抛）。
+ *
+ * 作用域是「同一个游标连续推出的序列」= 一个 beat 的一条轨：shift MUST NOT 跨 beat 传播——黑底按 beat 包络整条铺、
+ * 不参与 shift，首槽起点与黑底起点封口靠的正是「shift 从 0 起」。跨 beat 的接缝（beat 末 = 下一 beat 首）不是同一游标
+ * 推出、不在接缝条款射程内；前移留下的那一帧落在**发生前移的 beat 末端**（黑底之下），可数、INFO 可见。
+ */
+export function projectSlotsToFrameGrid<T extends { clip_id: string; clip_st: number; clip_ed: number; track_st: number; track_ed: number }>(
+	slots: readonly T[],
+	rate: number,
+	boundMsOf?: (slot: T) => number | undefined,
+): FrameGridProjection<T> {
+	const order = slots.map((s, i) => ({ s, i })).sort((a, b) => a.s.track_st - b.s.track_st || a.i - b.i);
+	const out: (T | null)[] = slots.map(() => null);
+	const info: string[] = [];
+	let shift = 0;
+	let shifted = 0;
+	let dropped = 0;
+	const tag = (s: T): string => `${s.clip_id}@${s.clip_st}（轨 ${s.track_st}–${s.track_ed}）`;
+	for (const { s, i } of order) {
+		const stF = sec2frame(s.track_st, rate) + shift;
+		let edF = sec2frame(s.track_ed, rate) + shift;
+		const csMs = sec2ms(s.clip_st);
+		let durMs = f2ms(edF, rate) - f2ms(stF, rate);
+		if (durMs <= 0) {
+			dropped++;
+			info.push(`帧网格：槽位 ${tag(s)} 投影后不足一帧（帧 ${stF}→${edF}），弃置（决策层残片，不落轨）`);
+			continue;
+		}
+		// 上界只约束**帧量化多出的那不足一帧**：决策层自身已越界的槽位（sec2ms(clip_ed) > 上界）不动——那是决策层的事，
+		// 由写方自检（assertSourceBound / T5）如实抛，MUST NOT 让写出侧「顺手修掉」而把决策缺陷藏起来
+		// （lay-writer-selfcheck：候选 clip_ed 超素材 duration 2ms ⇒ 抛 source_overrun，上界不参与决策）。
+		const boundMs = boundMsOf?.(s);
+		if (boundMs !== undefined && csMs + durMs > boundMs && sec2ms(s.clip_ed) <= boundMs) {
+			const over = csMs + durMs - boundMs;
+			edF -= 1;
+			shift -= 1;
+			shifted++;
+			durMs = f2ms(edF, rate) - f2ms(stF, rate);
+			info.push(
+				`帧网格：槽位 ${tag(s)} 取整帧后 clip_ed 越上界 ${over}ms（上界 ${boundMs}ms）⇒ 终点前移一帧（帧 ${edF + 1}→${edF}），` +
+					`同轨后续槽位整体前移一帧（宁短一帧不截邻场景）`,
 			);
+			if (durMs <= 0) {
+				dropped++;
+				info.push(`帧网格：槽位 ${tag(s)} 前移后不足一帧，弃置`);
+				continue;
+			}
+		}
+		out[i] = {
+			...s,
+			clip_ed: (csMs + durMs) / 1000,
+			track_st: f2ms(stF, rate) / 1000,
+			track_ed: f2ms(edF, rate) / 1000,
+		};
+	}
+	return { slots: out.filter((s): s is T => s !== null), shifted, dropped, info };
+}
+
+/**
+ * 写出侧的段界回查（fix-matrix-lay-frame-grid 2.2）：槽位记录（FillSlot）不携带检索段，段界从 plan 反查——
+ * 包含判据与决策层 segBoundsOf（gap 填充的延长上限）**同一条**：sg.start ≤ clip_st ≤ clip_ed ≤ sg.end（整毫秒格比较，
+ * fix-gapfill-eps-boundary-residue A 档；52 份金样 + 3 份真机 plan 的段界实测 2182 段全在毫秒格上，与此前 10⁻⁶ 松弛逐值同解），
+ * 先本 beat、后其他 beat（借来的料属别的 beat）。决策层已越过段界的窗口（借头 / 复吸的「越段界 ≤ 一帧」松弛档）
+ * 查不到包含段 ⇒ 不受段界约束（那是决策层有意的松弛，写出侧 MUST NOT 反过来把它削掉）；图片候选与整片伪段候选
+ * （无 segments）无段界，只受素材时长（由调用方另合成）。返回秒；undefined = 无段界。
+ */
+export function slotSegmentEnd(
+	plan: BrollPlan,
+	beat: PlanBeat,
+	slot: { clip_id: string; clip_st: number; clip_ed: number },
+): number | undefined {
+	const beatsToScan = [beat, ...plan.beats.filter((b) => b !== beat)];
+	for (const bb of beatsToScan) {
+		for (const q of bb.queries) {
+			for (const rr of q.results ?? []) {
+				if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
+				for (const sg of rr.segments ?? []) {
+					if (sec2ms(sg.start) <= sec2ms(slot.clip_st) && sec2ms(slot.clip_ed) <= sec2ms(sg.end)) return sg.end;
+				}
+			}
 		}
 	}
+	return undefined;
 }
 
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
@@ -807,8 +958,24 @@ function buildQueryPools(
 				const p50 = (seg as { motion?: { p50?: number } }).motion?.p50;
 				const hot = typeof p50 === "number" && Number.isFinite(p50) && p50 > MOTION_HOT_P50;
 				// 模糊降权（fix-describe-cache-locality）：同款处置——降权不排除、不碰地板；
-				// 信号来自 describe 注入（未跑 matrix describe --plan 时恒 false ⇒ 排序零回归）
-				const blurry = (cand as { describe?: { usable_flags?: Record<string, unknown> } }).describe?.usable_flags?.blurry === true;
+				// 信号来自 describe 注入（未跑 matrix describe --plan 时恒 false ⇒ 排序零回归）。
+				//
+				// [fix-describe-window-coverage] 射程收窄：`usable_flags` 是**一帧**的判决
+				// （`matrix describe --plan` 每候选只抽 `segments[0].best` 一帧），此前被当成**候选级**的值
+				// 用在**全部段**上 ⇒ seg0 恰好糊，就把这个候选里清晰的段一起降权。
+				// 真机 260902（旅拍 Q1+Q2 两份 plan 实算）：32 个被理解候选共带 843 段、只有 32 段（3.8%）被看过；
+				// 95 个落轨坑位里只有 12 个（12.6%）含那一帧，最远一条相距约 680s ——
+				// 87.4% 的段是被一个跟自己无关的帧判的刑。
+				// 同一循环体 30 行之上的 mark/highlight 早就是**逐段**查、且受 15s 局部性护栏约束
+				// （`DESCRIBE_NEAREST_MAX_GAP_MS`，注释原文「太远 = 别的镜头」）——这一行是掉队的那个。
+				//
+				// 射程外恒走**中性**（不惩罚不加分）：`blurry=false` ⇒ rank 回落到 `fused` 本身，
+				// 与上面 mark/highlight「缺席维度的权重回吐给 sim」逐字同口径。
+				// ⚠️ 中性 ≠ 零分：MUST NOT 把「没看过」按最坏值计入（那是另一种误判）；
+				// 也 MUST NOT 因射程外而给任何段**加分**。降权照旧只减分不排除、不碰地板。
+				const blurry =
+					(cand as { describe?: { usable_flags?: Record<string, unknown> } }).describe?.usable_flags?.blurry === true &&
+					segInDescribeScope(cand, seg);
 				pool.push({
 					cand,
 					seg,
@@ -837,6 +1004,114 @@ function buildQueryPools(
 	return out;
 }
 
+// ── 锚槽取材序 · 预留账（fix-anchor-top-hit-guarantee）────────────────────
+
+/**
+ * 锚槽的排序主键 = **原始 sim − 两条降权**（`fused` 不参与，即 mark/highlight 融合被剔出主序）。
+ *
+ * ## 为什么锚槽不能用融合分（`rank`）
+ *
+ * 锚是**语义卡点**，判的是「对不对」：关键词说到「武汉市十二中」这一刻，画面必须是那所学校。
+ * mark/highlight 判的是「好不好看 / 有没有看点」，拿它压 sim 等于**用审美压语义**。
+ * 更要命的是这两维的分是**就近借**来的——describe 缓存按最近帧查（`DESCRIBE_NEAREST_MAX_GAP_MS`
+ * 15s 内即算命中），可以来自**另一个场景**的帧；sim 却是这一段**自己**的分。
+ *
+ * 真机实证（2026-09-02 旅拍 Q1 / B04，`--mark-weight 0.3 --highlight-weight 0.2`）：
+ * 一段 sim 0.2719（该 query 36 条命中里排第 **29**）的《三色绘恋》户外广告牌，从 6.55s 外、
+ * **跨过场景切点**的一帧借到 mark 80 / hl 65，融合分被抬到 0.5059 顶上池首，
+ * 把 sim 0.4274 的校门画面压在下面——解说在说校名、字卡写校名、画面是广告牌。
+ *
+ * ## 为什么 hot/blurry 两条降权**留在**主序里（与本件 delta 初稿的措辞有出入，见 tasks 1.1 记账）
+ *
+ * delta 初稿写的是「hot/blurry 降权也 MUST NOT 参与主序」。落地时发现那句与**同一条 Requirement**
+ * 自己的「零权重逐字节不变」冲突：两条降权与 mark/highlight 无关，`--mark-weight 0 --highlight-weight 0`
+ * 时 `fused === sim` 但 `rank === sim − 降权` 仍可能 ≠ sim，把降权剔出主序会让**零权重配置**下的
+ * 锚槽落位也变（真机 hot/blurry 信号本就与权重无关地存在）。
+ * 取舍：**降权留在主序**——它俩合计 ≤0.05，是「近乎同分时别选糊的/别选糊成一团的」的微调，
+ * 天然不可能翻掉 0.4274 vs 0.2719 这种量级的语义差；而剔掉它换来的是一次无谓的零权重回归。
+ * ⇒ 主键 `simRank = seg.score − hot降权 − blurry降权`，恰好使**零权重下主键与 `rank` 恒等**，
+ *   零回归成为**恒等式**而不是「大概不会变」。spec delta 已同批订正为本口径。
+ *
+ * ⚠️ [fix-describe-window-coverage] `p.blurry` 的语义已由「候选级」收窄为「**段级**」
+ * （只在 describe 射程内的段上为 true），本函数逐字未改就自动跟着收窄了 —— 这正是把射程判定
+ * 落在 `Pair` 构造那一处的原因：三个消费点（`rank` / 本函数 / `blurrySlotsPlaced`）各写一遍必漂。
+ */
+function anchorSimRank(p: Pair): number {
+	return p.seg.score - (p.hot ? MOTION_HOT_PENALTY : 0) - (p.blurry ? BLURRY_PENALTY : 0);
+}
+
+/**
+ * 锚槽候选序：`pinned` 置顶 > 原始 sim（含降权）降序 > 融合分 tie-break > 视频优先。
+ *
+ * ⚠️ **另排一份，MUST NOT 改 `buildQueryPools` 的池序本体**——那口池是**序贯槽共用**的，
+ * 改它就把射程从「锚槽这一处」扩到全部普通槽（本件明令不动普通槽：spec「适用面 SHALL 严格限于锚槽」）。
+ *
+ * 零权重恒等（`--mark-weight 0 --highlight-weight 0`）：此时 `fused === seg.score`
+ * ⇒ `anchorSimRank === rank` ⇒ 主键与 `buildQueryPools` 的主键**逐值相等**，
+ * 后续 tie-break 键同集合，且 `Array.prototype.sort` 稳定 ⇒ 序**逐位相同**、产物逐字节不变。
+ */
+function anchorOrder(pool: Pair[]): Pair[] {
+	return [...pool].sort(
+		(a, b) =>
+			Number(b.pinned) - Number(a.pinned) ||
+			anchorSimRank(b) - anchorSimRank(a) ||
+			// 同 sim 才轮到融合分说话（spec「同 sim 时仍按融合分 tie-break」）
+			b.rank - a.rank ||
+			b.fused - a.fused ||
+			b.seg.score - a.seg.score ||
+			Number(isImagePair(a)) - Number(isImagePair(b)),
+	);
+}
+
+/**
+ * 锚预留账（第二刀）：`消费键 → 预留它的锚 id`。`planBeatFills` 铺轨前建一份、全程共享。
+ *
+ * 立账理由（判据一致性）：用户 `pinned` 已经能豁免 `consumed` 抢占——`fix-pinned-placement-guarantee`
+ * 把「钉选是**落位保证**而非仅排序特权」写死，四条豁免清单第 ③ 条正是 `consumed`。
+ * 而**系统锚承诺的同样是落位保证**（图纸与主规格白纸黑字：「把锚 query 的最高分命中钉在关键词
+ * 说出时刻」），今天却被任意一个前序 beat 的泛化普通槽以更低的分抢走：真机 B02 一条
+ * `"ordinary streets and apartment blocks in a Chinese city"`（分 0.3531）抢走了 B04 锚
+ * 以 0.4274 命中的校门段——**分低的普通槽赢了分高的锚**，纯粹因为 beat 是按序处理的。
+ *
+ * ⚠️ 预留面**每锚恒为 1 对**（MUST NOT top-N）：多预留就是把普通槽饿死到落黑，
+ * 与 `relax-gapfill-*` 一整条线刚治好的黑片直接对撞。
+ * ⚠️ 释放 MUST 在锚**落位或 degraded 之后立即**发生（见 `fillBeatTrackWithAnchors` 的 try/finally）
+ * ——漏释放 = 凭空制造黑片。
+ *
+ * ## 锚预留 vs 用户 pinned：豁免边界一眼可比（两者承诺的都是落位保证，故并排放）
+ *
+ * | 护栏 | 用户 `pinned` | 系统锚预留 |
+ * |---|---|---|
+ * | `consumed` 抢占 | **豁免**（只看自己落过没有） | **豁免**（铺轨前先锁，普通槽拿不到） |
+ * | `excluded_hint` 派单负词 | **豁免**（agent 显式裁定 > 自动护栏） | 不豁免（锚是系统选取，不是人点名） |
+ * | `scoreFloor` 分数地板 | **豁免**（强制入选语义） | **不豁免**——「无合格命中不硬锚」是既有条款，**不硬锚烂画面** |
+ * | jump-cut 紧邻避让 | **豁免**（连着出两颗是他要的画面） | 不适用（锚只钉一个点） |
+ * | `noImage`（`--no-image-broll`） | **不豁免**——「零图片上云」是用户级硬承诺 | **不豁免**（同款理由） |
+ * | `beatOwners` 同 beat 跨轨归属互斥 | **不豁免**——那条给的是**备选面** | **不豁免**（同款理由） |
+ *
+ * ⇒ 预留只多做一件事：**把「谁先消费」这一步的顺序改对**。它 MUST NOT 顺手放开上面任何一条
+ * 「不豁免」——那三条各有各的用户级承诺，与「锚该拿它的 top-1」是正交的两回事。
+ */
+type AnchorReservations = Map<string, string>;
+
+/** 锚 id：`beat 名 \0 该 beat 内 anchors 数组下标`。预留预扫与落位两处 MUST 用同一把算法算 id
+ * （beat 名在 plan 内唯一——`fills` 就是拿它当 Map 键的）。 */
+function anchorIdOf(beatName: string, idx: number): string {
+	return `${beatName}\u0000${idx}`; // NUL 分隔：beat 名可含任意可见字符（含 # / 空格），普通分隔符会被真机 beat 名撞上
+}
+
+/**
+ * 这一对是否被**别的锚**预留了。
+ *
+ * `pinned` 不受预留阻挡：「用户 pinned 优先于锚」是既有口径（锚槽被钉选候选占据时 status 报 `pinned`），
+ * 系统预留 MUST NOT 反过来压住用户的显式指令。
+ */
+function reservedByOther(res: AnchorReservations | undefined, p: Pair, self?: string): boolean {
+	if (!res || res.size === 0 || p.pinned) return false;
+	const owner = res.get(p.key);
+	return owner !== undefined && owner !== self;
+}
+
 /** 颗粒源窗（选取评估与落位共用，保证避让判定用的就是将落位的窗口）：
  * 图片=0..d（运镜分支）；视频=best 居中截 d **钳段界**（fix-broll-flash-frames D1——
  * 「有素材时长向段外扩」口径废止：段边界≈场景切点，外扩即把邻场景异景帧截进 clip，
@@ -849,12 +1124,37 @@ function sourceWindowFor(p: Pair, d: number): { clipSt: number; clipEd: number }
 	return { clipSt, clipEd: Math.min(clipSt + d, p.seg.end) };
 }
 
+/** 段内黑段（fix-index-gradual-transition-blindness）：本地检索段可带的正交信号 `black`。
+ *
+ * ⚠️ 走类型断言读，而不是从 `PlanResult["segments"]` 上取：契约正本（`src/lib/matrix.ts`）的
+ * 类型与校验**不在本 change 的文件射程内**（并行施工分工），由接手方同批补齐——见 handoff。
+ * 形态坏（非数组/非有限数/顺序反）的条目**逐条丢弃**而不是整体拒：本函数是消费方，
+ * 手改坏一个数不该让整轨铺不出来；真正的形态校验属于 `validatePlanForLay` 那一层。 */
+export function blackSpansOf(seg: unknown): [number, number][] {
+	const raw = (seg as { black?: unknown }).black;
+	if (!Array.isArray(raw)) return [];
+	const out: [number, number][] = [];
+	for (const b of raw) {
+		if (!Array.isArray(b) || b.length < 2) continue;
+		const [st, ed] = b as [unknown, unknown];
+		if (typeof st !== "number" || typeof ed !== "number" || !Number.isFinite(st) || !Number.isFinite(ed) || !(ed > st)) continue;
+		out.push([st, ed]);
+	}
+	return out.sort((a, b) => a[0] - b[0]);
+}
+
 /** 窗口精修（fix-broll-flash-frames D1）：①端点残片收缩（只收不移）——窗内切点（seg.cuts）距
  * 端点 <SLIVER_MIN_SEC 时端点吸附至切点（恰落切点=无残片不动）；②帧网格吸附——端点按素材帧率
  * （result.fps）就近吸附整帧边界（VFR/非常规 time_base 消除 ±1 帧边界抖动；fps 缺失跳过）。
  * 两步**只许缩短不许撑长**：吸附取整可能把槽长撑出 1 帧，`maxD`（剩余 beat 空间）与段界是硬上限
  * ——越界会顶掉下一 beat 的首槽造成时间线重叠（渲染器 normalizeTrack 直接硬拒）。
- * 精修后短于 MIN_SHOT_SEC 返回 null（该对不采纳，走既有换候选/留空路径）。图片候选原样返回。 */
+ * 精修后短于 MIN_SHOT_SEC 返回 null（该对不采纳，走既有换候选/留空路径）。图片候选原样返回。
+ *
+ * ★ ⓪ 黑段收缩（fix-index-gradual-transition-blindness）在①之前，见函数体内头注。
+ *
+ * ⚠️ **合流点提示（给 `fix-anchor-top-hit-guarantee`）**：本次**只加了 ⓪ 黑段收缩这一步**，
+ * 取窗的排序 / 选段 / 窗口起点算法（`sourceWindowFor`、候选池排序、锚点择对）**一字未动**。
+ * ⓪ 是纯收缩（只把端点向内移），不会改变「选了哪一对、窗口从哪儿起」这两件事。 */
 function refineWindow(
 	p: Pair,
 	win: { clipSt: number; clipEd: number },
@@ -874,14 +1174,52 @@ function refineWindow(
 	opts?: { gridInward?: boolean; snapCuts?: boolean },
 ): { clipSt: number; clipEd: number } | null {
 	if (isImagePair(p)) return win;
-	const EPS = 1e-6;
+	const EPS = 1e-6; // C 档：refineWindow 秒域精修 + 帧号域取整的 ε（fix-gapfill-eps-boundary-residue D3 明确不改，登记转出）
 	let { clipSt, clipEd } = win;
-	// 端点是否由「吸附到切点」得来——若是，帧网格取整 MUST NOT 把它推回切点的另一侧：
+	// 端点是否由「吸附到切点 / 黑段边」得来——若是，帧网格取整 MUST NOT 把它推回那个点的另一侧：
 	// 切点时码 = 新场景**首帧**的时刻，起点就近取整可能落到切点前一帧（= 留 1 帧旧场景，
 	// 把刚做的收缩撤销了半帧；打样实测 618.469 在 60fps 上取整到 618.4667）。故起点向上取整、
-	// 终点向下取整，宁可少一帧也不越到切点另一侧。
-	let stOnCut = false;
-	let edOnCut = false;
+	// 终点向下取整，宁可少一帧也不越到另一侧。黑段边同理，且后果更硬：越回去就是把黑帧收进 clip。
+	let stSnapped = false;
+	let edSnapped = false;
+
+	// ── ⓪ 黑段收缩（fix-index-gradual-transition-blindness）────────────────────
+	//
+	// 病灶：源片自带的**叠化过黑**（画面淡到全黑再淡回）在逐帧 scene score 上分数被结构性压到零
+	// ⇒ 索引侧此前完全看不见它，铺轨侧也就没有任何避让判据。真机 Q1 的 50 颗 B-roll 里有 5 颗
+	// 把整段过黑包进了 clip（149.4s 成片平均每 30 秒黑一下，4 处还没有 MG 遮盖，裸黑压着口播）。
+	//
+	// 为什么这一步 MUST 独立于①的残片收缩、且**不受 SLIVER_MIN_SEC 约束**：
+	// 那 5 处黑段恰恰落在窗口**正中**（实测距两端 3.4s / 2.4s），任何残片阈值下都不触发
+	// ——「离端点太远」正是它今天漏网的原因，拿残片规则去接它等于没接。
+	//
+	// 为什么是**收缩到一侧**而不是整对弃用（与次地板档 `subFloorFill` 的「窗内有切点即弃用」
+	// 有意不同）：黑段两侧各有 8–9s 的好画面，整对弃用是白扔素材；而次地板档的槽只有 7–30 帧，
+	// 根本没有可收缩的余量，那里只能弃。
+	//
+	// 取**较长的一侧**（并列取前侧，保持确定性）；两侧都不够 MIN_SHOT_SEC 时本函数返回 null，
+	// 由调用方走既有的换候选/留空路径 —— MUST NOT 落一个仍包着黑段的窗口。
+	//
+	// ⚠️ 本步只**收缩**，不重新取窗：把窗口在较长那侧按原槽长重新摆一次（能保住整槽时长）
+	// 属于**取窗逻辑**的改动，那是 `fix-anchor-top-hit-guarantee` 的靶位，见 handoff。
+	const black = blackSpansOf(p.seg);
+	if (black.length) {
+		const hit = black.filter(([bs, be]) => bs < clipEd - EPS && be > clipSt + EPS);
+		if (hit.length) {
+			// 头侧 = [clipSt, 首个交叠黑段起点]、尾侧 = [末个交叠黑段终点, clipEd]：
+			// 按「首/末」取，两侧内部就恒无黑段（中间夹着的黑段全被切掉）。
+			const headEd = Math.min(Math.max(hit[0]![0], clipSt), clipEd);
+			const tailSt = Math.max(Math.min(hit[hit.length - 1]![1], clipEd), clipSt);
+			if (headEd - clipSt >= clipEd - tailSt) {
+				clipEd = headEd;
+				edSnapped = true;
+			} else {
+				clipSt = tailSt;
+				stSnapped = true;
+			}
+		}
+	}
+
 	const cuts = opts?.snapCuts === false ? undefined : p.seg.cuts;
 	if (Array.isArray(cuts) && cuts.length) {
 		const inWin = cuts.filter((c) => Number.isFinite(c) && c > clipSt + EPS && c < clipEd - EPS);
@@ -889,23 +1227,23 @@ function refineWindow(
 			const head = inWin[0]!;
 			if (head - clipSt < SLIVER_MIN_SEC) {
 				clipSt = head;
-				stOnCut = true;
+				stSnapped = true;
 			}
 			const tail = inWin[inWin.length - 1]!;
 			if (tail > clipSt + EPS && clipEd - tail < SLIVER_MIN_SEC) {
 				clipEd = tail;
-				edOnCut = true;
+				edSnapped = true;
 			}
 		}
 	}
 	const fps = p.cand.fps;
 	if (typeof fps === "number" && Number.isFinite(fps) && fps > 0) {
 		const inward = opts?.gridInward === true;
-		// 起点：吸附到切点者（或 gridInward）向上取整（不含切点前那帧），否则就近；再钳回段内
-		const stGrid = stOnCut || inward ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
+		// 起点：吸附到切点/黑段边者（或 gridInward）向上取整（不含那个点之前的帧），否则就近；再钳回段内
+		const stGrid = stSnapped || inward ? Math.ceil(clipSt * fps - EPS) / fps : Math.round(clipSt * fps) / fps;
 		const st = Math.min(Math.max(stGrid, p.seg.start), clipEd);
-		// 终点：吸附到切点者（或 gridInward）向下取整（不含切点那帧，它属下一镜头），否则就近
-		let ed = Math.min(edOnCut || inward ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
+		// 终点：吸附到切点/黑段边者（或 gridInward）向下取整（不含那一帧：切点那帧属下一镜头、黑段起帧已经是黑的），否则就近
+		let ed = Math.min(edSnapped || inward ? Math.floor(clipEd * fps + EPS) / fps : Math.round(clipEd * fps) / fps, p.seg.end);
 		// 吸附撑长的硬上限：超出剩余空间即把终点**向下**取整到帧网格（宁短一帧不越界）
 		if (ed - st > maxD + EPS) ed = st + Math.floor((maxD + EPS) * fps) / fps;
 		if (ed - st > EPS) {
@@ -1008,6 +1346,13 @@ export function fillBeatTrack(opts: {
 	markStats?: MarkStatsSets;
 	/** 句界吸附（adjust-shot-cut-sentence-align）：缺席/ratio≤0 = 不激活（旧行为逐字节零回归）。 */
 	cutAlign?: CutAlignOpts;
+	/** 锚预留账（fix-anchor-top-hit-guarantee 第二刀）：`planBeatFills` 建一份共享。
+	 * 普通序贯槽 MUST NOT 消费被预留的对——缺席/空表时本函数逐字节零回归（无锚 plan 恒缺席）。 */
+	anchorReserved?: AnchorReservations;
+	/** 消费归属账（fix-anchor-top-hit-guarantee 第三刀）：`消费键 → <beat>|<query>`。
+	 * 只记**第一阶段**（逐 beat 常规填充）的消费——gap 填充是第二阶段、跑在全部锚之后，
+	 * 不可能抢在任何锚前面，故不入账也不影响锚的归因。缺席 = 不记账（纯诊断，零行为影响）。 */
+	consumedBy?: Map<string, string>;
 }): FillSlot[] {
 	const { beat, trackOrder, consumed, scoreFloor } = opts;
 	const span = beat.track_ed - beat.track_st;
@@ -1018,7 +1363,7 @@ export function fillBeatTrack(opts: {
 	// 句界吸附激活判定 + 免费对齐入账：beat 起点恰逢句起点（音频驱动工程 beat 边界 = utterance span
 	// 包络，首槽起点天然对齐）——不入账会让实测系统性超出目标比例（design §2 论据 2）
 	const ca = opts.cutAlign && opts.cutAlign.ratio > 0 && opts.cutAlign.starts.length ? opts.cutAlign : undefined;
-	if (ca && ca.starts.some((s) => Math.abs(s - beat.track_st) <= CUT_ALIGN_EPS)) {
+	if (ca && ca.starts.some((s) => Math.abs(s - beat.track_st) <= CUT_ALIGN_WINDOW_SEC)) {
 		ca.state.chances++;
 		ca.state.snapped++;
 	}
@@ -1069,10 +1414,10 @@ export function fillBeatTrack(opts: {
 			let best: number | undefined;
 			let bestDist = Number.POSITIVE_INFINITY;
 			for (const s of ca.starts) {
-				if (s < bandLo - 1e-6) continue;
-				if (s > bandHi + 1e-6) break; // starts 升序，越带即止
+				if (s < bandLo - 1e-6) continue; // C 档：吸附带 ε（bandLo/Hi 浮点派生，改整毫秒可能翻选段——D3 明确不改）
+				if (s > bandHi + 1e-6) break; // starts 升序，越带即止 · C 档：吸附带 ε
 				const tailRoom = beat.track_ed - s;
-				if (tailRoom > 1e-6 && tailRoom < MIN_SHOT_SEC) continue; // beat 尾死残段保护（吸了填不进颗粒）
+				if (tailRoom > 1e-6 && tailRoom < MIN_SHOT_SEC) continue; // beat 尾死残段保护（吸了填不进颗粒）· C 档：吸附带 ε
 				const dist = Math.abs(s - (cursor + dTarget));
 				if (dist < bestDist) {
 					best = s;
@@ -1083,7 +1428,7 @@ export function fillBeatTrack(opts: {
 				ca.state.chances++;
 				// 负反馈闭环：已实现比例低于目标才吸（三成错开由「不低于则有意跳过」产生）；
 				// 确定性纯函数，密度自适应——句密多跳、句疏多吸（design §2）
-				if (ca.state.snapped / ca.state.chances < ca.ratio - 1e-9) {
+				if (ca.state.snapped / ca.state.chances < ca.ratio - 1e-9) { // C 档：比例 ε（无量纲，D3 明确不改）
 					ca.state.snapped++;
 					snapTarget = best;
 					dTarget = best - cursor;
@@ -1093,10 +1438,16 @@ export function fillBeatTrack(opts: {
 
 		const minLen = Math.min(MIN_SHOT_SEC, remaining);
 		const dFor = (p: Pair): number => Math.min(dTarget, pairAvail(p), remaining);
-		// 基础合格：未被全局消费 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
+		// 基础合格：未被全局消费 ∧ 未被别的锚预留 ∧ 供长够 ∧ 同 beat 素材归属不冲突（同槽候选组互斥）
 		const eligible = (p: Pair): boolean => {
 			if (pairAvail(p) < minLen) return false;
 			if (taken(p)) return false;
+			// 锚预留（fix-anchor-top-hit-guarantee 第二刀）：**这一句就是「锚优先于普通序贯槽」的全部**。
+			// 少了它，前序 beat 的泛化普通槽会以更低的分先把后序 beat 锚的 sim top-1 吃掉
+			// （真机两次复现：2026-08-23 黄石锚落第 7 名、2026-09-02 武汉锚落第 29 名）。
+			// ★ 本函数**恒不是锚自己**（锚槽取对在 fillBeatTrackWithAnchors 里内联，不走这里；
+			//   锚点分割出的子区间跑到这儿时，本 beat 的锚早已落位/降级并释放）⇒ 不传 self，全拦。
+			if (reservedByOther(opts.anchorReserved, p)) return false;
 			const owner = opts.beatOwners?.get(p.cand.clip_id);
 			return owner === undefined || owner === trackOrder;
 		};
@@ -1125,7 +1476,7 @@ export function fillBeatTrack(opts: {
 					if (!eligible(p)) continue;
 					const win = resolveWindow(p);
 					if (!win || jumpCutBlocked(p, win)) continue;
-					if (requireReach && snapTarget !== undefined && win.clipEd - win.clipSt < snapTarget - cursor - CUT_ALIGN_EPS) continue;
+					if (requireReach && snapTarget !== undefined && win.clipEd - win.clipSt < snapTarget - cursor - CUT_ALIGN_WINDOW_SEC) continue;
 					return { p, win };
 				}
 			}
@@ -1185,7 +1536,7 @@ export function fillBeatTrack(opts: {
 		const win = pickWin;
 		const d = win.clipEd - win.clipSt;
 		// 句界吸附退账：供长不足/窗口精修把边界拉离吸附点 → 本次实际未对齐，退还闭环账（后续机会续补）
-		if (ca && snapTarget !== undefined && Math.abs(cursor + d - snapTarget) > CUT_ALIGN_EPS) ca.state.snapped--;
+		if (ca && snapTarget !== undefined && Math.abs(cursor + d - snapTarget) > CUT_ALIGN_WINDOW_SEC) ca.state.snapped--;
 
 		const t = slotTimes(win.clipSt, cursor, d);
 		if (seamStrict) {
@@ -1211,6 +1562,7 @@ export function fillBeatTrack(opts: {
 		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++; // 取用高运动段（降权未挡住=候选稀疏）
 		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++; // 同上：取用模糊候选如实记账
 		consumed.add(pick.key);
+		opts.consumedBy?.set(pick.key, `${beat.beat}|${pick.query}`);
 		opts.beatOwners?.set(pick.cand.clip_id, trackOrder);
 		lastPlaced = { slotIdx, clipId: pick.cand.clip_id, clipEd: win.clipEd };
 		lastPick = pick;
@@ -1225,16 +1577,17 @@ export function fillBeatTrack(opts: {
 	const last = slots[slots.length - 1];
 	if (last && lastPick) {
 		const tail = beat.track_ed - last.track_ed;
-		if (tail > 1e-6 && tail < MIN_SHOT_SEC) {
+		// 「有残量」按整毫秒格判（fix-gapfill-eps-boundary-residue A 档）；`< MIN_SHOT_SEC` 是业务阈值，不动
+		if (msGap(last.track_ed, beat.track_ed) >= BLACK_BED_MERGE_TOL_MS && tail < MIN_SHOT_SEC) {
 			// 图片候选不限源界（运镜 duration 按最终槽长档位生成，吸收后仍被覆盖）
 			const hi = isImagePair(lastPick) ? Number.POSITIVE_INFINITY : lastPick.seg.end;
 			const ext = Math.min(tail, Math.max(0, hi - last.clip_ed));
-			if (ext > 1e-6) {
+			if (sec2ms(ext) >= BLACK_BED_MERGE_TOL_MS) {
 				// 上限 = 该槽起点到 beat 末端的全部空间（吸收后仍 MUST NOT 越过 beat 包络）
 				const maxD = beat.track_ed - last.track_st;
 				const refined = refineWindow(lastPick, { clipSt: last.clip_st, clipEd: last.clip_ed + ext }, maxD);
 				// 精修失败（收缩后不足下限）= 维持吸收前窗口，如实留空
-				if (refined && refined.clipEd > last.clip_ed + 1e-6) {
+				if (refined && msGap(last.clip_ed, refined.clipEd) >= BLACK_BED_MERGE_TOL_MS) {
 					// 两端 MUST NOT 各自舍入（见 slotTimes 头注）——尾部吸收同样走唯一出口。
 					// track_ed_old + grew ≡ track_st + newDur，故两侧同时由 newDur 派生，恒等式不破。
 					const t = slotTimes(last.clip_st, last.track_st, refined.clipEd - last.clip_st);
@@ -1261,6 +1614,37 @@ export interface AnchorOutcome {
 	status: "planned" | "pinned" | "degraded";
 	/** degraded 原因（人读告警与机读诊断共用）。 */
 	reason?: string;
+	/**
+	 * 实际落位段在**锚候选序**里的 1-based 名次（fix-anchor-top-hit-guarantee 第三刀）；
+	 * degraded（未落位）时整键缺席。
+	 *
+	 * ★ 立这个字段是因为**没有它就没法把「完美钉位」和「钉了个第 29 名」分开**：
+	 *   `status` 只有 planned/pinned/degraded 三态，真机那次 sim 排第 29 的错配报出来是
+	 *   `status:"planned"`，与钉准了逐字节同形——典型的静默失败。
+	 * ★ 刻意**不压成第四个 status 态**：名次是连续量，第 2 名与第 29 名不是同一件事，
+	 *   压成一个 `degraded` 又是一次信息丢失（tasks 0.3 记账）。
+	 */
+	sim_rank?: number;
+	/** 实际落位段的**原始 sim**（不含 mark/highlight 融合、不含降权）；degraded 时整键缺席。 */
+	sim?: number;
+	/** 该锚候选序**队首**的原始 sim（= 本该钉住的那一段的分）；degraded 时整键缺席。 */
+	top_sim?: number;
+	/**
+	 * 队首没被本锚取用时的如实归因（`sim_rank === 1` 或 degraded 时**整键缺席**——完美钉位不制造噪音）。
+	 *   · `consumed`——已被别处消费（是谁见 `top_by`）；
+	 *   · `reserved`——正被**另一个锚**的预留扣着（`at_sec` 更早者先得；只在 plan 的 beat 顺序
+	 *     与 `at_sec` 顺序不一致时可达，因为同序时先到的锚早已消费完并释放 ⇒ 报 `consumed`）；
+	 *   · `unfit`——供长不足 / 同 beat 跨轨归属互斥 / 精修后不足最小槽长。
+	 *
+	 * ★ 只给机读 `code`、不带人读 `reason`：同 `DirectOutcome.code` 的理由——人读文案里内嵌数值
+	 *   会在 JS/Python 之间产生 `"1"` vs `"1.0"` 这种纯格式差，进逐字节对拍面就是噪声。
+	 *   文案由消费侧按 code 现渲染。
+	 */
+	top_miss?: "consumed" | "reserved" | "unfit";
+	/** `top_miss === "consumed"` 时队首的**去向**：`<beat>|<query>`（消费它的那一槽）。
+	 * 其余情形整键缺席。真机那次的值会是 `B02|ordinary streets and apartment blocks in a Chinese city`
+	 * ——一句话说清「谁以什么名义把校门段拿走了」。 */
+	top_by?: string;
 }
 
 /**
@@ -1270,9 +1654,14 @@ export interface AnchorOutcome {
  * 口径：
  *   - 锚只钉**首轨**（trackOrder 0，默认可见的主候选轨）；备选轨保持既有序贯填充——N 轨 × 锚
  *     重复钉位会把不二用消费池抽干，备选轨要给用户的是整套差异化方案，同一锚的次优命中撑不起这个价值。
- *   - 每锚取其 query 池的首个合格对（池序 = pinned 置顶 > 等效分降序——**用户 pinned 优先于锚**
- *     的系统选取，取到 pinned 对时 status="pinned"）；片段钉 `max(beat.track_st, at_sec − 提前量)`，
- *     时长 = min(命中段可用长, per_shot_sec×2)，出界钳回 beat 窗口。
+ *   - 每锚取其 query 池的首个合格对，池序走 **`anchorOrder`**（pinned 置顶 > **原始 sim** 降序 >
+ *     融合分 tie-break）而**不是** `buildQueryPools` 的融合分序（fix-anchor-top-hit-guarantee 第一刀，
+ *     理由见 `anchorSimRank` 头注：锚判「对不对」，mark/highlight 判「好不好看」且是**就近借**来的分）。
+ *     **用户 pinned 仍优先于锚**的系统选取，取到 pinned 对时 status="pinned"；
+ *     片段钉 `max(beat.track_st, at_sec − 提前量)`，时长 = min(命中段可用长, per_shot_sec×2)，出界钳回 beat 窗口。
+ *   - 每锚的候选序队首在**全 plan 铺轨之前**已被预留（第二刀，见 `AnchorReservations` 头注），
+ *     普通序贯槽与 gap 填充拿不到它；本锚**落位或 degraded 后立即释放**（下方 try/finally，
+ *     漏释放 = 凭空制造黑片）。锚 × 锚争同一对按 at_sec 升序先到先得，后到者取次优。
  *   - 锚间时间重叠：按 at_sec 先到先钉，后锚只后移不重叠；挤到不足最小槽长即 degraded（不硬锚）。
  *   - 锚 query 无 ≥score 地板命中 / at_sec 缺失（内插失败）→ 该锚 degraded 退化普通槽 + summary 明示；
  *     锚池为空时 reason 按 anchorPoolEmptyReason 如实归因（检索失败/零命中/被旧版 plan 去重折叠分案，
@@ -1316,6 +1705,11 @@ export function fillBeatTrackWithAnchors(opts: {
 	highlightLookup?: MarkLookup;
 	/** 句界吸附（adjust-shot-cut-sentence-align）：锚槽窗口零改动（锚 > 句吸附），锚点分割区间内透传照常吸附。 */
 	cutAlign?: CutAlignOpts;
+	/** 锚预留账（fix-anchor-top-hit-guarantee 第二刀）：`planBeatFills` 铺轨前建好，本函数**逐锚消账**。
+	 * 缺席 = 不启用预留（单测直调 `fillBeatTrackWithAnchors` 的旧路径逐字节零回归）。 */
+	anchorReserved?: AnchorReservations;
+	/** 消费归属账（第三刀，见 `fillBeatTrack` 同名字段）。 */
+	consumedBy?: Map<string, string>;
 }): { slots: FillSlot[]; anchors: AnchorOutcome[] } {
 	const { beat } = opts;
 	const anchorsIn = Array.isArray(beat.anchors) ? beat.anchors : [];
@@ -1328,8 +1722,18 @@ export function fillBeatTrackWithAnchors(opts: {
 	const degraded = (a: { keyword: string; at_sec: number | null }, reason: string): void => {
 		outcomes.push({ beat: beat.beat, keyword: a.keyword, at_sec: a.at_sec ?? null, track_st: null, clip_id: null, status: "degraded", reason });
 	};
+	/** 销掉某个锚名下的全部预留（fix-anchor-top-hit-guarantee 第二刀）。 */
+	const release = (id: string): void => {
+		if (opts.anchorReserved) for (const [k, v] of opts.anchorReserved) if (v === id) opts.anchorReserved.delete(k);
+	};
 	if (!(span > 0)) {
-		for (const a of anchorsIn) degraded({ keyword: a.keyword, at_sec: a.at_sec ?? null }, "beat 窗口无长度");
+		// ⚠️ 这条早退路**也必须释放**：它绕过了下面那个带 finally 的循环。
+		// 漏在这里的预留会一直扣到全部 beat 铺完（gap 填充前的兜底 clear 才收），
+		// 中间所有 beat 的普通槽都拿不到那一对 ⇒ 凭空造黑，且症状远离病灶。
+		for (let i = 0; i < anchorsIn.length; i++) {
+			degraded({ keyword: anchorsIn[i].keyword, at_sec: anchorsIn[i].at_sec ?? null }, "beat 窗口无长度");
+			release(anchorIdOf(beat.beat, i));
+		}
 		return { slots: [], anchors: outcomes };
 	}
 
@@ -1354,66 +1758,99 @@ export function fillBeatTrackWithAnchors(opts: {
 		.sort((x, y) => (x.a.at_sec ?? Number.POSITIVE_INFINITY) - (y.a.at_sec ?? Number.POSITIVE_INFINITY) || x.i - y.i);
 	let cursorMin = beat.track_st; // 前锚已占用的推进线（锚间只后移不重叠）
 
-	for (const { a } of sorted) {
-		if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) {
-			degraded(a, "at_sec 缺失（plan 内插失败：文本漂移/句被剪/重投影降级）");
-			continue;
+	for (const { a, i } of sorted) {
+		const selfId = anchorIdOf(beat.beat, i);
+		try {
+			if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) {
+				degraded(a, "at_sec 缺失（plan 内插失败：文本漂移/句被剪/重投影降级）");
+				continue;
+			}
+			// 钉位：at_sec − 提前量，出界钳回 beat 窗口（尾部至少容一个最小槽）
+			let st = Math.max(beat.track_st, a.at_sec - ANCHOR_LEAD_SEC);
+			st = Math.min(st, beat.track_ed - MIN_SHOT_SEC);
+			st = Math.max(st, beat.track_st, cursorMin);
+			const room = beat.track_ed - st;
+			if (sec2ms(room) < sec2ms(MIN_SHOT_SEC)) { // 整毫秒格（A 档）：浮点噪声由 sec2ms 吸收，不再需要 10⁻⁶ 松弛
+				degraded(a, "锚点窗口不足（与前锚重叠或过近 beat 末端）");
+				continue;
+			}
+			const pool = poolByQuery.get(a.query);
+			if (!pool?.length) {
+				degraded(a, anchorPoolEmptyReason(beat, a.query));
+				continue;
+			}
+			// 锚候选序（第一刀）：**原始 sim 主序**，MUST NOT 用 buildQueryPools 的融合分序。
+			// 另排一份而不是改池本体——那口池是序贯槽共用的（见 anchorOrder 头注）。
+			const order = anchorOrder(pool);
+			// 取该序首个合格对：不二用/同 beat 归属/精修口径与序贯填充完全同一套
+			let pick: Pair | null = null;
+			let pickWin: { clipSt: number; clipEd: number } | null = null;
+			let pickIdx = -1;
+			for (let k = 0; k < order.length; k++) {
+				const p = order[k];
+				// 与序贯填充同一判据（钉选只看自己落过没有，见 takenBy 头注）
+				if (taken(p)) continue;
+				// 别的锚预留的对不许抢（第二刀「双锚争同一对」：at_sec 先到先得，后到者取次优）
+				if (reservedByOther(opts.anchorReserved, p, selfId)) continue;
+				if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
+				const owner = opts.beatOwners?.get(p.cand.clip_id);
+				if (owner !== undefined && owner !== opts.trackOrder) continue;
+				const win = refineWindow(p, sourceWindowFor(p, Math.min(maxAnchorLen, pairAvail(p), room)), room);
+				if (!win) continue;
+				pick = p;
+				pickWin = win;
+				pickIdx = k;
+				break;
+			}
+			if (!pick || !pickWin) {
+				degraded(a, `锚 query「${a.query}」候选耗尽或精修后不足最小槽长`);
+				continue;
+			}
+			// 第三刀：名次如实报出。归因 MUST 在下面那几行**记账之前**算——
+			// `material` 去重档下同一 clip 的两个段共用一把消费键，先 `consumed.add(pick.key)`
+			// 再判 `taken(top)` 会把「精修不容」谎报成「被别处消费」。
+			const top = order[0];
+			const topMiss: AnchorOutcome["top_miss"] = taken(top)
+				? "consumed"
+				: reservedByOther(opts.anchorReserved, top, selfId)
+					? "reserved"
+					: "unfit";
+			const topBy = topMiss === "consumed" ? opts.consumedBy?.get(top.key) : undefined;
+			const d = pickWin.clipEd - pickWin.clipSt;
+			anchorSlots.push({
+				clip_id: pick.cand.clip_id,
+				query: a.query,
+				score: pick.seg.score,
+				...slotTimes(pickWin.clipSt, st, d),
+			});
+			opts.consumed.add(pick.key);
+			opts.consumedBy?.set(pick.key, `${beat.beat}|${a.query}`);
+			opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
+			if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
+			if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
+			if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++;
+			cursorMin = st + d;
+			outcomes.push({
+				beat: beat.beat,
+				keyword: a.keyword,
+				at_sec: a.at_sec,
+				track_st: r3(st),
+				clip_id: pick.cand.clip_id,
+				// 用户 pinned 优先于锚：锚槽被用户钉选候选占据时如实标 pinned（系统选取让位）
+				status: pick.pinned ? "pinned" : "planned",
+				sim_rank: pickIdx + 1,
+				sim: pick.seg.score,
+				top_sim: top.seg.score,
+				// 完美钉位不制造噪音：取到队首时整键缺席
+				...(pickIdx > 0 ? { top_miss: topMiss } : {}),
+				...(pickIdx > 0 && topBy !== undefined ? { top_by: topBy } : {}),
+			});
+		} finally {
+			// 预留释放：**落位与 degraded 的每一条出路都经过这里**（`continue` 也触发 finally）。
+			// 写成 try/finally 而不是在每个 continue 前手动 delete——上面有 5 条 degraded 出口，
+			// 漏掉任何一条就是「那一对永久不可用」⇒ 凭空制造黑片，且症状出现在别的 beat 上极难归因。
+			release(selfId);
 		}
-		// 钉位：at_sec − 提前量，出界钳回 beat 窗口（尾部至少容一个最小槽）
-		let st = Math.max(beat.track_st, a.at_sec - ANCHOR_LEAD_SEC);
-		st = Math.min(st, beat.track_ed - MIN_SHOT_SEC);
-		st = Math.max(st, beat.track_st, cursorMin);
-		const room = beat.track_ed - st;
-		if (room < MIN_SHOT_SEC - 1e-6) {
-			degraded(a, "锚点窗口不足（与前锚重叠或过近 beat 末端）");
-			continue;
-		}
-		const pool = poolByQuery.get(a.query);
-		if (!pool?.length) {
-			degraded(a, anchorPoolEmptyReason(beat, a.query));
-			continue;
-		}
-		// 取该 query 池首个合格对：不二用/同 beat 归属/精修口径与序贯填充完全同一套
-		let pick: Pair | null = null;
-		let pickWin: { clipSt: number; clipEd: number } | null = null;
-		for (const p of pool) {
-			// 与序贯填充同一判据（钉选只看自己落过没有，见 takenBy 头注）
-			if (taken(p)) continue;
-			if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
-			const owner = opts.beatOwners?.get(p.cand.clip_id);
-			if (owner !== undefined && owner !== opts.trackOrder) continue;
-			const win = refineWindow(p, sourceWindowFor(p, Math.min(maxAnchorLen, pairAvail(p), room)), room);
-			if (!win) continue;
-			pick = p;
-			pickWin = win;
-			break;
-		}
-		if (!pick || !pickWin) {
-			degraded(a, `锚 query「${a.query}」候选耗尽或精修后不足最小槽长`);
-			continue;
-		}
-		const d = pickWin.clipEd - pickWin.clipSt;
-		anchorSlots.push({
-			clip_id: pick.cand.clip_id,
-			query: a.query,
-			score: pick.seg.score,
-			...slotTimes(pickWin.clipSt, st, d),
-		});
-		opts.consumed.add(pick.key);
-		opts.beatOwners?.set(pick.cand.clip_id, opts.trackOrder);
-		if (pick.pinned) opts.pinnedPlaced?.add(segDiagKey(pick.cand.clip_id, pick.seg));
-		if (pick.hot && opts.stats) opts.stats.hotSlotsPlaced++;
-		if (pick.blurry && opts.stats) opts.stats.blurrySlotsPlaced++;
-		cursorMin = st + d;
-		outcomes.push({
-			beat: beat.beat,
-			keyword: a.keyword,
-			at_sec: a.at_sec,
-			track_st: r3(st),
-			clip_id: pick.cand.clip_id,
-			// 用户 pinned 优先于锚：锚槽被用户钉选候选占据时如实标 pinned（系统选取让位）
-			status: pick.pinned ? "pinned" : "planned",
-		});
 	}
 
 	// 锚点分割区间：各区间内按既有序贯逻辑铺（复用 fillBeatTrack；子区间以 sub-beat 形态传入——
@@ -1590,8 +2027,9 @@ export function fillBeatTrackWithDirectSlots(opts: {
 	const flowing = dsIn.filter((d) => !(typeof d.track_st === "number" && typeof d.track_ed === "number"));
 	pinned.sort((a, b) => (a.track_st as number) - (b.track_st as number));
 
+	// 重叠按整毫秒格判（fix-gapfill-eps-boundary-residue A 档，与 gtrk-invariants E9 同族：整数格相等 = 相邻，≥ 1ms 才是重叠）
 	const overlaps = (st: number, ed: number): boolean =>
-		placed.some((s) => st < s.track_ed - 1e-6 && ed > s.track_st + 1e-6);
+		placed.some((s) => msGap(st, s.track_ed) >= BLACK_BED_MERGE_TOL_MS && msGap(s.track_st, ed) >= BLACK_BED_MERGE_TOL_MS);
 
 	/**
 	 * `promised` = 这一槽的时间线窗口是**用户给的承诺**（钉位槽），不是顺排算出来的边界。
@@ -1618,7 +2056,8 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		// 约一半的输入会被段界钳位原样弹回，等于没做。
 		const win = refineWindow(p, raw, room, { gridInward: true, snapCuts });
 		const use = win ?? raw;
-		const refined = win !== null && (Math.abs(win.clipSt - raw.clipSt) > 1e-6 || Math.abs(win.clipEd - raw.clipEd) > 1e-6);
+		// 「精修动过窗口」按整毫秒格判（A 档自裁：与同函数的落位重叠 / 越 beat 同域；帧格位移 ≥ 8ms，零字节影响）
+		const refined = win !== null && (Math.abs(msGap(raw.clipSt, win.clipSt)) >= BLACK_BED_MERGE_TOL_MS || Math.abs(msGap(raw.clipEd, win.clipEd)) >= BLACK_BED_MERGE_TOL_MS);
 		// 源侧**真正供得起**多少：从（吸附后的）起点算到**用户给的原始终点**。
 		// ⚠️ MUST NOT 用精修后的终点——那一截是我们自己向内取整取掉的，材料其实还在。
 		// 拿它当「源窗不够」的判据，就是把自家的取整 artifact 误报成用户的窗不够
@@ -1636,7 +2075,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		// 亏空超过一帧才是源窗**真的**不够（用户给的两个窗本身就不等长），那时如实
 		// 缩轨并报 starved_sec，MUST NOT 靠越读几秒去补——那会把邻场景帧截进来。
 		const shortfall = trackDur - dur;
-		const useDur = shortfall > frame + 1e-6 ? dur : trackDur;
+		const useDur = shortfall > frame + 1e-6 ? dur : trackDur; // C 档：1/fps 亏空 ε（frame 不在毫秒格，归帧格化后续——D3 明确不改）
 		const starved = trackDur - useDur;
 		placed.push({
 			clip_id: d.clip_id,
@@ -1646,7 +2085,7 @@ export function fillBeatTrackWithDirectSlots(opts: {
 		});
 		// 短镜头判据看**屏幕上多长**（trackDur），不看源侧供了多少——观众看的是前者。
 		// 源侧供不满是另一回事，由 starved_sec 单独报，两者 MUST NOT 混成一条。
-		const isSliver = win === null || useDur < MIN_SHOT_SEC - 1e-6;
+		const isSliver = win === null || useDur < MIN_SHOT_SEC - 1e-6; // C 档：与 1/fps 亏空同组（useDur 可为帧域派生量，D3 明确不改）
 		outcomes.push({
 			beat: beat.beat,
 			clip_id: d.clip_id,
@@ -1658,14 +2097,15 @@ export function fillBeatTrackWithDirectSlots(opts: {
 			has_cuts: hasCuts,
 			cut_snap: cutSnap,
 			fps,
-			...(starved > frame + 1e-6 ? { starved_sec: r3(starved) } : {}),
+			...(starved > frame + 1e-6 ? { starved_sec: r3(starved) } : {}), // C 档：1/fps 亏空 ε
 		});
 	};
 
 	for (const d of pinned) {
 		const st = d.track_st as number;
 		const ed = d.track_ed as number;
-		if (!(ed > st) || st < beat.track_st - 1e-6 || ed > beat.track_ed + 1e-6) {
+		// 越 beat 按整毫秒格判（A 档）：起点早于包络 ≥ 1ms 或终点晚于包络 ≥ 1ms 即出界
+		if (!(ed > st) || msGap(st, beat.track_st) >= BLACK_BED_MERGE_TOL_MS || msGap(beat.track_ed, ed) >= BLACK_BED_MERGE_TOL_MS) {
 			outcomes.push({ beat: beat.beat, clip_id: d.clip_id, track_st: null, status: "rejected", code: "out_of_beat", refined: false, has_cuts: false, cut_snap: "no_data", fps: null });
 			continue;
 		}
@@ -1716,17 +2156,43 @@ export function fillBeatTrackWithDirectSlots(opts: {
 
 // ── 主轨 gap 填充 · fast 规划段（adjust-main-track-gap-fill）──────────────
 
-/** beat 内首轨槽位未覆盖区间（> EPS；beat 间隙不在职责内）。 */
-function beatGaps(beat: { track_st: number; track_ed: number }, slots: FillSlot[]): { st: number; ed: number }[] {
+/** 包络内未覆盖区间扫描（纯函数）：按 track_st 升序推进游标，整毫秒格上缝 ≥ BLACK_BED_MERGE_TOL_MS 即记一段（原始秒值，不舍入）。
+ *  决策侧 `beatGaps` 与审计侧 `residualMainTrackGaps` 共用这一份——实现与陈述同一判据（fix-gapfill-eps-boundary-residue D6）。 */
+function scanEnvelopeGaps(env: { track_st: number; track_ed: number }, slots: { track_st: number; track_ed: number }[]): { st: number; ed: number }[] {
 	const sorted = [...slots].sort((a, b) => a.track_st - b.track_st);
 	const gaps: { st: number; ed: number }[] = [];
-	let cur = beat.track_st;
+	let cur = env.track_st;
 	for (const s of sorted) {
-		if (s.track_st - cur > BLACK_BED_MERGE_EPS) gaps.push({ st: cur, ed: s.track_st });
+		if (msGap(cur, s.track_st) >= BLACK_BED_MERGE_TOL_MS) gaps.push({ st: cur, ed: s.track_st });
 		cur = Math.max(cur, s.track_ed);
 	}
-	if (beat.track_ed - cur > BLACK_BED_MERGE_EPS) gaps.push({ st: cur, ed: beat.track_ed });
+	if (msGap(cur, env.track_ed) >= BLACK_BED_MERGE_TOL_MS) gaps.push({ st: cur, ed: env.track_ed });
 	return gaps;
+}
+
+/** beat 内首轨槽位未覆盖区间（整毫秒格上 ≥ BLACK_BED_MERGE_TOL_MS；beat 间隙不在职责内）。 */
+function beatGaps(beat: { track_st: number; track_ed: number }, slots: FillSlot[]): { st: number; ed: number }[] {
+	return scanEnvelopeGaps(beat, slots);
+}
+
+/**
+ * 主轨残缝扫描（fix-gapfill-eps-boundary-residue D6，纯函数、只读）：对 gap 填充**之后**的主轨产物
+ * （含 solid 黑片与 `gap_fill: true` 槽位）逐 beat 在整毫秒格上扫相邻缝，任一缝 ≥ `BLACK_BED_MERGE_TOL_MS` 即如实报出。
+ * 「主轨零 gap」的陈述（人读日志 / lay JSON）SHALL 由本函数结果得出，MUST NOT 无条件打印；
+ * 判据常量与实现（`beatGaps` / `computeBlackBedHoles`）同一份。射程 = beat 包络内（beat 间隙不在 gap 填充职责内，与 `beatGaps` 同源）。
+ * `sec` 按整毫秒差报（`ms2sec`）：1ms 缝报 `0.001`，MUST NOT 因浮点相位漏报。
+ * 写方不变量 `assertTrackContinuity` 只判重叠不判缝、且不覆盖 gap 填充产物——那是登记转出项，本函数不替它立法、也 MUST NOT 以此放宽 E9。
+ */
+export function residualMainTrackGaps(
+	beats: { beat: string; track_st: number; track_ed: number; slots: { track_st: number; track_ed: number }[] }[],
+): BlackBedHole[] {
+	const out: BlackBedHole[] = [];
+	for (const b of beats) {
+		for (const g of scanEnvelopeGaps(b, b.slots)) {
+			out.push({ beat: b.beat, track_st: r3(g.st), track_ed: r3(g.ed), sec: ms2sec(msGap(g.st, g.ed)) });
+		}
+	}
+	return out;
 }
 
 /**
@@ -1747,6 +2213,29 @@ function fastFillBeatGaps(o: {
 	noImage?: boolean;
 	dedupScope?: DedupScope;
 	entries: GapFillEntry[];
+	/**
+	 * 跨 beat 借候选的来源（relax-gapfill-cross-beat-borrow）：**全 plan 的 beats**。
+	 *
+	 * 缺省不传 = 不借（`solid` / `none` 两档与既有调用方逐字节零变化）。
+	 * 传了才启用第 ③ 级——本 beat 候选被别的 beat 占尽、相邻延长也填不满时，
+	 * 从全片未消费的段里取料，MUST NOT 直接落黑片。
+	 *
+	 * ⚠️ 仍守「宁空不重复」：借的是**未消费**段（照过 `consumed` 过滤）。
+	 * 本件不松动那条铁律——实测供给/需求 4.10×，饿死纯粹是分配问题，不是总量问题。
+	 */
+	borrowBeats?: readonly PlanBeat[];
+	/** 次地板填真画面（relax-gapfill-subfloor-picture，主理人 2026-09-02 拍板）。
+	 *
+	 * 前面各档都要求残洞 ≥ `MIN_SHOT_SEC`，够不着的残洞一律落黑。可**落黑本身就排出了一个
+	 * 次地板槽**（真机 proj2-C 的 B11 是 0.219s 黑片）—— 也就是说地板今天**只拦真画面、
+	 * 不拦黑**。问题从来不是「要不要破地板」，而是这个已然次地板的槽里装的是画面还是黑。
+	 *
+	 * ⚠️ 本档**不改变任何槽的时长与切点**：轨上时长由残洞决定，与它本会落的黑片**逐字节等长**。
+	 *    换的只是内容（黑 → 画面）。故节奏、槽位数、时间线扰动全部为零 —— 这是它敢破地板的全部理由。
+	 *    MUST NOT 借本档之名去放宽 ①/③ 的地板：那才是真的改节奏。
+	 *
+	 * 缺省不传 = 不启用（`solid` / `none` 两档逐字节零变化）。 */
+	subFloorFill?: boolean;
 	/** 钉选落位段键收集器（fix-arrange-diagnostics-granularity）。
 	 * ⚠️ **诚实注记**：这条路今天打不出钉选段——钉选免地板且在池里恒排第一，凡 gap 够得着的位置，
 	 * 常规填充在更宽的口径下（`room ≤ remaining`、枯竭放行无邻接约束）早就够得着了。
@@ -1755,7 +2244,9 @@ function fastFillBeatGaps(o: {
 	pinnedPlaced?: Set<string>;
 }): void {
 	const { beat, slots } = o;
-	const EPS = BLACK_BED_MERGE_EPS;
+	// 整毫秒格（fix-gapfill-eps-boundary-residue）：本函数全部残量 / 间隙 / 可延长量判据经 sec2ms 取整数差再与 TOL 比，
+	// MUST NOT 退回 `x > 0.001` 浮点比较（同一行在不同时间线位置上会因相位给出两种答案，见 BLACK_BED_MERGE_TOL_MS 头注）。
+	const TOL = BLACK_BED_MERGE_TOL_MS;
 	let merged: Pair[] | undefined; // 惰性构建（无 gap 的 beat 零开销）；序=等效分降序（剩余里也先取好的）
 	const pairsRelaxed = (): Pair[] => {
 		if (!merged) {
@@ -1766,18 +2257,46 @@ function fastFillBeatGaps(o: {
 		}
 		return merged;
 	};
+	// 跨 beat 借候选池（relax-gapfill-cross-beat-borrow）：从**全 plan** 建，惰性、只建一次。
+	// ⚠️ 排序 MUST 显式定死（与 pairsRelaxed 同口径 rank→fused→score 降序）——
+	//    MUST NOT 依赖 Map/对象遍历序，那是跨语言移植的头号静默分叉源
+	//    （Python dict 序与 JS Map 序不保证一致）。
+	let borrowed: Pair[] | undefined;
+	const pairsBorrowable = (): Pair[] => {
+		if (!borrowed) {
+			const own = new Set(pairsRelaxed().map((p) => p.key));
+			borrowed = (o.borrowBeats ?? [])
+				.filter((b) => b.beat !== beat.beat)
+				.flatMap((b) => buildQueryPools(b, 0, { noImage: o.noImage, dedupScope: o.dedupScope }).flatMap((q) => q.pool))
+				.filter((p) => !isImagePair(p) && !own.has(p.key)) // 本 beat 自己有的走 ① 那一档，不重复进池
+				.sort((a, b) => b.rank - a.rank || b.fused - a.fused || b.seg.score - a.seg.score);
+			// 同一 (clip,segment) 可能被多个 beat 召回 ⇒ 按 key 去重，保留排序里第一个
+			const seen = new Set<string>();
+			borrowed = borrowed.filter((p) => (seen.has(p.key) ? false : (seen.add(p.key), true)));
+		}
+		return borrowed;
+	};
 	// 槽位的段界回查（延长上限）：找包含该窗口的命中段；整片伪段候选（无 segments）以素材时长为界。
 	// dur = 素材物理时长（微残量借帧的硬上限）。
+	// ⚠️ 搜索面 MUST 含**借来的 beat**（fix-borrow-residue-absorption）：
+	//    借来的料属于别的 beat，只翻 `beat.queries` 恒查不到 ⇒ 延长上限恒 0 ⇒
+	//    ③′ 的复吸变成**死代码**，借后残量照旧落成亚帧黑片。
+	//    实测教训：只补 ③′ 而不补这里，探针打出的残洞纹丝不动（0.010–0.037s），全绿而无效。
+	//    序：**先本 beat、后借来的 beat**（本 beat 的段界才是这颗料的「正主」）；
+	//    借来的 beat 按 `borrowBeats` 原序遍历 —— MUST NOT 依赖 Map/对象遍历序（跨语言分叉源）。
 	const segBoundsOf = (slot: FillSlot): { lo: number; hi: number; dur?: number } | undefined => {
-		for (const q of beat.queries) {
-			for (const rr of q.results ?? []) {
-				if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
-				for (const sg of rr.segments ?? []) {
-					if (sg.start <= slot.clip_st + 1e-6 && slot.clip_ed <= sg.end + 1e-6) {
-						return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+		const beatsToScan = [beat, ...(o.borrowBeats ?? []).filter((b) => b.beat !== beat.beat)];
+		for (const bb of beatsToScan) {
+			for (const q of bb.queries) {
+				for (const rr of q.results ?? []) {
+					if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
+					for (const sg of rr.segments ?? []) {
+						if (sec2ms(sg.start) <= sec2ms(slot.clip_st) && sec2ms(slot.clip_ed) <= sec2ms(sg.end)) {
+							return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+						}
 					}
+					if (!rr.segments?.length) return { lo: 0, hi: rr.duration ?? slot.clip_ed, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
 				}
-				if (!rr.segments?.length) return { lo: 0, hi: rr.duration ?? slot.clip_ed, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
 			}
 		}
 		return undefined;
@@ -1785,12 +2304,18 @@ function fastFillBeatGaps(o: {
 
 	for (const g of beatGaps(beat, slots)) {
 		let cursor = g.st;
+		// 洞的**有效末端**：②b「下一颗反向前伸」会把 next 的起点往回拉，等于从尾侧吃掉一截。
+		// 那一档不推进 `cursor`（它填的是尾侧不是头侧），所以必须另立一个变量记账。
+		// ⚠️ MUST NOT 在 ②b 之后继续拿 `g.ed` 当余量上界：③ 会照着老末端下料，
+		//    压到 next 头上 ⇒ 装配期 assertTrackContinuity 直接抛（E9 零容忍）。
+		//    本轮 proj2-A/B/C 没炸是运气——B18 那处 ②b 恰好没触发。
+		let gEnd = g.ed;
 		// ① 候选填充：放宽地板取剩余候选（不二用/归属互斥/负词照旧；节奏机制不适用）
-		while (g.ed - cursor >= MIN_SHOT_SEC - EPS) {
+		while (msGap(cursor, gEnd) >= sec2ms(MIN_SHOT_SEC) - TOL) {
 			let placed = false;
 			for (const p of pairsRelaxed()) {
 				if (o.consumed.has(p.key)) continue;
-				const room = g.ed - cursor;
+				const room = gEnd - cursor;
 				if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
 				const owner = o.beatOwners.get(p.cand.clip_id);
 				if (owner !== undefined && owner !== 0) continue;
@@ -1820,15 +2345,26 @@ function fastFillBeatGaps(o: {
 		// （黄石实测 1–6ms），做成黑片即亚帧碎片——此档允许延长越过段界（借入邻场景 ≤1 帧，肉眼不可辨），
 		// 硬上限仍为素材物理时长/0。
 		const MICRO_SLOP = 0.05;
-		if (g.ed - cursor > EPS) {
-			const prev = slots.find((s) => Math.abs(s.track_ed - cursor) <= EPS);
+		// ②a/②a′ 抽成**可复用的一步**（fix-borrow-residue-absorption）：③ 借完会留下新的残量，
+		// 而原先这一档只在借**之前**跑过一次 ⇒ 借后的残洞无人吸收，落成亚帧黑片。
+		// 实测 proj2-B B18：包络 157.816→166.768，借占到 166.765，剩 0.003s（0.1 帧）挂在那儿。
+		// 渲染看不见（取整判 0 帧），但那颗 clip 的 `gtrk patch trim` 悔棋通道从此只剩半条
+		// ——正是 fix-gapfill-subframe-residue 要消灭的东西，被 ③ 从后门放了回来。
+		//
+		// ⚠️ 顺序 MUST 保持「先延长、后借」：延长用的是**同一条素材**，画面连续；
+		//    借来的是别的 beat 的料，相关性天然更弱。反过来会拿弱料顶掉强料。
+		//    所以修法是「借之后**再吸一次**」，不是把 ③ 提到 ② 前面。
+		// ⚠️ 只复跑 ②a/②a′，**不含 ②b** —— ②b 不幂等（见其头注）。
+		const absorbPrev = (): void => {
+			if (msGap(cursor, gEnd) < TOL) return;
+			const prev = slots.find((s) => Math.abs(msGap(cursor, s.track_ed)) < TOL);
 			if (prev && prev.material_id === undefined) {
 				const seg = segBoundsOf(prev);
 				if (seg) {
-					const residue = g.ed - cursor;
+					const residue = gEnd - cursor;
 					const hi = residue <= MICRO_SLOP ? Math.min(seg.hi + residue, seg.dur ?? seg.hi + residue) : seg.hi;
 					const ext = Math.min(residue, Math.max(0, hi - prev.clip_ed));
-					if (ext > EPS) {
+					if (sec2ms(ext) >= TOL) {
 						// 同一个 ext 加到两个不同基数上，浮点相位不同可能进位不同 ⇒ 恒等式破。
 						// 一律走唯一出口（见 slotTimes 头注）：起点不动，时长派生两端。
 						{
@@ -1850,19 +2386,19 @@ function fastFillBeatGaps(o: {
 					//   正是本件要消灭的东西。实测 proj2-B 的 B16：1.28s 洞 → 借到段界后余 0.013s。
 					//   第二步：余数此时已 ≤ MICRO_SLOP，够格走松弛下界（越过段界 ≤ 一帧，肉眼不可辨，
 					//   与 ②a/②b 的 MICRO_SLOP 同一条法），把它一次吃干净。
-					// 循环上界恒 2，**由 `back <= EPS` 的 break 保证**（不是靠 rest 一定变小）：
+					// 循环上界恒 2，**由 `sec2ms(back) < TOL` 的 break 保证**（不是靠 rest 一定变小）：
 					//   · 头部余量够 ⇒ 第一步借到段界，余数 ≤ MICRO_SLOP，第二步用松弛下界吃干净；
 					//   · 头部余量**先耗尽** ⇒ 第二步的 `back` 恒为 0（下界没变、prev.clip_st 已到底）⇒ break，
 					//     残余如实留洞交给 solid 兜底。此时 rest 仍可能很大 —— 这是正常结局，不是异常。
 					//   ⚠️ MUST NOT 写成「第一步之后 rest 要么归零、要么 ≤ MICRO_SLOP」：那是假的，
 					//     第二种结局就是反例（实测 proj2-B 若头部余量不足即走这一支）。
 					for (let pass = 0; pass < 2; pass++) {
-						const rest = g.ed - cursor;
-						if (rest <= EPS) break;
+						const rest = gEnd - cursor;
+						if (msGap(cursor, gEnd) < TOL) break;
 						// 下界与 ②b 的松弛口径**逐字同源**（MUST NOT 另立一套）
 						const loB = rest <= MICRO_SLOP ? Math.max(0, seg.lo - rest) : seg.lo;
 						const back = Math.min(rest, Math.max(0, prev.clip_st - loB));
-						if (back <= EPS) break;
+						if (sec2ms(back) < TOL) break;
 						{
 							// 两端**一律经 slotTimes 派生**，含期望不动的 clip_ed——
 							// MUST NOT 写 `prev.clip_ed = prev.clip_ed` 跳过唯一出口（见其头注）。
@@ -1878,16 +2414,20 @@ function fastFillBeatGaps(o: {
 					}
 				}
 			}
-		}
-		if (g.ed - cursor > EPS) {
-			const next = slots.find((s) => Math.abs(s.track_st - g.ed) <= EPS);
+		};
+		absorbPrev();
+		// ②b 下一颗反向前伸（**尾侧**填充）：它不推进 `cursor`（填的不是头侧），
+		// 所以必须把吃掉的那一截记到 `gEnd` 上，否则 ③ 会按老末端下料、压到 next 头上。
+		// ⚠️ 本档**不幂等**：再跑一次会拿同一个 residue 二次回退 next 的起点。故只跑这一次。
+		if (msGap(cursor, gEnd) >= TOL) {
+			const next = slots.find((s) => Math.abs(msGap(gEnd, s.track_st)) < TOL);
 			if (next && next.material_id === undefined) {
 				const seg = segBoundsOf(next);
 				if (seg) {
-					const residue = g.ed - cursor;
+					const residue = gEnd - cursor;
 					const lo = residue <= MICRO_SLOP ? Math.max(0, seg.lo - residue) : seg.lo;
 					const ext = Math.min(residue, Math.max(0, next.clip_st - lo));
-					if (ext > EPS) {
+					if (sec2ms(ext) >= TOL) {
 						// 同上：两个起点各自回退同一个 ext 会让两侧时长分头进位。
 						// 起点先定死，再由「老终点 − 新起点」这一个时长派生两端（终点因此原地不动）。
 						{
@@ -1898,14 +2438,215 @@ function fastFillBeatGaps(o: {
 							next.clip_ed = t.clip_ed;
 							next.track_ed = t.track_ed;
 						}
-						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: next.clip_id, track_st: next.track_st, track_ed: r3(g.ed), sec: r3(ext) });
+						// 先登记再改 gEnd —— 这条 entry 的 track_ed 是**吃掉之前**的末端。
+						o.entries.push({ beat: beat.beat, kind: "extend", clip_id: next.clip_id, track_st: next.track_st, track_ed: r3(gEnd), sec: r3(ext) });
+						gEnd = next.track_st;
 					}
 				}
 			}
 		}
-		// ③ 残余中段（两端段界都到顶）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
+		// ③ 跨 beat 借候选（relax-gapfill-cross-beat-borrow）：落黑片**之前**的最后一档。
+		//
+		// 治的是「分配不均」不是「无中生有」：实测 proj2-B 全片供给/需求 **4.10×**，
+		// 而 B18 整段 8.952s 落黑——它自己那 4 条候选**逐条**被 B14/B16 先占。
+		// 全片 139 条段里 75 条被 ≥2 个 beat 召回，先到先得、后面饿死。
+		// 二创解说（一稿对一片、全片单素材）下这是**结构性**的。
+		//
+		// ⚠️ 三条边界（spec 明文）：
+		//   · 只在 fast 档生效 —— `borrowBeats` 不传即整档不启用，solid/none 逐字节零变化；
+		//   · **仍守不二用** —— 照过 `consumed`，借的是本轮没人用的段；
+		//   · **如实登记** —— kind:"borrowed"，画面与本段稿子的相关性天然弱于本 beat 自己的候选。
+		if (o.borrowBeats?.length) {
+			while (msGap(cursor, gEnd) >= sec2ms(MIN_SHOT_SEC) - TOL) {
+				let placed = false;
+				for (const p of pairsBorrowable()) {
+					if (o.consumed.has(p.key)) continue;
+					const room = gEnd - cursor;
+					if (pairAvail(p) < Math.min(MIN_SHOT_SEC, room)) continue;
+					const owner = o.beatOwners.get(p.cand.clip_id);
+					if (owner !== undefined && owner !== 0) continue;
+					const win = refineWindow(p, sourceWindowFor(p, Math.min(room, pairAvail(p))), room);
+					if (!win) continue;
+					const d = win.clipEd - win.clipSt;
+					const slot: FillSlot = {
+						clip_id: p.cand.clip_id,
+						query: p.query,
+						score: p.seg.score,
+						...slotTimes(win.clipSt, cursor, d),
+						gap_fill: true,
+					};
+					slots.push(slot);
+					if (p.pinned) o.pinnedPlaced?.add(segDiagKey(p.cand.clip_id, p.seg));
+					o.consumed.add(p.key);
+					o.beatOwners.set(p.cand.clip_id, 0);
+					o.entries.push({ beat: beat.beat, kind: "borrowed", clip_id: p.cand.clip_id, track_st: slot.track_st, track_ed: slot.track_ed, sec: r3(d) });
+					cursor += d;
+					placed = true;
+					break;
+				}
+				if (!placed) break;
+			}
+			// ③′ 借完**再吸一次**残量（fix-borrow-residue-absorption）。
+			// 借的落点由 refineWindow 决定，几乎必然与 `gEnd` 差一点点——那一点点若无人接手，
+			// 就是 B18 那 0.003s 亚帧黑片。此处 `prev` 正是刚借来的那颗，延长它即可。
+			// 只在借真的发生过时才有残量；absorbPrev 自带「整毫秒格上残量 < TOL」的空转保护。
+			absorbPrev();
+		}
+		// ④′ 次地板填真画面（relax-gapfill-subfloor-picture）：落黑之前的**最后一档**。
+		//
+		// 走到这里，残洞必然 < MIN_SHOT_SEC（否则 ①/③ 早填了），前面各档都够不着。
+		// 但它接下来会变成一个**次地板黑片槽** —— 地板从来没拦住黑，只拦真画面。
+		// 真机残留全表（fast 档三条片）：0.219 / 0.357 / 0.360 / 0.395 / 0.431 / 0.634 / 0.711 / 0.988s，
+		// 在 30fps 上是 7–30 帧的黑闪。同长度的真画面只是一次快切，明显不如黑闪难受。
+		//
+		// ⚠️ 三条边界：
+		//   · **全有或全无**：只在能整段覆盖残量时才填。填一半会把 1 个黑槽变成「画面 + 黑」两个槽
+		//     —— 多一刀、且黑还在，比不填更坏；
+		//   · **跳过帧网格吸附**：吸附只会再制造残量，而消灭残量正是本档的目的。
+		//     轨上时长由残洞决定（与它本会落的黑片逐字节等长），源窗取等长即可；
+		//   · **MUST NOT 跨源切点**：在一个已经只有 7–30 帧的镜头里再插一次场景切换，
+		//     那就是本仓一直在治的闪帧。宁可留黑也不排这种槽。
+		if (o.subFloorFill && msGap(cursor, gEnd) >= TOL) {
+			const room = gEnd - cursor;
+			const pool = o.borrowBeats?.length ? [...pairsRelaxed(), ...pairsBorrowable()] : pairsRelaxed();
+			for (const p of pool) {
+				if (o.consumed.has(p.key)) continue;
+				if (msGap(pairAvail(p), room) >= TOL) continue; // 覆盖不满整段（整毫秒格上短 ≥ 1ms）⇒ 换下一个（全有或全无）
+				const owner = o.beatOwners.get(p.cand.clip_id);
+				if (owner !== undefined && owner !== 0) continue;
+				const win = sourceWindowFor(p, room);
+				if (sec2ms(room) - msGap(win.clipSt, win.clipEd) >= TOL) continue;
+				// 窗内若有源切点，这一槽就是「7–30 帧里含一次场景切换」⇒ 弃用
+				const cuts = p.seg.cuts;
+				if (Array.isArray(cuts) && cuts.some((c) => Number.isFinite(c) && msGap(win.clipSt, c) >= TOL && msGap(c, win.clipEd) >= TOL)) continue;
+				const slot: FillSlot = {
+					clip_id: p.cand.clip_id,
+					query: p.query,
+					score: p.seg.score,
+					...slotTimes(win.clipSt, cursor, room),
+					gap_fill: true,
+				};
+				slots.push(slot);
+				if (p.pinned) o.pinnedPlaced?.add(segDiagKey(p.cand.clip_id, p.seg));
+				o.consumed.add(p.key);
+				o.beatOwners.set(p.cand.clip_id, 0);
+				o.entries.push({ beat: beat.beat, kind: "subfloor", clip_id: p.cand.clip_id, track_st: slot.track_st, track_ed: slot.track_ed, sec: r3(room) });
+				cursor = slot.track_ed;
+				break;
+			}
+		}
+		// ④ 残余中段（两端段界都到顶、且借无可借）→ 留给应用段 solid 兜底（layBrollTracks 洞检测自动接住）
 	}
 	slots.sort((a, b) => a.track_st - b.track_st);
+}
+
+// ── 落轨坑位 × 理解射程 重合度（fix-describe-window-coverage §1.8）──────────
+
+/** {@link measureDescribeScopeOverlap} 的产物：「真的铺上去的那一段，被 describe 看过吗」。 */
+export interface DescribeScopeOverlap {
+	/** 分母 = 本轮**真落位**的坑位数（全 beat 全轨；planBeatFills 的 fills 口径）。 */
+	slots: number;
+	/** 分子 = 其 `[clip_st, clip_ed]` **含被理解的那一帧**（`describe.at_sec`）的坑位数。
+	 * ★ 判据取「含那一帧」而不是「与锚点所在的那一段有交集」——后者宽得多，而 describe 真看过的
+	 * 只有那一帧。真机 12/95 = 12.6% 就是按「含那一帧」算出来的（proposal Why 二原话
+	 * 「95 个落轨坑位里只有 12 个的 `[clip_st, clip_ed]` 包含被理解的那一帧」），
+	 * 换成段级交集会把这个数抬上去，与被引用的真机证据对不上。
+	 * ⚠️ 与 `blurry` 降权的射程口径**刻意不同**且不矛盾：降权作用在候选池的单元（**段**）上，
+	 * 本账量的是落位产物的单元（**段内的那个子窗**）。两者各自都是自己那一层最紧的口径。 */
+	in_scope: number;
+	/** 分子里射程按 `segments[0]` **推定**（`describe.at_sec` 缺席，旧 plan / agent 手组）的坑位数。
+	 * 人读侧 SHALL 标注「推定射程」，MUST NOT 与写明锚点的条目混为一谈。 */
+	presumed: number;
+	/** 落位坑位里其候选**压根没有 describe** 的数量——「没看过」，不是「看过且判清晰」。
+	 * 它计入分母不计入分子：`slots − in_scope` 里既有这一类，也有「看过但看的是别处」。 */
+	no_describe: number;
+	/** `in_scope / slots`。**slots === 0 时为 null**（分母为 0 不可判）——
+	 * MUST NOT 写 0：「没铺任何坑位」与「铺了但一个都没被看过」是两件事，抹平了没法处置。 */
+	ratio: number | null;
+}
+
+/**
+ * 落轨坑位与理解射程的重合度（fix-describe-window-coverage §1.8，纯函数）。
+ *
+ * ## 它回答的问题，与 `signal_coverage` 不是同一个
+ *
+ * `add-signal-coverage-reporting` 的 `signal_coverage` 报的是「候选**段**有没有拿到 mark/highlight 分」
+ * （`hit/(hit+neutral)`，分母 = 进过候选池的段）；本函数报的是「**真的铺上去的那一段**有没有被
+ * describe 看过」（分母 = 落位坑位）。两个分母不同 ⇒ **MUST NOT 并键**，合并会把两件事抹平成一个数。
+ *
+ * ## 为什么要有这个数
+ *
+ * 真机 260902（旅拍 Q1+Q2）：**95 个落轨坑位里只有 12 个（12.6%）**含被理解的那一帧，
+ * 最远一条坑位 54.8–57.0s vs 理解帧 736.608s（相距约 680s）。
+ * 在这个数被报出来之前，读者看到 `usable_flags` 只会以为它说的是自己眼前这一段。
+ * 与 describe 侧的「32/843 = 3.8%」两头对上：那个说「候选带的段有多少被看过」，
+ * 这个说「最后铺上去的有多少被看过」，同一件事的两端。
+ *
+ * ## 候选定位口径（★ 不能只按 clip_id 找）
+ *
+ * 真机 B08 是现成反例：同一 clip `local-ce3f2dee555e70d9` 在两个 query 下 `seg0` 起止**逐字相同**、
+ * 只有 `best` 不同，`text_overlay` 一个 false 一个 true。只按 clip_id 反查会 50% 概率拿错那条 describe。
+ * ⇒ 先按 `(beat, query, clip_id)` 精确定位，跨 beat 借来的槽位（gap-fill）再退到全 plan 的
+ * `(query, clip_id)`；两级都落空才算未定位（计入分母、不计入分子，与「没看过」同向保守）。
+ *
+ * ## 它**不是**判据
+ *
+ * 只增可观测面：本函数零副作用、不参与任何排序与落位，比例再低也 MUST NOT 据此剔除/降权/拒铺
+ * （非致命 INFO 档）。槽位表在本函数前后逐字节不变——它只读 `fills`。
+ *
+ * ## ★ 为什么是独立纯函数、而**不是** `planBeatFills` 出参上的一个新键
+ *
+ * 试过，被闸当场拦下：`test/broll-arrange-apply.test.mjs` 有一条
+ * 「闭环产物与 planBeatFills 同形——下游不需要任何 if(来自云端) 分支」，
+ * 逐键比对 `applyArrangeResponse(...)` 与 `planBeatFills(...)` 的**顶层键集**。
+ * 往 `planBeatFills` 加键 ⇒ 云端闭环那条路少一个键 ⇒ 同形律破 ⇒ 下游被迫长分支。
+ * 而云端档根本没跑本地候选池，它也**算不出**这个数（它拿到的是结果不是过程）。
+ * ⇒ 正确位置是**调用方按需要自己量一次**（`planBeatFills` 之后、拿着同一份 `fills` 调本函数），
+ *   两条路的产物形态因此保持逐键一致。MUST NOT 为了少写一行调用把它塞回出参。
+ */
+export function measureDescribeScopeOverlap(
+	beats: readonly PlanBeat[],
+	fills: ReadonlyMap<string, FillSlot[][]>,
+): DescribeScopeOverlap {
+	const SEP = "\u0000"; // 分隔符取 NUL：query 是自由文本，任何可打印分隔符都可能被它自己包含
+	// 全 plan 的 (query, clip_id) 索引：跨 beat 借来的槽位靠它兜底。先到先得——
+	// 同一 (query, clip_id) 在不同 beat 下是同一次检索的同一条命中，describe 也是同一份。
+	const byQueryClip = new Map<string, PlanResult>();
+	const byBeatQueryClip = new Map<string, PlanResult>();
+	for (const b of beats) {
+		for (const q of b.queries ?? []) {
+			for (const r of q.results ?? []) {
+				const qk = `${q.query}${SEP}${r.clip_id}`;
+				if (!byQueryClip.has(qk)) byQueryClip.set(qk, r);
+				byBeatQueryClip.set(`${b.beat}${SEP}${qk}`, r);
+			}
+		}
+	}
+	let slots = 0;
+	let inScope = 0;
+	let presumed = 0;
+	let noDescribe = 0;
+	for (const b of beats) {
+		for (const track of fills.get(b.beat) ?? []) {
+			for (const s of track) {
+				slots++;
+				const qk = `${s.query}${SEP}${s.clip_id}`;
+				const cand = byBeatQueryClip.get(`${b.beat}${SEP}${qk}`) ?? byQueryClip.get(qk);
+				if (!cand) continue; // 未定位（solid 兜底 / 已不在 plan 里）：保守计入分母
+				const scope = describeScopeOf(cand);
+				if (!scope) {
+					noDescribe++;
+					continue;
+				}
+				// 图片候选与无 segments 的退化候选：射程 = 整条素材 ⇒ 这一坑位确实被看过
+				const hit = scope.wholeMaterial || (s.clip_st <= (scope.atSec as number) && (scope.atSec as number) <= s.clip_ed);
+				if (!hit) continue;
+				inScope++;
+				if (scope.presumed) presumed++;
+			}
+		}
+	}
+	return { slots, in_scope: inScope, presumed, no_describe: noDescribe, ratio: slots > 0 ? inScope / slots : null };
 }
 
 /** 全 plan 预填充（纯函数）：先定「填哪些颗粒」，供调用方下载后再落轨。
@@ -1999,6 +2740,64 @@ export function planBeatFills(
 		}
 	}
 	const fpsOf = (clipId: string): number | undefined => fpsByClip.get(clipId);
+	/**
+	 * 锚预留预扫（fix-anchor-top-hit-guarantee 第二刀 · 形态 A「锚预留集」）。
+	 *
+	 * 铺轨**开始之前**扫一遍全 plan 的 anchors，为每锚把它候选序的队首锁进预留账；
+	 * 序贯填充与 gap 填充据此跳过（`fillBeatTrack.eligible`），锚落位/degraded 后立即释放。
+	 *
+	 * 选形态 A 而不是形态 B「两阶段（先全片钉锚、再逐 beat 填间隔）」的理由：
+	 * A 完全不动 `fillBeatTrackWithAnchors` 的调用结构与 beat 的消费顺序，
+	 * **无 anchors 的 plan 连这段都不进**（下面第一行就返回）⇒ 零回归是结构性的、不用另证；
+	 * B 要重排整个填充时序，零回归面得额外拿证据。（tasks 0.2，待主理人追认）
+	 *
+	 * ⚠️ 三条边界：
+	 *   · **每锚至多 1 对**（MUST NOT top-N）——多预留就是把普通槽饿死到落黑；
+	 *   · **at_sec 缺失的锚不占预留**——它恒 degraded，占了就是白扣一段；
+	 *   · **首轨被高档直排占走的 beat 不占预留**——那种 beat 的 `beat.anchors` 根本跑不到
+	 *     （落位处 `arrange_mode==="direct"` 分支优先），预留下去就永远没人来释放。
+	 * ⚠️ 这里 **MUST NOT 传 `markStats`**：预扫只覆盖有锚的 beat，把它的命中/中性计进去会让
+	 *   `lay=0` 之类根本没铺轨的路径也长出统计数——诊断口径当场漂移。
+	 */
+	const anchorReserved: AnchorReservations = new Map();
+	/** 消费归属账（第三刀）：`消费键 → <beat>|<query>`。纯诊断，**不参与任何判定**
+	 * ——去掉它除了 `top_by` 缺席之外不改变一个字节。锚点分割出的子区间会记成
+	 * `<beat>~a<N>`（内部子 beat 名，节奏种子用），如实反映是「锚两侧的序贯槽」拿走的。 */
+	const consumedBy = new Map<string, string>();
+	if (Math.max(0, lay) > 0) {
+		const claims: { id: string; at: number; bi: number; ai: number; beat: PlanBeat; query: string }[] = [];
+		plan.beats.forEach((b, bi) => {
+			if (b.arrange_mode === "direct" && Array.isArray(b.direct_slots) && b.direct_slots.length) return;
+			(Array.isArray(b.anchors) ? b.anchors : []).forEach((a, ai) => {
+				if (typeof a.at_sec !== "number" || !Number.isFinite(a.at_sec)) return;
+				claims.push({ id: anchorIdOf(b.beat, ai), at: a.at_sec, bi, ai, beat: b, query: a.query });
+			});
+		});
+		if (claims.length) {
+			// 锚 × 锚争同一对：**at_sec 升序先到先得**（与落位处的锚间排序同一把口径），
+			// 后到者顺位取次优；同刻按 plan 序稳定分胜负（确定性纯函数，不留迭代序漂移）
+			claims.sort((x, y) => x.at - y.at || x.bi - y.bi || x.ai - y.ai);
+			const orderCache = new Map<string, Map<string, Pair[]>>();
+			for (const c of claims) {
+				let byQuery = orderCache.get(c.beat.beat);
+				if (!byQuery) {
+					byQuery = new Map(
+						buildQueryPools(c.beat, scoreFloor, {
+							noImage: opts.noImage,
+							dedupScope: opts.dedupScope,
+							markWeight: opts.markWeight,
+							markLookup: opts.markLookup,
+							highlightWeight: opts.highlightWeight,
+							highlightLookup: opts.highlightLookup,
+						}).map((p) => [p.query, anchorOrder(p.pool)] as [string, Pair[]]),
+					);
+					orderCache.set(c.beat.beat, byQuery);
+				}
+				const head = byQuery.get(c.query)?.find((p) => !anchorReserved.has(p.key));
+				if (head) anchorReserved.set(head.key, c.id);
+			}
+		}
+	}
 	// 同槽候选组互斥（同 beat 跨轨同素材互斥）；按 beat 留存——gap 填充规划段（两阶段在后）要接着记账
 	const ownersByBeat = new Map<string, Map<string, number>>();
 	for (const beat of plan.beats) {
@@ -2023,6 +2822,10 @@ export function planBeatFills(
 				pinnedPlaced: pinnedPlacedKeys,
 				cutAlign: cutAlignFor(k),
 				fpsOf,
+				// 锚预留账（第二刀）：**每条轨都要拿到**——备选轨（k>0）走的是纯序贯填充，
+				// 它同样会把后序 beat 锚的 top-1 吃掉（不二用是跨轨共享的）。
+				anchorReserved,
+				consumedBy,
 			};
 			// 优先布局（锚点 / 高档直排）**只作用于首轨**——备选轨要给的是「另一套方案」，
 			// 钉死同样的位置就失去了备选的意义（口径注记见各自函数头注）。
@@ -2046,6 +2849,13 @@ export function planBeatFills(
 		}
 		fills.set(beat.beat, perTrack);
 	}
+	// 锚预留兜底释放（fix-anchor-top-hit-guarantee 第二刀）：常规填充跑完，预留账**必须清空**。
+	// 正常路径上每锚都在 `fillBeatTrackWithAnchors` 的 try/finally 里销过账，这里恒是空操作；
+	// 留这一手是防「锚根本没被处理过」的形态（lay≤0 已在预扫处挡掉，直排档 beat 也已跳过，
+	// 但调用面会演化）——**漏释放 = 那一对永久不可用 = 凭空制造黑片**，代价远大于一次冗余清空。
+	// ⇒ 也正因为清在这里，下面的 gap 填充（第二阶段，在全部 beat 之后）与预留**时间上不可能共存**，
+	//   故 `fastFillBeatGaps` 侧不需要再加一层过滤（加了就是恒不触发的死代码）。
+	anchorReserved.clear();
 	// pinned 结算（fix-arrange-diagnostics-granularity）：requested = plan 内全部钉选候选的
 	// **全部段**（段键去重）；yielded = 未落成任何槽位的段。
 	// ★ 枚举 MUST 走 `segmentsOf`——与候选池同一口径（含无命中段时的整片伪段）。
@@ -2077,6 +2887,14 @@ export function planBeatFills(
 				noImage: opts.noImage,
 				dedupScope: opts.dedupScope,
 				entries: gapFillEntries,
+				// 跨 beat 借候选的来源 = 全 plan（relax-gapfill-cross-beat-borrow）。
+				// ⚠️ 只在这一处（fast 档）传 —— solid/none 走不到这里，天然零影响。
+				// 与本圈开头那条「两阶段」注释同源：常规填充**全部**跑完才轮到 gap 填充，
+				// 所以此刻 `consumed` 已定型，借的确实是「没人要」的段。
+				borrowBeats: plan.beats,
+				// 次地板填真画面（relax-gapfill-subfloor-picture）：同样只在 fast 档传。
+				// 它换的只是「已然次地板的那个槽」的内容，不动任何槽的时长与切点。
+				subFloorFill: true,
 				pinnedPlaced: pinnedPlacedKeys,
 			});
 			for (const s of slots) clipIds.add(s.clip_id); // 新填候选进下载集
@@ -2191,11 +3009,25 @@ export interface LayResult {
 			 * 「换了画布帧率之后这个数就不对了」的坑埋进契约面。帧数只出现在人读文案里。
 			 */
 			short_solid?: { count: number; sec: number; items: Array<{ beat: string; sec: number }> };
+			/**
+			 * 主轨残缝账面（fix-gapfill-eps-boundary-residue D6）：gap 填充**之后**主轨产物在整毫秒格上仍存在的缝
+			 * （`residualMainTrackGaps`，含 solid 与 `gap_fill: true` 槽位；判据与实现同一份 `BLACK_BED_MERGE_TOL_MS`）。
+			 * ★ **条件键**——零缝时整键缺席（与 `short_solid` 同构：缺席与空是两件事）；`items` 全量，MUST NOT 按阈值过滤。
+			 * 「主轨零 gap」的人读陈述 SHALL 由它得出，MUST NOT 无条件打印。
+			 */
+			residual_gaps?: { count: number; sec: number; items: BlackBedHole[] };
 		};
+		/** 写出侧帧格统计（fix-matrix-lay-frame-grid 2.4）：rate = 顶层 video_rate；slots / black_bed = 落在网格上的
+		 * 候选轨 clip 数（含 gap 黑片）/ 黑底 clip 数；shifted = 越段界 / 越素材上界前移次数。拒铺时缺席。 */
+		frameGrid?: FrameGridSummary;
+		/** 时钟账面（add-cross-clock-adapter D2）：代理实测 / 回退自述 / 本地恒等计数与不一致明细。拒铺时缺席。 */
+		clock?: ClockSummary;
 	};
 	broll: StructMetaBroll;
 	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
 	warnings: string[];
+	/** 人读 INFO（良性、有已知根因的写出侧事件：帧格前移 / 弃置残片），交由命令层以 info 级打印，MUST NOT 升成告警。 */
+	infos: string[];
 }
 
 // ── 自产指纹判据（fix-matrix-strip-identity）──────────────────────────────
@@ -2579,12 +3411,26 @@ export function layBrollTracks(opts: {
 	 * 应用与否由本函数以剥离后终态权威判定（音频驱动形态 ∧ 目标层首轨=最低号内容轨）；
 	 * 不适用时规划槽位（gap_fill 标记）被滤出落轨。缺席/mode none = 现状零回归。 */
 	gapFill?: { mode: GapFillMode; planned: GapFillEntry[] };
+	/** 代理落盘即实测（add-cross-clock-adapter D2）：clip_id → 命令层对落盘代理 ffprobe 一次的结果。
+	 * 有实测 ⇒ 该 clip 的 `materials[]` 条目 `duration / video_size / video_rate` 取文件真值，云端自述只进比对（`summary.clock`）；
+	 * 探测失败 / 缺席 ⇒ 回退自述（与本件落地前逐字节相同）+ `unverified`。**决策层不消费它**（`refineWindow` 仍用 `cand.fps`）。 */
+	proxyProbes?: ReadonlyMap<string, ProxyProbe>;
 }): LayResult {
 	const { gtrk, plan, lay, fills, downloads } = opts;
+	/** 时钟账面（D2）；探测失败样本只进一条汇总 WARN。 */
+	const clock: ClockSummary = { proxy_probed: 0, unverified: 0, local_source_container: 0, proxy_mismatch: [], proxy_fps_mismatch: [] };
+	const unverifiedSamples: string[] = [];
 	const blackBedOn = opts.blackBed !== false;
 	const forceRelay = opts.forceRelay === true;
 	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : "common");
 	const warnings: string[] = [];
+	const infos: string[] = [];
+	// ── 帧率（fix-matrix-lay-frame-grid D7）：写出侧帧格化的锚，与 gtrk patch 同一读法与话术；缺席 / 非正 / 非整数
+	//    在这里就抛——此刻尚未动任何结构、入参 gtrk 原样（零副作用），MUST NOT 静默退回毫秒路。
+	const videoRate = videoRateOf(gtrk);
+	/** 毫秒时刻 → 帧网格投影（一次 sec2frame、一次 f2ms）：黑底包络与空洞诊断的包络两端都走它，不参与 shift。 */
+	const gridSec = (sec: number): number => f2ms(sec2frame(sec, videoRate), videoRate) / 1000;
+	let shiftedTotal = 0;
 	const materials = [...((gtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}) };
 
@@ -2673,6 +3519,7 @@ export function layBrollTracks(opts: {
 				beats: [],
 			}) as StructMetaBroll,
 			warnings,
+			infos,
 		};
 	}
 
@@ -2798,13 +3645,32 @@ export function layBrollTracks(opts: {
 		for (let k = 0; k < perTrack.length; k++) {
 			// 下载失败的槽位丢弃（留空）；图片槽位以 material_id 指向注入材料（运镜/静态兜底）；全空轨槽不建 laid 条目；
 			// gap 填充规划槽位在填充不适用时滤出（adjust-main-track-gap-fill 应用段门控）
-			const slots = perTrack[k].filter(
+			const decided = perTrack[k].filter(
 				(s) =>
 					(!s.gap_fill || gapFillOn) &&
 					(downloads.has(s.clip_id) || (s.material_id !== undefined && opts.injectedMaterials?.has(s.material_id))),
 			);
-			if (!slots.length) continue;
+			if (!decided.length) continue;
 			const trackIndex = bandStart[targetLayer] + k;
+			// ── 写出侧帧格化（fix-matrix-lay-frame-grid D2″）：决策层槽位（毫秒）在此投影到顶层 video_rate 的帧网格。
+			//    本地槽位与云端编排（arrange-apply）返回的槽位走同一入口——fills 到这里已经不分来路。
+			//    clip_ed 上界 = 检索段界（严格，spec「越段界宁短一帧」）∧ 素材时长 + 1ms（与 assertSourceBound / T5 同一容差，
+			//    素材 = 本槽位真正会登记进 materials[] 的那条：图片走注入材料，其余走 plan 候选的 duration）。
+			const projected = projectSlotsToFrameGrid(decided, videoRate, (s) => {
+				const segEnd = slotSegmentEnd(plan, beat, s);
+				const injected = s.material_id !== undefined ? opts.injectedMaterials?.get(s.material_id) : undefined;
+				// 素材上界的真相源（add-cross-clock-adapter D1）：代理有实测就用文件本身的墙——否则 materials[] 写实测、
+				// 上界却按自述，代理比原片短时 assertSourceBound 会在写回前把本轮整个抛掉。判据（min / +1ms）一字未改。
+				const probed = s.material_id === undefined ? opts.proxyProbes?.get(s.clip_id) : undefined;
+				const matDur = injected ? injected.duration : probed && "wall" in probed ? probed.wall.durationSec : candById.get(s.clip_id)?.duration;
+				const segMs = segEnd === undefined ? undefined : sec2ms(segEnd);
+				const matMs = typeof matDur === "number" && Number.isFinite(matDur) && matDur > 0 ? sec2ms(matDur) + 1 : undefined;
+				return segMs === undefined ? matMs : matMs === undefined ? segMs : Math.min(segMs, matMs);
+			});
+			shiftedTotal += projected.shifted;
+			for (const m of projected.info) infos.push(`${beat.beat} 轨 ${trackIndex}：${m}`);
+			const slots = projected.slots;
+			if (!slots.length) continue;
 			const bucket = trackClips.get(trackIndex) ?? [];
 			slots.forEach((s, i) => {
 				const materialId = s.material_id ?? brollMaterialIdFor(s.clip_id);
@@ -2817,15 +3683,45 @@ export function layBrollTracks(opts: {
 						const cand = candById.get(s.clip_id);
 						const dl = downloads.get(s.clip_id)!;
 						const mat: LooseMaterial = { id: materialId, path: dl.rel };
-						if (typeof cand?.duration === "number") mat.duration = cand.duration;
-						if (dl.source === "local") {
-							// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）
-							if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
-						} else {
-							const dims = previewDims(cand?.width, cand?.height);
+						const probed = dl.source === "local" ? undefined : opts.proxyProbes?.get(s.clip_id);
+						if (probed && "wall" in probed) {
+							// 代理落盘即实测（add-cross-clock-adapter D2，契约 §2「materials[] 描述文件本身」）：文件是代理，
+							// 条目就写代理的实测——duration / video_size / video_rate 三件取 ffprobe；云端自述（原片值）只进比对。
+							// 键序与自述路一致（id / path / duration / video_size / video_rate），两条路的产物只差值不差形。
+							mat.duration = probed.wall.durationSec;
+							const dims = probed.width > 0 && probed.height > 0 ? [probed.width, probed.height] : previewDims(cand?.width, cand?.height);
 							if (dims) mat.video_size = dims;
+							if (probed.fps > 0) mat.video_rate = r3(probed.fps);
+							else if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
+							clock.proxy_probed++;
+							const declared = wallFromDeclared(cand?.duration, "cloud_declared", "plan");
+							if (declared) {
+								const cmp = compareWalls(declared, probed.wall, cand?.fps);
+								if (cmp.exceeds) clock.proxy_mismatch.push({ clip_id: s.clip_id, declared_ms: cmp.declaredMs, probed_ms: cmp.measuredMs, frames: cmp.frames });
+							}
+							if (typeof cand?.fps === "number" && probed.fps > 0 && Math.abs(cand.fps - probed.fps) / probed.fps > VFR_MISMATCH_RATIO) {
+								clock.proxy_fps_mismatch.push({ clip_id: s.clip_id, declared_fps: cand.fps, probed_fps: r3(probed.fps) });
+							}
+						} else {
+							// 自述路（探测失败 / 未探测 / 本地素材）：与本件落地前逐字节相同。云端自述经 wallFromDeclared 供值
+							// （秒字面原样）；非正 / 非有限的 number 仍原样登记（既有行为：材料无有效时长 ⇒ 上界跳过）。
+							const declared = wallFromDeclared(cand?.duration, dl.source === "local" ? "source_container" : "cloud_declared", dl.source === "local" ? "local-index ffprobe" : "plan");
+							if (declared) mat.duration = declared.durationSec;
+							else if (typeof cand?.duration === "number") mat.duration = cand.duration;
+							if (dl.source === "local") {
+								// 本地素材免代理：path=素材绝对路径，尺寸/帧率取 ffprobe 实测原值（不做 preview 缩放）——source_container 恒等
+								if (cand?.width && cand?.height) mat.video_size = [cand.width, cand.height];
+							} else {
+								const dims = previewDims(cand?.width, cand?.height);
+								if (dims) mat.video_size = dims;
+							}
+							if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
+							if (dl.source === "local") clock.local_source_container++;
+							else {
+								clock.unverified++;
+								if (probed) unverifiedSamples.push(`${s.clip_id}（${probed.error}）`);
+							}
 						}
-						if (typeof cand?.fps === "number") mat.video_rate = cand.fps;
 						newMaterialsById.set(materialId, mat);
 					}
 				}
@@ -2857,8 +3753,10 @@ export function layBrollTracks(opts: {
 		// ——磁吸安全不变量（beat 包络内主轨零 gap）在此收口，不依赖下载成败。
 		if (gapFillOn) {
 			const mainLaid = laid.find((l) => l.order === 0);
+			// 洞按**帧网格上的**包络算（fix-matrix-lay-frame-grid）：槽位已在网格上，包络两端同一 gridSec ⇒ 洞的两端
+			// 天然是整帧号投影，黑片一出生就在网格上；不足半帧的决策残量与包络末端同帧 ⇒ 连洞都没有（亚帧黑片结构性消失）。
 			const { holes } = computeBlackBedHoles({
-				beats: [{ beat: beat.beat, track_st: beat.track_st, track_ed: beat.track_ed, slots: mainLaid?.slots ?? [] }],
+				beats: [{ beat: beat.beat, track_st: gridSec(beat.track_st), track_ed: gridSec(beat.track_ed), slots: mainLaid?.slots ?? [] }],
 			});
 			if (holes.length) {
 				if (!isLayoutableCanvas([canvas[0], canvas[1]])) {
@@ -2953,27 +3851,49 @@ export function layBrollTracks(opts: {
 	// ⚠️ 类型 MUST 与 `LayResult.summary.gapFill`（本文件上方那条声明）**保持同形**：
 	// 这里是局部变量、那里是出参，两处各写一遍 ⇒ 加了新键只改一边就会 tsc 红（实测踩过）。
 	let gapFillSummary:
-		| { mode: GapFillMode; filledSec: number; fills: GapFillEntry[]; short_solid?: { count: number; sec: number; items: Array<{ beat: string; sec: number }> } }
+		| {
+				mode: GapFillMode;
+				filledSec: number;
+				fills: GapFillEntry[];
+				short_solid?: { count: number; sec: number; items: Array<{ beat: string; sec: number }> };
+				residual_gaps?: { count: number; sec: number; items: BlackBedHole[] };
+		  }
 		| undefined;
 	if (gapFillOn && gapFillReq) {
 		const surviving = gapFillReq.planned.filter((e) => e.clip_id !== undefined && downloads.has(e.clip_id));
 		const fillsAll = [...surviving, ...gapSolidEntries].sort((a, b) => a.track_st - b.track_st || a.track_ed - b.track_ed);
 		gapFillSummary = { mode: gapFillReq.mode, filledSec: r3(fillsAll.reduce((n, f) => n + f.sec, 0)), fills: fillsAll };
+		// ── 主轨残缝实扫（fix-gapfill-eps-boundary-residue D6）：「主轨零 gap」不再无条件陈述——
+		// 对填充**之后**的首轨产物（帧网格上的槽位 + solid 黑片）按整毫秒格逐 beat 扫缝，有 ≥ 1ms 即如实报数。
+		// 包络取 gridSec（与上方洞检测同一包络）；beat 间隙不在射程（与 beatGaps 同源）。纯只读，MUST NOT 反过来改任何槽位。
+		const residual = residualMainTrackGaps(
+			metaBeats.map((b) => ({
+				beat: b.beat,
+				track_st: gridSec(b.track_st),
+				track_ed: gridSec(b.track_ed),
+				slots: b.laid.find((l) => l.order === 0)?.slots ?? [],
+			})),
+		);
+		if (residual.length) {
+			gapFillSummary.residual_gaps = { count: residual.length, sec: r3(residual.reduce((n, h) => n + h.sec, 0)), items: residual };
+		}
 		// ── 过短黑片可观测面（add-short-black-fill-warning）──
 		// 黑片本身是**正确的兜底**：候选枯竭时不落它，主轨就露洞、客户端开磁吸后配音与画面错位。
 		// 用一秒黑闪换整片音画错位是更坏的交易，故本段 MUST NOT 改变黑片是否落、落多长、落在哪。
 		// 要治的是**沉默**：同一个 filled_sec 背后既可能是一段 8 秒整段留白，
 		// 也可能是十几处几帧的黑闪，而今天的产物说不出这两者的区别。
 		// 上界取 MIN_SHOT_SEC 不是凑数——短于它的黑片，按铺轨自己的口径就不该单独存在。
-		// 帧率按**顶层 video_rate** 取；缺失或非正 ⇒ 判不了帧数，此时下界退化为「大于 0」
-		// （秒数仍是确定事实，账面照记；只是没法说它是几帧）。
-		const rate = typeof gtrk.video_rate === "number" && gtrk.video_rate > 0 ? gtrk.video_rate : null;
+		// 帧率 = 顶层 video_rate（fix-matrix-lay-frame-grid 之后恒合法：缺席 / 非正 / 非整数在本函数入口已抛，
+		// 「判不了帧数只报秒数」那条分支随之退役）。
+		const rate = videoRate;
 		// ★ **双边**区间 [1 帧, MIN_SHOT_SEC)：
 		//   · 下界 —— 不足一帧的是**亚帧残片**，渲染侧累计取整判 0 帧、观众根本看不见，
 		//     报成「黑闪」就是假话；那一档归 fix-gapfill-subframe-residue（它负责**消掉**它们，
 		//     不是报它们）。两件的射程在 1 帧处接壤，本件 MUST NOT 越界去认领。
+		//     黑片如今一出生就在帧网格上（一帧 = f2ms 投影差 33/34ms @30），帧数按 `sec2frame`（半帧进一）判——
+		//     sec × rate ≥ 1 会把向下投影的一帧（0.033 × 30 = 0.99）误判成亚帧而漏报。帧化只经 frame-domain（T3）。
 		//   · 上界 —— MIN_SHOT_SEC：短于它的黑片按铺轨自己的口径就不成一个镜头。
-		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && (rate === null ? f.sec > 0 : f.sec * rate >= 1));
+		const shortSolids = fillsAll.filter((f) => f.kind === "solid" && f.sec < MIN_SHOT_SEC && sec2frame(f.sec, rate) >= 1);
 		if (shortSolids.length) {
 			gapFillSummary.short_solid = {
 				count: shortSolids.length,
@@ -2981,14 +3901,12 @@ export function layBrollTracks(opts: {
 				// 全量，MUST NOT 按阈值过滤
 				items: shortSolids.map((f) => ({ beat: f.beat, sec: f.sec })),
 			};
-			// 帧数只在能判时出现；判不了就只报秒数，MUST NOT 编造
-			// （与 cuts 三态 / motion 缺省同口径：判不了就说判不了）。
-			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s${rate ? `（${Math.round(f.sec * rate)} 帧）` : ""}`;
+			// 帧数按顶层 video_rate 换算（黑片在网格上，sec2frame 半帧进一即整帧数）。
+			const fmt = (f: GapFillEntry): string => `${f.beat}=${f.sec}s（${sec2frame(f.sec, rate)} 帧）`;
 			const head = shortSolids.slice(0, 5).map(fmt).join("、");
 			warnings.push(
 				`主轨落了 ${shortSolids.length} 处**过短黑片**（短于最小槽长 ${MIN_SHOT_SEC}s，合计 ` +
 					`${gapFillSummary.short_solid.sec}s）：${head}${shortSolids.length > 5 ? ` 等 ${shortSolids.length} 处` : ""}。\n` +
-					(rate ? "" : "（工程 video_rate 不可用，只报秒数、不换算帧数。）\n") +
 					"短到不成一个镜头的黑片，在成片里就是一下黑闪。这**不阻断交片**——黑片是候选枯竭时的正确兜底，\n" +
 					"没有它主轨会露洞、客户端开主轨磁吸后配音与画面错位，那是更坏的结果。\n" +
 					"真要消掉它，只有扩候选池这一条路：① 给这些 beat 补素材、重跑 `matrix index`；\n" +
@@ -3049,9 +3967,15 @@ export function layBrollTracks(opts: {
 		}
 	}
 
-	// ── 纯黑底垫轨（track_index 恒 = 全部层带之下 bandEnd，比所有候选轨都大）──
-	// gtrk v1 里非主轨 track_index 越大越靠下（客户端 importer 升序进 overlay、overlay[0] 最上层），
-	// 故黑底恰好落在「全部候选轨（各层带）之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	// ── 纯黑底垫轨（track_index 恒 = 层带区之下预留的最小号 baseIndex）──
+	// gtrk v1 契约：非主轨 track_index **越大越靠前（上层）**（composition-contract-v1 §video_track），
+	// 故黑底取**最小**号恰好落在「全部候选轨（各层带）之下、口播主轨之上」，B-roll 期间遮住 A-roll。
+	// ⟲ link-broll-zorder-contract-recheck（2026-09-16）：本段原写「恒 = bandEnd，比所有候选轨都大」
+	//   且方向断言与契约恰好相反，两处均已过时——取号早已在 fix-broll-zorder-contract-drift 改成 baseIndex
+	//   （见下方赋值处），方向断言则与 SOURCE_LAYER_ORDER 头注**正相反**。原文还拿「客户端 importer
+	//   升序进 overlay」当方向依据，而那个实现正是 opencut fix-gtrk-import-overlay-z-order 修掉的东西。
+	// ⚠️ 方向依据 SHALL 只认契约条文，MUST NOT 拿任一消费方（客户端 importer / 剪映导出 / 后端渲染）
+	//   当下的实现当锚。保留下来的是「黑底为什么垫在候选轨之下、口播主轨之上」这个**意图**。
 	// 他层保留轨在场时即使本轮零新轨也要重铺黑底（黑轨已被恒剥，位置随层结构平移）。
 	//
 	// ★ fix-broll-black-bed-regression：黑底在场不变量 —— **剥后仍有任何自产 B-roll 内容轨在场，
@@ -3101,16 +4025,35 @@ export function layBrollTracks(opts: {
 					track_index: blackTrack,
 					track_size: [width, height],
 					muted: true,
-					track_timeline: segments.map((s, i) => ({
-						clip_id: `blackbed-${i}`,
-						material: solidId,
-						clip_st: 0,
-						clip_ed: r3(s.track_ed - s.track_st),
-						track_st: s.track_st,
-						track_ed: s.track_ed,
-						duration: r3(s.track_ed - s.track_st),
-						producer: producerTag(opts.generatedAt),
-					})),
+					// 黑底同域（fix-matrix-lay-frame-grid D4′）：毫秒合并（mergeBlackBedSegments，决策口径不动、段数与
+					// expectedSelfProducedTracks 的复算同源）之后，每段两端各取一次 sec2frame、写出经 f2ms；**不参与 shift**
+					// （黑底按 beat 包络整条铺是铁律）⇒ 与首槽起点封口由构造成立（同一 sec2frame(beat.track_st)），末槽终点 ≤ 黑底终点。
+					// 时长恒为两端投影之差（不可加）。不足一帧的段（beat 包络 < 半帧，理论边角）弃置并告警——不留零长 clip。
+					track_timeline: segments.flatMap((s, i) => {
+						const stF = sec2frame(s.track_st, videoRate);
+						const edF = sec2frame(s.track_ed, videoRate);
+						const durMs = f2ms(edF, videoRate) - f2ms(stF, videoRate);
+						if (durMs <= 0) {
+							warnings.push(
+								`黑底段 ${s.track_st}–${s.track_ed} 在 ${videoRate}fps 网格上不足一帧（帧 ${stF}→${edF}），本段不铺黑底；` +
+									`下一轮重铺的黑底 clip 数会与登记复算差 1，若因此被判「已编辑」请用 --force-relay。`,
+							);
+							return [];
+						}
+						const len = durMs / 1000;
+						return [
+							{
+								clip_id: `blackbed-${i}`,
+								material: solidId,
+								clip_st: 0,
+								clip_ed: len,
+								track_st: f2ms(stF, videoRate) / 1000,
+								track_ed: f2ms(edF, videoRate) / 1000,
+								duration: len,
+								producer: producerTag(opts.generatedAt),
+							},
+						];
+					}),
 				};
 			}
 		}
@@ -3145,8 +4088,10 @@ export function layBrollTracks(opts: {
 			.filter((b) => b.laid.length > 0) // 与黑底时窗同一批 beat（laid 为空者本就不铺黑底）
 			.map((b) => ({
 				beat: b.beat,
-				track_st: b.track_st,
-				track_ed: b.track_ed,
+				// 包络两端取黑底同一投影（fix-matrix-lay-frame-grid）：口径不变（洞 = 黑底 − 槽位并集），只是两边都读
+				// **写出后**的值——槽位已在网格上，包络若仍读毫秒会把 ≤ 半帧的相位差误报成洞。登记 track_st/track_ed 本身不动。
+				track_st: gridSec(b.track_st),
+				track_ed: gridSec(b.track_ed),
 				slots: b.laid.flatMap((l) => l.slots), // 跨轨取并：轨 1 空、轨 2 有的段落不算空洞
 			}));
 		({ holes: blackBedHoles, totalSec: blackBedHoleSec } = computeBlackBedHoles({ beats: holeBeats }));
@@ -3237,6 +4182,48 @@ export function layBrollTracks(opts: {
 		video_track: [...keptOtherTracks, ...bandTracksSorted, ...(blackTrackObj ? [blackTrackObj] : [])],
 		struct_meta: { ...structMeta, broll },
 	};
+	// ── 时钟账面告警（add-cross-clock-adapter D2）：三类各汇总成一行，明细全量走 summary.clock（--json lay.clock）。
+	//    MUST NOT 阻断、MUST NOT 反向影响决策层——这里只是把「文件真值 vs 云端自述」的事实说出来。
+	if (unverifiedSamples.length) {
+		warnings.push(
+			`代理实测失败 ${unverifiedSamples.length} 颗：materials[] 沿用云端自述的时长 / 尺寸 / 帧率（unverified）——` +
+				`${unverifiedSamples.slice(0, 3).join("、")}${unverifiedSamples.length > 3 ? " 等" : ""}。` +
+				"源出点上界因此对着自述值而非落盘文件；ffmpeg 就位后重跑本命令即可实测（代理已落盘，重跑很快）。",
+		);
+	}
+	if (clock.proxy_mismatch.length) {
+		const sample = clock.proxy_mismatch
+			.slice(0, 3)
+			.map((m) => `${m.clip_id}（自述 ${m.declared_ms}ms / 实测 ${m.probed_ms}ms，差 ${m.frames ?? "?"} 帧）`)
+			.join("、");
+		warnings.push(
+			`代理实测时长与云端自述差 > 1 帧：${clock.proxy_mismatch.length} 颗——${sample}${clock.proxy_mismatch.length > 3 ? " 等" : ""}。` +
+				"materials[] 已按落盘文件实测写出（源出点上界随之）；槽位选段与吸附网格未动（决策层不消费实测值）。全量明细见 --json lay.clock.proxy_mismatch。",
+		);
+	}
+	if (clock.proxy_fps_mismatch.length) {
+		const sample = clock.proxy_fps_mismatch
+			.slice(0, 3)
+			.map((m) => `${m.clip_id}（云端 ${m.declared_fps} / 代理实测 ${m.probed_fps}）`)
+			.join("、");
+		warnings.push(
+			`源帧吸附按云端 fps、代理实测帧率不同：${clock.proxy_fps_mismatch.length} 颗——${sample}${clock.proxy_fps_mismatch.length > 3 ? " 等" : ""}。` +
+				"refineWindow 仍按云端 fps 吸附（云本平价：决策输入不变）；代理不保帧率的根治在服务端代理生成保源帧率，本地不改吸附网格。全量明细见 --json lay.clock.proxy_fps_mismatch。",
+		);
+	}
+	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：上面逐槽 assertTrimIdentity / 逐轨 assertTrackContinuity
+	// 之外补**素材上界**（T5：B-roll 素材带 ffprobe / plan duration，代理与原片不同也只认 materials[] 登记的那条；
+	// 黑底与黑片 material 无 duration ⇒ 跳过）。射程 = 本次落的候选轨 + 黑底轨（D2′）；他层保留轨 / 用户轨的
+	// 存量违例只进 warnings（命令层逐条 log.warn），MUST NOT 阻断。slotTimes 与决策层零改动。
+	{
+		const ownClipIds = new Set<string>();
+		for (const t of [...createdTracks, ...(blackTrackObj ? [blackTrackObj] : [])]) {
+			const tl = (t as { track_timeline?: unknown }).track_timeline;
+			if (!Array.isArray(tl)) continue;
+			for (const c of tl) if (c && typeof c === "object" && typeof (c as { clip_id?: unknown }).clip_id === "string") ownClipIds.add((c as { clip_id: string }).clip_id);
+		}
+		assertGtrkWriteInvariants(next, "matrix lay", { ownClipIds, warn: (m) => warnings.push(m) });
+	}
 	return {
 		next,
 		summary: {
@@ -3256,8 +4243,16 @@ export function layBrollTracks(opts: {
 			blackBedHoleSec,
 			blackBedHoles,
 			...(gapFillSummary ? { gapFill: gapFillSummary } : {}),
+			frameGrid: {
+				rate: videoRate,
+				slots: laidClips,
+				black_bed: blackTrackObj ? (blackTrackObj.track_timeline as unknown[]).length : 0,
+				shifted: shiftedTotal,
+			},
+			clock,
 		},
 		broll,
 		warnings,
+		infos,
 	};
 }

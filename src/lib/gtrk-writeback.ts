@@ -85,11 +85,23 @@ export class GtrkWritebackConflictError extends Error {
 	}
 }
 
-/** 冲突文案：`matrix` 的措辞逐字保持既有（零回归），其余按操作名点名自己。 */
+/**
+ * 冲突文案。按操作名点名自己（MUST NOT 报成别的操作，否则用户会去查错地方）。
+ *
+ * [link-gtrk-writeback-rebase-long-window] 旧文案的指引是「请**关闭客户端未保存的工程**后重试」，
+ * 该说法自客户端 `.gtrk` 周期自动保存（主 change `add-gtrk-autosave`）上线后**两头失真**：
+ *  · 成因不是「有未保存改动」——自动保存与脏位无关，工程只要开着就每 60s 写一次盘；
+ *  · 指引不可执行——照做之后下一分钟又会写。
+ * 故改为陈述可核实的事实（目标文件逐字节未变）+ **当下就能执行**的下一步。
+ *
+ * 各写命令的读→写窗口已压到毫秒级（耗时动作之后才取基底与 revision），故本文案的触发已属罕见；
+ * 真触发时几乎必然是「重读到 rename 之间」被插队，重跑即可。
+ */
 function conflictMessage(operation: string): string {
+	const head = `工程文件在 ${operation} 写回的最后一步被外部修改（保存冲突），已拒绝写入——目标文件逐字节未变`;
 	return operation === "matrix"
-		? "工程文件在 matrix 运行期间被外部修改（保存冲突），已拒绝写入；请关闭客户端未保存的工程或重跑（plan 与已下载代理均保留）"
-		: `工程文件在 ${operation} 运行期间被外部修改（保存冲突），已拒绝写入；请关闭客户端未保存的工程后重试`;
+		? `${head}；直接重跑本命令即可（plan 与已下载代理均保留，重跑很快）`
+		: `${head}；直接重跑本命令即可`;
 }
 
 /**

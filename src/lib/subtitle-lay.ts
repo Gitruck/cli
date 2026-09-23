@@ -1,3 +1,4 @@
+import { subtitleAssFontSizeToCss } from "./subtitle-font-metrics";
 /**
  * 字幕上轨纯函数面（add-subtitle-lay-command）——transcript 投影实例 → 客户端契约形态的
  * text 元素 → `.gtrk` 的 `struct_meta.client_visual_elements`（cve）text lane 幂等替换。
@@ -11,8 +12,8 @@
  *  - 元素构造：`build-subtitle-text-element.ts`（DOM 测量版）——本文件是它的**确定性静态几何**
  *    等价实现（design D3）：客户端折行按空白符分词（`split(/\s+/)`），CJK 无空格文本恒单
  *    「词」不折行 ⇒ content 只做归一；垂直落位只依赖行数（块高 = 行数×行高），水平落位在
- *    「7 预设边距全对称 + textAlign 恒 center」下恒 0。黄金样本实证（1920×1080 default 单行）：
- *    positionY = 1080 − 75 − 45 − 540 = 420，与客户端 DOM 测量产物同值。
+ *    「7 预设边距全对称 + textAlign 恒 center」下恒 0。字号先按字体度量从 ASS 转为 CSS，
+ *    垂直位置再由转换后的行高计算；历史黄金样本的旧字号/位置不作为新生成元素的标尺。
  *  - cve 形状与读侧信任边界：`tonghe/client-visual-elements.ts`（schema 1 / lane 白名单 /
  *    时间字段整数 tick / params 有限标量）。
  *  - 字幕身份判据：`subtitle-actions.ts` 的 `params.subtitleCue === true`
@@ -22,6 +23,25 @@
  * cve lanes[0]（被客户端保存过的真实字幕 lane），已抽进 test/fixtures/subtitle-golden/。
  */
 import { randomUUID } from "node:crypto";
+// 第 ② 级切点护栏的词表与判据（tasks §2 要求词表落独立文件：换表只动那一个文件）。
+// ⚠️ 本地拆窗器自 link-subtitle-lay-cloud-line-split 起**冻结**：只作 `--offline` 兜底，不再蒸馏词表。
+import { splitsWord } from "./caption-word-guard";
+// 与客户端逐字节同源的整形纯叶子（回缝 / 过滤 / 云端拆行结果回贴 / 桥接）。
+import {
+	attachPunctuation,
+	attributeAndAlign,
+	bridgeSmallGaps,
+	DEFAULT_BRIDGE_GAP_SECONDS,
+	dropShortUnits,
+	normalizeSubtitleContent,
+	resewProjectedInstances,
+	stripSubtitlePunctuation,
+	unitsToCaptions,
+	type ProjectedUnit,
+	type ShapedCaption,
+	type SplitLine,
+} from "./caption-align";
+import { isCloudLineSplitUnavailable, type CloudLineSplitResult } from "./subtitle-line-split-client";
 
 /** 客户端 MediaTime 刻度（opencut wasm TICKS_PER_SECOND）。 */
 export const SUBTITLE_TICKS_PER_SECOND = 120000;
@@ -215,62 +235,11 @@ function hexToRgba(hex: string, alpha: number): string {
 }
 
 /**
- * content 归一（客户端 wrapSubtitleText 的无测量等价形态）：trim + \r\n→\n，逐段 trim、
- * 段内空白符折叠为单空格。CJK 无空格文本 = 客户端逐字节同值；含空格长句不折行属已知偏差
- * （客户端无 DOM 时同样降级，design Risks 记录）。
+ * content 归一与去标点（★ 主理人 2026-08-21 真机走查拍板：中英逗号句号换空格、其余标点保留）
+ * 自 link-subtitle-lay-cloud-line-split 起**搬进两仓逐字节同源的纯叶子 `caption-align.ts`**——客户端
+ * 一键上字幕与本命令从此吃同一份规则。此处原样 re-export，既有调用点与测试 import 路径不变。
  */
-export function normalizeSubtitleContent(text: string): string {
-	const normalized = text.trim().replace(/\r\n/g, "\n");
-	return normalized
-		.split("\n")
-		.map((paragraph) => {
-			const trimmed = paragraph.trim();
-			return trimmed ? trimmed.split(/\s+/).join(" ") : "";
-		})
-		.join("\n");
-}
-
-/** 中日韩后继判据（U+3000-30FF 标点/假名、U+3400-9FFF 表意、U+F900-FAFF 兼容、U+FF00-FFEF 全角）。 */
-const CJK_NEXT = /[　-ヿ㐀-䶿一-鿿豈-﫿＀-￯]/;
-
-/**
- * 字幕文本去标点（★ 主理人 2026-08-21 真机走查拍板）：中英逗号（，,）与中英句号（。.）
- * 替换为空格——「有些标点符号在字幕里也不好看」；其余标点（引号「」『』、顿号、问号、
- * 感叹号、破折号等）一律保留（裁定只点名逗号句号）。
- *
- *  - 英文句号防误伤小数/缩写：只替换后面跟空白、行尾或中日韩字符的 `.`；
- *    `3.5`、`U.S.`（词内）、`example.com` 这类后接字母/数字的句点不动。
- *  - 英文逗号防误伤千分位：两侧都是数字的 `,`（`1,000`）不动，其余全换（同一
- *    「别误伤数字」原则的逗号侧最小豁免）。
- *  - 中文逗号句号无此顾虑，全换。
- *
- * 只做「标点 → 空格」一步；收尾（连续空格折叠为一、行首行尾空格裁掉——行尾句号
- * 换出的空格因此直接消失、结尾干净）交由既有 normalizeSubtitleContent 统一完成。
- * 只影响写出的字幕 content；transcript.json 原文 MUST NOT 改。
- */
-export function stripSubtitlePunctuation(text: string): string {
-	let out = "";
-	for (let i = 0; i < text.length; i++) {
-		const ch = text[i];
-		if (ch === "，" || ch === "。") {
-			out += " ";
-			continue;
-		}
-		if (ch === ",") {
-			const prev = i > 0 ? text[i - 1] : "";
-			const next = i + 1 < text.length ? text[i + 1] : "";
-			out += /[0-9]/.test(prev) && /[0-9]/.test(next) ? ch : " ";
-			continue;
-		}
-		if (ch === ".") {
-			const next = i + 1 < text.length ? text[i + 1] : "";
-			out += next === "" || /\s/.test(next) || CJK_NEXT.test(next) ? " " : ch;
-			continue;
-		}
-		out += ch;
-	}
-	return out;
-}
+export { normalizeSubtitleContent, stripSubtitlePunctuation } from "./caption-align";
 
 /** 秒 → 整数 tick（客户端 mediaTimeFromSeconds 的取整同义；cve 读侧硬闸要求整数非负）。 */
 export function secondsToTicks(seconds: number): number {
@@ -296,8 +265,8 @@ export function buildSubtitleParams({
 	const row = orientationOf(canvas) === "landscape" ? preset.landscape : preset.portrait;
 	const colorHex = SUBTITLE_COLORS[colorId];
 
-	// 字号：app 单位 = (Fontsize/PlayResY) × 90（客户端 fontSizeRatioOfPlayHeight × FONT_SIZE_SCALE_REFERENCE）。
-	const fontSizeApp = (row.fontSize / row.playResY) * FONT_SIZE_SCALE_REFERENCE;
+	// ASS real-dimension 字号先转换为 CSS em；其他尺寸参数仍保留 ASS 像素单位。
+	const fontSizeApp = (subtitleAssFontSizeToCss(row.fontSize) / row.playResY) * FONT_SIZE_SCALE_REFERENCE;
 	// 尺寸型参数（描边宽/投影偏移）：app = assPx × 90 / playResY（运算次序同客户端 toAppUnit）。
 	const toAppUnit = (assPx: number) => (assPx * FONT_SIZE_SCALE_REFERENCE) / row.playResY;
 
@@ -424,10 +393,26 @@ export function buildCaptionElement({
 
 /** 投影视图句条（lib/projection.ts ViewUtterance 的消费面子集）。 */
 export interface ProjectedUtterance {
+	/**
+	 * 源 utterance id（`ViewUtterance.id` 一路透传）。同一句被智能剪辑切成多个存活实例时，
+	 * 这些实例的 id 相同——⓪ 同句回缝就以它为唯一判据。
+	 * **可选**：不传时回缝恒不触发，存量调用行为逐字不变（fix-subtitle-lay-duplicate-instances 回归闸）。
+	 */
+	id?: string;
 	text: string;
 	track_st: number | null;
 	track_ed: number | null;
 	dropped: boolean;
+	/**
+	 * 存活字（`ViewWord`：轨上时码）。有则本条文本 = 存活字拼接（被剪掉的字不显示，
+	 * link-subtitle-lay-cloud-line-split）；缺席 / 空数组 = 无字级时码（TTS 产物），文本取整句。
+	 */
+	words?: Array<{ w: string; track_st: number; track_ed: number }>;
+	/**
+	 * 该 utterance 的整句字数（`ViewUtterance.total_words` 一路透传，adjust-caption-keep-complete-sentence）：
+	 * 存活字数 < 它 ⇒ 残片，最小可读时长过滤只对残片生效；缺席或 0 = 无字级明细，按完整句处理。
+	 */
+	total_words?: number;
 }
 
 export interface CaptionWindow {
@@ -443,30 +428,211 @@ export function textUnits(text: string): number {
 	return n;
 }
 
+// ── 切点选择：三级回退（fix-caption-split-word-boundary，2026-09-02 旅拍三条真机复盘）────
+//
+// 归因（proposal §〇/§一）：真机上的「嫌|冷」「正|对」「这件|事」「真实|过着」四处词中断
+// **不是** TTS 切的（引擎六种 `text_split_method` 全部只在标点处切，句内切不出这种断点），
+// 是本文件自己切的——原实现只抄到 infra `subtitle-line-split` 正本的第 ①「均分定锚点」，
+// 第 ②「在锚点浮动窗内挑词边界」③「词边界无解才字符强切」两步从来没写；更难堪的是旧头注
+// 已经把「切点在 ±2 字符内有空格则吸附到空格」承诺出去了，实现里只有一句 `p.trim()`。
+// 本节补的就是 ②③（并把那句承诺真正兑现），锚点那一步一行不动。
+// 第 ② 级的词表与判据不在本文件——它是**人工维护的种子表**（主理人 2026-09-16 裁定不做
+// HanLP 蒸馏快照，理由见该文件 `CJK_GUARD_WORDS` 头注），单独落在 `caption-word-guard.ts`，
+// 本节只 import `splitsWord` 这一个入口。
+
 /**
- * 超宽句均分拆窗（口径对齐服务端「均分不贪心」）：按 ceil(units/max) 段均分字宽，
- * 时间按各段字宽比例内插；切点在 ±2 字符内有空格则吸附到空格（空格是天然停顿点）。
+ * 锚点浮动窗（单位=字宽）。对齐 infra `subtitle-line-split` 正本 spec:8-14
+ * 「切点浮动窗口的用途是**在预算内挑一个更好的词边界**，MUST NOT 成为越过预算的通道」
+ * ——不是 CLI 自创的旋钮，所以不开 CLI 开关（`--max-units` 已是唯一旋钮，0 即关）。
  */
-export function splitCaptionWindow(win: CaptionWindow, maxUnits: number): CaptionWindow[] {
+export const CAPTION_SPLIT_FLOAT_UNITS = 2;
+
+/** 天然停顿点：切在这些字**之后**零歧义（取 infra `text_segmentation_method.py` 的 splits 集 + 常见收尾标点）。 */
+const CAPTION_BREAK_AFTER_PUNCT = new Set([
+	"，", "。", "？", "！", "、", "；", "：", "…", "—", "～",
+	",", ".", "?", "!", ";", ":", "~",
+	"」", "』", "》", "】", "）", ")", "”", "’",
+]);
+
+/** ASCII 原子字符（字母/数字）——原子串守卫的基元。 */
+const ATOMIC_ASCII = /[0-9A-Za-z]/;
+
+/**
+ * 原子串守卫：连续 ASCII 字母/数字串、以及 `3.5` / `1,000` / `example.com` 这类含中缀符的
+ * 数值/点分形态 SHALL 视为不可切原子。判据与 `stripSubtitlePunctuation`（:251）对小数、
+ * 千分位、域名的保护口径同源（那边是「别把标点换成空格」，这边是「别在这儿下刀」），
+ * 但**只读不改**那个函数。
+ *
+ * 返回 true = 切点 `cut`（切在 chars[cut] 之前）落在某个原子串内部。
+ */
+function splitsAtomicRun(chars: string[], cut: number): boolean {
+	const a = chars[cut - 1] ?? "";
+	const b = chars[cut] ?? "";
+	const prev2 = chars[cut - 2] ?? "";
+	const next2 = chars[cut + 1] ?? "";
+	const alnum = (ch: string) => ch !== "" && ATOMIC_ASCII.test(ch);
+	const digit = (ch: string) => ch !== "" && /[0-9]/.test(ch);
+	if (alnum(a) && alnum(b)) return true;
+	// 切在中缀符**之前**：`3|.5`、`example|.com`、`1|,000`
+	if (alnum(a) && b === "." && alnum(next2)) return true;
+	if (digit(a) && b === "," && digit(next2)) return true;
+	// 切在中缀符**之后**：`3.|5`、`example.|com`、`1,|000`
+	if (a === "." && alnum(b) && alnum(prev2)) return true;
+	if (a === "," && digit(b) && digit(prev2)) return true;
+	return false;
+}
+
+/** 切点左侧是标点之后位 / 空白位（第 ① 级信号；空白位顺带兑现旧头注承诺的「空格吸附」）。 */
+function isPunctOrSpaceBoundary(chars: string[], cut: number): boolean {
+	const a = chars[cut - 1] ?? "";
+	const b = chars[cut] ?? "";
+	if (/\s/.test(a) || /\s/.test(b)) return true;
+	return CAPTION_BREAK_AFTER_PUNCT.has(a);
+}
+
+/** chars[from, to) 里是否有非空白字符（纯空白窗会被下游 `filter(Boolean)` 吞掉 ⇒ 凭空少一段）。 */
+function hasVisible(chars: string[], from: number, to: number): boolean {
+	for (let i = from; i < to; i++) if (!/\s/.test(chars[i])) return true;
+	return false;
+}
+
+/** 切点命中级别：punct=① 标点/空白，guard=② 词表护栏放行，anchor=③ 退化回锚点。 */
+export type CaptionSplitTier = "punct" | "guard" | "anchor";
+
+/**
+ * 在锚点浮动窗内挑一个合规切点（纯函数）。
+ *
+ * @param chars       本窗全部字符（码点切分）
+ * @param prefixUnits 字宽前缀和（`prefixUnits[i]` = chars[0..i) 的字宽），长度 chars.length+1
+ * @param startIndex  本段起点下标（预算守卫要算「本段字宽」，光有锚点算不出来——
+ *                    故比 tasks 1.2 的签名草稿多这一个入参）
+ * @param anchorIndex 第 ① 步均分定出的锚点切点（切在 chars[anchorIndex] 之前）
+ * @param maxUnits    单窗字宽上限
+ * @param partsLeft   本次切点**之后**还要产生的段数（含末段）
+ *
+ * 三级回退：① 标点/空白 → ② 词表护栏 → ③ 退回 anchorIndex。
+ * ①② 两级都受**预算守卫**约束（对齐 infra spec:8-10「MUST NOT 成为越过预算的通道」）：
+ * 本段字宽 ≤ maxUnits **且** 剩余字宽 ≤ maxUnits × partsLeft，缺一即拒——只守前者会把
+ * 超宽整块推给末段。③ 不受预算守卫约束：它就是落地前的行为本身，逐字符一致，永不失败。
+ */
+export function pickSplitIndex(
+	chars: string[],
+	prefixUnits: number[],
+	startIndex: number,
+	anchorIndex: number,
+	maxUnits: number,
+	partsLeft: number,
+): { index: number; tier: CaptionSplitTier } {
+	const total = prefixUnits[chars.length];
+	const anchorAt = prefixUnits[anchorIndex];
+	const cands: number[] = [];
+	for (let c = startIndex + 1; c < chars.length; c++) {
+		if (Math.abs(prefixUnits[c] - anchorAt) > CAPTION_SPLIT_FLOAT_UNITS + 1e-9) continue;
+		// 后面还要切出 partsLeft 段，每段至少留 1 个字——段数由第 ① 步定死，MUST NOT 被切点浮动改掉
+		if (chars.length - c < partsLeft) continue;
+		// 两侧都得有实字：切出一个纯空白窗会被 `filter(Boolean)` 吞掉，等于凭空少一段
+		if (!hasVisible(chars, startIndex, c) || !hasVisible(chars, c, chars.length)) continue;
+		cands.push(c);
+	}
+	// 排序：先近后远；等距时**向回收缩**优先（infra 正本「算法 SHALL 自锚点向回收缩」）
+	cands.sort((x, y) => {
+		const dx = Math.abs(prefixUnits[x] - anchorAt);
+		const dy = Math.abs(prefixUnits[y] - anchorAt);
+		if (Math.abs(dx - dy) > 1e-9) return dx - dy;
+		return x - y;
+	});
+	const inBudget = (c: number) =>
+		prefixUnits[c] - prefixUnits[startIndex] <= maxUnits + 1e-9 &&
+		total - prefixUnits[c] <= maxUnits * partsLeft + 1e-9;
+	// ① 标点 / 空白优先（零歧义、零词表；原子串守卫仍然生效——`3.5` 里的 `.` 不是停顿点）
+	for (const c of cands) {
+		if (!inBudget(c) || splitsAtomicRun(chars, c)) continue;
+		if (isPunctOrSpaceBoundary(chars, c)) return { index: c, tier: "punct" };
+	}
+	// ② 词表护栏（含锚点自身：锚点若本来就不切词，走的就是这一级，不算退化）
+	for (const c of cands) {
+		if (!inBudget(c) || splitsAtomicRun(chars, c)) continue;
+		if (!splitsWord(chars, c)) return { index: c, tier: "guard" };
+	}
+	// ③ 退化：退回锚点。宁可一处切得难看，也不抛错、不吞字、不越预算段数。
+	return { index: anchorIndex, tier: "anchor" };
+}
+
+/** 拆窗统计出参（退化计数走出参而非返回值：`splitCaptionWindow` 的数组返回形状 MUST NOT 变）。 */
+export interface CaptionSplitStats {
+	/** 第 ③ 级（无词边界可用、退回字宽均分）命中次数。 */
+	fallbackCount: number;
+}
+
+/**
+ * 超宽句拆窗：**① 锚点均分（不贪心）→ ② 浮动窗内挑不切词的切点 → ③ 无解退回锚点**
+ * 三步（与 infra `subtitle-line-split` 正本同构）。段数由第 ① 步定死，时间按各段字宽比例内插、
+ * 末端对齐原句末——第 ②③ 步只改**文本分配点**，时间线零扰动。
+ *
+ * 第 ① 级的空白位就是旧头注承诺过的「空格吸附」（旧实现只有一句 `p.trim()`，承诺了没写）；
+ * 第 ③ 级命中次数经 `stats` 出参上抛，由命令层出 INFO 与 `--json`——看不见的退化等于没修。
+ */
+export function splitCaptionWindow(
+	win: CaptionWindow,
+	maxUnits: number,
+	stats?: CaptionSplitStats,
+): CaptionWindow[] {
 	const total = textUnits(win.text);
 	if (!maxUnits || total <= maxUnits) return [win];
 	const parts = Math.max(2, Math.ceil(total / maxUnits));
 	const target = total / parts;
 	const chars = [...win.text];
-	const pieces: string[] = [];
-	let acc = 0;
-	let cur = "";
-	for (const ch of chars) {
-		cur += ch;
-		acc += ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5;
-		if (pieces.length < parts - 1 && acc >= target - 1e-9) {
-			pieces.push(cur);
-			cur = "";
-			acc = 0;
+	// 字宽前缀和（prefix[i] = chars[0..i) 的字宽），供锚点定位与预算守卫 O(1) 取值
+	const prefix: number[] = [0];
+	for (const ch of chars) prefix.push(prefix[prefix.length - 1] + (ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5));
+
+	// 段数以**落地前的锚点法产物**为准，而不是 parts：字宽粒度让每段有少量过冲，极端输入下
+	// 末几段够不到 target（少切一刀），或末刀正好落在句尾（没有尾窗）——两种情况下落地前的
+	// 段数都不等于 parts（fuzz 实证：maxUnits=3 的乱码串上 ~23% 命中，13/20 两个真实档位 0 命中）。
+	// 本件只改切点位置、MUST NOT 改段数，所以先照落地前的实现原样跑一遍，只取它切出几段。
+	const refPieces: string[] = [];
+	{
+		let acc = 0;
+		let cur = "";
+		for (const ch of chars) {
+			cur += ch;
+			acc += ch.codePointAt(0)! > 0x2e80 ? 1 : 0.5;
+			if (refPieces.length < parts - 1 && acc >= target - 1e-9) {
+				refPieces.push(cur);
+				cur = "";
+				acc = 0;
+			}
 		}
+		if (cur.trim()) refPieces.push(cur);
 	}
-	if (cur.trim()) pieces.push(cur);
-	// 空格吸附：段尾/段首紧邻空格时归并空白（避免窗首悬空格）
+	const cutsNeeded = refPieces.filter((p) => p.trim()).length - 1;
+
+	const cuts: number[] = [];
+	let start = 0;
+	for (let seg = 1; seg <= cutsNeeded; seg++) {
+		const partsLeft = cutsNeeded - seg + 1; // 本次切点之后还要产生的段数（含末段）
+		// 锚点 = 自**本段起点**累加到 target 的第一个下标（与落地前逐字符同式：旧实现每段把 acc 归零）
+		let anchor = start + 1;
+		while (anchor < chars.length && prefix[anchor] - prefix[start] < target - 1e-9) anchor++;
+		// 切点浮动会让后面的段起点跟着挪，挪多了末几段够不到 target。此时把锚点夹到
+		// 「后面每段至少留 1 个字」的边界上，保证刀数恒为 cutsNeeded（段数守恒的兜底，正常语料夹不动）。
+		const hardLimit = chars.length - partsLeft;
+		if (anchor > hardLimit) anchor = hardLimit;
+		if (anchor <= start) break;
+		const picked = pickSplitIndex(chars, prefix, start, anchor, maxUnits, partsLeft);
+		if (picked.tier === "anchor" && stats) stats.fallbackCount += 1;
+		cuts.push(picked.index);
+		start = picked.index;
+	}
+	const pieces: string[] = [];
+	let from = 0;
+	for (const c of cuts) {
+		pieces.push(chars.slice(from, c).join(""));
+		from = c;
+	}
+	const tail = chars.slice(from).join("");
+	if (tail.trim()) pieces.push(tail);
+	// 切点若落在空白处，两侧的悬空格在此裁掉（文本无损的唯一豁免：仅空白）
 	const cleaned = pieces.map((p) => p.trim()).filter(Boolean);
 	const out: CaptionWindow[] = [];
 	let cursor = win.startSec;
@@ -493,11 +659,84 @@ export interface CaptionShapingOpts {
 }
 
 /**
- * 投影视图 → 字幕窗口序列：存活实例按 track_st 序（projectTranscript 已排）逐条转窗口；
- * 短于 MIN_CAPTION_SEC（轨上时长）的实例丢弃并计数（客户端 droppedShortCount 同口径）。
+ * ⓪ 同句回缝阈值（秒）。相邻两个**同 id** 投影实例的 gap ≤ 此值即认定「本来就是一句话被剪成了两片」，
+ * 合并成一条上轨（时间取包络、文本仍是整句）。
+ *
+ * 取值 0.5（2026-09-04 拍板）：真机样本里同句相邻实例的实际 gap 为 0.07~0.13s，
+ * 而该剪没剪的真实句间停顿通常 > 0.5s，两个分布之间有一个数量级的空档。
+ *
+ * **MUST NOT 与 `shaping.maxGapSec` 共用**：`--max-gap` 管「视觉上要不要拉长前条以消灭闪烁」，
+ * 回缝管「这两片本来是同一句话」——是两个问题。`--max-gap 0`（关桥接）时回缝仍须生效，
+ * 否则重复字幕会随手一个 flag 就回来。也不开 CLI 旋钮（多一个开关多一份误用）。
+ */
+export const CAPTION_RESEW_GAP_SEC = 0.5;
+
+/**
+ * ViewUtterance 消费面 → 共享叶子的投影实例（存活实例；dropped / 无时码跳过）。
+ * 有字级时码时文本 = 存活字拼接（被剪掉的字不显示）；无则整句。
+ * `id` 缺席时每条各给唯一 id ⇒ 回缝恒不触发（存量调用行为逐字不变，fix-subtitle-lay-duplicate-instances 回归闸）。
+ */
+export function toProjectedUnits(utterances: ProjectedUtterance[]): ProjectedUnit[] {
+	const out: ProjectedUnit[] = [];
+	utterances.forEach((u, i) => {
+		if (u.dropped || u.track_st === null || u.track_ed === null) return;
+		// `ViewWord` 不含标点：从原句把紧跟每个字的标点挂回去（08-21 拍板只清逗号句号、其余 SHALL 保留）
+		const words =
+			u.words && u.words.length > 0
+				? attachPunctuation(
+						u.text,
+						u.words.map((w) => ({ w: w.w, st: w.track_st, ed: w.track_ed })),
+					)
+				: null;
+		// 残片判定（adjust-caption-keep-complete-sentence）：有字级明细按存活字数 vs 整句字数；
+		// 无字级明细（TTS 产物）视图不带源区间、判不出残片 ⇒ 按完整句处理（过滤宁可少丢不可多丢）。
+		const totalWords = words && typeof u.total_words === "number" && u.total_words > 0 ? u.total_words : null;
+		out.push({
+			utteranceId: u.id ?? `__inst_${i}`,
+			text: words ? words.map((w) => w.w).join("") : u.text,
+			startTime: u.track_st,
+			endTime: u.track_ed,
+			words,
+			partial: words !== null && totalWords !== null ? words.length < totalWords : false,
+			totalWords,
+		});
+	});
+	return out;
+}
+
+/**
+ * ⓪ 同句回缝 → MIN_CAPTION_SEC 过滤（两仓共享叶子 `caption-align.ts`）。
+ *
+ * 背景（2026-09-04 真机）：投影器对同一句的每个存活实例都吐**整句**文本，逐实例上轨就是
+ * 同一句在时间线上重复 N 遍（样本工程 151 条字幕里 39 种文本重复、共 89 个实例）。
+ * 判据：**相邻**且 **id 相同** 且 **gap ≤ CAPTION_RESEW_GAP_SEC**（不设下界，完全重叠也并）。
+ * 文本口径（link-subtitle-lay-cloud-line-split 改）：有字级时码按时间线序拼接存活字——口播剪辑的常态是
+ * 句内剪口吃 / 重读，整句文本会把剪掉的字显示回来；无字级时码仍取整句一次。
+ */
+function resewAndFilter(utterances: ProjectedUtterance[]): {
+	units: ProjectedUnit[];
+	mergedCount: number;
+	droppedShort: number;
+} {
+	const { units, mergedCount } = resewProjectedInstances(toProjectedUnits(utterances), CAPTION_RESEW_GAP_SEC);
+	const { kept, droppedCount } = dropShortUnits(units, MIN_CAPTION_SEC);
+	return { units: kept, mergedCount, droppedShort: droppedCount };
+}
+
+function toWindow(c: ShapedCaption): CaptionWindow {
+	return { text: c.text, startSec: c.startTime, durationSec: c.duration };
+}
+
+/**
+ * 【离线路 · 冻结】投影视图 → 字幕窗口序列：⓪ 同句回缝 → 过滤 → ① 本地拆窗 → ② 桥接。
+ * 自 link-subtitle-lay-cloud-line-split 起只服务 `--offline`；缺省走 `shapeCaptionsCloud`。
  * 可选整形（fix-subtitle-lay-split-and-gap，真机挑刺 2026-08-27）：
  *   maxUnits —— 超宽句拆窗（整句上轨会溢出画布）；
  *   maxGapSec —— 小 gap 桥接（几百 ms 的字幕消失-再现在播放时闪得难受）。
+ *
+ * 步序 MUST 是 ⓪回缝 → MIN_CAPTION_SEC 过滤 → ①拆窗 → ②桥接
+ * （fix-subtitle-lay-duplicate-instances）：回缝若排在过滤之后，同句的两个短实例会各自先被丢掉，
+ * 明明合起来够长却丢了字；排在拆窗之后则每片都已按整句拆过一遍，重复已经落地、缝不回来了。
  */
 export function captionsFromProjection(
 	utterances: ProjectedUtterance[],
@@ -506,24 +745,21 @@ export function captionsFromProjection(
 	captions: CaptionWindow[];
 	droppedShort: number;
 	splitCount: number;
+	/** 拆窗时第 ③ 级退化（无词边界可用、退回字宽均分）命中次数——词表够不够用的唯一可观测信号。 */
+	splitFallbackCount: number;
 	bridgedCount: number;
+	/** ⓪ 同句回缝并掉的实例数（= 存活实例数 − 回缝后单元数）。0 = 本次没有一句被剪成多片。 */
+	mergedCount: number;
 } {
-	const raw: CaptionWindow[] = [];
-	let droppedShort = 0;
-	for (const u of utterances) {
-		if (u.dropped || u.track_st === null || u.track_ed === null) continue;
-		const durationSec = u.track_ed - u.track_st;
-		if (durationSec < MIN_CAPTION_SEC) {
-			droppedShort += 1;
-			continue;
-		}
-		raw.push({ text: u.text, startSec: u.track_st, durationSec });
-	}
-	// ① 拆窗
+	// ⓪ 同句回缝 + 过滤（MUST 在拆窗/桥接之前）
+	const { units, mergedCount, droppedShort } = resewAndFilter(utterances);
+	const raw: CaptionWindow[] = unitsToCaptions(units).map(toWindow);
+	// ① 拆窗（拆出的子窗 MUST NOT 二次复检 MIN_CAPTION_SEC——丢一个子窗 = 丢一段文本，比一个短窗更糟）
 	let splitCount = 0;
+	const splitStats: CaptionSplitStats = { fallbackCount: 0 };
 	const captions: CaptionWindow[] = [];
 	for (const w of raw) {
-		const parts = shaping.maxUnits ? splitCaptionWindow(w, shaping.maxUnits) : [w];
+		const parts = shaping.maxUnits ? splitCaptionWindow(w, shaping.maxUnits, splitStats) : [w];
 		if (parts.length > 1) splitCount += parts.length - 1;
 		captions.push(...parts);
 	}
@@ -540,7 +776,81 @@ export function captionsFromProjection(
 			}
 		}
 	}
-	return { captions, droppedShort, splitCount, bridgedCount };
+	return {
+		captions,
+		droppedShort,
+		splitCount,
+		splitFallbackCount: splitStats.fallbackCount,
+		bridgedCount,
+		mergedCount,
+	};
+}
+
+/** 云端拆行结果（`shapeCaptionsCloud` 出参的云端半边）。 */
+export interface CloudShapingReport {
+	/** null = 云端走通；string = 不可用原因（已 fail-open：回缝后的句原样成条、长句未拆）。 */
+	unavailable: string | null;
+	/** 服务端 fail-open 降级（分词不可达 / 批级预算耗尽）：行照用、消息透传。 */
+	degraded: boolean;
+	degradeMessage: string | null;
+	inputLines: number;
+	outputLines: number;
+	/** 兜底分支（服务端时码）被钳进父句包络的行数（add-cross-clock-adapter D4）；云端不可用 / 全部字级回贴时恒 0。 */
+	clampedLines: number;
+}
+
+/**
+ * 【缺省路】投影视图 → 字幕窗口：⓪ 同句回缝 → 过滤 → ③ 云端拆行 → ④ 时间回贴 → ② 桥接。
+ * 断句零本地实现（主理人 2026-09-06 拍板）；`splitLines` 由命令层注入真实云端客户端（测试注入替身）。
+ * 云端不可用（`CloudLineSplitUnavailable`）⇒ fail-open：回缝后的句原样成条，`report.unavailable` 记原因；
+ * MUST NOT 落到本地拆窗器——那正是要退场的东西。其它异常照抛。
+ */
+export async function shapeCaptionsCloud(
+	utterances: ProjectedUtterance[],
+	{
+		splitLines,
+		maxGapSec = DEFAULT_BRIDGE_GAP_SECONDS,
+	}: {
+		splitLines: (lines: SplitLine[]) => Promise<CloudLineSplitResult>;
+		maxGapSec?: number;
+	},
+): Promise<{
+	captions: CaptionWindow[];
+	droppedShort: number;
+	mergedCount: number;
+	bridgedCount: number;
+	cloud: CloudShapingReport;
+}> {
+	const { units, mergedCount, droppedShort } = resewAndFilter(utterances);
+	const cloud: CloudShapingReport = {
+		unavailable: null,
+		degraded: false,
+		degradeMessage: null,
+		inputLines: units.length,
+		outputLines: 0,
+		clampedLines: 0,
+	};
+	let shaped: ShapedCaption[];
+	if (units.length === 0) {
+		shaped = [];
+	} else {
+		try {
+			const r = await splitLines(units.map((u) => ({ text: u.text, st: u.startTime, ed: u.endTime })));
+			const stats = { clampedLines: 0 };
+			shaped = attributeAndAlign({ units, lines: r.lines, stats });
+			cloud.clampedLines = stats.clampedLines;
+			cloud.degraded = r.degraded;
+			cloud.degradeMessage = r.degradeMessage;
+		} catch (e) {
+			// 鸭子判而非 instanceof：测试打包下 lib / command 两份 bundle 各有一份 class
+			if (!isCloudLineSplitUnavailable(e)) throw e;
+			cloud.unavailable = e.message;
+			shaped = unitsToCaptions(units);
+		}
+	}
+	cloud.outputLines = shaped.length;
+	const bridgedCount = bridgeSmallGaps(shaped, maxGapSec);
+	return { captions: shaped.map(toWindow), droppedShort, mergedCount, bridgedCount, cloud };
 }
 
 // ── cve 幂等替换 ─────────────────────────────────────────────────────────

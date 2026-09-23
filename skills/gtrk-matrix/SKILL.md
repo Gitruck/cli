@@ -25,6 +25,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 ## 配方库 v1（起手式，可变奏可自创）
 
 > 配方前置都一样：能跑 `gtrk` CLI；本地素材类配方先 `gtrk matrix index --dirs <素材夹>` 建索引。每条命令都带 `--json`。
+> ⚠️ **路径里有英文半角逗号**（`Bears, Salmon and Adventure` 这种）时 `--dirs` / `--materials` MUST **重复传**（`--dirs "A" --dirs "B"`，累加不覆盖），别塞进一串里 —— 缺省按半角逗号分隔。整串在盘上存在时会自动不拆，中文全角「，」从不参与拆分。
 
 ### 配方 A · 纯匹配铺轨（默认主路）
 
@@ -50,6 +51,8 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
   ```
 - **变奏点**：`--top-k` 控理解成本（1 积分/张，只理解你会认真考虑的那几条）；云端 plan 同样可 describe（帧从签名 url 现抽）；理解产物有本地缓存，反复迭代不重复扣费。
 - **裁定要点**：`usable_flags` 是信号不是判决——结合 `desc` 复核（水印在角落的航拍也许仍可用）；剔除动作=从 plan 删掉那条 result，CLI 不会替你剔。
+  另读 describe 输出的**剔除风险**清单：候选数 ≤1 的 beat 一删就掏空（音频驱动 ⇒ 整段黑屏或跨 beat 借片；口播 ⇒ 露 A-roll）。先补素材再剔，MUST NOT 见 flag 就删。
+  ——260902 真机 P3 八个 beat 里七个只有 1 条候选；该清单只是判据，剔不剔仍归你（铁律①「零件不裁定」，见 §四层架构与三条铁律）。
 
 ### 配方 C · 时间窗匹配（电影解说式）
 
@@ -135,11 +138,13 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 指定素材类型 | `--material-class <c>` | `real_shot` \| `concept` · 栏目策略 | 仅 internal 矩阵成员口 |
 | 填充门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | 低于不采纳、槽位留空露黑底；调完必看空洞告警 |
 | 切点对齐字幕句 | `--cut-align <r>` | 浮点 0–1 · `0.7`（`0`=关闭） | 三七开拍板：约七成字幕句起点恰逢镜头切点、三成有意错开；句级时码取 transcript 重投影（降级自动回旧节奏并告警）；开启时结果 JSON `lay.cut_align` 报实测比例 |
-| 主轨空洞填充 | `--gap-fill <m>` | `fast` \| `solid`（默认）\| `none` | **仅音频驱动工程主轨**（口播工程不适用零回归）：fast=放宽地板随便填候选→延长相邻颗粒→黑片兜底；solid=黑片垫齐（精修一眼看出没匹配到）；none=留 gap（客户端主轨磁吸会吸除 gap 致画面与配音错位，慎用）；生效时结果 JSON `lay.gap_fill` 报明细 |
+| 主轨空洞填充 | `--gap-fill <m>` | `fast` \| `solid`（默认）\| `none` | **仅音频驱动工程主轨**（口播工程不适用零回归）：fast=放宽地板随便填候选→延长相邻颗粒→**跨 beat 借候选**→**次地板补真画面**→仍不够才黑片；借来的画面与本段稿子相关性弱、次地板槽是不到 1.2s 的快切，两者都会在日志里**指名报出**（`kind` 为 `borrowed` / `subfloor`）——那是如实告知，**不是缺陷，别当 bug 上报**；solid=黑片垫齐（精修一眼看出没匹配到）；none=留 gap（客户端主轨磁吸会吸除 gap 致画面与配音错位，慎用）；生效时结果 JSON `lay.gap_fill` 报明细 |
 | 编排交给云端跑 | `--arrange <m>` | **按素材来源自动定档，一般不用传** | 铺**自己电脑里的素材**→`cloud`（编排在服务端，按编排量计费）；铺**素材矩阵的素材**→`local`（编排仍在本机、不计费，逐字不动）。`shadow`=本机照跑照铺轨、云端只对拍不采纳。⚠️ 本地素材路上 `--arrange local` **已不受理**（2026-08-31 拍板：编排只在服务端迭代，留旧路等于让用户在不知情时拿到另一套算法的结果）；云端拿不到产物时**直接报错**，不会换算法把活干完。⚠️ **它不是省钱开关**——矩阵素材要付检索费，两条路都花钱、只是花在不同环节，MUST NOT 对用户说「用本地就不花钱」 |
 | 落轨前先质检画音对齐 | `--arrange-qc` | 开关 · 缺省关 | 只查各 beat 的**卡点句**（span.from 领衔句）：画面没给到稿句说的东西就换候选重排，最多 2 轮，到限即交付 + 如实登记残余。零渲染。⚠️ 按帧计费（每卡点句 1 帧/轮），跑前报预估求确认。**默认关，用户没说就别带**。拿不到卡点句（无 dispatch / 重投影降级）时会明说「跳过 ≠ 查过」，别把那条日志读成通过 |
 | 云端编排本次上限 | `--arrange-cost-cap <n>` | 正整数 · 不限 | 超限服务端**前置拒绝**、零执行零计费（不是跑一半掐断）。只在 `--arrange shadow\|cloud` 时有意义 |
 | 先估价再决定跑不跑 | `--arrange-estimate-only` | 开关 · 缺省关 | 走到云端编排的计价确认那一步就停：报出编排量后**成功**返回（`ok:true` + `estimateOnly:true`，不是「被拒绝」），零云端调用、工程零改动。机读值在 `lay.arrange.units` 与 `lay.arrange.scale`。⚠️ 它省的是**云端那一次调用与其计费**（及其后的下载落轨），不是整条链——工程/plan/重投影照样要走。素材矩阵路会报 `applicable:false` 而**不是 0**。与 `--yes` 同给时以它为准 |
+| 云端编排请求体存证 | `--dump-request <file>` | 路径 · 缺省不写 | **排障专用，用户没提就别带。** 把**实际上行的**云端编排请求体逐字节落到该文件——服务端**不保存 plan 全文**，所以复现一次调用只能靠它。⚠️ **不能指向工程目录内**（工程会被打包拷走，而它含 beat 名与检索词），传了会报参数错；开 `--arrange-qc` 时每轮各一份（第 N 轮加 `.roundN`）。回执在 `lay.arrange_run.dump_request`。⚠️ 转交这份文件前 MUST 先告诉用户里面有什么，别替他做决定 |
+| 外发调参仪表 | `--explain` | 开关 · 缺省关 | 缺省 `lay.dedup` 只出 `emptySlots`（判素材池够不够用，upsell 判据就是它）；本开关再补 `emptySlotsByRefine` / `adjacentWaived` / `hotSlotsPlaced` / `blurrySlotsPlaced` 四个**调参仪表**，人读日志同口径。**不改任何决策**，工程产物逐字节不变。⚠️ 用户问「为什么这颗抖/糊/空」时才带，别缺省开着刷噪音 |
 | 不要黑底垫轨 | `--no-black-bed` | 开关 · 默认铺 | 黑底按 beat 包络整条铺，B-roll 期间遮口播 |
 | 已编辑轨强铺逃生门 | `--force-relay` | 开关 · 关 | 用户明确点头才带；raw 登记删除不可恢复 |
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
@@ -173,13 +178,45 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 |---|---|---|---|
 | 搜整条素材（BGM 主场） | `gtrk matrix material "<词>"` | 字符串 · — | 单条检索；`--out <file>` 落盘或缺省 stdout |
 | 指定素材形态 | `--scope <s>` | `clip` \| `image` \| `audio` · `audio` | 三态通用；clip 要的是**整条**原片直链（要段落用 `matrix search`） |
-| 只要可商用 | `--commercial-only` | 开关 · 关（搜全库） | 成员口传 `copyright_scope=commercial`；公开口本就只含可商用，该档位会**显式提示**而非静默忽略 |
+| 只要可商用 | `--commercial-only` | 开关 · 关（**成员档即全库，这是缺省而非将就**） | **按需收紧的显式开关，MUST NOT 默认带上**（见下方选材口径）：成员口传 `copyright_scope=commercial`；公开口本就只含可商用，该档位会**显式提示**而非静默忽略 |
 | 按成片时长挑 | `--min-duration <秒>` / `--max-duration <秒>` | 数字 · 不过滤 | 可单独或组合给；成员口透传服务端 `filters`，公开口无该入参（CLI 按结果 `duration` 本地过滤并提示）；负数 / 上界小于下界=参数错误 |
 | 多给几条候选 | `--top-k <n>` | 整数 · `5`（服务端上限 50） | BGM 推荐 3-5 首的量级 |
 | 去同质化 | `--diversity` | 开关 · 关 | 避免返回雷同素材 |
 | 机读（你必带） | `--json` | 开关 · 关 | `mode:"material"`，stdout 只出结果 JSON |
 
 出参逐条：`{id, note, duration, audio_type, tags, score, download_url, cover_url}`；`audio_type`（`pure` 纯音乐 / `song` 歌曲）与 `accompaniment_url`（song 类现成伴奏直链，零处理成本）**两档通用**；**只有 `is_copyright`（及 clip 的 `material_class`）是成员口独有**——公开口**没有**这个字段，零件如实缺省不伪造，你也别把「没有该字段」读成「不可商用」。`download_url` 带 24h 签名（过期重跑即重签）。
+
+> ⚠️ **`is_copyright` = 能不能商用，不是「有没有被版权保护」**
+>
+> ```
+> is_copyright: true   → 可商用（自有 ∪ 已授权）
+> is_copyright: false  → 不可商用（**不是**「没版权、可随便用」）
+> ```
+>
+> **`false` MUST NOT 读作「无版权、可以随便用」——它恰恰相反。** 决定性反证：概念素材（他人版权物）
+> 入库时固定写 `is_copyright=0`；字段若真是「是否受版权保护」，那批必须是 1。
+>
+> **真机事故（2026-09-02，这条警示的由来）**：AI 执行方连续两轮**特意去挑 `is_copyright:false`**，
+> 以为那是「没版权、随便用」的安全选项，结果把**不可商用**素材铺进了 5 个工程；唯一安全的
+> `true` 反倒被主动避开。**病灶是把极性读反了，不是「用了 `false` 的素材」**——认准这一条，
+> 下面那条缺省口径才不会被误读成「事故的教训被推翻了」。
+>
+> **选材口径按档位分流**（⟲ 2026-09-06 主理人拍板）：
+>
+> - **internal 矩阵成员口：缺省搜全库，MUST NOT 自设一道命令面并不存在的闸。** 命令面缺省本就是
+>   `copyright_scope=all`，你 **MUST NOT 默认写上 `--commercial-only`**，也 MUST NOT 以「保险起见」
+>   为由把 `is_copyright:false` 的候选剔除或降权——「免费搜**全库**（含非商用/概念素材）」
+>   正是成员身份买到的东西，在最后一米替他扣下等于把已售出的权益又收回去；
+> - **对价是如实标注**：推荐候选时 **MUST 逐条带上 `copyright_label`**（不可商用的就照直写「不可商用」）。
+>   放开池子 MUST NOT 连版权状态一起放掉。但这条 **MUST NOT 升级成追问或阻塞**——
+>   用户没提商用需求就不必反问，标注完照常往下走；
+> - **用户特意说明才收紧**：他明说「只要可商用的」/「这条要商用发布」/「客户商单交付」时，
+>   MUST 加 **`--commercial-only`**（传 `copyright_scope=commercial`，出参逐条 `is_copyright:true`），
+>   或只从 `copyright_label:"可商用"` 的候选里挑。**「用户没说」MUST NOT 被当成「用户要求收紧」**；
+> - **公开口（external 档）没有这个字段**——那不是「不可商用」，而是「服务端已经在源头只放可商用素材」，
+>   缺席即无需判，本条分流对它无影响；
+> - `--json` 出参里 CLI 会**逐条派生一个人话标签 `copyright_label`**（`"可商用"` / `"不可商用"`），
+>   与 `is_copyright` 恒同向、缺席同缺席。**判读以这两个键中的任一为准，MUST NOT 靠字段名去猜。**
 
 **upsell 口径**：`--json` 出参可能带一个**独立顶层字段** `upsell`（人读模式则是末尾一行提示）——**当且仅当**公开口档位且结果不足（0 条或少于请求量一半）时才有，内容是「加入同和新媒体矩阵可免费搜全库」+ 链接。它**不在 `results` 里、不改写任何候选**：原样转述给用户，别把它当成一条素材。成员档恒无此字段。
 
@@ -193,7 +230,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | **源时间窗过滤** | `--source-window <start,end>` | 秒，`start<end` · 不过滤 | 仅 `--local`：只返回与窗口**有交集**的命中段（段边界不裁剪）；与其他过滤器 AND 叠加；图片候选自动排除；**空窗 = ok 空结果非错误**，扩窗是你的裁定 |
 | 场景切分粒度 | `--scene-threshold <f>` | 浮点 (0,1) · `0.3` | 仅 index：镜头切换快调高、长镜头调低 |
 | 固定机位判稳阈值 | `--stability-threshold <f>` | 浮点 (0,1) · `0.05` | 仅 index：场景内最大帧间变化低于此值判 stable，抽帧收敛为**中点 1 帧**（60s 固定机位从 30 帧省到 1 帧）；summary 分列 stable/unstable 场景数与省帧数；误判 stable 丢检索粒度、误判 unstable 只是不省钱——**宁严勿松**；默认为保守值待标定 |
-| 索引强制重建 | `--rebuild` | 开关 · 关 | 忽略指纹全部重算向量；**理解缓存（describes）不清**。存量索引库（2026-08-19 闪帧修复之前建的）**没有切点全集**：铺轨消不到段内切点、消不掉 2~3 帧异景残片——用户报「成片有闪帧」且素材是高帧率长视频时，先带本开关重建一次索引 |
+| 索引强制重建 | `--rebuild` | 开关 · 关 | 忽略指纹全部重算向量；**理解缓存（describes）不清**。存量索引库（2026-08-19 闪帧修复之前建的）**没有切点全集**：铺轨消不到段内切点、消不掉 2~3 帧异景残片——用户报「成片有闪帧」且素材是高帧率长视频时，先带本开关重建一次索引。⟲ 2026-09-10 起多一条重建理由：**倍帧素材的假切点治法**与**段级运动量信号**都只在重建时落库（见「本地素材检索模式要点」） |
 | 不要图片候选 | `--no-image-broll` | 开关 · 默认参与 | 检索与铺轨完全排除图片（零图片上云）；pinned 也不豁免这条 |
 | 跳过计费确认 | `--yes` | 开关 · 关 | 图片运镜 / describe >20 张两处护栏通用 |
 
@@ -206,7 +243,12 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 直接理解素材文件 | `--materials <a,b,...>` | 逗号分隔文件 · — | 视频按**场景中点**逐帧理解；图片文件直传；结果在 stdout JSON `items` |
 | 跳过确认 | `--yes` | 开关 · 关 | 将实际调用 >20 张才触发确认（预估积分明示）；internal 豁免免确认仅提示 |
 
-理解产物形态：`{desc(≤200字中文描述), tags[], mark(0-100 质量分), usable_flags{watermark, text_overlay, black_border, blurry}}`。**缓存即钱**：产物按（素材, 帧时刻）落本地索引库，同帧重复 describe 零调用零计费；素材内容变了（size:mtime 指纹变）该素材缓存自动作废。
+理解产物形态：`{desc(≤200字中文描述), tags[], mark(0-100 质量分), usable_flags{watermark, text_overlay, black_border, blurry}, at_sec(射程锚点)}`。**缓存即钱**：产物按（素材, 帧时刻）落本地索引库，同帧重复 describe 零调用零计费；素材内容变了（size:mtime 指纹变）该素材缓存自动作废。
+
+**⚠️ 一条 describe 只代表一段，不代表整条候选**（`--plan` 形态）：每个候选**只抽一帧**（`segments[0]` 的 `best`），这条判决的有效射程就是**那一帧所属的那一个 segment**。`at_sec` 就是那一帧的时刻（**素材时基**秒，与 `segments[].best` 同轴——注意与 `beats[].anchors[].at_sec` 的**工程轴**秒同名不同轴，别换算）。缺这个字段的旧 plan 按 `segments[0]` 推定，**不外推到全部段**。
+
+- 真机 260902 量级：32 个被理解候选共带 **843 段，只有 32 段（3.8%）被看过**；95 个落轨坑位里只有 12 个（12.6%）含那一帧。命令跑完会打一行「理解覆盖率：N 帧 / M 段 = X%」（`--json` 读 `describe_coverage`），**M 是段数不是候选数**——别把「注入 N 条 result.describe」读成「这 N 条候选都看过了」。
+- 转述给用户时 MUST 按段说：「这条候选的 X–Y 秒那一段有字幕」，MUST NOT 说成「这条素材有字幕」。要判更多段就得多抽帧 = 多花钱（1 积分/张），是否加抽由用户拍板，CLI 不替他加。
 
 **plan 消费零件**（`gtrk matrix lay`）：
 
@@ -215,7 +257,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
 | 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 自己组的 plan 从这进。⚠️ 组的时候把检索返回的 `results` 条目**原样搬**——`cuts` / `motion` 住在 `segments[]` 里面，自己重写 segments 就把它们丢了（后果：端点残片收缩空转、高运动降权失效，见配方 C 要点） |
 | 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
-| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
+| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--dump-request/--explain/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
 ## plan 编辑口径（法定通道的边界）
 
@@ -228,7 +270,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 - `result.pinned: true`：**钉选**——是**落位保证**，不只是排序特权。它豁免四条自动护栏：①派单负词 `excluded_hint`、②`--score-floor` 分数地板、③不二用抢占（钉选段不会因为**别的候选**占了同一把消费键而落不上；但同一个「候选+段」对仍只落一次）、④紧邻跳剪避让（钉选相邻照落，也不计进 `dedup.adjacentWaived`）。
   **不豁免的三条**：`--no-image-broll`（零图片上云是硬承诺，图片候选连 pinned 也进不来）、同 beat 跨轨素材归属互斥（那条给的是备选面——钉选占满每条轨，`--lay N` 就退化成 N 条一样的轨）、主轨 gap 快速填充的兜底档。
   钉多了仍可能打架（供长不足/位置冲突），让位名单在结果 JSON `lay.pinned.yielded` 与告警里**逐段**明示。
-- beat 的 `anchors`：**关键词锚**（拆分稿圈定、plan 检索时内插 `at_sec`）——`[{keyword, utterance, at_sec, query}]`，lay 把锚 query 最高分命中钉在 `at_sec−0.5s`（时长 min(命中段, per_shot×2)），其余槽位在锚点分割的区间内序贯填充。可编辑：**挪 `at_sec`**（微调卡点时刻）、**换 `query`**（换锚画面）、**删锚**（整条删除）；`at_sec:null`=内插失败态，lay 按降级普通槽处置。锚 query 池内有 pinned 候选时**用户钉选优先占锚槽**。
+- beat 的 `anchors`：**关键词锚**（拆分稿圈定、plan 检索时内插 `at_sec`）——`[{keyword, utterance, at_sec, query}]`，lay 把锚 query **原始 sim 最高的合格命中**（原始检索相似度，**不是** mark/highlight 融合分——`--mark-weight`/`--highlight-weight` 在锚槽退为同 sim 时的 tie-break）钉在 `at_sec−0.5s`（时长 min(命中段, per_shot×2)），其余槽位在锚点分割的区间内序贯填充。**锚预留优先于普通序贯槽消费**：铺轨前先为每锚锁住其 sim 第一名（每锚至多 1 对，落位或降级后立即释放），前序 beat 的泛化普通槽拿不到它；取不到第一名时锚 outcome 会**如实报名次与去向**（落的是第几名、第一名被哪个 beat/query 取走），MUST NOT 静默当成钉准了。可编辑：**挪 `at_sec`**（微调卡点时刻）、**换 `query`**（换锚画面）、**删锚**（整条删除）；`at_sec:null`=内插失败态，lay 按降级普通槽处置。锚 query 池内有 pinned 候选时**用户钉选优先占锚槽**。
 - beat 的 `per_shot_sec`/`requested_shots`（节奏锚，影响槽长档位）。
 
 **不可编辑面**（动了会被 `matrix lay` 校验拒绝并指名字段）：
@@ -258,13 +300,13 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 
 **为什么 B-roll 整个阶段最先**：**AI 情景片段属于底轨 B-roll 画面家族，不是叠加层**——叠加层只有 MG（含 ov）。MG 的排版决策是「因势象形避主体」，**依赖底轨的最终画面构图**；三源（影视/本地/AI）没落齐就产 MG，等 AI 片段回铺后避让必然错位、甚至盖住 AI 画面主体。
 
-> ⚠️ 旧序（MG ④ 在 AI 再现 ⑤ 之前、理由写「越往后叠得越上层」）**是把「工序次序」误当成了「图层次序」**。工序上 AI 片段必须先落位；图层上它本来就在底轨。
+> ⚠️ 旧序（MG ④ 在 AI 情景动画 ⑤ 之前、理由写「越往后叠得越上层」）**是把「工序次序」误当成了「图层次序」**。工序上 AI 片段必须先落位；图层上它本来就在底轨。
 
 铺完**必须停下等用户在 opencut 里挑选/调整**（关键检查点），不要一口气往下冲。
 
 **前置**：需要跑过 `gtrk split` 的产物目录（`split/dispatch.json`）。`film_broll` 空 = 本片没有影视/本地素材腿 → 跳过本步，看 AI 情景片段腿（`dispatch.ai_drama` 非空则交棒 `/gtrk-ai-drama`），两腿都空才直接进 ⑤。`gtrk` 找不到 → `npm i -g @gitruck/cli@latest`。用户先在 opencut 手调过切点也不怕——命令每次都现场重投影 beat 窗口，微调口播轨不用重跑 `gtrk split`，只有拆分稿本身变了才要。
 
-**业务分离**：本框架 skill 不硬编任何栏目审美。B-roll 的 `queries` 在 ② 拆分时已写进派单（不触发生产 skill）；栏目只供检索偏好（`--column`，internal 口生效）。档位由命令自己探（结果 JSON `memberType`），external 口固定 real_shot+有版权素材。
+**业务分离**：本框架 skill 不硬编任何栏目审美。B-roll 的 `queries` 在 ② 拆分时已写进派单（不触发生产 skill）；栏目只供检索偏好（`--column`，internal 口生效）。档位由命令自己探（结果 JSON `memberType`），external 口固定 real_shot + 可商用素材。
 
 ## 本地素材检索模式要点（`--local` / `matrix index`）
 
@@ -273,6 +315,14 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 - 两步走：`gtrk matrix index --dirs <a,b> --json` 建索引（增量零重算）→ `gtrk matrix --local --dirs <a,b> --project <目录> --json` 检索铺轨。
 - **score 地板观察（重要）**：本地域 score 量纲与云端不同，完美命中可低至 0.246——默认 `0.2` 是松地板，排名靠查询内相对顺序。**别按云端直觉调高**（0.3 可能把正确命中砍光）。
 - 索引跨机不可移植（键=绝对路径）：换机重跑 `matrix index` 即可（分钟级）；素材改名/移动身份不变（内容哈希）。
+- **段带运动量，据此换段（`add-material-motion-signal`）**：重建过索引的素材，检索结果的每个 `segments[]` 会多带一个可选 `motion`（去重后帧间跳变分位 `p50`/`p90` + 样本数 + 有效帧率）。它答的是**「这段抖不抖」**，与 `score`（像不像）正交：`p50` 超 `0.05` 视为高运动，铺轨排序时降权 0.02 分（**只降权、不排除**——候选稀疏时宁可用高运动段也不留空，留空的观感代价更大）。用户报「这段画面晃得看不清 / 想换一段」时，`motion.p50` 就是挑替补的依据：同 beat 里挑 `p50` 更低的段。
+  - ⚠️ **缺席 = 不可判，不是「平稳」**。存量索引库（本能力上线前建的）没有这份信号，段上整键无 `motion`；此时高运动降权对该素材**不生效**，不是「它很稳」。要拿到信号得 `gtrk matrix index --dirs <夹> --rebuild` 重建一次。
+  - ⚠️ **样本不足也报缺席**：长静止镜头去重后可能只剩个位数帧，分位不可信，`p50`/`p90` 如实为 `null`（`samples` 仍照报）。同样 MUST NOT 读成「平稳」。
+- **倍帧素材（30fps 内容装进 60fps 容器）**：这类素材每隔一帧就是上一帧的复制。索引会认出来并落**有效帧率**（`motion.effective_fps`，如容器 60 而实际 30）。判据取近零帧的**连续长度**而非占比——倍帧运动段呈单帧交替（连零 ≤2），静止镜头是长串连零（实测 15–118 帧），两者近零帧都多、只有连零长度分得开。
+  - 见到 `effective_fps` 明显低于容器帧率时，**如实告诉用户这条素材是倍帧的**（画面实际流畅度只有标称的一半，不是铺轨铺坏了）。
+  - **假切点已在索引侧治掉**（2026-09-10）：倍帧会让快摇镜头的帧间分被顶过切点阈值，从而在**单一镜头内**吐出一串假切点（实测某段 0.43s 内记了 11 个）。现在切点判定在**去重后的帧序列**上进行——持续快摇在去重序列上是一条连续高分串、整串不算刀，真实一刀仍是孤立尖峰、照留。非倍帧素材的判定一字未动。
+  - ⚠️ **存量索引里的假切点不会自己消失**：这条修法只在**重建索引**时生效。素材被判 `doubled` 且某段 `cuts` 密得离谱（零点几秒里十几刀）时，多半是本能力上线前建的库 ⇒ `gtrk matrix index --dirs <夹> --rebuild` 重建一次；重建前别把那些切点当真。
+  - ⚠️ **一个已知取舍**：倍帧区里**紧挨着**的两刀（去重后相邻）会被判成持续运动而漏掉。它们在信号上与「快摇的头两帧」不可分——宁可漏这一对，也好过把十几个假切点放进去。
 - 含本地 B-roll 的工程云渲会被提交口直接拒绝（`local_broll_cloud_render_rejected`）——走客户端本地出片或 `gtrk render`。
 - embed 端点连不通（`embed_endpoint_unreachable`）：查 `~/.gitruck` config `embedUrl` / env `GITRUCK_EMBED_URL`；describe 端点同理（`describe_endpoint_unreachable`，`describeUrl` / `GITRUCK_DESCRIBE_URL`）；CLI 绝不回落第三方端点。会话失效（6033）重跑即自动重开续跑。
 
@@ -307,14 +357,15 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 ## 执行（每次都带 `--json`）
 
 > **产物落点纪律（MUST · 全文见随包 `AGENT.md` 同名一节）**：一切产物只落**工程目录**或**用户显式指定的输出路径**；**MUST NOT** 把成片/预览/素材复制到 agent 自有工作目录——引用媒体用原路径；临时文件放系统 temp 用完即删。违者后果=用户系统盘被静默吃满（真机事故）。
+> 交付物（颗粒 HTML / 工程文件 / 派单稿 / 文稿等）SHALL **直接以工程目录内的最终路径为写入路径**，MUST NOT 先写 agent 自有工作目录再拷进工程——**中转本身即违规**，不以「最后拷进去了」免责，**体积不是豁免理由**（2026-09-07 事故里漂掉的是 2.7–6.2 KB 的 HTML）。与上一条的分界：抽帧图这类**不交付**的中间物走系统 temp；**要交付的东西没有暂存态**。
 
 ```bash
 gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-k K] [--column <id>] --json
 ```
 
 - `--json`：人读日志走 stderr，成功时 stdout 只有一行结果 JSON：
-  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots,adjacentWaived}, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
-  （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/items? }`）
+  `{ ok, mode:"plan", memberType, columnId?, planPath, lay:{ refused, laidTracks:[…], laidClips, removedTracks:[…], keptEditedTracks:[…], blackTrack, blackBedHoleSec, blackBedHoles:[…], dedup:{scope,emptySlots}（**调参仪表四件只在 `--explain` 时才出**）, signal_coverage?:{mark?:{hit,neutral,coverage},highlight?:{hit,neutral,coverage}}, pinned?:{requested,placed,yielded}, anchors?:{planned,pinned,degraded}, anchor_details?:[{beat,keyword,at_sec,track_st,clip_id,status,reason?}], arrange_run?:{calls,source,mode,fallback?,units_total,billed,idempotency_recorded?,diff_count?,diffs?:[…],rounds:[{round,mode,source,fallback?,units?,idempotent_replay?,idempotency_recorded?,diff_count?}], dump_request?, dump_request_files?}, downloads:{preview,raw,reused,failed} }, integrity:{…}, reprojection:{…}, counts:{ beats, queries, results, errors } }`
+  （`--lay 0` 时无 `lay`；`search` 模式 `{ ok, mode:"search", results:[…], counts, outPath? }`；`matrix lay` 模式 `mode:"lay"` 且 `counts.queries` 恒 0——零检索；`matrix describe` 模式 `{ ok, mode:"describe", described, cached, called, failed, credits_estimated, exempt?, planPath?/injected?, describe_coverage?:{frames,segments,ratio,image_candidates}, items? }`）
 - **拒铺结局**（候选轨已被用户编辑）：stdout 出 `{ ok:false, refused:[…], reason:"tracks_edited", planReusable:true, … }` 且非 0 退出——不是命令失败，plan 已产出，处置见下表。
 - **命令失败**（缺派单、鉴权失败、全部 query 失败、参数越界、坏 plan 被 lay 拒）→ 非 0 退出、报错在 stderr、stdout 无 JSON。先看退出码，把 stderr 报错如实回给用户。
 - 检索分钟级，耐心等返回。
@@ -324,7 +375,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 读 stdout 那行 JSON（字段按需读、读前判空），别只回「铺好了」：
 
 - `counts`：几个 beat、几条检索（几条失败）、几条候选——一句话概括盘子大小。
-- `memberType`：internal=矩阵成员口（栏目偏好/concept 生效）；external=通用口（固定 real_shot 有版权）。
+- `memberType`：internal=矩阵成员口（栏目偏好/concept 生效）；external=通用口（固定 real_shot + 可商用）。
 - `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、几个颗粒（不含黑底轨）。
 - `lay.blackTrack`：黑底垫轨轨号（未铺时 null）。
 - `lay.blackBedHoleSec` / `lay.blackBedHoles`：**黑底空洞**（纯黑压口播时段），恒全量不按阈值过滤——非零就主动报（哪个 beat、几秒、在哪），这是粗剪期既定取舍不是故障。
@@ -335,6 +386,16 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
   覆盖率低不等于「没 describe」——一个素材通常只有一个时间点有描述行，离它太远（>15s）的段就近命中不上，**素材越长覆盖率越低**。所以：`coverage` 为 0 ⇒ 本片确实没理解过，去跑 `matrix describe --plan`；`coverage` 偏低但非 0 ⇒ **重跑 describe 不会改善**，如实告诉用户「信号只对这 N% 的候选段起了作用，其余按中性、排序主要还是语义分」，别让他以为加权在全面生效。
 - `lay.anchors` / `lay.anchor_details`（拆分稿圈了关键词锚才出现）：`planned` 钉位数 / `pinned` 用户钉选占锚槽数 / `degraded` 降级数——`degraded` 非零要按 `anchor_details` 指名哪个关键词没锚上及原因（无合格命中/文本漂移/窗口不足），提示用户该处「听到关键词看到画面」的卡点没兑现、可换 query 或补素材后重跑。
 - `lay.downloads`：`raw` 原片回落 / `failed` 掉槽位非零时提一句。
+- `lay.arrange_run`（**本地素材路**才出现；素材矩阵路与总闸压回本地时**整键缺席**）：这一轮**云端编排**的账与归因，MUST 主动读、别当噪声跳过。⚠️ 它与 `--arrange-estimate-only` 出的 `lay.arrange` **不是同一个东西**：那个是零调用的**本地预估**，这个是**服务端复算的实收量**，MUST NOT 拿去互相核账。
+  - `fallback:"self_check_failed"` ⇒ **MUST 主动告诉用户**：这一轮云端产物被弃、已花掉 `units_total` 编排量、成片走的是本地编排；并把 `diffs` 前几条贴给他 / 反馈给我们（`diffs` 是**全量**，机读面不截断）。成片**没问题**（`ok` 仍是 `true`），但这笔钱花得不明不白。
+  - `fallback:"decision_pin_mismatch"` ⇒ 两侧跑的**不是同一版决策算法**，产物不可比而非「算得不一样」。告诉用户服务端版本与本机期望版本这两个数，让他稍后重试；持续如此就反馈给我们。这一档**没有** `diffs`（根本没比过）。
+  - `fallback:"unreachable"/"rejected"/"malformed"` ⇒ 没拿到可用的云端产物；`diff_count`/`diffs` 会**一起缺席**（那是「压根没对拍成」，不是「对拍过且一致」）。
+  - `mode:"shadow"` ⇒ 成片走的**本来就是**本地产物（设计如此，不是回落、没出事），但云端那一次**照样计了费**⇒ MUST 如实报 `units_total`，**MUST NOT** 因为 `source:"local"` 就说「没走云端」。
+  - `units_total > 0` ⇒ 如实报花了多少；`billed:false` ⇒ 全部命中服务端幂等回放，本轮**零新增计费**，别吓唬用户。
+  - `idempotency_recorded:false` ⇒ 幂等登记没写成，**提示用户重发会重新计费**（别建议他「重跑一次试试」）。
+  - `rounds` **恒在**（开 `--arrange-qc` 时不止一条）：逐轮的账在这里，`units_total` 已按轮累加并跳过回放轮。某轮的 `units` 缺席 = 那一轮「已计费但服务端没告诉我们计了多少」，**MUST NOT** 读成「那轮没花钱」。
+  - `dump_request`（只在带了 `--dump-request` 时出）：上行请求体的落点。**服务端不留 plan 全文**，所以这份文件是复现这次调用的唯一凭据。写了不止一份时另出 `dump_request_files` 全量清单——**按它读，MUST NOT 自己按命名规则拼后几轮的路径**。
+  - 服务端**频率保护**（按 key 限流 / 相似请求指纹，同回 HTTP 429）⇒ CLI 先按限流窗口对齐等待并重试，仍不通过才落到 `fallback:"unreachable"`，**零执行零计费**。此时报错原文里带的是服务端说法（「频率保护」而非「端点不可达」）——MUST 照那句转述：**不是余额问题、也不是请求写错了**，隔一会儿再来，或先用 `--arrange-estimate-only` 只看规模。⚠️ MUST NOT 建议用户立刻连着重跑（那只会把窗口撑得更满）。
 - `integrity`（素材落盘自检，只在真写回过时出现）：`dangling` 悬空引用全量清单；`danglingReferenced`（时间线上没素材可放）与 `danglingOrphan`（只挂在 materials 里）严重度差一个量级，**分开说**；`external` 绝对路径找不到文件另一档。告知不拦阻，别自己删素材。
 - 单 query 失败是局部化的（`counts.errors>0` 但 `ok:true`）：如实说哪几段没检到。
 - 工程缺失/非 v1 → 告警跳过铺轨但仍产 plan（`lay` 字段缺失）。
@@ -367,12 +428,14 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | 只想先看清单不铺轨 | `--lay 0`（只产 plan）；之后铺 = `matrix lay`（不重新检索、不重新烧配额） |
 | **报「候选轨已被你编辑过」拒铺** | 保护不是故障：工程零改动，plan 照常产出。① opencut 处置那条轨后重跑；② 用户明确点头 → `--force-relay`（raw 登记删除不可恢复，先说后果） |
 | **`matrix lay` 报「plan 校验未通过」** | 你把不可编辑面改坏了（报错逐条指名字段）：按 §plan 编辑口径改回来重跑；`local_path 路径无效` 多半是可移动盘没挂载或真把路径改了 |
+| **describe 明明跑过、这轮又扣费** | 多半是**服务端判据升级**：`describes` 缓存键并入判据版本（`DESCRIBE_CRITERIA_VERSION`），旧口径条目在新版本下不算命中，会重跑重计费。`--json` 的 `cached_stale_criteria` 就是这一栏的张数（是 `called` 的子集，不是额外开销）。旧产物不删、仍可读。**属预期，不是缺陷** |
+| **`matrix index` 报 `0/0`（一个素材都没枚举到）** | 先看两件事：① `--dirs` 的路径里有没有**英文半角逗号**——有就改成重复传（见文首前置）；② 素材夹里有没有**断链**（失效软链接）。两条都不是再查路径本身对不对 |
 | 报「本地索引不存在」 | 先 `gtrk matrix index --dirs <...>`；已建过则查 `--dirs` 与建索引目录是否一致、可移动盘是否挂载 |
 | 换电脑用不了索引 | 索引跨机不可移植（本机缓存），新机重跑 `matrix index` 即可 |
 | 预览看不了 / 想「重签」 | 别为此重跑铺轨：`preview_url`/`cover_url` 不带签名不过期；带签名 24h 过期的是原片 `url`——工程内走客户端「确认原片」重签；**脱离工程要原片落本地走 `gtrk matrix fetch <clip_id...>`（免费重签+下载，见「精剪补素材」节）** |
 | raw 原片回落 / 体积大 | 提示用户；服务端 backfill 后重跑可换回轻量代理 |
 | `reprojection.degraded:true` | 不是故障：命令算不出当刻窗口退回快照。`transcript_missing` → 补回 transcript.json 或新版 oralcut 重出；`no_project`/`gtrk_unreadable` → 工程放回位或 `--project` 指对 |
-| 期望 concept 却报 external 限制 | 如实说明当前身份只出 real_shot 有版权素材，concept 需矩阵成员口 |
+| 期望 concept 却报 external 限制 | 如实说明当前身份只出 real_shot 可商用素材，concept 需矩阵成员口 |
 | describe 报 `describe_endpoint_unreachable` | 服务端未上线/网络/配置指错：查 `describeUrl` / `GITRUCK_DESCRIBE_URL`；缓存与 plan 都在，修好重跑。describe 走异步任务（提交后轮询取结果）：任务提交成功后即便中途断网结果也不丢（服务端照跑），可重新轮询/稍后重跑取回；上游失败服务端自动退款，只需重跑 |
 
 > **搜词规范**（ad-hoc `search` 与理解派单 queries 通用）：英文长句场景描述（5–12 词，谁+在哪+做什么），一条只装一个场景意象，避多义/字面强的动词（"pointing"/"hunting" 会召回特写/猎人，改用 "giving suggestions in a meeting" 这类场景语义）。
@@ -385,7 +448,24 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
   ⚠️ **异步等待的口子**：外部平台抽卡可能数天，严格串行会把后续无限期卡住。故进 ⑤ 的硬门是「**AI 片段已回铺 ∨ 用户明示先跳过**」。走「明示跳过」时 MUST 把**与 AI beat 相邻或重叠区间的 MG 颗粒**标记为「AI 回铺后待复查构图」并在收口时复述该清单，**MUST NOT 静默跳过**。
 - **`dispatch.ai_drama` 为空** → 三源已齐，直接进 **④ 全局抽帧检查画面构图**：对最终底轨抽帧看主体位置 / 安全区 / 画面朝向 / 明暗，**停下等用户确认构图无误**（这与刚才「挑选 B-roll」那次确认是两次不同的确认），过了才交棒 ⑤ `/gtrk-mg`。
 - `dispatch.mg` 也为空 → 无 MG 车道，④ 检查过后直接 `render` 收口。
-- 用户表示暂时只要 B-roll → 停在这，尊重他的节奏。
+### 逃生门：两种信号都要认（范围 + 节奏）
+
+上面的往下走是**默认**，但**用户表达了范围保留或节奏保留时 SHALL 停在这一步、SHALL NOT 自动交棒**。
+两者语义正交，认漏一个都会误冲：
+
+- **范围信号 = 走多远**（我只要这一个产物）：「暂时只要 B-roll」「B-roll 就这样，先不往下」「先不出片」。
+- **节奏信号 = 怎么走**（每步停等我）：**「逐步推进」**（本仓公约立法定名的正式模式名，
+  定义就是「每步停等确认」，用户会照着这么说）、「一步步来」「先 X 然后我们再说」
+  「我看看再定」「等我确认」。
+
+⚠️ **词表只是举例、不是白名单**——判据是「**用户表达了节奏/范围保留**」，换个说法照样得听懂。
+特别注意「先 X **然后**我们逐步推进」：用户明说了还要往下，**范围**逃生门逐字不成立，
+但**节奏**逃生门成立 ⇒ **停**。
+
+停下时**必须交代下一步是什么、他说一声就继续**（例：「B-roll 这腿定了。按你说的逐步来我先停在这，
+下一步是 AI 情景片段 / 全局抽帧检查构图，你说一声我就接着做」），别退化成事事请示。
+
+**没有这两类信号时不改默认**：仍按上文自动往下走。
 
 > 原则：**agent 替用户跑 CLI / 接力 skill，用户只对话**——别让用户自己去终端敲下一条 gtrk 命令；但关键检查点务必停下等用户确认再进下一步——本车道涉及**两处**：① B-roll 铺完让用户挑选/调整；② ④ 全局抽帧检查后让用户确认构图。
 

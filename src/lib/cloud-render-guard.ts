@@ -10,9 +10,9 @@
  * 挂载点：uploadAndSubmitTask（云端任务提交唯一漏斗）对 .gtrk 工程文件生效；
  * 未来新增云渲类命令 SHALL 复用 assertCloudSubmittableGtrk。
  */
-import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { BROLL_LOCAL_MATERIAL_PREFIX, BROLL_MATERIAL_PREFIX } from "./matrix-lay";
+import { readJson } from "./read-json";
 
 /** 机读拒绝码（--json / error.code 同值）。 */
 export const CLOUD_LOCAL_BROLL_CODE = "local_broll_cloud_render_rejected";
@@ -80,7 +80,7 @@ export function assertCloudSubmittableGtrk(gtrk: Record<string, unknown>, gtrkDi
 export async function guardGtrkCloudSubmit(path: string): Promise<void> {
 	let gtrk: Record<string, unknown>;
 	try {
-		const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+		const parsed: unknown = await readJson(path, ".gtrk 工程");
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
 		gtrk = parsed as Record<string, unknown>;
 	} catch {

@@ -22,11 +22,32 @@
  * ## 上行集是怎么定的：从服务端**实读**字段反推
  *
  * 不是照着 design 的字段表抄，而是把移植后的决策层（infra
- * `utils/process/media/vision/broll_arrange/`）里所有 `r.get(...)` / `s[...]` 扫一遍，
- * 得到 result 级 10 键、segment 级 6 键、beat 级 8 键、anchor 级 3 键。
- * 判据是「投影前后本地 `planBeatFills` 产物**逐字节相同**」，由 26 份金样对拍钉死
- * （见 `test/broll-arrange-wire.test.mjs`）——那条测试同时证明了两件事：
- * 没多传（隐私）、没少传（正确性）。
+ * `utils/process/media/vision/broll_arrange/`）里所有 `r.get(...)` / `s[...]` 扫一遍。
+ *
+ * **键计数（2026-09-03 实数一遍，fix-arrange-wire-decision-signal-dropped）**：
+ * result 级 **10** 键（其中 `describe` 是容器，内含 **2** 键：`usable_flags.blurry` /
+ * `at_sec`——本次由 1 增到 2）、segment 级 **7** 键（本次由 6 增到 7，新增 `black`）、
+ * beat 级 **9** 键、anchor 级 3 键、query 级 2 键、direct_slot 级 7 键。
+ * ⟲ 订正记录：beat 级原写 8，是 `add-arrange-direct-tier` 加 `arrange_mode` /
+ * `direct_slots` 之后**没跟着改**留下的陈数（本次一并数正，非本件引入）。
+ * ⚠️ 这几个数是**人数的**，没有任何装置在维持它——改白名单的人 MUST 同批数一遍。
+ *
+ * 判据是「投影前后本地 `planBeatFills` 产物**逐字节相同**」，由 **50 份**金样
+ * （`cases/` 42 + `real/` 8）对拍钉死（见 `test/broll-arrange-wire.test.mjs`）。
+ *
+ * ★ **这条判据证明什么、不证明什么（2026-09-03 订正）**：
+ * 它原先被写成「同时证明了两件事：没多传（隐私）、没少传（正确性）」——**那句话不成立**。
+ * · **没多传**由另一条测试单独负责（逐条枚举脏字段哨兵、搜整棵上行体 JSON 树），
+ *   不是本判据的产物：多传的字段决策层不读，产物照样逐字节相同。
+ * · **没少传**只在**金样里出现过该字段**时才可判。金样中不存在的字段，这条等式对它
+ *   **恒真** —— 2026-09-03 凯奇坎那次就是这么全绿放行的：`describe.at_sec` 与
+ *   `segment.black` 已被决策层消费、却一份金样都没带过，闸对它们**结构上不存在**。
+ *
+ * ⇒ **持续义务（spec 条款，非注释建议）**：新增一个会被客户端决策层读取的 plan 字段时，
+ * MUST 同批 ① 纳入本白名单（或按 spec 显式登记 / 走归一化免登记的第三条出路），
+ * 且 ② 补一份**带该字段**的金样。清单与那条会红的断言在
+ * `test/broll-arrange-wire.test.mjs` 的「决策层实读字段清单」一节，
+ * 条款正本见 change `fix-arrange-wire-decision-signal-dropped` 的 delta。
  *
  * ## 三处形态是刻意「不优化」的
  *
@@ -54,7 +75,7 @@
 import type { ArrangeTier, BrollPlan, DirectSlot, DirectSlotRole, PlanAnchor, PlanBeat, PlanQuery, PlanResult } from "./matrix";
 import type { DedupScope, GapFillMode, MarkLookup } from "./matrix-lay";
 // ★ 值import：值表探针键的段枚举 MUST 与候选池同源，见 `materializeSignalTable` 头注。
-import { segmentsOf } from "./matrix-lay";
+import { blackSpansOf, segmentsOf } from "./matrix-lay";
 import { METERING_ALGO_PIN, arrangeUnits, scaleOfRequest } from "./arrange-metering";
 
 // ── 上行体形态 ────────────────────────────────────────────────────────────
@@ -71,6 +92,18 @@ export interface WireSegment {
 	cuts?: number[];
 	/** 只带 p50 一维；不可判时整键缺席（不是 0，也不是 null）。 */
 	motion?: { p50: number };
+	/** 段内黑段（源片叠化过黑），`[起, 止]` 秒对，已按 `blackSpansOf` 同款逐条校验并归一。
+	 *
+	 * ★ 2026-09-03 纳入白名单（fix-arrange-wire-decision-signal-dropped）：
+	 * `refineWindow` 步骤⓪ 自 2026-09-02 起**已在消费它**（收不动就换候选 ⇒ 级联改写 consumed 序），
+	 * 而本投影此前恒 6 键、不含 black ⇒ 服务端在**数据上**就无从复现 CLI 的窗口收缩。
+	 * infra 那道 `_assert_no_unconsumed_segment_signals` 读的是**投影之后**的 plan，
+	 * 字段在到达服务端前就蒸发了 ⇒ 那道闸在云端路径上**结构性永不触发**，只护得住进程内直调。
+	 *
+	 * ⚠️ 上行的是**已过滤**的归一形态，不是原始值：形态坏的条目在此就丢掉，
+	 * 两侧因此看到逐字节相同的数据；MUST NOT 改成透传原始数组（那会把过滤口径变成两份）。
+	 * 空数组不上行（整键缺席 ⟺ 无黑段），与 `cuts` 的「非数组即缺席」同形。 */
+	black?: [number, number][];
 }
 
 /** 候选级上行形态。`url` / `cover_url` / `local_path` / `note` / `width` / `height` /
@@ -85,8 +118,19 @@ export interface WireResult {
 	duration?: number;
 	pinned?: true;
 	excluded_hint?: true;
-	/** 只带 blurry 一个信号位；describe 的其余键（含全部文本）不上行。 */
-	describe?: { usable_flags: { blurry: true } };
+	/** 只带 blurry 一个信号位 + 射程锚点；describe 的其余键（含全部文本）不上行。
+	 *
+	 * ★ `at_sec` 于 2026-09-03 纳入（fix-arrange-wire-decision-signal-dropped）：
+	 * 它是**被理解那一帧的素材时基秒**，决定 `blurry` 降权的**射程**
+	 * （`matrix.ts` 的 `describeScopeOf` / `segInDescribeScope`）。
+	 * 缺席时服务端退 `segments[0].best` 推定——今天两者恒相等（`--plan` 每候选只抽一帧），
+	 * 但那是**当前抽帧口径的巧合**：`fix-describe-window-coverage` 的「扩抽帧」一落地即分叉。
+	 *
+	 * ⚠️ **同名不同轴**：这里的 `at_sec` 是**素材时基**，`WireAnchor.at_sec` 是**工程轴**。
+	 * MUST NOT 互换、MUST NOT 合并成同一个概念。
+	 *
+	 * 三态口径同 `motion.p50`：有限数才透传，其余整键缺席（不是 0、不是 null）。 */
+	describe?: { usable_flags: { blurry: true }; at_sec?: number };
 	segments?: WireSegment[];
 }
 
@@ -194,6 +238,11 @@ function projectSegment(s: NonNullable<PlanResult["segments"]>[number]): WireSeg
 	// 同本地 SQL 的 IS NOT NULL 口径：不可判 ⇒ 整键缺席，MUST NOT 当「平稳」用
 	const p50 = num(s.motion?.p50);
 	if (p50 !== undefined) out.motion = { p50 };
+	// 黑段：走**与消费方同一把过滤器**（`blackSpansOf`），上行的就是 refineWindow 实际读到的那份。
+	// 空数组不上行——整键缺席 ⟺ 无黑段，与 `cuts` 的三态**有意不同**（black 没有「没扫过」这一档：
+	// 索引侧 black_indexed 为 NULL 的素材在 plan 里根本不带 black 键）。
+	const black = blackSpansOf(s);
+	if (black.length) out.black = black;
 	return out;
 }
 
@@ -209,9 +258,14 @@ function projectResult(r: PlanResult): WireResult {
 	if (duration !== undefined) out.duration = duration;
 	if (r.pinned === true) out.pinned = true;
 	if (r.excluded_hint) out.excluded_hint = true;
-	// describe 只取 blurry 一个信号位；desc / tags / mark 一律不上行
+	// describe 只取 blurry 一个信号位 + 射程锚点 at_sec；desc / tags / mark 一律不上行
 	if ((r.describe?.usable_flags as Record<string, unknown> | undefined)?.blurry === true) {
 		out.describe = { usable_flags: { blurry: true } };
+		// 射程锚点：有限数才带，否则整键缺席（服务端退 segments[0].best 推定）。
+		// ⚠️ 只在 blurry 为真时才有意义——射程是给降权用的，不降权就没有射程可言，
+		// 且这样上行体在无 blurry 的绝大多数候选上**逐字节不变**（既有 26 份金样零影响）。
+		const at = num((r.describe as { at_sec?: unknown } | undefined)?.at_sec);
+		if (at !== undefined) out.describe.at_sec = at;
 	}
 	if (Array.isArray(r.segments)) out.segments = r.segments.map(projectSegment);
 	return out;

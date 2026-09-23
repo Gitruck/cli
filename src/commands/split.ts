@@ -14,7 +14,7 @@
 import type { Command } from "commander";
 import { resolve, join, dirname, basename } from "node:path";
 import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import {
 	describeProjectionSource,
@@ -25,8 +25,11 @@ import {
 	type Transcript,
 } from "../lib/projection";
 import { validateSplitDoc, buildLanding, renderSplitMarkdown, type SplitDoc } from "../lib/splitdoc";
+import { formatJobDistribution } from "../lib/mg-visual-job";
+import { mgCoverage, coverageLine } from "../lib/mg-coverage";
 import { resolveColumnConfig, effectiveVocab } from "../lib/column-config";
 import { readUserConfig } from "../lib/user-config";
+import { readJson } from "../lib/read-json";
 import { readGtrk, assertGtrkV1, writeStructMetaSplit } from "../lib/gtrk-writeback";
 import { log, routeLogsToStderr } from "../lib/log";
 
@@ -103,7 +106,7 @@ function slugify(name: string): string {
 }
 
 async function loadTranscript(path: string): Promise<Transcript> {
-	const t = JSON.parse(await readFile(path, "utf8")) as Transcript;
+	const t = await readJson<Transcript>(path, "transcript.json");
 	if (!t || !Array.isArray(t.utterances) || typeof t.material_id !== "string" || typeof t.text_hash !== "string") {
 		throw new Error(`transcript.json 结构异常（缺 utterances/material_id/text_hash）：${path}`);
 	}
@@ -214,7 +217,7 @@ async function runLand(
 	if (!transcriptPath || !existsSync(transcriptPath)) throw new Error(TRANSCRIPT_MISSING);
 
 	log.step("▶ 校验拆分稿并落地…");
-	const doc = JSON.parse(await readFile(splitdocPath, "utf8")) as SplitDoc;
+	const doc = await readJson<SplitDoc>(splitdocPath, "拆分稿");
 	const transcript = await loadTranscript(transcriptPath);
 
 	// ① v1 门（读 .gtrk 并记录内容 revision，供写回前双重校验）
@@ -234,7 +237,7 @@ async function runLand(
 		transcriptHash: transcript.text_hash,
 		vocab: effectiveVocab(resolved.config),
 	};
-	const { errors, warnings } = validateSplitDoc(doc, ctx);
+	const { errors, warnings, visualJobs } = validateSplitDoc(doc, ctx);
 	for (const w of warnings) log.warn(w);
 	if (errors.length) {
 		throw new Error(
@@ -287,6 +290,20 @@ async function runLand(
 		`落地完成：${landing.split.beats.length}/${doc.beats.length} beat 落轨` +
 			`（MG ${landing.dispatch.mg.length} · FILM_BROLL ${landing.dispatch.film_broll.length} · AI_DRAMA ${landing.dispatch.ai_drama.length}）`,
 	);
+	// [gate-mg-visual-job §1.5] 职能分布**只观测、不判红**：它不是阈值，是让人一眼看出这条片子
+	// 派了什么形状的视觉。⚠️ `decor` MUST 单列、MUST NOT 并进 `statement`——它是必要但可被滥用的
+	// 一档（「标成 decor 就不用想视觉了」），**异常多本身就是信号**，并进去这个信号就看不见了。
+	if (visualJobs && landing.dispatch.mg.length > 0) {
+		log.info(`   · MG 视觉职能分布：${formatJobDistribution(visualJobs)}`);
+	}
+	// [add-mg-coverage-report §1.3] 派单当场就报空档：接力的 agent 拿到 dispatch 就会照单全铺，
+	// 铺完报「N 颗全部成功」——**成功与覆盖是两件事**。2026-09-20 真机上 537s 的片只派了前 34s，
+	// 此前一路无声。只给事实、不判红、不改退出码（`mg-coverage` 文件头 §射程）。
+	const mgCov = mgCoverage(landing.dispatch.mg, typeof gtrk.duration === "number" ? gtrk.duration : 0);
+	{
+		const line = coverageLine(mgCov);
+		if (line) log.info(`   · ${line}`);
+	}
 	for (const s of landing.skipped) log.warn(`跳过 ${s.beat}：${s.reason}`);
 	for (const s of landing.shrunk) log.warn(`收缩 ${s.beat}：${s.dropped} 句被剪，按存活 ${s.kept} 句包络 → ${s.track_st}s…${s.track_ed}s（建议人工复核）`);
 	if (landing.unhandledLanes.length > 0) {
@@ -308,6 +325,8 @@ async function runLand(
 			film_broll: landing.dispatch.film_broll.length,
 			ai_drama: landing.dispatch.ai_drama.length,
 		},
+		// 新增字段（add-mg-coverage-report）：既有字段逐字不变，只多这一个
+		mg_coverage: mgCov,
 	};
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;

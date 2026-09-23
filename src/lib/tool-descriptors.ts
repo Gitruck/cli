@@ -8,11 +8,14 @@
  * cloud 型直调公共域 API，local 型可复用同一注册表与发现入口；infra 零改动。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { dirname, extname, join, resolve as resolvePath } from "node:path";
+import { readFile, rename, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
 import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, probeGeometry } from "./media";
 import { renderProReport } from "./clip-brief";
+import { assertEnum, catalogEnumSync } from "./enum-catalog";
+import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
+import { readJson } from "./read-json";
 
 // ---------------------------------------------------------------- 类型
 
@@ -39,7 +42,26 @@ export const MULTI_INPUT_KINDS: ReadonlySet<ToolInputKind> = new Set(["images", 
 export interface ToolOption {
 	flag: string;
 	desc: string;
+	/**
+	 * 可重复出现：注册时挂收集器、缺省 `[]`（add-purify-region-scope）。
+	 * ⚠️ 缺省是空数组而非 undefined —— 描述符里判「用户给没给」MUST 看长度。
+	 */
+	repeatable?: true;
 }
+
+/**
+ * 去水印两个工具共用的选项（link-add-purify-region-scope-cli §1.2）。
+ * 注册器按完整 flag 串去重、先注册者的 desc 生效 ⇒ 两个描述符 MUST 引同一个对象，不许各写一份。
+ */
+const PURIFY_SCOPE_OPTION: ToolOption = {
+	flag: "--purify-scope <scope>",
+	desc: "净化范围：video_purify 支持 full_screen / subtitle / custom / region，image_purify 支持 full_screen / region；未传时使用服务端 full_screen 默认值",
+};
+const PURIFY_REGION_OPTION: ToolOption = {
+	flag: "--purify-region <box>",
+	desc: "region 模式要直接去除的区域框，可重复（最多 16 个）：视频 x,y,w,h[,start[,end]]（秒，end 省略即到结尾），图片 x,y,w,h；框内全部内容都会被处理",
+	repeatable: true,
+};
 
 /** 输入声明：类别 + 扩展名白名单（缺省按类别取默认）+ 视频类可选硬时长上限（上传前 ffprobe 前置）。 */
 export interface ToolInputSpec {
@@ -70,8 +92,40 @@ export interface ToolContext {
 	opts: Record<string, unknown>;
 	/** --param/--params-json 解析结果（runner 最终会逐字段合并覆盖到 payload 上，descriptor 只读）。 */
 	extraParams: Record<string, unknown>;
+	/**
+	 * 产物目录绝对路径（link-video-translate-dub-local-paths-cli）。有输入文件的工具在提交前即是最终落点；
+	 * 无输入文件且没给 --out 的工具建目录时可能防撞改名，runner 建目录后回填。单测手搓的上下文可不给。
+	 */
+	outDir?: string;
 	/** 人读提示输出口（一律走 stderr，不污染 --json 的 stdout）。 */
 	warn: (msg: string) => void;
+}
+
+/**
+ * 附加输入文件声明（link-video-translate-dub-cli D3）：positional 主输入之外，工具还要再带一个本地文件
+ * （首个使用者：译制配音的克隆参考 `--ref <file>` → `ref_file_id`）。
+ *
+ * runner 在**任何上传之前**做本地校验（存在性 + 扩展名，不过即报错、零上传零提交），
+ * 在**主输入上传之后**经同一上传缓存上传（`--reupload` 同样生效），把 file_id 写进 payload 的 `payloadKey`
+ * （覆盖 buildPayload 返回值中的同名键；`--param` / `--params-json` 仍最后合并、优先级最高）。
+ * flag 与 options 一样挂到族命令（按完整 flag 串去重）。未声明本项的工具行为与 task.json 面包屑逐字节不变。
+ */
+export interface ExtraInputSpec {
+	/** commander 解析后的选项键（`--ref <file>` → `ref`）。 */
+	optKey: string;
+	/** 完整 flag 串（如 `--ref <file>`）。 */
+	flag: string;
+	/** file_id 写进 payload 的键；MUST NOT 为 `file_id`（会盖掉主输入）。 */
+	payloadKey: string;
+	/** 扩展名白名单（小写、含前导点）。 */
+	exts: string[];
+	/** 帮助文案。 */
+	desc: string;
+	/**
+	 * 可选：给了值、但按本次其余参数用不上时返回一句提示；runner 经 ctx.warn 打**一次**，
+	 * 随后不校验、不上传、不写键。返回 undefined = 照常处理。在必填参数前置干跑之后调用。
+	 */
+	ignoreReason?: (ctx: ToolContext) => string | undefined;
 }
 
 /** 云端任务原始产物 output_result（形态各异：单 file / 多 file 键，由 mapOutputs 收敛）。 */
@@ -103,6 +157,8 @@ export interface ToolDescriptor {
 	disabledReason?: string;
 	/** 工具专属 CLI 选项（族命令注册时统一挂 commander）。 */
 	options?: ToolOption[];
+	/** 附加输入文件（cloud 型可选；input=none 不得声明，注册表校验）。 */
+	extraInputs?: ExtraInputSpec[];
 
 	// —— cloud 型 ——
 	/** 云端任务类型，可含 cli/ 域前缀（cloud.ts 的 /task/${taskType} 模板天然通吃两域）。 */
@@ -451,8 +507,17 @@ const imagePurify: ToolDescriptor = {
 	outputHint: "净化图片",
 	enabled: true,
 	taskType: "image_purify",
-	buildPayload(fileId) {
-		return { file_id: fileId };
+	options: [PURIFY_SCOPE_OPTION, PURIFY_REGION_OPTION],
+	buildPayload(fileId, ctx) {
+		const payload: Record<string, unknown> = { file_id: fileId };
+		const scopeRaw = ctx.opts.purifyScope;
+		const scope = scopeRaw == null ? undefined : String(scopeRaw);
+		if (scope != null && scope !== "full_screen" && scope !== "region") {
+			throw new Error("image_purify 的 --purify-scope 只支持 full_screen 或 region");
+		}
+		if (scope != null) payload.purify_scope = scope;
+		applyPurifyRegions(scope, ctx, false, payload);
+		return payload;
 	},
 	mapOutputs(out, ctx) {
 		const url = pickUrl(out, ["download_url"]);
@@ -633,6 +698,87 @@ export function parseNormalizedRoi(value: unknown): NormalizedRoi {
 	return { x, y, w, h };
 }
 
+/** region 模式单次最多几个框（与服务端 `purify_roi.MAX_PURIFY_REGIONS` 同值，add-purify-region-scope design D1）。 */
+export const MAX_PURIFY_REGIONS = 16;
+
+export type PurifyRegion = NormalizedRoi & { start?: number; end?: number };
+
+/**
+ * 解析一个区域框：命令行 `x,y,w,h[,start[,end]]` 串，或 params-json 里的 `{x,y,w,h,start?,end?}` 对象。
+ * 空间四元组复用 `parseNormalizedRoi` 的边界与报错；时间两元为秒（`start ≥ 0`、`end > start`）。
+ * `withTime=false`（图片）时带时间字段直接拒 —— 服务端会忽略它们，CLI 让用户当场知道没生效。
+ */
+export function parsePurifyRegion(value: unknown, opts: { withTime: boolean }): PurifyRegion {
+	let spatial: unknown;
+	let start: unknown;
+	let end: unknown;
+	let fromString = false;
+	if (typeof value === "string") {
+		fromString = true;
+		const parts = value.split(",");
+		if (parts.length < 4 || parts.length > 6 || parts.some((part) => !part.trim())) {
+			throw new Error(
+				opts.withTime ? "--purify-region 必须是 x,y,w,h[,start[,end]]" : "--purify-region 必须是 x,y,w,h 四个归一化数字",
+			);
+		}
+		spatial = parts.slice(0, 4).join(",");
+		start = parts[4];
+		end = parts[5];
+	} else if (value && typeof value === "object" && !Array.isArray(value)) {
+		const box = value as Record<string, unknown>;
+		spatial = { x: box.x, y: box.y, w: box.w, h: box.h };
+		start = box.start;
+		end = box.end;
+	} else {
+		throw new Error("区域框必须包含归一化数字 x、y、w、h");
+	}
+	if (!opts.withTime && (start != null || end != null)) {
+		throw new Error("图片的区域框只接受 x,y,w,h，不支持 start/end 时间段");
+	}
+	const region: PurifyRegion = { ...parseNormalizedRoi(spatial) };
+	const toNumber = (item: unknown): number =>
+		typeof item === "number" ? item : fromString && typeof item === "string" ? Number(item) : Number.NaN;
+	if (start != null) {
+		const s = toNumber(start);
+		if (!Number.isFinite(s) || s < 0) throw new Error("区域框的 start 必须是 ≥0 的秒数");
+		region.start = s;
+	}
+	if (end != null) {
+		const e = toNumber(end);
+		if (!Number.isFinite(e) || e <= (region.start ?? 0)) throw new Error("区域框的 end 必须是大于 start 的秒数");
+		region.end = e;
+	}
+	return region;
+}
+
+/**
+ * region 作用域的框收集与校验（视频 / 图片共用）。组合矛盾一律前置报错（主件 design D7 的 CLI 侧口径）：
+ * 非 region 作用域给了 `--purify-region`、region 作用域一个框都没给、超过上限。
+ * 命令行给了框 ⇒ 写进 payload；只走 params-json ⇒ 只校验不改写，由 runner 的 mergeParams 合入（与 custom 的 roi 同款）。
+ */
+function applyPurifyRegions(
+	scope: string | undefined,
+	ctx: ToolContext,
+	withTime: boolean,
+	payload: Record<string, unknown>,
+): void {
+	const raw = ctx.opts.purifyRegion;
+	const fromCli: unknown[] = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+	if (scope !== "region") {
+		if (fromCli.length > 0) throw new Error("--purify-region 只能与 --purify-scope region 一起使用");
+		return;
+	}
+	const fromParams = ctx.extraParams.regions;
+	if (fromCli.length === 0 && fromParams == null) {
+		throw new Error("--purify-scope region 必须同时提供 --purify-region 或 params-json.regions");
+	}
+	const boxes = fromCli.length > 0 ? fromCli : fromParams;
+	if (!Array.isArray(boxes) || boxes.length === 0) throw new Error("params-json.regions 必须是非空数组");
+	if (boxes.length > MAX_PURIFY_REGIONS) throw new Error(`区域框最多 ${MAX_PURIFY_REGIONS} 个`);
+	const parsed = boxes.map((box) => parsePurifyRegion(box, { withTime }));
+	if (fromCli.length > 0) payload.regions = parsed;
+}
+
 /** video_purify —— 净化用户有权处理的视频中的水印、字幕或指定区域。 */
 const videoPurify: ToolDescriptor = {
 	name: "video_purify",
@@ -646,22 +792,20 @@ const videoPurify: ToolDescriptor = {
 	taskType: "video_purify",
 	pollTimeoutMs: 4 * 60 * 60 * 1000,
 	options: [
-		{
-			flag: "--purify-scope <full_screen|subtitle|custom>",
-			desc: "净化范围；未传时使用服务端 full_screen 默认值",
-		},
+		PURIFY_SCOPE_OPTION,
 		{
 			flag: "--purify-method <ffmpeg|raft>",
 			desc: "净化方式；未传时使用服务端 ffmpeg 默认值，raft 仅支持 20 分钟以内视频",
 		},
 		{ flag: "--purify-roi <x,y,w,h>", desc: "custom 模式的归一化矩形区域" },
+		PURIFY_REGION_OPTION,
 	],
 	buildPayload(fileId, ctx) {
 		const payload: Record<string, unknown> = { file_id: fileId };
 		const scopeRaw = ctx.opts.purifyScope;
 		const scope = scopeRaw == null ? undefined : String(scopeRaw);
-		if (scope != null && scope !== "full_screen" && scope !== "subtitle" && scope !== "custom") {
-			throw new Error("--purify-scope 只支持 full_screen、subtitle 或 custom");
+		if (scope != null && scope !== "full_screen" && scope !== "subtitle" && scope !== "custom" && scope !== "region") {
+			throw new Error("--purify-scope 只支持 full_screen、subtitle、custom 或 region");
 		}
 		if (scope != null) payload.purify_scope = scope;
 
@@ -684,6 +828,7 @@ const videoPurify: ToolDescriptor = {
 			}
 			parseNormalizedRoi(ctx.extraParams.roi);
 		}
+		applyPurifyRegions(scope, ctx, true, payload);
 		return payload;
 	},
 	mapOutputs(out, ctx) {
@@ -1225,8 +1370,16 @@ export const IMAGE_TO_LIVE_FORMATS = new Set(["mp4", "motion_photo"]);
 
 /** image_to_live —— 智能 LivePhoto（图 → 约 4 秒短视频，或直出安卓动态照片）。
  *  2026-08-05 曾因上游供给停摆回收（adjust-gate-image-to-live），换供应商后经
- *  restore-tool-image-to-live 翻回启用态；服务端门控须先解除，否则直调会拿 6029/503。
- *  2026-08-26 经 link-image-to-live-motion-photo-cli 接上服务端既有的 output_format 交付格式。 */
+ *  restore-tool-image-to-live 翻回启用态。
+ *  2026-08-26 经 link-image-to-live-motion-photo-cli 接上服务端既有的 output_format 交付格式。
+ *
+ *  ⟲ **2026-09-10（link-enum-catalog-cli §2.5）：这里原先写着「服务端门控须先解除，
+ *  否则直调会拿 6029/503」——那条纪律要求两仓各改一处、且顺序不能错。现在不必了。**
+ *  可用性由服务端下发的枚举清单（`task_availability.offline`）**覆盖**：
+ *  服务端下架一个 task_type，CLI 拉到新清单就自动在上传前拦住并说明理由，
+ *  **无需 CLI 发版**。本 `enabled` 字段只表示「本版 CLI 认不认识这个工具」，
+ *  **不再**承担「服务端此刻可不可用」——后者恒以清单为准，且**只降不升**
+ *  （清单说下架就拦；清单没说、或压根没清单，一律照常放行交服务端裁决）。 */
 const imageToLive: ToolDescriptor = {
 	name: "image_to_live",
 	title: "智能 LivePhoto",
@@ -1282,10 +1435,43 @@ const imageToLive: ToolDescriptor = {
 
 // ---------------------------------------------------------------- 智能字幕识别（add-tool-video-ai-subtitle）
 
-/** 服务端 subtitle_type 样式枚举（7 种小稳集，bundle 校验；--param 可绕过作前向兼容逃生）。 */
-const AI_SUBTITLE_TYPES = ["default", "outline", "cinema_yellow", "immersive_box", "wide_spacing", "deep_shadow", "boxed"];
-/** 服务端 subtitle_color 颜色枚举（11 种）。 */
-const AI_SUBTITLE_COLORS = ["雅黑", "淡绿", "森林绿", "湖蓝", "道奇蓝", "钢蓝", "浅粉红", "深橙", "珊瑚橙", "橙红", "土豪金"];
+/**
+ * 帮助文案里的枚举渲染（change `link-enum-catalog-cli` §2.2）。
+ *
+ * ⟲ 这里原先是两个**硬编码常量** `AI_SUBTITLE_TYPES` / `AI_SUBTITLE_COLORS`。
+ * 服务端加一种样式，CLI 不发版就当场拒绝那个合法值——而两边都不报错，只是行为不对。
+ * 现在改读服务端下发的枚举清单快照。
+ *
+ * ⚠️ **注册期零网络**（`link-enum-catalog-cli` 红线②）：命令注册在**每次进程启动**都会跑，
+ * 在这里发请求等于给每一条命令（包括 `--help`）加一次往返。故只读盘上快照，
+ * 没有快照就退回一句不许诺具体取值的兜底文案。
+ */
+function enumHint(key: Parameters<typeof catalogEnumSync>[0], prefix: string, tail: string): string {
+	const vals = catalogEnumSync(key);
+	return vals ? `${prefix}：${vals.join("/")}（${tail}）` : `${prefix}：取值以服务端为准，\`gtrk doctor\` 可查当前清单（${tail}）`;
+}
+
+/**
+ * 族内多个工具共用的选项（link-video-translate-dub-cli D2）。注册器按完整 flag 串去重、先注册者的 desc 生效
+ * ⇒ 同一 flag 的 desc 只能有一份，且 MUST 是不绑定单一工具的中性表述；各工具「必不必填、不给时怎样」
+ * 写在各自的 description 与 buildPayload 报错里。同 PURIFY_SCOPE_OPTION：引用同一个对象，不许各写一份。
+ */
+const LANGUAGE_OPTION: ToolOption = {
+	flag: "--language <code>",
+	desc: "源语种代码（部分工具必填，缺了会在上传前报错；取值以服务端支持列表为准）",
+};
+const TRANSLATE_LANGUAGE_OPTION: ToolOption = {
+	flag: "--translate-language <code>",
+	desc: "目标语种代码（部分工具必填；可选的工具不传即不翻译；取值以服务端为准）",
+};
+const SPEAKER_OPTION: ToolOption = {
+	flag: "--speaker <code>",
+	desc: "音色代号，部分工具还接受 clone（克隆原声）；是否必填见各工具说明。可用音色见官网文档，传错时报错会列出全部可用项",
+};
+const SUBTITLE_TYPE_OPTION: ToolOption = {
+	flag: "--subtitle-type <style>",
+	desc: enumHint("subtitle.styles", "字幕样式", "未传则用服务端默认；何时生效见各工具说明"),
+};
 
 /**
  * video_ai_subtitle —— 智能字幕识别（原名「智能视频字幕」）。一进多出的混合能力：
@@ -1308,12 +1494,12 @@ const videoAiSubtitle: ToolDescriptor = {
 	taskType: "video_ai_subtitle",
 	pollTimeoutMs: 4 * 60 * 60 * 1000, // 内部含去字幕+ASR+LLM+烧录，长视频耗时可观
 	options: [
-		{ flag: "--language <code>", desc: "源语种代码（video_ai_subtitle 必填、其余工具可选；具体取值由服务端支持列表校验）" },
-		{ flag: "--translate-language <code>", desc: "译文目标语种（未传则单语）" },
+		LANGUAGE_OPTION,
+		TRANSLATE_LANGUAGE_OPTION,
 		{ flag: "--need-render", desc: "把字幕烧录进视频（仅视频输入有效）" },
 		{ flag: "--need-pure", desc: "先去除原视频中的字幕" },
-		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（未传则用服务端默认）` },
-		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（未传则用服务端默认）` },
+		SUBTITLE_TYPE_OPTION,
+		{ flag: "--subtitle-color <color>", desc: enumHint("subtitle.colors", "字幕颜色", "未传则用服务端默认") },
 	],
 	/**
 	 * 默认只传抽出音频（毛片永不上传，对齐 oralcut / long2short）：字幕主产物是 .ass 文本，画面对
@@ -1354,12 +1540,12 @@ const videoAiSubtitle: ToolDescriptor = {
 		if (ctx.opts.needPure === true) payload.need_pure = true;
 		if (ctx.opts.subtitleType != null) {
 			const v = String(ctx.opts.subtitleType);
-			if (!AI_SUBTITLE_TYPES.includes(v)) throw new Error(`--subtitle-type 只支持 ${AI_SUBTITLE_TYPES.join("、")}`);
+			assertEnum("subtitle.styles", "--subtitle-type", v);
 			payload.subtitle_type = v;
 		}
 		if (ctx.opts.subtitleColor != null) {
 			const v = String(ctx.opts.subtitleColor);
-			if (!AI_SUBTITLE_COLORS.includes(v)) throw new Error(`--subtitle-color 只支持 ${AI_SUBTITLE_COLORS.join("、")}`);
+			assertEnum("subtitle.colors", "--subtitle-color", v);
 			payload.subtitle_color = v;
 		}
 		return payload;
@@ -1450,16 +1636,16 @@ const subtitleTranslate: ToolDescriptor = {
 	// 不含 ASR/烧录那类重活，故不必照抄 video_ai_subtitle 的 4h。
 	pollTimeoutMs: 60 * 60 * 1000,
 	options: [
-		{ flag: "--language <code>", desc: "源语种代码（必填；取值由服务端支持列表校验）" },
-		{ flag: "--translate-language <code>", desc: "译文目标语种代码（必填）" },
+		LANGUAGE_OPTION,
+		TRANSLATE_LANGUAGE_OPTION,
 		{ flag: "--output-format <fmt>", desc: `产物格式 ${SUBTITLE_OUTPUT_FORMATS.join("/")}（未传则跟随输入）` },
 		{
 			flag: "--line-mode <mode>",
 			desc: `翻译粒度 ${SUBTITLE_LINE_MODES.join("/")}（缺省 resegment：先合并回自然句再翻，更通顺但行数与时码会变；keep 严格逐行、时码与输入逐条一致）`,
 		},
 		{ flag: "--bilingual", desc: "输出双语字幕（原文与译文同框；仅 ass 输出有效）" },
-		{ flag: "--subtitle-type <style>", desc: `字幕样式：${AI_SUBTITLE_TYPES.join("/")}（仅 ass 输出有效）` },
-		{ flag: "--subtitle-color <color>", desc: `字幕颜色：${AI_SUBTITLE_COLORS.join("/")}（仅 ass 输出有效）` },
+		SUBTITLE_TYPE_OPTION, // 本工具仅 ass 输出有效（description 与服务端报错已讲）
+		{ flag: "--subtitle-color <color>", desc: enumHint("subtitle.colors", "字幕颜色", "仅 ass 输出有效") },
 		{
 			flag: "--canvas <WxH>",
 			desc: "画布几何，决定译文按哪一档折行（未传则：.ass 用文件里的 PlayRes，.srt 无从推断、服务端按横屏 1920x1080）。竖屏务必显式传",
@@ -1500,12 +1686,12 @@ const subtitleTranslate: ToolDescriptor = {
 		if (ctx.opts.bilingual === true) payload.lingual_type = "bilingual";
 		if (ctx.opts.subtitleType != null) {
 			const v = String(ctx.opts.subtitleType);
-			if (!AI_SUBTITLE_TYPES.includes(v)) throw new Error(`--subtitle-type 只支持 ${AI_SUBTITLE_TYPES.join("、")}`);
+			assertEnum("subtitle.styles", "--subtitle-type", v);
 			payload.subtitle_type = v;
 		}
 		if (ctx.opts.subtitleColor != null) {
 			const v = String(ctx.opts.subtitleColor);
-			if (!AI_SUBTITLE_COLORS.includes(v)) throw new Error(`--subtitle-color 只支持 ${AI_SUBTITLE_COLORS.join("、")}`);
+			assertEnum("subtitle.colors", "--subtitle-color", v);
 			payload.subtitle_color = v;
 		}
 		if (ctx.opts.canvas != null) {
@@ -1582,7 +1768,7 @@ const videoLong2ShortPro: ToolDescriptor = {
 	taskType: "video_long2short_pro",
 	pollTimeoutMs: 4 * 60 * 60 * 1000, // 内含 ASR + 选段 + 逐 clip 润色渲染，长片耗时可观
 	options: [
-		{ flag: "--language <code>", desc: "源语种代码（精剪必填；取值以服务端支持列表为准）" },
+		LANGUAGE_OPTION, // 精剪必填（buildPayload 上传前报错）
 		{ flag: "--output-language <code>", desc: "选段/文案的输出语种（未传则同源语种）" },
 		{ flag: "--main-topic <text>", desc: "主题引导（影响选段偏好）" },
 		{ flag: "--output-size <s>", desc: "成片画幅 9:16|16:9|1:1 或自定义 WxH（未传则服务端默认）" },
@@ -1662,6 +1848,7 @@ const videoLong2ShortPro: ToolDescriptor = {
 			renderProReport(clips, (out.report ?? {}) as Record<string, unknown>, {
 				source: ctx.inputAbs ?? ctx.baseName,
 				clipFiles: byIndex,
+				splitScreen: ctx.opts.splitScreen === true, // 请求态，与 buildPayload 的判据同源
 			}),
 			"utf8",
 		);
@@ -1877,12 +2064,17 @@ const audioTtsClone: ToolDescriptor = {
 	options: [
 		{ flag: "--text <text>", desc: "待合成的短文本（与 --text-file 二选一）" },
 		{ flag: "--text-file <file>", desc: "待合成的文本文件（UTF-8；与 --text 二选一）" },
-		{ flag: "--speaker <code>", desc: "音色代号（必填；可用列表见官网文档「可用音色」，传错时报错会列出全部可用项）" },
+		SPEAKER_OPTION, // 本工具必填（buildPayloadNone 报错）
 		{ flag: "--text-lang <lang>", desc: "文本语言（未传则服务端默认 zh）" },
 		{ flag: "--output-format <fmt>", desc: "输出音频格式 wav/mp3（未传则服务端默认 wav）" },
 		{ flag: "--split-method <m>", desc: "长文切分法 cut0~cut5（未传则跟随该音色调好的参数）；它也决定字幕的断句粒度，要一句一条传 cut5" },
 		{ flag: "--batch-size <n>", desc: "分段并发批大小 1~16（未传则服务端默认）" },
 		{ flag: "--subtitle-format <fmt>", desc: "同时产出字幕文件，如 srt（未传则不出字幕；不额外计费，取值以服务端为准）" },
+		{
+			flag: "--fragment-interval <sec>",
+			desc: "句间停顿秒数（**仅自训音色**；云引擎音色传了会报错而非静默忽略）。未传则跟随引擎默认。" +
+				"实测参考：默认档全片约 25% 时长是句间静音，调到 0.2 可显著提紧节奏",
+		},
 	],
 	buildPayloadNone(ctx) {
 		const o = ctx.opts;
@@ -1901,6 +2093,13 @@ const audioTtsClone: ToolDescriptor = {
 		const speed = parseNumFlag(o.speed, "--speed");
 		if (speed != null) p.speed = speed;
 		if (typeof o.splitMethod === "string") p.text_split_method = o.splitMethod;
+		// 句间停顿（link-add-tts-fragment-interval-cli）：给了才写键，不给一个键都不加
+		// ——与 --split-method 同口径，保证不传时 payload 逐字节与从前一致。
+		// ⚠️ 区间（服务端 [0.05, 1.0]）**不在 CLI 冻结**：合法值由服务端校验并在报错里给出，
+		//    照抄一份到这里就会有两个真相，服务端调区间时 CLI 变成错的那个。
+		//    这里只挡「根本不是数字」——那是本地就能判死、不值得往返一次的输入错误。
+		const fi = parseNumFlag(o.fragmentInterval, "--fragment-interval");
+		if (fi != null) p.fragment_interval = fi;
 		const bs = parseNumFlag(o.batchSize, "--batch-size");
 		if (bs != null) {
 			if (!Number.isInteger(bs)) throw new Error(`--batch-size 需要整数，拿到「${String(o.batchSize)}」`);
@@ -1929,6 +2128,331 @@ const audioTtsClone: ToolDescriptor = {
 	},
 };
 
+// ---------------------------------------------------------------- 视频译制配音（link-video-translate-dub-cli）
+
+/**
+ * 工程文件分目录名：与 `src/lib/materialize.ts` 的 `baseFormat` 同口径（jianying_* → jianying、capcut_* → capcut）。
+ * 不直接 import：materialize 牵连渲染 / 剪映草稿拷贝等重依赖，会被一并打进 tool-descriptors 的测试 bundle 与 CLI 冷启动路径。
+ * 两份口径的一致性由 test/tool-video-translate-dub.test.mjs 对拍钉住。
+ */
+export function dubProjectDir(format: string): string {
+	if (format.startsWith("jianying")) return "jianying";
+	if (format.startsWith("capcut")) return "capcut";
+	return format;
+}
+
+/** `--speed-band <min,max>`：本地只挡凑不成两个有限数字的输入；区间合法性（0<min≤max≤上限）交服务端。 */
+export function parseSpeedBand(v: unknown): [number, number] {
+	const raw = String(v).trim();
+	const parts = raw.split(",").map((s) => s.trim());
+	const nums = parts.map((s) => (s === "" ? Number.NaN : Number(s)));
+	if (parts.length !== 2 || nums.some((n) => !Number.isFinite(n))) {
+		throw new Error(`--speed-band 需要「最小,最大」两个数字（如 0.95,1.15），拿到「${raw}」`);
+	}
+	return [nums[0]!, nums[1]!];
+}
+
+/** 服务端 `errors`（衍生产物降级明细）：非空对象才算有，其余一律视为没有。 */
+function dubErrors(v: unknown): Record<string, unknown> | undefined {
+	if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+	return Object.keys(v).length ? (v as Record<string, unknown>) : undefined;
+}
+
+/** 服务端 .gtrk 里衍生素材的占位文件名（主件 handler `_collect_outputs` 写死）；mapOutputs 按同名落在产物目录根。 */
+const DUB_DERIVED_MEDIA = new Set(["dub.wav", "bgm.wav", "base.mp4"]);
+
+/** 非 gtrk 的工程文件分目录（dubProjectDir 的产出）：这些格式的素材路径 CLI 不改写，只提示重新链接。 */
+const DUB_PROJECT_DIRS = new Set(["jianying", "capcut", "xml", "fcpxml", "otio"]);
+
+/**
+ * 把落地的 .gtrk 素材路径从服务端占位名改成本机绝对路径（link-video-translate-dub-cli D6）。
+ * 服务端写的是占位名：原片 = 服务端存储名（`<file_id>.<ext>`）、衍生素材 = `dub.wav / bgm.wav / base.mp4`；
+ * 工程文件又落在 `gtrk/` 子目录，占位名按工程所在目录解析必然找不到。
+ * 规则：衍生占位名 → 产物目录里刚落地的同名文件；其余不带目录的占位名（只有原片一条）→ 本地原片。
+ * 找不到对应落地文件的衍生占位名原样保留（该项降级未出）。先写临时文件再改名，改写中途失败不留半截工程。返回改写条数。
+ */
+export async function relinkDubGtrk(gtrkPath: string, landed: string[], inputAbs: string | undefined): Promise<number> {
+	const gtrk = await readJson(gtrkPath, ".gtrk 工程") as { materials?: Array<{ path?: unknown }> };
+	const landedByName = new Map<string, string>();
+	for (const p of landed) {
+		if (DUB_DERIVED_MEDIA.has(basename(p)) && basename(dirname(p)) !== "gtrk") landedByName.set(basename(p), resolvePath(p));
+	}
+	let changed = 0;
+	for (const m of Array.isArray(gtrk.materials) ? gtrk.materials : []) {
+		if (!m || typeof m.path !== "string" || /[\\/]/.test(m.path)) continue;
+		const target = DUB_DERIVED_MEDIA.has(m.path) ? landedByName.get(m.path) : inputAbs ? resolvePath(inputAbs) : undefined;
+		if (!target) continue;
+		m.path = target;
+		changed += 1;
+	}
+	if (changed) {
+		const tmp = `${gtrkPath}.tmp`;
+		await writeFile(tmp, JSON.stringify(gtrk, null, 2));
+		await rename(tmp, gtrkPath);
+	}
+	return changed;
+}
+
+/** `--project-formats <list>` → 格式数组（逗号拆、去空白、丢空项）；没给返回 undefined，给了却全空本地拒。 */
+export function parseDubProjectFormats(v: unknown): string[] | undefined {
+	if (v == null) return undefined;
+	const formats = String(v)
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	if (!formats.length) throw new Error("--project-formats 至少写一个格式（逗号分隔，如 gtrk,jianying）");
+	return formats;
+}
+
+/** 这次要不要剪映 / CapCut 草稿（只看用户显式给的 --project-formats；缺省只出 gtrk）。 */
+function dubWantsDraft(formats: string[] | undefined): boolean {
+	return !!formats?.some((f) => f.startsWith("jianying") || f.startsWith("capcut"));
+}
+
+/**
+ * 剪映草稿文件夹（link-video-translate-dub-local-paths-cli）：`<剪映草稿根>/<产物目录名>`，与 `gtrk long2short` 同填法
+ * （主件 add-video-translate-dub-local-paths tasks 0.2 核定：`nle_draft_dir` 是具体草稿文件夹，meta 的 draft_fold_path / draft_name 由它派生）。
+ * 草稿根解析同 `gtrk oralcut`：显式 --jianying-draft-dir → gtrk init 配置 → 自动探测。解析不到或没有产物目录时 undefined。
+ */
+export function dubDraftFolder(ctx: ToolContext): string | undefined {
+	if (!ctx.outDir) return undefined;
+	const opt = ctx.opts.jianyingDraftDir == null ? undefined : String(ctx.opts.jianyingDraftDir);
+	const root = resolveJianyingDraftDir(opt);
+	return root ? join(root, basename(ctx.outDir)) : undefined;
+}
+
+/** 视频输入才带本机路径（音频不产工程文件）；需要产物目录。 */
+function dubSendsLocalPaths(ctx: ToolContext): boolean {
+	return !!ctx.inputAbs && !isAudioFile(ctx.inputAbs) && !!ctx.outDir;
+}
+
+/** 降级明细键 → 用户看得懂的产物名（未知键原样显示；`project:<格式>` 归到工程文件）。 */
+const DUB_ERROR_LABELS: Record<string, string> = {
+	subtitle: "字幕",
+	bilingual_subtitle: "双语字幕",
+	transcript: "逐句对齐记录",
+	project: "工程文件",
+	bgm: "伴奏轨",
+	base_video: "延长后的底片",
+};
+
+/**
+ * video_translate_dub —— 视频译制配音（服务端 id 72，主件 gitruck-infra add-video-translate-dub）。
+ *
+ * 一个视频或音频进：识别原话 → 翻译 → 用所选音色（或克隆原片说话人）逐句重新配音 → 按原说话位置铺回去。
+ * 只替换音轨，画面不动（不做口型同步）。
+ *
+ * 刻意不做的三件事：
+ * - **不冻结任何枚举**：语种、音色、字幕形态与样式、拟合策略、工程格式的合法值一律交服务端
+ *   （服务端 400 自带可用值，runner 原样转出）。`--subtitle-type` 也不走 assertEnum——服务端对样式名做写法归一、
+ *   认不出按缺省处理，本地按清单拦反而会误杀合法写法。
+ * - **不只传音频**：视频的 natural 策略可能插冻结帧、烧录字幕要画面，两件都只能在服务端对着画面做（v1 整片上传）。
+ * - **缺省不传 project_formats**：服务端缺省只出 `.gtrk`；要剪映 / PR 工程显式 `--project-formats`。
+ */
+const videoTranslateDub: ToolDescriptor = {
+	name: "video_translate_dub",
+	title: "视频译制配音",
+	description:
+		"把视频（或音频）里的话翻译成另一种语言，用所选音色或克隆原片说话人的声音逐句重新配音，并按原来的说话位置铺回去。" +
+		"只替换音轨，画面保持原样（不做口型同步）。--language / --translate-language / --speaker 必填；单条最长 120 分钟，长片耗时十几分钟起。" +
+		"克隆别人的声音须先取得本人同意。",
+	kind: "cloud",
+	input: { kind: "video", exts: [...PUBLIC_VIDEO_EXTS, ...AUDIO_EXTS], maxDurationSec: 120 * 60 },
+	priceKey: "video_translate_dub",
+	outputHint: "配音成片 mp4（音频输入为 mp3）+ 配音轨/伴奏轨 + 字幕 + 逐句对齐记录 + 工程文件",
+	enabled: true,
+	taskType: "video_translate_dub",
+	pollTimeoutMs: 4 * 60 * 60 * 1000, // 120 分钟源片 + 排队
+	options: [
+		LANGUAGE_OPTION,
+		TRANSLATE_LANGUAGE_OPTION,
+		SPEAKER_OPTION,
+		{ flag: "--ref-lang <code>", desc: "克隆参考段的语种（仅 --speaker clone 时有意义；未传则同源语种）" },
+		{ flag: "--no-keep-bgm", desc: "不保留原片伴奏（默认保留：原片确有伴奏时成片混回原伴奏并另出伴奏轨）" },
+		{
+			flag: "--fit-policy <policy>",
+			desc: "时长拟合策略，如 natural（允许少量画面定格来延长）、strict（成片与原片等长，超出部分截尾）；未传则用服务端默认，取值以服务端为准",
+		},
+		{ flag: "--speed-band <min,max>", desc: "全片语速倍率允许区间，两个数字逗号分隔（如 0.95,1.15；未传则用服务端默认，区间由服务端校验）" },
+		{
+			flag: "--subtitle-mode <mode>",
+			desc: "译制配音的字幕形态，如 none（不出）、soft（只出字幕文件）、burn（烧进成片）、bilingual_burn（双语烧录）；音频输入不能烧录；未传则用服务端默认，取值以服务端为准",
+		},
+		SUBTITLE_TYPE_OPTION,
+		{ flag: "--project-formats <list>", desc: "译制配音要出的工程文件格式，逗号分隔（如 gtrk,jianying,xml；未传则只出客户端工程 .gtrk）" },
+		{
+			flag: "--jianying-draft-dir <dir>",
+			desc: "剪映草稿目录（要剪映草稿时用：草稿落到这里、剪映列表里可见；缺省读 gtrk init 的配置或自动探测）",
+		},
+	],
+	extraInputs: [
+		{
+			optKey: "ref",
+			flag: "--ref <file>",
+			payloadKey: "ref_file_id",
+			exts: [...AUDIO_EXTS, ...PUBLIC_VIDEO_EXTS],
+			desc: "克隆参考音频或视频（仅 --speaker clone 时有意义；未传则从原片里自动挑干净的人声段）",
+			// 非 clone 时服务端本就忽略 ref_file_id。CLI 选择**提示一次、不上传不发送**：
+			// 照传只会白白多传一个文件，静默吞掉又会让用户以为参考生效了。
+			ignoreReason(ctx) {
+				const speaker = ctx.opts.speaker == null ? "" : String(ctx.opts.speaker).trim();
+				return speaker === "clone" ? undefined : "--ref 只在 --speaker clone 时有意义，本次已忽略（不上传、不提交）";
+			},
+		},
+	],
+	preprocess(ctx) {
+		ctx.warn(
+			"译制配音耗时较长，长片十几分钟起。提交成功后产物目录里会先写 task.json（含任务号）；" +
+				"中途断开可凭任务号在云端查询取回，别直接重跑（重跑会重新计费）",
+		);
+		// 要剪映草稿却找不到草稿目录：上传前说一次（buildPayload 会跑两遍，提示放这里不重复）
+		if (dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats)) && !dubDraftFolder(ctx)) {
+			ctx.warn("没找到剪映草稿目录 → 剪映 / CapCut 草稿将缺 draft_meta_info.json、列表里看不到。可加 --jianying-draft-dir <你的草稿目录> 重跑");
+		}
+		return ctx.inputAbs!; // 整片上传（见头注释）
+	},
+	buildPayload(fileId, ctx) {
+		const o = ctx.opts;
+		const str = (v: unknown): string => (v == null ? "" : String(v).trim());
+		// 三项必填：runner 的前置干跑在**上传之前**跑本函数，缺参零上传零提交
+		const sourceLang = str(o.language);
+		const targetLang = str(o.translateLanguage);
+		const speaker = str(o.speaker);
+		const missing: string[] = [];
+		if (!sourceLang) missing.push("--language <源语种>");
+		if (!targetLang) missing.push("--translate-language <目标语种>");
+		if (!speaker) missing.push("--speaker <clone 或音色代号>");
+		if (missing.length) {
+			throw new Error(
+				`video_translate_dub 缺必填参数：${missing.join("、")}。` +
+					"语种传标准地区码（如 zh-CN、en-US），可用语种与音色以服务端为准（传错时报错会列出可用项）",
+			);
+		}
+		const p: Record<string, unknown> = { file_id: fileId, source_lang: sourceLang, target_lang: targetLang, speaker };
+		// 可选键一律「给了才写」：不写键 ≡ 服务端缺省，存量行为不被凭空多出的键改变
+		if (str(o.refLang)) p.ref_lang = str(o.refLang);
+		// commander 的取反式缺省是 true：只有显式 --no-keep-bgm（=== false）才写键
+		if (o.keepBgm === false) p.keep_bgm = false;
+		if (str(o.fitPolicy)) p.fit_policy = str(o.fitPolicy);
+		if (o.speedBand != null) p.speed_band = parseSpeedBand(o.speedBand);
+		if (str(o.subtitleMode)) p.subtitle = str(o.subtitleMode);
+		if (str(o.subtitleType)) p.subtitle_type = str(o.subtitleType);
+		const formats = parseDubProjectFormats(o.projectFormats);
+		if (formats) p.project_formats = formats;
+		// 本机路径（link-video-translate-dub-local-paths-cli）：服务端据此把工程素材写成本机路径、要草稿时产齐 meta
+		if (dubSendsLocalPaths(ctx)) {
+			p.source_path = ctx.inputAbs;
+			p.local_output_dir = ctx.outDir;
+			if (dubWantsDraft(formats)) {
+				const folder = dubDraftFolder(ctx);
+				if (folder) p.struct_meta = { nle_draft_dir: folder };
+			}
+		}
+		return p;
+	},
+	mapOutputs(out, ctx) {
+		const audioInput = !!ctx.inputAbs && isAudioFile(ctx.inputAbs);
+		const mainExt = (url: string): string => extFromUrl(url, audioInput ? ".mp3" : ".mp4");
+		const singles: Array<[key: string, filename: (url: string) => string]> = [
+			["output_file_download_url", (url) => `${ctx.baseName}-dub${mainExt(url)}`],
+			["dub_audio_file_download_url", () => "dub.wav"],
+			["bgm_audio_file_download_url", () => "bgm.wav"],
+			["base_video_file_download_url", () => "base.mp4"],
+			["subtitle_file_download_url", () => `${ctx.baseName}.srt`],
+			["bilingual_subtitle_file_download_url", () => `${ctx.baseName}_bilingual.srt`],
+			["transcript_file_download_url", () => "transcript.json"],
+		];
+		const items: DownloadItem[] = [];
+		for (const [key, name] of singles) {
+			const url = out[key];
+			// 衍生产物降级时服务端给空串：MUST NOT 落 0 字节占位文件（用户会以为字幕出了）
+			if (typeof url !== "string" || !url.trim()) continue;
+			items.push({ url, filename: name(url) });
+		}
+		// 工程文件按基础格式分目录：剪映与 CapCut 草稿文件名相同，平铺会互相覆盖
+		for (const raw of Array.isArray(out.files) ? out.files : []) {
+			if (!raw || typeof raw !== "object") continue;
+			const f = raw as Record<string, unknown>;
+			const url = f.download_url;
+			if (typeof url !== "string" || !url.trim()) continue;
+			if (typeof f.format !== "string" || !f.format.trim() || typeof f.filename !== "string") continue;
+			// 服务端给的是纯文件名；只取末段，防带路径的名字越出产物目录
+			const leaf = f.filename.split(/[\\/]/).pop() ?? "";
+			if (!leaf || leaf === "." || leaf === "..") continue;
+			items.push({ url, filename: `${dubProjectDir(f.format.trim())}/${leaf}` });
+		}
+		return items;
+	},
+	/**
+	 * 服务端衍生产物降级（字幕 / 逐句记录 / 工程文件等某项失败）时任务仍是 completed、积分已扣、成片与配音轨在手
+	 * ⇒ MUST NOT 判失败；但要让用户当场知道少了什么。明细（可能很长）只进 result-output.json，终端只打一行。
+	 */
+	async postprocess(ctx, landed, out) {
+		// 工程素材重连（D6）：.gtrk 里还有占位名就改写成本机绝对路径（服务端已写本机路径时改写 0 条）；其余格式只提示
+		let otherProjects = false;
+		let gtrkLanded = false;
+		let gtrkHadPlaceholders = false;
+		const draftDirs = new Map<string, boolean>(); // 剪映 / CapCut 草稿目录 → 是否落了 draft_meta_info.json
+		for (const p of landed) {
+			const dir = basename(dirname(p));
+			if (dir === "gtrk" && p.toLowerCase().endsWith(".gtrk")) {
+				gtrkLanded = true;
+				try {
+					if ((await relinkDubGtrk(p, landed, ctx.inputAbs)) > 0) gtrkHadPlaceholders = true;
+				} catch (e) {
+					ctx.warn(`客户端工程素材路径改写失败（工程仍可打开，需手动重新链接素材）：${e instanceof Error ? e.message : String(e)}`);
+				}
+			} else if (dir === "jianying" || dir === "capcut") {
+				draftDirs.set(dir, (draftDirs.get(dir) ?? false) || basename(p) === "draft_meta_info.json");
+			} else if (DUB_PROJECT_DIRS.has(dir)) {
+				otherProjects = true;
+			}
+		}
+		// 草稿缺 meta：服务端要拿到草稿文件夹（struct_meta.nle_draft_dir）才产；没找到剪映草稿目录或服务端尚未升级时会缺
+		const noMeta = [...draftDirs].filter(([, hasMeta]) => !hasMeta).map(([d]) => (d === "jianying" ? "剪映" : "CapCut"));
+		if (noMeta.length) {
+			ctx.warn(
+				`${noMeta.join(" / ")} 草稿缺 draft_meta_info.json，在草稿列表里看不到、不能直接打开；` +
+					"加 --jianying-draft-dir <你的剪映草稿目录> 重跑可补齐，或直接用客户端工程 gtrk/project.gtrk",
+			);
+		}
+		// 剪映两件套齐全且提交时带了草稿文件夹 ⇒ 落进剪映草稿目录（同 gtrk oralcut / long2short）；CapCut v1 留在产物目录
+		const wantsDraft = dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats));
+		const folder = wantsDraft ? dubDraftFolder(ctx) : undefined;
+		if (folder && draftDirs.get("jianying") === true && ctx.outDir) {
+			try {
+				const landing = await copyJianyingDraft(join(ctx.outDir, "jianying"), folder);
+				if (landing.complete) ctx.warn(`剪映草稿已落到：${folder}（打开剪映即可在草稿列表里看到）`);
+				else ctx.warn(`剪映草稿两件套不全（缺 ${landing.missing.join("、")}），没有放进剪映草稿目录`);
+			} catch (e) {
+				ctx.warn(`剪映草稿放进草稿目录失败（产物目录 jianying/ 里仍有两件套）：${e instanceof Error ? e.message : String(e)}`);
+			}
+		}
+		if (draftDirs.get("capcut") === true) {
+			ctx.warn("CapCut 草稿两件套在产物目录 capcut/ 下，暂不自动放进 CapCut 草稿目录，需要时整个文件夹手动复制过去");
+		}
+		// 素材占位名提示：以取回的 .gtrk 为准（还有占位名 = 服务端没写本机路径）；没出 .gtrk 时看这次有没有带本机路径
+		const placeholders = gtrkLanded ? gtrkHadPlaceholders : !dubSendsLocalPaths(ctx);
+		if (placeholders && (otherProjects || [...draftDirs.values()].some(Boolean))) {
+			ctx.warn(
+				"剪映 / CapCut / Premiere 等工程里的素材是占位文件名：打开后请把原片、dub.wav、bgm.wav、base.mp4 指向本产物目录里的同名文件（原片指回你本地的源文件）",
+			);
+		}
+		const errors = dubErrors(out.errors);
+		if (!errors) return;
+		const labels = [...new Set(Object.keys(errors).map((k) => DUB_ERROR_LABELS[k.split(":")[0]!] ?? k))];
+		ctx.warn(`⚠️ 部分附带产物未生成：${labels.join("、")}（成片与配音轨照常可用；原因记在 result-output.json 的 errors）`);
+	},
+	mapResult(out) {
+		const report =
+			out.report && typeof out.report === "object" && !Array.isArray(out.report)
+				? (out.report as Record<string, unknown>)
+				: {};
+		const errors = dubErrors(out.errors);
+		return errors ? { ...report, errors } : report;
+	},
+};
+
 /**
  * mad —— 一键剪 MAD（local 型「纯本地工具、可选云端加料」形态首个成员，add-tool-mad）。
  * 素材文件夹（+可选 BGM）→ 自动选技法 → 生成 AE 母合成成片工程 .jsx。
@@ -1952,6 +2476,14 @@ const mad: ToolDescriptor = {
 		{ flag: "--duration <秒>", desc: "成片目标时长（默认 20，文案口径 15~30）" },
 		{ flag: "--seed <n>", desc: "随机种子（可复现；各工具语义见各自说明）" },
 		{ flag: "--refresh", desc: "强制忽略本地缓存、重拉当前 manifest 版本数据" },
+		{
+			flag: "--technique <值,…>",
+			desc: "只用点名的技法出片（技法名 / 别名 / pid，逗号分隔；零计费、不需 Key）",
+		},
+		{
+			flag: "--search <关键词>",
+			desc: "只查技法目录不出片（名/别名/类目包含匹配；与 --technique 互斥）",
+		},
 	],
 };
 
@@ -1996,6 +2528,7 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	videoSplitScreen,
 	videoLong2ShortPro,
 	audioTtsClone,
+	videoTranslateDub,
 	mad,
 ];
 
@@ -2010,11 +2543,44 @@ export function findTool(name: string, registry: ToolDescriptor[] = TOOL_REGISTR
  */
 export function validateRegistry(registry: ToolDescriptor[] = TOOL_REGISTRY): void {
 	const seen = new Set<string>();
+	// 同一长选项在多个工具里 MUST 同 flag 串、同 repeatable（link-add-purify-region-scope-cli §1.3）：
+	// 注册器按完整 flag 串去重，写法不一致会各注册一次、在 commander 里撞名，挡在发版门前。
+	const optionByLong = new Map<string, ToolOption>();
 	for (const d of registry) {
 		if (!d.name) throw new Error("descriptor 缺 name");
 		if (RESERVED_NAMES.has(d.name)) throw new Error(`descriptor 名与保留字冲突：「${d.name}」`);
 		if (seen.has(d.name)) throw new Error(`descriptor 名重复：「${d.name}」`);
 		seen.add(d.name);
+		// 附加输入（link-video-translate-dub-cli D3）：三条坏声明启动即拒
+		const extraInputs = d.extraInputs ?? [];
+		if (extraInputs.length && d.input.kind === "none") {
+			throw new Error(`input=none 的工具不得声明 extraInputs（零上传路径与附加文件上传语义冲突）：「${d.name}」`);
+		}
+		const extraOptKeys = new Set<string>();
+		const extraPayloadKeys = new Set<string>();
+		for (const x of extraInputs) {
+			if (x.payloadKey === "file_id") {
+				throw new Error(`附加输入 ${x.flag} 的 payloadKey 不得为 file_id（会盖掉主输入）：「${d.name}」`);
+			}
+			if (extraOptKeys.has(x.optKey)) throw new Error(`附加输入 optKey 重复：「${x.optKey}」（${d.name}）`);
+			if (extraPayloadKeys.has(x.payloadKey)) throw new Error(`附加输入 payloadKey 重复：「${x.payloadKey}」（${d.name}）`);
+			extraOptKeys.add(x.optKey);
+			extraPayloadKeys.add(x.payloadKey);
+		}
+		// 附加输入的 flag 与工具专属选项挂同一个族命令、同一套按 flag 去重 ⇒ 纳入同名长选项一致性检查
+		const declaredOptions: ToolOption[] = [
+			...(d.options ?? []),
+			...extraInputs.map((x): ToolOption => ({ flag: x.flag, desc: x.desc })),
+		];
+		for (const o of declaredOptions) {
+			const long = /--[a-z0-9-]+/i.exec(o.flag)?.[0];
+			if (!long) throw new Error(`工具选项缺长选项名：「${o.flag}」（${d.name}）`);
+			const prev = optionByLong.get(long);
+			if (prev && (prev.flag !== o.flag || Boolean(prev.repeatable) !== Boolean(o.repeatable))) {
+				throw new Error(`工具选项 ${long} 在多个工具里声明不一致：「${prev.flag}」与「${o.flag}」（${d.name}）`);
+			}
+			optionByLong.set(long, o);
+		}
 		if (!d.enabled && !d.disabledReason) throw new Error(`未启用工具缺 disabledReason：「${d.name}」`);
 		if (d.kind === "cloud" && !d.taskType) throw new Error(`cloud 型工具缺 taskType：「${d.name}」`);
 		if (d.kind === "cloud" && !d.priceKey) throw new Error(`cloud 型工具缺 priceKey：「${d.name}」`);

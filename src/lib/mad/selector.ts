@@ -74,6 +74,13 @@ export interface SelectOpts {
 	seed: number;
 	/** 目标平均窗长（秒，窗口数预算用；缺省 2.2）。 */
 	targetAvgSec?: number;
+	/**
+	 * 技法白名单（pid 集合，add-mad-technique-whitelist）。给定时先把池收窄成子池，
+	 * 轮转维度从「类目」换成「技法」（白名单可能全落在同一类目），去重粒度降到 uid
+	 * （白名单只有一两个技法时，pattern 级去重必然凑不满窗口预算）。
+	 * **不给时一律走原路径**——PRNG 的消费次序一变，所有老 `--seed` 就全漂了。
+	 */
+	allowPids?: Set<string>;
 }
 
 /** 窗口数预算：--duration ÷ 目标平均窗长，钳 [6,12]（文案口径落 8~10）。 */
@@ -87,15 +94,19 @@ export function budgetWindowCount(durationSec: number, targetAvgSec = 2.2): numb
  * 池不足时放宽去重（保证凑够预算），异向条目 cover 兜底。
  */
 export function selectWindows(opts: SelectOpts): ChosenWindow[] {
-	const { pool, videos, durationSec, orientation, seed } = opts;
+	const { videos, durationSec, orientation, seed } = opts;
 	const rnd = mulberry32(seed || 1);
 	const want = budgetWindowCount(durationSec, opts.targetAvgSec);
+	// 白名单态：子池 + 按技法轮转 + uid 级去重（见 SelectOpts.allowPids）
+	const whitelist = opts.allowPids && opts.allowPids.size > 0 ? opts.allowPids : null;
+	const pool = whitelist ? opts.pool.filter((e) => whitelist.has(String(e.pid))) : opts.pool;
 	if (pool.length === 0 || videos.length === 0) return [];
 
-	// 类目分组（保序）
-	const cats = [...new Set(pool.map((e) => e.cat))];
+	// 轮转分组（保序）：默认按类目，白名单态按技法
+	const groupOf = (e: PoolEntry) => (whitelist ? String(e.pid) : e.cat);
+	const cats = [...new Set(pool.map(groupOf))];
 	const byCat = new Map<string, PoolEntry[]>();
-	for (const c of cats) byCat.set(c, pool.filter((e) => e.cat === c));
+	for (const c of cats) byCat.set(c, pool.filter((e) => groupOf(e) === c));
 
 	const chosen: ChosenWindow[] = [];
 	const usedPatterns = new Set<string>();
@@ -117,10 +128,10 @@ export function selectWindows(opts: SelectOpts): ChosenWindow[] {
 	while (chosen.length < want && guard < want * (cats.length + 4) + 50) {
 		guard++;
 		let entry: PoolEntry | null = null;
-		// ② 类目轮转：从当前游标起找一个有候选的类目
+		// ② 轮转：从当前游标起找一个有候选的组（默认=类目；白名单态=技法，且去重降到 uid）
 		for (let k = 0; k < cats.length && !entry; k++) {
 			const cat = cats[(catCursor + k) % cats.length];
-			entry = tryPickFrom(byCat.get(cat) ?? [], false);
+			entry = tryPickFrom(byCat.get(cat) ?? [], !!whitelist);
 			if (entry) catCursor = (catCursor + k + 1) % cats.length;
 		}
 		// 全类目去重后无候选 → 放宽 pattern 去重再来一轮（仍避免同 uid）

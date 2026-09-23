@@ -81,7 +81,7 @@ description: Vlog 纪实类一站式成片图纸——纪实 Vlog 是散文的�
 - **禁幼稚拟声与过度儿化**：换成真实事实——数字与事实比拟声词有力。
 - **风格贴着素材走**：素材什么气质，稿子就什么气质，不加分不减分。
 
-**成片时长 = min(内容支撑, 素材支撑)**；旁白折算约 200–240 字/分钟。
+**成片时长 = min(内容支撑, 素材支撑)**；旁白折算用**挂钟语速**（按检查点①选定的音色取，取不到用缺省 ≈330 字/分钟）——口径与标定档案见 `skills/gtrk-travel-recap/references/speech-rate.md`，**MUST NOT 复制数值表**。
 
 ### 3.2 立神：找出那根线（★ 本类型的第一步，先于选材）
 
@@ -188,7 +188,7 @@ HKRR 四维（缺哪补哪）：
 3. **旁白稿 + 标题**：正文全文贴给用户（不是给路径），标注每段旁白挂在哪个位置；标题候选列出；
 4. **画幅**：横屏 B 站/西瓜=1920x1080，竖屏抖音=1080x1920。**素材几何与画幅不一致时明确提示**；
 5. **TTS 音色**：拉 catalog（`GET {apiBase}/task/tts/voices`，免鉴权）挑 2–4 个候选，**每个附试听链接**（`audition_url`）。⚠️ 纪实类的旁白与现场同期声会交替出现，**音色应贴近用户本人音色或明显区分**（避免观众困惑「这是谁在说」）——如用户本人出镜说话，优先建议同性别接近音色；
-6. **BGM 处置（双来源）**：用户自带 → 询问是否 `audio_separation` 取伴奏；未提供 → `gtrk matrix material "<按内容情绪写的检索词>" --scope audio --top-k 5 --diversity --json`，推荐 3–5 首**每首附试听链接**（`download_url`），`audio_type:"song"` 取 `accompaniment_url`。⚠️ 纪实类 BGM 要给同期声让路，音量口径同旅拍（-20dB）；
+6. **BGM 处置（双来源）**：用户自带 → 询问是否 `audio_separation` 取伴奏；未提供 → `gtrk matrix material "<按内容情绪写的检索词>" --scope audio --top-k 5 --diversity --json`，推荐 3–5 首**每首附试听链接**（`download_url`），`audio_type:"song"` 取 `accompaniment_url`。⚠️ **版权状态如实转述**：`is_copyright` 的语义是 `1/true`=**可商用**、`0/false`=**不可商用**（反直觉，MUST NOT 把 `false` 读成「无版权、可随便用」）；矩阵成员档**缺省搜全库**，MUST NOT 默认加 `--commercial-only`、也 MUST NOT 擅自剔掉 `false` 的候选，但推荐时 MUST 逐条带上派生位 `copyright_label` 的中文标签（不追问不阻塞）——用户特意说明只要可商用 / 要商用发布时才加 `--commercial-only` 收紧。⚠️ 纪实类 BGM 要给同期声让路，音量口径同旅拍（-20dB）；
 7. **字幕样式**：7 样式 × 11 色；用户没选用 default+雅黑（不追问不阻塞）。
 
 **试听链接义务（MUST）**：音色与 BGM 的推荐没有试听链接=未完成推荐。
@@ -240,11 +240,16 @@ gtrk mg lint "<工程目录>/mg/<composition_id>.html" --dispatch "<工程目录
 gtrk mg --project "<工程目录>" --json
 
 # ⑪ BGM（-20dB = 线性 0.10）
+# --beat-align 的高潮点取自 split.beats 的 narrative / container_stage（升华段 → 容器转折 → 回扣段）；
+# 拆分稿没带这两个字段 ⇒ 落 0.75×全片兜底档，**CLI 会明示那是猜的**。不接受就用 --climax <轨秒> 指定。
+# 两侧都够长时零平铺（恰好 1 个 clip）；不够长才按小节线平铺补齐、接缝吸附 downbeat。
 gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-align --json
 
 # ⑫ 字幕
 gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --json
 ```
+
+> **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
 
 **配方级参数口径**：
 - **旁白音量 = 1.0（线性），BGM = 0.10（-20dB）**：旁白是主角、BGM 垫底；⚠️ 契约 `volume` 字段**只写线性增益、MUST NOT 写 dB**（客户端面板显示的才是 dB）；

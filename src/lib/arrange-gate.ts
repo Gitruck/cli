@@ -43,8 +43,9 @@
 import type { BrollPlan } from "./matrix";
 import type { ArrangeOutcome } from "./arrange-apply";
 import { applyArrangeResponse, diffArrangeOutcome } from "./arrange-apply";
-import { type LocalArrangeOpts, projectArrangeRequest } from "./arrange-wire";
+import { type ArrangeRequest, type LocalArrangeOpts, projectArrangeRequest } from "./arrange-wire";
 import { type ArrangeDeps, type ArrangeEndpoint, requestArrange } from "./arrange-client";
+import { compareDecisionPin, type DecisionPinRelation, decisionPinCauses, LOCAL_DECISION_ALGO_PIN } from "./arrange-decision-pin";
 
 /** `local`=只本地（现状）；`shadow`=本地落轨 + 云端只对拍不采纳；`cloud`=采纳云端产物。 */
 export type ArrangeMode = "local" | "shadow" | "cloud";
@@ -83,6 +84,7 @@ export type FallbackReason =
 	| "unreachable" // ② 服务端熔断
 	| "rejected" // ③ 服务端业务拒绝（含 algo_pin 与双端复算不一致）
 	| "malformed" // 产物结构违约
+	| "decision_pin_mismatch" // 服务端跑的决策层版本与本机期望不符 ★ 已计费
 	| "self_check_failed"; // 本地复算自校验不一致 ★ 已计费
 
 export interface ArrangeGateResult {
@@ -97,6 +99,27 @@ export interface ArrangeGateResult {
 	units?: number;
 	/** false = 服务端幂等登记未写成，本次调用不受幂等保护。 */
 	idempotencyRecorded?: boolean;
+	/** `true` = 本次命中服务端**幂等回放**（未重新执行、未新增计费）。
+	 *
+	 * ⚠️ **缺席 ⟺ 真执行了**，这是服务端契约（回放时才置 true，其余情况整键缺席，见路由 swagger）。
+	 * MUST NOT 补 `false` 造出第三档「无法确定」——那会让每一次正常执行都被说成不确定，
+	 * 比 `link-arrange-replay-honesty` 修掉的那个无条件误报更没用（该件初版就这么写过，走查时判死）。
+	 *
+	 * ★ 2026-09-03 透传上来（fix-arrange-selfcheck-json-surface）：`arrange-gate` 内部早就在读它
+	 * （计费口径三分），但从不外传 ⇒ 机读面无从分辨「白花钱」与「没花钱」。
+	 *
+	 * ⚠️ 类型**只允许 `true`**（不是 `boolean`）：让「补 false」在**类型层**就编译不过，
+	 * 而不是靠下一个人记得读上面这段注释。 */
+	idempotentReplay?: true;
+	/** 决策层版本核对结论（`link-arrange-decision-pin-echo`）。**拿到过响应的那几路才有**
+	 * （没拿到响应就没有可核对的对象 —— 与 `fallback()` 助手不补服务端回显字段同一条纪律）。
+	 *
+	 * - `server`：服务端回传的版本；**服务端没给时是显式的 `null`，MUST NOT 整键省略**
+	 *   ——「服务端没给」与「这一档根本没跑到」是两件事，后者由整个 `decisionPin` 缺席表达。
+	 * - `relation`：四态判别结果。**服务端没给时整键缺席** —— 那一档**核对没有发生**，
+	 *   与「核对通过（same）」MUST NOT 说成一样。缺席 MUST NOT 被读作第五档「不确定」：
+	 *   它是「服务端尚未上线该字段」这一**确定的事实**，处置是「照现状」而不是「打个问号」。 */
+	decisionPin?: { server: string | null; local: string; relation?: DecisionPinRelation };
 }
 
 export interface ArrangeGateDeps {
@@ -131,6 +154,17 @@ export interface ArrangeGateDeps {
 	 *   扔掉一个手上就有的可用产物对用户没有任何好处。照旧回落 + 大声告知。
 	 */
 	strictCloud?: boolean;
+	/**
+	 * `--dump-request <file>` 的落盘钩子（**纯透传**，add-broll-arrange-atom 1.3）。
+	 *
+	 * 拿到的是**实际上行的那个对象**，在发请求**之前**回调——`unreachable` / `rejected`
+	 * 那几路同样留得下证据，而那恰恰是客服最需要复现的场景（跑成功的那次没人来问）。
+	 *
+	 * ⚠️ 本文件**不认识文件系统，也 MUST NOT 认识**：gate 的职责是取数路与四层回滚，
+	 *    往里塞一个 `writeFileSync` 会让「怎么落盘」这件事在两处各有一份口径。
+	 *    落点解析、工程目录禁写、多轮命名全在命令层（`makeArrangeDumper`）。
+	 */
+	dumpRequest?: (req: ArrangeRequest) => void;
 }
 
 /** 抽芯档下不再回落的那三种情形共用的错误。
@@ -177,6 +211,15 @@ export async function runArrangeWithFallback(
 	const mode = resolveArrangeMode(requestedMode);
 
 	if (mode === "local") {
+		// ★ 2026-09-03（fix-arrange-selfcheck-json-surface §1.5）：这条早返回原来**人读机读双静默**——
+		//   相邻的 out_of_scope 分支有 log.info，唯独总闸压回本地时一个字都不打。
+		//   `--arrange local` 已不受理之后，`GITRUCK_ARRANGE` 是**唯一**能把本地素材路压回本地引擎的开关，
+		//   而「悄悄换引擎」是最不该静默的一类事：用户拿到的是本地编排产物，却以为走的是云端。
+		//   ⚠️ 用 info 不用 warn —— 这是我们自己按下的阀，不是异常。
+		//   文案只说结论，MUST NOT 写 GITRUCK_ARRANGE 的设置方法（它不进用户文档）。
+		if (requestedMode !== "local") {
+			log.info("云端编排被总闸压回本地：本轮零云端调用、零计费，产物来自本地编排引擎（与云端可能不同解）。");
+		}
 		return { outcome: deps.runLocal(), source: "local", mode, ...(requestedMode !== "local" ? { fallback: "kill_switch" as const } : {}) };
 	}
 	if (!isLocalArrangeScope(plan)) {
@@ -191,6 +234,16 @@ export async function runArrangeWithFallback(
 	//: 抽芯只作用于 **cloud 档**：shadow 的全部意义就是「本地落轨 + 云端只对拍」，
 	//: 在那一档上抛错等于把一个纯观测档变成了硬依赖。
 	const strict = deps.strictCloud === true && mode === "cloud";
+	/** 「没拿到响应」那几路的共用早返回。
+	 *
+	 * ⚠️ **本助手 MUST NOT 补 `idempotentReplay`（也 MUST NOT 补任何服务端回显字段）。**
+	 * 它覆盖的 `unreachable` / `rejected` 两种（以及上面两条 `mode === "local"` /
+	 * `out_of_scope` 的同族早返回）**都没有拿到过响应** —— 服务端连一个字节都没回，
+	 * 那里没有「是不是幂等回放」这件事可以转述。补上去就是**无中生有**：
+	 * 缺席 ⟺ 真执行了（见 `ArrangeGateResult.idempotentReplay` 的契约注），
+	 * 于是补一个 `idempotentReplay: true` 会谎报「回放了、没花钱」，
+	 * 补 `false` 又会造出被判死过的第三档。**两种补法都是假话，唯一正确的是不补。**
+	 * 这条写在原地是刻意的：不写，下一个人会「顺手补齐」让形态整齐。 */
 	const fallback = (reason: FallbackReason, msg: string): ArrangeGateResult => {
 		if (strict) throw new ArrangeUnavailableError(reason, msg);
 		log.warn(`${msg}——本轮回落本地编排，工程照常完成。`);
@@ -200,6 +253,9 @@ export async function runArrangeWithFallback(
 	if (!deps.endpoint) return fallback("unreachable", "未配置编排端点");
 
 	const req = projectArrangeRequest(plan, lay, scoreFloor, opts, deps.costCap !== undefined ? { costCap: deps.costCap } : {});
+	// `--dump-request`：**发请求之前**落盘。放在 try 外、放在 await 前，是为了让
+	// 「连不上」「被拒」那两路也留得下证据——那才是有人会拿着来找我们的场景。
+	deps.dumpRequest?.(req);
 	let resp;
 	try {
 		resp = await (deps.request ?? requestArrange)(deps.endpoint, req, deps.clientDeps ?? {});
@@ -215,25 +271,113 @@ export async function runArrangeWithFallback(
 		throw e; // 非本层的异常不吞——吞了会把真 bug 伪装成「网络不好」
 	}
 
+	// 计费口径（link-arrange-replay-honesty）：**MUST NOT 无条件断言「已计费」**。
+	//
+	// 2026-09-02 真机事故：三次调用全部命中服务端幂等回放（服务端日志只有 SELECT、零 INSERT、
+	// 亚秒返回），按幂等设计**不二次扣费**；而 CLI 无条件告诉用户「白花了 109 编排量」，
+	// 三次全是误报。吓唬用户的错误信息比没有信息更坏 —— 它把注意力引向一笔不存在的账，
+	// 盖住了真正的问题（服务端回放了两次部署之前的结果）。
+	//
+	// 服务端**本来就给了**标记，只是这里一直没读。
+	// ⚠️ 契约是「命中幂等回放时为 `true`，**其余情况缺席**」（见路由 swagger）——
+	//    所以缺席**不是**「不确定」，它明确等于「真执行了」。
+	//    MUST NOT 把缺席当成第三档「无法确定」：那会让**每一次正常执行**都被说成不确定，
+	//    比原来的误报更没用（本件初版就这么写过，走查时判死）。
+	const billingNote =
+		resp.idempotent_replay === true
+			? "ℹ️ 本次是服务端**幂等回放**（未重新执行、未新增计费）。产物陈旧的常见成因是" +
+				"服务端决策层已升级而幂等条目尚未失效——重试即可，**不必去核对计费流水**。"
+			: `⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
+				"成片不受影响，但这笔账你花得不明不白——请把这条反馈给我们。";
+
+	// ── 决策层版本核对（link-arrange-decision-pin-echo）────────────────────────
+	//
+	// 放在**产物解析之前**：版本对不上时那份产物根本不可比，再去 diff 只会得到一堆
+	// 面目模糊的「自校验不一致 N 处」，把真正的原因（服务端跑的是另一版算法）埋掉。
+	// ⚠️ 也 MUST NOT 挪到 `diffs` 计算之后：**不可比就不比**，比出来的那个数正是
+	//    2026-09-03 事故里盖住根因的东西（用户看到「8 处不一致」，真正发生的是两侧
+	//    `blurry` 降权射程一个段级一个候选级）。
+	//
+	// ★ 比较按**版本号序**（`@vN` 取整），MUST NOT 用纯字符串相等：后者会让每一个
+	//   「服务端先上线、CLI 后发」的发版窗口都触发拒绝，把一次正常滚动变成全员回落。
+	//
+	// ⚠️ **缺席不算不一致**（合法的第三档）：服务端未升级到会回传它的版本，或命中的是
+	//    本字段落地之前写下的幂等条目。判成不一致会把每一个没升级的服务端都变成故障。
+	//    代价如实记：这一档下**核对没有发生**，与「核对通过」MUST NOT 在日志里说成一样，
+	//    机读面也以 `decisionPin.relation` 整键缺席如实表达（`server: null` 仍在场）。
+	const serverPin = resp.decision_algo_pin;
+	const pinRelation: DecisionPinRelation | undefined = typeof serverPin === "string" ? compareDecisionPin(serverPin, LOCAL_DECISION_ALGO_PIN) : undefined;
+	const decisionPin = {
+		server: serverPin ?? null,
+		local: LOCAL_DECISION_ALGO_PIN,
+		...(pinRelation !== undefined ? { relation: pinRelation } : {}),
+	};
+	if (pinRelation === "server_behind" || pinRelation === "unparsable") {
+		// 拒绝采纳 + **指名道姓**。成败判据只有一条：用户看到的是**两个版本号**，
+		// 不是「自校验不一致 N 处」—— 凡是让它退化回 diff 计数的写法一律判死。
+		// ⚠️ 成因清单是**条件式**的（`decisionPinCauses`）：列出的每一条都 SHALL 在
+		//    当时的部署态下真实可能发生，MUST NOT 硬编码一张恒定的清单。
+		log.warn(
+			`服务端跑的决策层是 ${serverPin}，本机期望 ${LOCAL_DECISION_ALGO_PIN} —— ` +
+				`${pinRelation === "unparsable" ? "版本形态不认识，两侧无从比较" : "服务端比本机旧"}，产物不可比，本轮弃用、改用本地编排。\n` +
+				`常见成因：${decisionPinCauses().join("；")}。\n` +
+				"出路：稍后重试；持续如此请把这条发给我们。\n" +
+				`${billingNote}`,
+		);
+		// ⚠️ `common` 在下面才定义（它依赖 diffs，而 diffs 依赖已解析的 remote）——
+		//    本档**刻意不解析产物**，故这里逐字段自建，MUST NOT 为了少写几行把 common 提上来：
+		//    那会强迫本档先解析一份已知不可比的产物。
+		// ⚠️ 本档**不走 `fallback()` 助手**：那条在 `strictCloud` 下抛错，而本档 SHALL 回落。
+		//    理由逐字沿用「自校验不一致仍回落」那条 —— 本地产物在发网络请求之前就已算出、
+		//    握在手上，扔掉它对用户没有任何好处。诚实性由指名道姓 + 机读面可见兑现，
+		//    不由把工程炸掉兑现。
+		// ⚠️ `diffs` **整键缺席**（没比过 ≠ 比了 0 处），MUST NOT 为了 JSON 形态整齐补 `diffs: []`。
+		return {
+			outcome: local,
+			source: "local",
+			mode,
+			fallback: "decision_pin_mismatch",
+			decisionPin,
+			...(resp.units !== undefined ? { units: resp.units } : {}),
+			...(resp.idempotency_recorded !== undefined ? { idempotencyRecorded: resp.idempotency_recorded } : {}),
+			...(resp.idempotent_replay === true ? { idempotentReplay: true as const } : {}),
+		};
+	}
+	if (pinRelation === undefined) {
+		log.info("服务端未回传决策层版本（旧版服务端或旧幂等条目）——本轮**未做**版本核对，产物按自校验结论处置。");
+	}
+
 	let remote: ArrangeOutcome;
 	try {
 		remote = applyArrangeResponse(resp, lay);
 	} catch (e) {
-		// 产物结构违约：**已计费**（服务端成功返回过），如实说
-		const billed =
-			`⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
-			"请把这条连同上面的违约明细反馈给我们。";
+		// 产物结构违约：服务端成功返回过，计费口径同上三分
+		const billed = `${billingNote}\n请把这条连同上面的违约明细反馈给我们。`;
 		if (strict) throw new ArrangeUnavailableError("malformed", `服务端编排产物结构违约：${(e as Error).message}\n${billed}`);
 		log.warn(`服务端编排产物结构违约，本轮弃用：${(e as Error).message}\n${billed}`);
-		return { outcome: local, source: "local", mode, fallback: "malformed", ...(resp.units !== undefined ? { units: resp.units } : {}) };
+		return {
+			outcome: local,
+			source: "local",
+			mode,
+			fallback: "malformed",
+			decisionPin,
+			...(resp.units !== undefined ? { units: resp.units } : {}),
+			...(resp.idempotent_replay === true ? { idempotentReplay: true as const } : {}),
+		};
 	}
 
 	const diffs = diffArrangeOutcome(local, remote);
 	const common = {
 		mode,
 		diffs,
+		// 版本核对结论恒随结果外传（含「服务端没给」那一档：`server: null` + `relation` 缺席）——
+		// 「服务端没给」与「这一档没跑到」是两件事，靠整键缺席分辨。
+		decisionPin,
 		...(resp.units !== undefined ? { units: resp.units } : {}),
 		...(resp.idempotency_recorded !== undefined ? { idempotencyRecorded: resp.idempotency_recorded } : {}),
+		// ⚠️ 缺席语义原样保留：`=== true` 才带上，MUST NOT 写成 `!== undefined`（那会把 false 也带出去、
+		//    造出第三档「无法确定」）。缺席 ⟺ 真执行了，见 `ArrangeGateResult.idempotentReplay` 的注。
+		...(resp.idempotent_replay === true ? { idempotentReplay: true as const } : {}),
 	};
 
 	if (resp.idempotency_recorded === false) {
@@ -253,13 +397,28 @@ export async function runArrangeWithFallback(
 	}
 
 	// cloud 档
+	// ── `server_ahead`（服务端比本机新）：**采纳服务端产物**，把差异降级成一句 INFO ──
+	//    §0.1 拍板取 ①（主理人 2026-09-03「都按你推荐的来」）。这是**正常发版窗口**的样子：
+	//    服务端先上线、CLI 后发，两侧算得不一样是**版本差**而不是故障。
+	//    另两档的代价是它被选中的理由：② 一律拒绝 ⇒ 每个发版窗口全员静默换引擎（虽有告警），
+	//    与抽芯后「本地素材只走云端」的口径直接冲突；③ 抛错 ⇒ 发版窗口内用户交不了片。
+	//    ⚠️ **代价 MUST 说出来**：这一轮的自校验安全网被关掉了 —— 我们采纳了一份**没能复算验证**
+	//       的产物。不说这句就是拿「一切正常」盖住「这轮没验」。
+	if (pinRelation === "server_ahead" && diffs.length) {
+		log.info(
+			`服务端决策层 ${serverPin} **新于**本机期望 ${LOCAL_DECISION_ALGO_PIN}：本轮 ${diffs.length} 处复算差异属**版本差**，` +
+				"不作为拒绝理由，已采纳服务端产物。\n" +
+				"⚠️ 代价如实记：这一轮的**自校验安全网被关掉了**（差异无从区分是版本差还是真 bug）。\n" +
+				"建议升级 CLI（`npm i -g @gitruck/cli`）后重跑，让两侧回到同一版。",
+		);
+		return { outcome: remote, source: "cloud", ...common };
+	}
 	if (deps.selfCheck !== false && diffs.length) {
-		// ★ 已计费却弃用产物——这是四层里唯一一处「用户付了钱、我们扔了东西」，MUST 大声说
+		// ★ 弃用服务端产物。计费口径走上面的三分（MUST NOT 在这里再写一份「已计费」断言）。
 		log.warn(
 			`本地复算自校验不一致（${diffs.length} 处），本轮弃用服务端产物、改用本地编排：\n  ${diffs.slice(0, 5).join("\n  ")}` +
 				(diffs.length > 5 ? `\n  …另有 ${diffs.length - 5} 处` : "") +
-				`\n⚠️ 本次调用服务端已执行并计费（编排量 ${resp.units ?? "?"}），而产物被我们丢弃了。` +
-				"成片不受影响，但这笔账你花得不明不白——请把这条反馈给我们。",
+				`\n${billingNote}`,
 		);
 		return { outcome: local, source: "local", fallback: "self_check_failed", ...common };
 	}

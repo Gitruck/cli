@@ -19,6 +19,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { r3, sec2ms } from "./frame-domain";
 import {
 	describeImages,
 	putCachedDescribe,
@@ -27,6 +28,7 @@ import {
 	type MaterialDescribe,
 } from "./describe";
 import { extractFrameJpg, openLocalIndexDb, type SqlDb } from "./local-index";
+import { readJsonSync } from "./read-json";
 
 /** 单句审计条目（alignment-audit.json items[]）。 */
 export interface AlignmentItem {
@@ -71,6 +73,20 @@ export interface AlignmentReport {
 		lead_total: number;
 		lead_mismatch: number;
 		lead_rate: number | null;
+	};
+	/** [fix-describe-billing-report-honesty] 计费账面——本命令走的是与 `matrix describe`
+	 * **同一个** describe 端点，服务端对同一批账号适用同一套豁免（`gc_member_type=internal`
+	 * ⇒ `skip_quota_check` ⇒ 预扣整段短路），故报数也走同一条判据。
+	 * 此前本文件全文 grep 不到 `exempt`，无条件按原价确认并报数。 */
+	billing: {
+		/** 计费身份豁免（gc_member_type=internal）。 */
+		exempt: boolean;
+		/** 实耗口径：豁免时 0。 */
+		credits_estimated: number;
+		/** 原价（= 待判定帧数 × 1 积分）。 */
+		credits_would_be: number;
+		/** 身份探针失败：按非豁免继续，但「探不到」MUST NOT 呈现成「确定不豁免」。 */
+		probe?: "failed";
 	};
 	items: AlignmentItem[];
 }
@@ -120,7 +136,7 @@ export function pairSentencesWithClips(args: {
 		const base: AlignmentItem = {
 			id: u.id,
 			sentence: u.text,
-			track_mid: Math.round(mid * 1000) / 1000,
+			track_mid: r3(mid),
 			clip_id: null,
 			source_path: null,
 			source_sec: null,
@@ -142,7 +158,7 @@ export function pairSentencesWithClips(args: {
 			role,
 			clip_id: clip.clip_id ?? null,
 			source_path: path,
-			source_sec: Math.round(srcSec * 1000) / 1000,
+			source_sec: r3(srcSec),
 		};
 	});
 }
@@ -164,6 +180,11 @@ export interface AlignmentRunDeps {
 	/** 计费确认（--yes 跳过）。 */
 	confirm: (msg: string) => Promise<boolean>;
 	yes: boolean;
+	/** [fix-describe-billing-report-honesty] 计费身份豁免探测（`gc_member_type === "internal"`）。
+	 * 由 `src/commands/qc.ts` 的 `runAlignmentMode` 注入（那里已 loadConfig，无需新增配置读取）。
+	 * 缺席 = 不探 = 按非豁免（保守，不会少收）；探针抛错同样按非豁免继续——
+	 * 对齐质检是内部质量武器，MUST NOT 因为一个计费旁支的探针而整条命令红。 */
+	probeExempt?: () => Promise<boolean>;
 	onLog?: (msg: string) => void;
 	/** 测试注入：服务端批判定替身。 */
 	describeBatch?: (images: string[], claims: (string | null)[]) => Promise<MaterialDescribe[]>;
@@ -175,26 +196,25 @@ export interface AlignmentRunDeps {
 
 export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps): Promise<AlignmentReport> {
 	const log = deps.onLog ?? (() => {});
-	const readJson = (p: string): unknown => JSON.parse(readFileSync(p, "utf-8"));
 	const gtrkPath = join(projectDir, "gtrk", "project.gtrk");
 	const transcriptPath = join(projectDir, "transcript", "transcript.json");
 	if (!existsSync(gtrkPath) || !existsSync(transcriptPath)) {
 		throw new Error(`工程不完整：需要 ${gtrkPath} 与 ${transcriptPath}（oralcut/project init 产物布局）`);
 	}
-	const gtrk = readJson(gtrkPath) as {
+	const gtrk = readJsonSync(gtrkPath, ".gtrk 工程") as {
 		video_track?: Array<{ track_timeline?: GtrkClip[] }>;
 		materials?: Array<{ id?: string; path?: string }>;
 	};
-	const transcript = readJson(transcriptPath) as {
+	const transcript = readJsonSync(transcriptPath, "transcript.json") as {
 		utterances?: Array<{ id: string; text: string; st: number; ed: number }>;
 	};
 	const planPath = join(projectDir, "split", "broll-plan.json");
-	const quoteSpans = existsSync(planPath) ? quoteSpansFromPlan(readJson(planPath)) : [];
+	const quoteSpans = existsSync(planPath) ? quoteSpansFromPlan(readJsonSync(planPath, "plan")) : [];
 	// [七三开] 卡点句 = 各 beat 的 span.from（dispatch 派单里的领衔句）；无 dispatch 时全按 lead 兜底。
 	const dispatchPath = join(projectDir, "split", "dispatch.json");
 	let leadIds: Set<string> | undefined;
 	if (existsSync(dispatchPath)) {
-		const dsp = readJson(dispatchPath) as { film_broll?: Array<{ span?: { from?: string } }> };
+		const dsp = readJsonSync(dispatchPath, "派单清单") as { film_broll?: Array<{ span?: { from?: string } }> };
 		const ids = (dsp.film_broll ?? []).map((f) => f.span?.from).filter((x): x is string => !!x);
 		if (ids.length > 0) leadIds = new Set(ids);
 	}
@@ -234,15 +254,38 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 		auditable.push(it);
 	}
 
-	// ── 计费确认（1 积分/帧；稿句级粒度=防冗余铁则）──
-	const credits = auditable.length * DESCRIBE_CREDITS_PER_IMAGE;
-	if (auditable.length > 0 && !deps.yes) {
-		const go = await deps.confirm(
-			`对齐质检将逐句判定 ${auditable.length} 帧（约 ${credits} 积分，1 积分/帧；引用段已按结构校验跳过）。确认继续？`,
-		);
-		if (!go) {
-			rmSync(tmp, { recursive: true, force: true });
-			throw new Error("对齐质检计费确认被拒绝——零调用零计费");
+	// ── 计费确认（1 积分/句帧；稿句级粒度=防冗余铁则）──
+	// [fix-describe-billing-report-honesty] 接上 describe 的同一条计费身份判据：
+	// 两边打的是同一个 describe 端点，服务端对同一批账号零扣，凭什么这边还按原价弹确认闸。
+	const creditsWouldBe = auditable.length * DESCRIBE_CREDITS_PER_IMAGE;
+	let exempt = false;
+	let probeFailed = false;
+	if (auditable.length > 0 && deps.probeExempt) {
+		try {
+			exempt = await deps.probeExempt();
+		} catch (e) {
+			// 探针失败 MUST NOT 成为质检的新失败点：按非豁免走确认闸，命令照常跑完。
+			probeFailed = true;
+			log(
+				`[对齐质检] 计费身份探测失败（${e instanceof Error ? e.message : String(e)}）——按**非豁免**保守继续（原价 ${creditsWouldBe} 积分），实际可能不扣`,
+			);
+		}
+	}
+	const credits = exempt ? 0 : creditsWouldBe;
+	if (auditable.length > 0) {
+		if (exempt) {
+			// 豁免免确认仅提示——与 describe 既有纪律同调（护栏是为花钱设的，不花钱就别拦路）
+			log(
+				`[对齐质检] 计费豁免（同合云内部成员，gc_member_type=internal）——原价 ${creditsWouldBe} 积分，本次实耗 0，免确认继续`,
+			);
+		} else if (!deps.yes) {
+			const go = await deps.confirm(
+				`对齐质检将逐句判定 ${auditable.length} 帧（约 ${credits} 积分，1 积分/帧，异步任务计费：提交预扣→完成结算，失败自动退款；引用段已按结构校验跳过）。确认继续？`,
+			);
+			if (!go) {
+				rmSync(tmp, { recursive: true, force: true });
+				throw new Error("对齐质检计费确认被拒绝——零调用零计费");
+			}
 		}
 	}
 
@@ -268,7 +311,7 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 			// 客观卡片顺手写缓存（免费副产物；claim 字段刻意不入缓存——判定随稿句走，不可复用）
 			if (deps.db && it.source_path !== null && it.source_sec !== null) {
 				try {
-					putCachedDescribe(deps.db, `align-${basename(it.source_path)}`, Math.round(it.source_sec * 1000), {
+					putCachedDescribe(deps.db, `align-${basename(it.source_path)}`, sec2ms(it.source_sec), {
 						...r,
 						claim_aligned: undefined,
 						claim_verdict: undefined,
@@ -308,6 +351,12 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 			lead_mismatch: judged.filter((i) => i.role !== "follow" && i.verdict === "mismatch").length,
 			lead_rate: alignmentRate(judged.filter((i) => i.role !== "follow")),
 		},
+		billing: {
+			exempt,
+			credits_estimated: credits,
+			credits_would_be: creditsWouldBe,
+			...(probeFailed ? { probe: "failed" as const } : {}),
+		},
 		items,
 	};
 
@@ -329,6 +378,15 @@ export async function runAlignmentQc(projectDir: string, deps: AlignmentRunDeps)
 		const role = it.role === "follow" ? "跟随" : it.skipped === "quote" ? "引用" : "**卡点**";
 		md.push(`| ${it.id} | ${role} | ${it.sentence.replace(/\|/g, "\\|")} | ${img} | ${verdict} | ${(it.reason ?? it.frame_desc ?? "").replace(/\|/g, "\\|")} |`);
 	}
+	// 计费如实报一行（fix-describe-billing-report-honesty）：报告是交付话术要转述的实耗来源，
+	// 把「实耗 0」只藏在跑命令时的一行 stderr 里，事后看报告的人就读不到了。
+	md.push(
+		"",
+		report.billing.exempt
+			? `计费：豁免（同合云内部成员，gc_member_type=internal）——原价 ${report.billing.credits_would_be} 积分，本次实耗 **0**。`
+			: `计费：${report.billing.credits_estimated} 积分（1 积分/句帧，异步任务计费：提交预扣→完成结算，失败自动退款）` +
+					`${report.billing.probe === "failed" ? "；⚠️ 计费身份没探到，此处按**非豁免**保守报数，实际可能不扣" : ""}。`,
+	);
 	writeFileSync(join(qcDir, "alignment-audit.md"), md.join("\n"), "utf-8");
 	return report;
 }

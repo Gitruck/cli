@@ -11,7 +11,28 @@ import { existsSync, mkdirSync, cpSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { packageRoot } from "../lib/paths";
-import { log } from "../lib/log";
+import { log, routeLogsToStderr } from "../lib/log";
+import { currentVersion } from "../lib/version";
+import { appendStyleSkillEntry, type AppendStyleSkillResult, type StyleSkillEntry } from "../lib/column-config";
+import { readUserConfig } from "../lib/user-config";
+import {
+	catalogSnapshotDate,
+	formatHuman,
+	isScene,
+	isTechniqueEntry,
+	listScenes,
+	lookupByRepo,
+	recommend,
+	toJson,
+	type CatalogProduces,
+} from "../lib/third-party-catalog";
+import {
+	buildSkillManifest,
+	detectStoreMode,
+	listPackagedSkills,
+	unifiedSkillStore,
+	writeSkillManifest,
+} from "../lib/skill-freshness";
 
 // 仓库内打包分发的 skill 名（各含 SKILL.md；部分另带 references/ 或 agents/）
 export const SKILL_NAMES = [
@@ -39,6 +60,8 @@ export const SKILL_NAMES = [
 	"gtrk-voiceover",
 	// 解说链垂类示例（add-food-recap-skill）：探店/密着/做饭流程 → 美食解说成片
 	"gtrk-food-recap",
+	// Vlog 纪实类组合图纸（add-vlog-docu-skill）：现场同期声 × 后期旁白双声道交替 → 纪实成片工程；主理人 2026-09-10 拍板入清单
+	"gtrk-vlog-docu",
 ] as const;
 
 export interface InstallSkillOptions {
@@ -259,9 +282,35 @@ function validateBundledSkills(source: string): boolean {
 	return allOk;
 }
 
+/**
+ * 给一个已装存储写「一致性戳」（manifest：包版本 + 逐 skill 内容指纹/形状签名 + 安装时间）。
+ *
+ * 本轮只做 spec 的 ③ 过期检测：安装形态没动，统一存储仍是快照，
+ * 戳的作用就是让**后续命令**能廉价判出「这份快照比包内正本旧了」。
+ * 装了几个就戳几个（`names` 传实际落地的那一组），别把没装的写进去。
+ * 写不进去 ⇒ 静默返回 false：那只意味着「日后核对判不出、静默跳过」，MUST NOT 打扰用户。
+ */
+function stampSkillStore(storeDir: string, source: string, names: readonly string[]): boolean {
+	if (names.length === 0) return false;
+	try {
+		return writeSkillManifest(
+			storeDir,
+			buildSkillManifest({
+				source,
+				names,
+				cliVersion: currentVersion(),
+				mode: detectStoreMode(storeDir, source, names),
+			}),
+		);
+	} catch {
+		return false;
+	}
+}
+
 function copySkillsToTarget(dir: string, source: string, targetLabel?: string): boolean {
 	const destRoot = resolve(dir);
 	let allOk = validateBundledSkills(source);
+	const copied: string[] = [];
 	for (const name of SKILL_NAMES) {
 		const src = join(source, name);
 		if (!existsSync(join(src, "SKILL.md"))) continue;
@@ -269,6 +318,7 @@ function copySkillsToTarget(dir: string, source: string, targetLabel?: string): 
 		try {
 			mkdirSync(dest, { recursive: true });
 			cpSync(src, dest, { recursive: true });
+			copied.push(name);
 			log.ok(`已安装 ${name}${targetLabel ? ` → ${targetLabel}` : ""}：${join(dest, "SKILL.md")}`);
 		} catch (error) {
 			allOk = false;
@@ -277,6 +327,9 @@ function copySkillsToTarget(dir: string, source: string, targetLabel?: string): 
 			);
 		}
 	}
+	// 一致性戳：这一段是 cpSync 快照，装完即冻结；不留戳就没人能判断它有没有过期
+	// （change fix-skill-install-staleness · 2026-09-04 真机事故）。写失败是良性降级，不打扰用户。
+	stampSkillStore(destRoot, source, copied);
 	if (targetLabel) {
 		log.info(`已写入 ${targetLabel}；若当前会话未出现新 Skill，请重启或刷新该 Agent。`);
 	} else {
@@ -345,6 +398,13 @@ export function installSkill(opts: InstallSkillOptions = {}): boolean {
 			log.warn(`skills 适配器安装失败（退出码 ${result.status ?? "未知"}）。`);
 			log.info(`可查看支持的 Agent ID：npx -y skills add "${source}" --list`);
 		}
+
+		// 一致性戳：适配器把整个 source 目录交给它自己的发现器（凡带 SKILL.md 的目录都装），
+		// 所以这里按**包里实际有什么**戳，而不是按 SKILL_NAMES —— 两者不一定同步
+		// （在飞 change 新加的 skill 会先落磁盘、后进分发清单）。
+		if (adapterOk) {
+			stampSkillStore(unifiedSkillStore(opts.home ?? homedir()), source, listPackagedSkills(source));
+		}
 	}
 
 	let supplementalOk = true;
@@ -360,8 +420,212 @@ export function installSkill(opts: InstallSkillOptions = {}): boolean {
 	return sourcesOk && adapterOk && supplementalOk;
 }
 
+// ── 第三方 skill：推荐目录与安装登记（change add-third-party-skill-catalog）──────────────
+
+const REPO_SHAPE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+const PRODUCES_VALUES: readonly CatalogProduces[] = ["MG", "AI_DRAMA", "FILM_BROLL", "A_ROLL", "script", "none"];
+
+/** `gtrk skills recommend`：无场景列枚举；有场景按 tier 输出。人读恒走 stderr；`--json` 时 stdout 只有 JSON。 */
+export function recommendSkills(opts: { scene?: string; json?: boolean } = {}): number {
+	routeLogsToStderr();
+	if (!opts.scene) {
+		const scenes = listScenes();
+		log.step(`第三方 skill 推荐目录（快照 ${catalogSnapshotDate()}，条目以仓库页为准）——按场景查：gtrk skills recommend --scene <id>`);
+		for (const s of scenes) log.info(`${s.id.padEnd(13)} ${s.label}（${s.count} 条）`);
+		if (opts.json) process.stdout.write(`${JSON.stringify(scenes, null, 2)}\n`);
+		return 0;
+	}
+	if (!isScene(opts.scene)) {
+		log.err(`未知场景「${opts.scene}」；合法场景：${listScenes().map((s) => s.id).join(" / ")}`);
+		return 1;
+	}
+	const entries = recommend(opts.scene);
+	if (opts.json) {
+		process.stdout.write(`${JSON.stringify(toJson(entries), null, 2)}\n`);
+		return 0;
+	}
+	log.step(`场景「${opts.scene}」推荐 ${entries.length} 条（快照 ${catalogSnapshotDate()}，star 与许可以仓库页为准；推荐是建议，装不装是你的选择）`);
+	process.stderr.write(`${formatHuman(entries)}\n`);
+	return 0;
+}
+
+export interface AddSkillOptions {
+	skill?: string[];
+	produces?: string;
+	column?: string;
+	agents?: string;
+	all?: boolean;
+	copy?: boolean;
+	/** 仅供测试覆盖。 */
+	columnsDir?: string;
+	home?: string;
+}
+
+export interface AddSkillDeps {
+	/** 透传上游 `skills add`；测试注入假实现。 */
+	run?: (invocation: { command: string; args: string[]; shell: boolean }) => {
+		status: number | null;
+		stdout?: string;
+		stderr?: string;
+		error?: Error;
+	};
+	appendEntry?: typeof appendStyleSkillEntry;
+	/** 缺省栏目 id 来源（config.json `defaultColumn`）；测试注入。 */
+	defaultColumn?: () => string | undefined;
+}
+
+export interface AddSkillResult {
+	ok: boolean;
+	repo: string;
+	columnId?: string;
+	entries: StyleSkillEntry[];
+	registrations: AppendStyleSkillResult[];
+	/** 登记后的提示（车道绑定来源 / 技法族 / 未绑定），与人读日志同文；供测试与机读。 */
+	notices: string[];
+	reason?: string;
+}
+
+/** 上游 `skills add <owner/repo>` 的参数拼装：与随包安装同一条路，多 `--skill` 逐个透传。 */
+export function buildThirdPartyAdapterArgs(
+	repo: string,
+	opts: Pick<AddSkillOptions, "skill" | "agents" | "all" | "copy"> = {},
+): string[] {
+	const args = ["-y", "skills", "add", repo, "-g", "-y"];
+	for (const s of opts.skill ?? []) args.push("--skill", s);
+	if (opts.all) {
+		args.push("--all");
+	} else {
+		for (const agent of splitAgentSelection(opts.agents).upstream) args.push("--agent", agent);
+	}
+	if (opts.copy) args.push("--copy");
+	return args;
+}
+
+/**
+ * 决定登记条目的 produces / routing：显式 `--produces` > 目录值 > 管线外（routing:none）。
+ * `script` / `none` 恒带 `routing:"none"`（spec：管线外产物不猜车道）。
+ * `status` 取目录条目的 `origin`（一方 = "first-party"），无则 "third-party"；技法族（场景 technique）条目目录值即 none。
+ */
+export function resolveRegistration(
+	repo: string,
+	skills: string[],
+	producesOpt?: string,
+): { entries: StyleSkillEntry[]; fromCatalog: boolean; unbound: boolean; technique: boolean } {
+	const cat = lookupByRepo(repo);
+	const technique = Boolean(cat && isTechniqueEntry(cat));
+	const status = cat?.origin ?? "third-party";
+	const produces = (producesOpt ?? cat?.produces) as CatalogProduces | undefined;
+	const names = skills.length > 0 ? skills : cat?.skills?.length ? [cat.skills[0]] : [repo.split("/")[1]];
+	const entries: StyleSkillEntry[] = names.map((name) => {
+		const e: StyleSkillEntry = { id: name, ref: `${repo}#${name}`, status };
+		if (produces) {
+			e.produces = produces;
+			if (produces === "script" || produces === "none") e.routing = "none";
+		} else {
+			e.routing = "none";
+		}
+		return e;
+	});
+	return { entries, fromCatalog: !producesOpt && Boolean(cat?.produces), unbound: !produces, technique };
+}
+
+/** `gtrk skills add <owner/repo>`：透传上游安装 → 成功才登记进栏目配置 `style.skills`（追加、去重、失败不登记）。 */
+export function addThirdPartySkill(repo: string, opts: AddSkillOptions = {}, deps: AddSkillDeps = {}): AddSkillResult {
+	const fail = (reason: string): AddSkillResult => ({ ok: false, repo, entries: [], registrations: [], notices: [], reason });
+	if (!REPO_SHAPE.test(repo)) return fail(`仓名格式应为 owner/repo：${repo}`);
+	if (opts.produces !== undefined && !PRODUCES_VALUES.includes(opts.produces as CatalogProduces)) {
+		return fail(`--produces 取值应为 ${PRODUCES_VALUES.join(" / ")}：${opts.produces}`);
+	}
+	let args: string[];
+	try {
+		args = buildThirdPartyAdapterArgs(repo, opts);
+	} catch (error) {
+		return fail(error instanceof Error ? error.message : String(error));
+	}
+	const invocation = npxInvocation(args);
+	const run =
+		deps.run ??
+		((inv) => {
+			const r = spawnSync(inv.command, inv.args, {
+				stdio: ["inherit", "pipe", "pipe"],
+				shell: inv.shell,
+				encoding: "utf8",
+				maxBuffer: 16 * 1024 * 1024,
+			});
+			return { status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "", error: r.error };
+		});
+	log.info(`透传通用 Agent Skills 适配器安装 ${repo}${opts.skill?.length ? `（skill：${opts.skill.join(", ")}）` : ""}`);
+	const result = run(invocation);
+	if (result.stdout) process.stdout.write(result.stdout.endsWith("\n") ? result.stdout : `${result.stdout}\n`);
+	if (result.stderr) process.stderr.write(result.stderr);
+	if (result.error) return fail(`无法启动 skills 适配器：${result.error.message}`);
+	if (result.status !== 0) return fail(`上游 skills 适配器安装失败（退出码 ${result.status ?? "未知"}），未登记`);
+
+	const columnId = opts.column ?? (deps.defaultColumn ?? (() => readUserConfig().defaultColumn))() ?? "default";
+	const { entries, fromCatalog, unbound, technique } = resolveRegistration(repo, opts.skill ?? [], opts.produces);
+	const notices: string[] = [];
+	const notice = (msg: string, level: "info" | "warn" = "info") => {
+		notices.push(msg);
+		log[level](msg);
+	};
+	const append = deps.appendEntry ?? appendStyleSkillEntry;
+	const registrations: AppendStyleSkillResult[] = [];
+	for (const entry of entries) {
+		try {
+			const r = append(entry, { columnId, columnsDir: opts.columnsDir });
+			registrations.push(r);
+			if (r.appended) log.ok(`已登记 ${entry.ref} → 栏目「${columnId}」${r.created ? "（新建配置文件）" : ""}：${r.path}`);
+			else log.info(`已登记过 ${entry.ref}，未重复追加：${r.path}`);
+		} catch (error) {
+			return { ok: false, repo, columnId, entries, registrations, notices, reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+	if (technique) {
+		const lane = opts.produces;
+		if (lane === undefined || lane === "none" || lane === "script") {
+			notice("技法族条目：不绑车道（routing:none），/gtrk-mg 在 MG 步按槽位取用，不当 MG 生产 skill。");
+		} else {
+			notice(`目录记该仓为技法族（不绑车道），已按你的指定登记为 ${lane} 生产者——它会被当作本栏目 ${lane} 生产 skill 解析。`, "warn");
+		}
+	} else if (fromCatalog) {
+		notice(`车道绑定取自推荐目录：produces=${entries[0]?.produces}`);
+	}
+	if (unbound) notice("未绑定车道（routing:none）；需要参与铺轨请用 --produces MG|AI_DRAMA|FILM_BROLL 指定。");
+	if (!opts.column && columnId === "default") {
+		log.info("未指定 --column 且 config.json 无 defaultColumn：已登记到栏目「default」；要让派单消费它，运行时传 --column default 或在 ~/.gitruck/config.json 设 defaultColumn。");
+	}
+	return { ok: true, repo, columnId, entries, registrations, notices };
+}
+
 export function registerSkills(program: Command): void {
 	const skills = program.command("skills").description("管理跨 Agent Skills（通用适配器 + gtrk 补充宿主）");
+
+	skills
+		.command("recommend")
+		.description("skill 推荐目录（第三方 + 一方技法族）：不带 --scene 列场景；--scene <id> 按场景给条目（用途 / 安装 / 许可 / 登记）。无状态、不联网")
+		.option("--scene <id>", "场景 id：hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique（一方排版技法族）")
+		.option("--json", "机读：stdout 只输出 JSON，人读转 stderr")
+		.action((opts: { scene?: string; json?: boolean }) => {
+			const code = recommendSkills(opts);
+			if (code !== 0) process.exitCode = code;
+		});
+
+	skills
+		.command("add <repo>")
+		.description("安装第三方 skill（透传通用 skills 适配器）并登记进栏目配置 style.skills；repo 形如 owner/repo")
+		.option("--skill <name>", "多 skill 仓只装指定 skill（可重复）", (v: string, prev: string[] = []) => [...prev, v], [])
+		.option("--produces <lane>", "产物绑定车道：MG / AI_DRAMA / FILM_BROLL / A_ROLL / script / none（缺省取目录值，没有则 routing:none）")
+		.option("--column <id>", "登记到哪个栏目（缺省 config.json 的 defaultColumn）")
+		.option("--agents <list>", "指定 Agent ID，逗号分隔")
+		.option("--all", "安装到全部已登记 Agent")
+		.option("--copy", "每个 Agent 各复制一份")
+		.action((repo: string, opts: AddSkillOptions) => {
+			const r = addThirdPartySkill(repo, opts);
+			if (!r.ok) {
+				log.err(r.reason ?? "安装失败");
+				process.exitCode = 1;
+			}
+		});
 
 	skills
 		.command("install")

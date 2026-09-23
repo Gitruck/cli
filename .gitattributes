@@ -6,3 +6,14 @@
 # 注：对拍本身比的是**反序列化后的结构**（见 fixtures/broll-arrange/README.md），
 # 不依赖换行符；本条是为了让「文件字节」这个更朴素的判据也能用。
 test/fixtures/broll-arrange/** text eol=lf
+
+# IR 编译器与它的同步指纹旁挂（change move-text-ir-compiler-to-client）。
+# 这一对是**跨仓一致性的判据**：`compile.ts` 有两份（cli 正本 + opencut 副本），
+# 各仓的用例只校「我这份的 sha256 == 我这边的旁挂」，而旁挂只由 `text-ir-sync.mjs` 写。
+#
+# 判据是**文件字节**，所以换行符必须与平台无关。本机 core.autocrlf=true，实测：
+# 全新检出会把 compile.ts 转成 649 处 CRLF，sha256 从 78bbc50d… 变成 86c50637…，
+# 指纹用例在**任何一台 Windows 新克隆的机器上当场判红**——包括打包发版那台。
+# 不钉的话，这道闸就从「挡两份实现漂移」退化成「挡你是不是在 Linux 上」。
+src/lib/text-ir/compile.ts text eol=lf
+src/lib/text-ir/compile.ts.sha256 text eol=lf

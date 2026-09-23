@@ -22,7 +22,7 @@ description: 通用解说视频创作图纸（解说链正本）——把「一�
 
 **素材来源边界**：解说的主体画面**只用本地素材**——素材就是被讲的对象本身，平台素材库在主体画面上是范畴错误；平台库最多补空镜/概念镜头作辅料，**缺省不掺、问了才加**。
 
-## 二、输入契约与开工六问
+## 二、输入契约与开工七问
 
 **输入**：本地素材语料（素材夹，或单条长片——影视/游戏实况先建索引拆条）±稿件 ± 用户自己念的口播毛片。**MUST NOT 执行任何网络下载**（版权责任归用户）。
 
@@ -34,8 +34,32 @@ description: 通用解说视频创作图纸（解说链正本）——把「一�
 | ④ | 声音基座 | **问用户**：TTS 配音（挑音色附试听）/ 你自己念（给口播毛片） | §五 基座路由：TTS 走配音工程；口播毛片先走 `gtrk oralcut` 粗剪（外录先 `gtrk audio align` 对轨） |
 | ⑤ | 要不要引用段 | **问用户**，按题材给建议：影视/游戏强建议开，旅拍/探店可选 | §四；答不要 = 全程零引用动作 |
 | ⑥ | 画幅 | 按投放平台问；素材几何 ffprobe 取证 | 画布；横屏素材硬做竖屏有黑边/裁切，丑话先说 |
+| ⑦ | **源片语种 / 方言** | **问用户**：听一段 / 看片内有无内嵌字幕 / 看素材出处 | `gtrk transcript --lang`（`zh-CN` 普通话 / **`zh-HK` 粤语** / `en-US` / `ja-JP`…）；素材通篇无对白答「无对白 / 不转写」即闭合，MUST NOT 因缺这个答案阻塞开工 |
 
-> ②③④⑤ MUST 问用户、MUST NOT 代猜；一张表一次问完，不碎问。
+> ②③④⑤⑦ MUST 问用户、MUST NOT 代猜；一张表一次问完，不碎问。
+> ⟲ **推荐面（公约 §三‴）**：问答收口时多问一句「要不要看看第三方 skill？」，不列名；题材命中场景触发词才多 1–2 句定向推（`gtrk skills recommend --scene <id> --json` 取 tier 最高者，各给一句为什么），用户追问才展开完整块；轻提加定向合计不超三句、同会话同场景只推一次、答「不要」零动作。
+>
+> ⟲ **2026-09-02 六问补为七问（新增 ⑦ 语种）**：260902 真机一条**粤语对白**的片子按缺省 `zh-CN`
+> 静默转写跑完，整条链上无一处问过语种。⑦ MUST 早于 ① 的转写发起：转写是计费动作且在检查点①**之前**，
+> **非中文素材**（`en-US` / `ja-JP`…）语种传错，用户在检查点①拿到的稿子就是坏的、重来要再付一次 ASR
+> （真机 `--lang en-US` 出英文稿即实证）；且豆包 14 项白名单外的语种码在 `word_level=true` 下会裸
+> `KeyError` 炸任务。**MUST NOT 以缺省 `zh-CN` 静默开跑**，检查点①对语种只做过目复核。
+>
+> ⟲ **2026-09-02 同日订正（这一问的原粤语论证段已被求证推翻，问本身照旧成立）**：原文写
+> 「`zh-CN` 与 `zh-HK` 在后端是两个不同的识别语种（Whisper `zh` vs `yue`）」——**该因果论断错**。
+> `gtrk transcript` 写死 `word_level: true`（`src/commands/transcript.ts:178`）⇒ 链路钉在豆包、
+> 到不了 Whisper（infra `utils/process/media/audio/asr.py:44-49` 在 `AsrFunc.Whisper` 分支里
+> 仍把 `word_level_handler` 钉成豆包）；而豆包字典里 `zh-CN` 与 `zh-HK` **都映射空串**
+> （`utils/partner/volcengine/doubao_llm_asr.py:36-37`）⇒ 两种写法发出的请求**逐字段相同**。
+> 粤语能识别对，靠的是豆包空串模式自己的方言自适应，与这个参数无关；`zh-HK→yue` 那条映射真实存在
+> （`utils/partner/openai/__init__.py:18`）但只在 `word_level=false` 走 Whisper 时生效，CLI 今天走不到。
+> ⇒ 粤语 **SHOULD** 如实填 `zh-HK`（元数据诚实 + 备将来链路切换），但 **MUST NOT 以「粤语语种传错」
+> 为由重跑转写**：`la` 进 ASR 缓存键（`asr_result_cache.py:71-75`），换码必然 cache miss，
+> 白扣一次时长换回同一份结果。
+> ⟲ **2026-09-19 订正**：上段「写死 `word_level: true`」已过时。现口径按产物消费面分流
+> （cli `adjust-transcript-json-word-level`）：**无 `--json`** ⇒ 句级、走自部署引擎 + 服务端纠错（小工具用法）；
+> **`--json`**（本图纸的用法）⇒ 字级，transcript.json 带 `words[]`，字幕拆行后时间按语音贴。
+> 粤语在 `--json` 路照旧落厂商字级腿；无 `--json` 路的粤语代价见 `switch-transcript-to-selfhosted-asr`。
 
 ## 三、时序铺排三档（本图纸的技术正本）
 
@@ -177,6 +201,7 @@ QC 反算重铺）；② 段带 `cuts`，端点残片收缩生效；③ 段带 `
 - **引用点在写稿时定**：稿件里显式留引用窗口（出处 = 甲档对照表里的区间），MUST NOT 铺轨时临时起意。
 - **切取用流拷贝**（`ffmpeg -c copy`，零重编码）；想让 AI 帮你海选可引用的高光，可先跑一遍 `gtrk long2short` 拿选段清单当候选（可选辅助，明示计费）。
 - **装配**：逐段 TTS + 引用段原声按稿序拼成总音频 → 合成 transcript（各段句级时码换算到拼接轴）→ `gtrk project init --audio <总音频> --transcript <合成转写>` 建工程（自备配音兜底路）；引用段画面 = 该源区间直排上轨。无引用段时装配退化为单条 TTS + `--tts-task` 主路（与旅拍同款）。
+  **产物文件名别硬拼（fix-tool-outdir-collision）**：多段 TTS 落**同一个 `--out`** 时，第二段起的产物会带 taskId 后 6 位后缀（`tts-narrator-a1b2c3.wav`），基名只有第一份是干净的。拼接清单 MUST 按每次回执的 `files` 取路径，MUST NOT 按 `tts-<speaker>.wav` 猜——猜出来的名字会一路指向第一段，拼出来的总音频会把某一段重复多遍而不报错。
   **主轨无缝铁则（260828 主理人挑刺定案）**：合成 transcript 里引用段 utterance 的 st/ed **MUST 写物理拼接位**（拼接轴上的真实起止），MUST NOT 加 ±0.1s 字幕 pad——dispatch 的 beat 轨窗派生自转写时刻，pad 会在主轨上留 0.1s 缝（三片实测各 4 处）。已有 pad 的存量工程修法：改转写引用句时刻→重导视图→重落拆分（hash 只随文本不失效）→重铺（plan 引用窗随之外扩，Δ=0 不破）→字幕重出。
 - **克制丑话**：引用段是佐料——时长占比失衡会让片子变成搬运，平台判定风险归用户（§八 一并告知）。
 
@@ -186,10 +211,24 @@ QC 反算重铺）；② 段带 `cuts`，端点残片收缩生效；③ 段带 `
 # ① 索引前置（第一步就起，不是可选项——它是质量信号的载体，见 §三 代价表）
 #    4K 长片索引慢，未提速期**与写稿/TTS/检查点①并行跑**，别串行干等
 gtrk matrix index --dirs "<这一部片的绝对路径>" &     # 后台起，写稿同时跑（索引侧同口径：也钉单片）
-gtrk transcript "<长片>" --json            # 影视/游戏类：台词与时码双锚（可选）
+#   ⚠️ **后台起就看不见失败**：全域零枚举现在是**硬失败**（退出码 1），而 `&` 把它吞了 ——
+#     回头 MUST 看那一行的 `materials.total` 与 `per_dir`，别等到检索阶段才发现索引是空的。
+#     报 0/0 先看两件事：路径里有没有**英文半角逗号**（有就把 --dirs 重复传，别塞一串）、素材夹里有没有断链。
+gtrk transcript "<长片>" --lang <开工⑦所答语种> --json   # 影视/游戏类：台词与时码双锚（可选）
+#   ↑ 语种取开工⑦所答，MUST NOT 拿缺省顶上去 —— 但「传错就白花钱」只在**非中文**这一档成立；
+#     粤语 SHOULD 如实填 zh-HK（元数据诚实 + 备链路切换），当前链路下对粤语无差别：
+#     CLI 写死 word_level: true ⇒ 钉在豆包，豆包字典里 zh-CN 与 zh-HK 都映射空串 ⇒ 请求逐字段相同。
+#     MUST NOT 以「粤语传错」为由重跑（la 进 ASR 缓存键，换码必 cache miss、白扣一次时长）。详见 §二 ⑦ 注
 
 # ②③ 写稿（甲档出处共生 / 乙路对照表对齐）→ 检查点①拍板（§六）
 gtrk matrix material "<情绪 题材 检索词>" --scope audio --top-k 5 --json   # BGM 候选附试听
+#   ⚠️ is_copyright 的权威语义是 1/true=可商用、0/false=**不可商用**——反直觉，MUST NOT 把 false
+#   读成「无版权、可随便用」（真机上正是这一步读反，把不可商用素材铺进了 5 个工程）。
+#   ⟲ 260906 拍板 · 选材口径：矩阵成员档**缺省搜全库**，MUST NOT 默认加 --commercial-only、
+#   也 MUST NOT 以「保险起见」为由剔掉 is_copyright:false 的候选（全库正是成员身份买到的东西）。
+#   对价是**如实标注**：推荐时 MUST 逐条带上 copyright_label（派生位，中文标签），不可商用的照直说，
+#   但 MUST NOT 升级成追问或阻塞。用户**特意说明**只要可商用 / 要商用发布 / 客户商单时才加
+#   --commercial-only 收紧；「用户没说」MUST NOT 当成「用户要求收紧」。
 
 # ④ 声音基座（按开工④路由）
 gtrk tool audio_tts_clone --text-file <稿段.txt> --speaker <voice_id> --json   # TTS 路
@@ -210,9 +249,14 @@ gtrk matrix lay --project "<工程>" --mark-weight 0.3 --highlight-weight 0.2 --
 # BGM 是带人声歌曲（audio_type:"song"）→ MUST 下载 accompaniment_url 伴奏版上轨，
 # 不得用 download_url 原曲（人声与配音打架，260827 美食批踩坑）
 gtrk mg --project "<工程>" --json
+# --beat-align 的高潮点取自 split.beats 的 narrative / container_stage（升华段 → 容器转折 → 回扣段）；
+# 拆分稿没带这两个字段 ⇒ 落 0.75×全片兜底档，**CLI 会明示那是猜的**。不接受就用 --climax <轨秒> 指定。
+# 两侧都够长时零平铺（恰好 1 个 clip）；不够长才按小节线平铺补齐、接缝吸附 downbeat。
 gtrk audio lay --project "<工程>" --file "<bgm>" --volume 0.1 --beat-align --json
 gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
 ```
+
+> **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
 
 配方口径（`--mark-weight 0.3`、BGM 0.10、`--gap-fill fast`、句界吸附缺省）与旅拍图纸 §五 同源，本图纸引用不复制。
 `--highlight-weight 0.2`（260828 新增）：看点维度与 mark 正交——mark 判「好不好看」、highlight 判
@@ -269,7 +313,7 @@ gtrk subtitle lay --project "<工程>" --style <样式> --color <色> --json
 
 | 模式 | 停点 |
 |---|---|
-| **快速成片**（默认） | 开工六问 → 检查点①（必停一次）→ 一杆到底 |
+| **快速成片**（默认） | 开工七问 → 检查点①（必停一次）→ 一杆到底 |
 | **逐步推进** | 每步停等确认（索引结论 / 稿件 / 对照表 / 铺排结果 / 字卡 / BGM / 字幕逐项） |
 
 差别只在停几次；三条腿自检见《成片型图纸公约》§四。

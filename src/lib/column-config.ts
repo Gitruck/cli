@@ -5,13 +5,14 @@
  * P0 只落 L0+L2。逐维度算子（交并集非父子集，禁全局 deep-merge）：
  *   vocab / lanes.enabled / broll.column_tag_ids = UNION（附加不丢默认）
  *   broll.facet_allowed = INTERSECTION（收窄）
- *   lanes.appearance / broll.material_class_policy / facet_defaults / style = OVERRIDE（换装）
+ *   lanes.appearance / broll.material_class_policy / facet_defaults / highlight_rubric / style = OVERRIDE（换装）
  * 零配置 = 只评 L0（《实在界漫游指南》全套词表），split 链路行为与词表化前逐字节等价。
  */
 import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { gitruckHome } from "./paths";
 import { BASE_TRACKS, CONTAINER_STAGES, LANES, NARRATIVES } from "./splitdoc";
+import { readJsonSync } from "./read-json";
 
 export interface ColumnVocab {
 	narrative?: string[];
@@ -39,6 +40,11 @@ export interface ColumnBroll {
 	material_class_policy?: string;
 	facet_defaults?: Record<string, unknown>;
 	facet_allowed?: string[];
+	/** [fix-highlight-rubric-wiring] 看点评判准则的 L2 层（三级取用 L1 flag > L2 此处 > L0 服务端缺省）。
+	 * 纯文本，**只影响看点评分口径**，MUST NOT 参与检索/过滤/候选剔除。
+	 * 折叠算子 = OVERRIDE 而非 UNION：准则是一份要整体喂给评分模型的文本，
+	 * 把两层拼起来会产出自相矛盾的口径（「判奇观地貌」与「判分量对比」并列）。 */
+	highlight_rubric?: string;
 }
 
 /** style.skills 清单条目（column-style-manifest spec）：栏目自产 skill 的逻辑引用登记。
@@ -150,6 +156,8 @@ export function foldColumnConfigs(layers: ColumnConfig[]): ColumnConfig {
 			// 其余：OVERRIDE
 			if (typeof l.broll.material_class_policy === "string") out.broll.material_class_policy = l.broll.material_class_policy;
 			if (l.broll.facet_defaults && typeof l.broll.facet_defaults === "object") out.broll.facet_defaults = l.broll.facet_defaults;
+			// highlight_rubric：OVERRIDE（整体换装，MUST NOT 与下层拼接——见字段注释）
+			if (typeof l.broll.highlight_rubric === "string") out.broll.highlight_rubric = l.broll.highlight_rubric;
 		}
 
 		// style：OVERRIDE 整块（「换装」语义，数组/子块不逐条 merge）
@@ -177,7 +185,7 @@ function readLocalColumn(columnId: string, dir: string, warnings: string[]): Col
 		return undefined;
 	}
 	try {
-		const parsed = JSON.parse(readFileSync(p, "utf8")) as unknown;
+		const parsed = readJsonSync(p) as unknown;
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			warnings.push(`栏目配置格式异常（非 JSON 对象）：${p}，回落内置默认`);
 			return undefined;
@@ -339,4 +347,81 @@ export function effectiveVocab(config: ColumnConfig): {
 		base_track: config.vocab?.base_track ?? [...BASE_TRACKS],
 		unknown_narrative: config.fallback?.unknown_narrative,
 	};
+}
+
+// ── 第三方 skill 登记（change add-third-party-skill-catalog）────────────────────────────
+
+export interface AppendStyleSkillResult {
+	/** 写入（或已存在）的栏目配置文件绝对路径。 */
+	path: string;
+	/** true = 本次追加了一条；false = 同 ref 已存在，一字未改。 */
+	appended: boolean;
+	/** 文件原不存在、本次按最小骨架新建。 */
+	created: boolean;
+}
+
+/**
+ * 把一条 skill 登记**追加**进本地栏目配置的 `style.skills`（column-style-manifest「不透明引用清单」射程内）。
+ *
+ * 纪律（spec「gtrk skills add SHALL 透传上游安装并把条目追加进栏目配置」）：
+ *  - **追加不清空**：读改写，其余键原样保留（JSON.parse/stringify 不重排键序）；
+ *  - **同 `ref` 幂等**：已存在则不重复追加、不改动原条目；
+ *  - 文件不存在 ⇒ 建最小骨架 `{ meta: { id }, style: { skills: [entry] } }`（与 style-maker §登记 同口径）；
+ *  - 文件存在但**损坏**（非 JSON 对象）⇒ 抛错、**不覆盖**——登记不能以毁掉用户栏目配置为代价；
+ *  - 框架零解析：只碰清单条目自身，MUST NOT 读 `ref` 指向的内容。
+ */
+export function appendStyleSkillEntry(
+	entry: StyleSkillEntry,
+	opts: { columnId: string; columnsDir?: string } = { columnId: "default" },
+): AppendStyleSkillResult {
+	if (!entry.ref || typeof entry.ref !== "string") throw new Error("登记条目缺 ref");
+	if (!entry.id || typeof entry.id !== "string") throw new Error("登记条目缺 id");
+	const dir = opts.columnsDir ?? columnsDir();
+	const path = join(dir, `${opts.columnId}.json`);
+	let root: Record<string, unknown>;
+	let created = false;
+	if (existsSync(path)) {
+		let parsed: unknown;
+		try {
+			parsed = readJsonSync(path);
+		} catch (e) {
+			throw new Error(`栏目配置损坏（JSON 解析失败），拒绝覆盖：${path}（${e instanceof Error ? e.message : String(e)}）`);
+		}
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error(`栏目配置格式异常（非 JSON 对象），拒绝覆盖：${path}`);
+		}
+		root = parsed as Record<string, unknown>;
+	} else {
+		root = { meta: { id: opts.columnId } };
+		created = true;
+	}
+	const styleRaw = root.style;
+	const style: Record<string, unknown> =
+		typeof styleRaw === "object" && styleRaw !== null && !Array.isArray(styleRaw)
+			? (styleRaw as Record<string, unknown>)
+			: {};
+	const skillsRaw = style.skills;
+	const skills: unknown[] = Array.isArray(skillsRaw) ? skillsRaw : [];
+	const exists = skills.some(
+		(s) => typeof s === "object" && s !== null && (s as { ref?: unknown }).ref === entry.ref,
+	);
+	if (exists) return { path, appended: false, created: false };
+	skills.push({ ...entry });
+	style.skills = skills;
+	root.style = style;
+	// ⚠️ 用户此刻要的**交付物**（`gtrk skills` 是他按下的动作），写失败照旧抛、MUST NOT 吞
+	// （change `fix-sidecar-write-failure-kills-command` · design D6）。只把 Node 原文换成人话。
+	try {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`, "utf8");
+	} catch (e) {
+		const code = (e as { code?: unknown })?.code;
+		const why = typeof code === "string" ? code : e instanceof Error ? e.message : String(e);
+		throw new Error(
+			`栏目配置存不进 ${path}（${why}）。\n` +
+				`多半是那个文件正被别的程序占着，或者目录不让写。\n` +
+				`这次登记没落地；确认那个目录可写之后重跑。`,
+		);
+	}
+	return { path, appended: true, created };
 }

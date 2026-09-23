@@ -12,7 +12,8 @@ import { mkdir, readFile, rename, rm, writeFile, readdir } from "node:fs/promise
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homeFile } from "../paths";
-import type { MadManifest, PoolEntry } from "./types";
+import type { CatalogPattern, MadCatalog, MadManifest, PoolEntry } from "./types";
+import { readJson } from "../read-json";
 
 /** MAD 本地缓存根目录 ~/.gitruck/mad-cache。 */
 export function madCacheDir(): string {
@@ -52,6 +53,8 @@ export interface MadData {
 	verDir: string;
 	/** 本次是否在线（manifest 拉取成功）；离线时 IR 分片只能吃缓存、选窗须限已缓存分片。 */
 	online: boolean;
+	/** 本次生效的 manifest（catalog 等按需数据集据此取；追加字段，既有消费方不受影响）。 */
+	manifest: MadManifest;
 }
 
 const REQUIRED_KEYS = ["mad_pool"] as const;
@@ -150,7 +153,7 @@ export async function ensureMadData(opts: { refresh?: boolean }, deps: DataDeps)
 			);
 		}
 		try {
-			manifest = validateManifest(JSON.parse(await readFile(snapshotPath, "utf8")));
+			manifest = validateManifest(await readJson(snapshotPath));
 		} catch {
 			throw new Error("本地 manifest 缓存损坏且当前离线。请连网重跑，或加 --refresh 强制重新下载。");
 		}
@@ -204,13 +207,82 @@ export async function ensureMadData(opts: { refresh?: boolean }, deps: DataDeps)
 	// ⑤ 装载池
 	let pool: PoolEntry[];
 	try {
-		pool = JSON.parse(await readFile(poolPath, "utf8"));
+		pool = await readJson<PoolEntry[]>(poolPath);
 		if (!Array.isArray(pool)) throw new Error("mad_pool 非数组");
 	} catch (e) {
 		throw new Error(`技法池数据装载失败：${e instanceof Error ? e.message : String(e)}（可加 --refresh 重拉）`);
 	}
 
-	return { version, assetsBase: manifest.assets_base, pool, verDir, online };
+	return { version, assetsBase: manifest.assets_base, pool, verDir, online, manifest };
+}
+
+/**
+ * 备好技法目录 `catalog`（add-mad-technique-whitelist）。
+ *
+ * **懒下载**：只有 `--technique` / `--search` 才调本函数。零参调用一个字节的额外流量都不产生——
+ * 目录 100 KB 上下，给最常用的那条路径凭空加首拉不值。
+ * 其余口径与 `mad_pool` 逐条对齐：sha256 校验 / 临时文件+原子改名 / 版本目录 / --refresh /
+ * 损坏自愈（在线删重拉、离线报错）/ 断网回退缓存。同属免鉴权公开只读面，不带 Authorization、零计费。
+ */
+export async function ensureMadCatalog(
+	data: MadData,
+	opts: { refresh?: boolean },
+	deps: DataDeps,
+): Promise<MadCatalog> {
+	const { warn } = deps;
+	const meta = data.manifest.datasets.catalog;
+	// 选择性灌装下 catalog 可能尚未补灌：只让点名/检索这两个入口报错，零参调用不受影响。
+	if (!meta) throw new Error("技法目录尚未就绪，请稍后再试。（不带 --technique / --search 的出片不受影响）");
+
+	const path = join(data.verDir, "catalog.json");
+	const cacheValid = await verifyFile(path, meta.sha256);
+	if (!!opts.refresh || !cacheValid) {
+		if (!data.online) {
+			throw new Error(
+				existsSync(path)
+					? "本地技法目录缓存损坏且当前离线。请连网重跑，或加 --refresh 强制重新下载。"
+					: "技法目录需联网下载一次（约 100 KB）。请连网后重跑 `--technique` / `--search`；不带这两个选项的出片仍可离线跑。",
+			);
+		}
+		await mkdir(data.verDir, { recursive: true });
+		warn(`下载技法目录 catalog（版本 v${data.version}，约 ${Math.round(meta.size / 1024)} KB）…`);
+		const res = await deps.fetchFn(meta.url);
+		if (!res.ok) throw new Error(`catalog 下载失败 HTTP ${res.status}`);
+		const buf = new Uint8Array(await res.arrayBuffer());
+		if (sha256Hex(buf) !== meta.sha256) {
+			throw new Error("catalog 下载校验不通过（sha256 不符），请重试或 --refresh。");
+		}
+		await atomicWrite(path, buf);
+	}
+
+	try {
+		return parseCatalog(await readJson(path));
+	} catch (e) {
+		throw new Error(`技法目录装载失败：${e instanceof Error ? e.message : String(e)}（可加 --refresh 重拉）`);
+	}
+}
+
+/** catalog 原结构 → 扁平 pattern 列表（cat 从父节点下放；pid 归一成 string）。 */
+export function parseCatalog(obj: unknown): MadCatalog {
+	const o = obj as { version?: unknown; categories?: unknown };
+	if (!o || typeof o !== "object" || !Array.isArray(o.categories)) throw new Error("catalog 结构非法（缺 categories）");
+	const patterns: CatalogPattern[] = [];
+	for (const c of o.categories as { name?: unknown; patterns?: unknown }[]) {
+		const cat = String(c?.name ?? "");
+		if (!Array.isArray(c?.patterns)) continue;
+		for (const p of c.patterns as Record<string, unknown>[]) {
+			if (p?.pid == null) continue;
+			patterns.push({
+				pid: String(p.pid),
+				pattern: String(p.pattern ?? ""),
+				aliases: Array.isArray(p.aliases) ? (p.aliases as unknown[]).map((a) => String(a)) : [],
+				cat,
+				n_seen: Number(p.n_seen ?? 0),
+			});
+		}
+	}
+	if (patterns.length === 0) throw new Error("catalog 为空（无任何技法条目）");
+	return { version: Number(o.version ?? 0), patterns };
 }
 
 /** 供 pool.ts 复用的 sha256/原子写（避免重复实现）。 */

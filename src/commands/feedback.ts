@@ -45,6 +45,7 @@ import { randomUUID } from "node:crypto";
 import { release } from "node:os";
 import { CloudError, parseJson } from "../lib/cloud";
 import { noticeOnce } from "../lib/compliance-notice";
+import { crashReportNoticeOnce } from "../lib/crash-report";
 import { loadConfig, type CloudConfig } from "../lib/config";
 import { log, routeLogsToStderr } from "../lib/log";
 import { promptConfirm } from "../lib/prompt";
@@ -454,6 +455,7 @@ export async function postFeedback(
 	fetchFn: typeof fetch = fetch,
 ): Promise<{ duplicated: boolean; retried: boolean }> {
 	noticeOnce();
+	crashReportNoticeOnce();
 
 	let lastNetworkError: unknown;
 	for (let attempt = 0; attempt < 2; attempt++) {

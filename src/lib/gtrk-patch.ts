@@ -7,8 +7,9 @@
  * ## 唯一权威域 = 帧域，毫秒是帧号的单向投影
  *
  * 因为**取整不可加**（`f2ms(a+b) ≠ f2ms(a)+f2ms(b)`），「两端各自取整到毫秒」与
- * 「时长由帧差单独换算」**不可同时成立**。护栏例（`rate=30`）：`st_frame=1`、`ed_frame=2` 时
- * `f2ms` 两端得 33 / 67 ms，差 **34ms**，而帧差换算 `f2ms(1)=33ms` —— `34 ≠ 33`。
+ * 「时长由帧差单独换算」**不可同时成立**。护栏例（`rate=30`，`f2ms` 向下投影，fix-matrix-lay-frame-grid D5）：
+ * `st_frame=2`、`ed_frame=3` 时 `f2ms` 两端得 66 / 100 ms，差 **34ms**，而帧差换算 `f2ms(1)=33ms` —— `34 ≠ 33`。
+ * 这不是可以靠换取整方向绕开的——任何取整都不可加。
  *
  * 故自由变量只有三个（`st_frame` / `dur_frames` / `clip_st`），其余全是**导出量**，
  * 且导出顺序固定（delta「帧对齐」Requirement 的权威表）：
@@ -55,82 +56,16 @@ export interface Locator {
 	track_st: number;
 }
 
-/** 元素的帧域视图（自由变量 + 源侧毫秒），是所有动作的运算对象。 */
-export interface FrameView {
-	stFrame: number;
-	durFrames: number;
-	/** 源侧入点（整毫秒）。gap 与 beat 恒为 `null`（契约禁写 `clip_st`/`clip_ed`）。 */
-	clipStMs: number | null;
-}
-
-// ────────────────────────────── 表示层换算 ──────────────────────────────
-
-/**
- * 秒 → 帧，**半帧进一**。
- *
- * MUST NOT 用 `int()` 截断（会系统性掉一帧：帧 130 @30fps = 4333.33ms，ms 量化成 4.333s 后
- * ×30 = 129.99 帧，截断即 129）；MUST NOT 用裸 `round()`（银行家舍入把恰好半帧取偶，
- * 20ms@25fps ⇒ 0 帧 ⇒ 零时长元素）。须与消费侧帧化口径同源。
- */
-export function sec2frame(sec: number, rate: number): number {
-	return Math.floor(sec * rate + 0.5);
-}
-
-/**
- * 帧 → 整毫秒。标准帧率下往返可逆：`sec2frame(f2ms(n)/1000, rate) === n`
- * （帧域偏差 ≤0.03 帧 ≪ 0.5 帧）。
- *
- * ⚠️ **不可加**：存在 a/b 使 `f2ms(a+b) ≠ f2ms(a)+f2ms(b)`（rate=30 时 f2ms(1)+f2ms(1)=66
- * 而 f2ms(2)=67）。所以它 MUST NOT 被用来单独换算时长——见模块头。
- */
-export function f2ms(frame: number, rate: number): number {
-	return Math.round((frame * 1000) / rate);
-}
-
-/** 秒 → 整毫秒（源侧量化用；不涉帧）。 */
-export function sec2ms(sec: number): number {
-	return Math.round(sec * 1000);
-}
-
-/** 整毫秒 → 秒字面（3 位小数，与既有 `r3` 口径同一）。 */
-export function ms2sec(ms: number): number {
-	return ms / 1000;
-}
-
-/** 读入的秒值 → 整毫秒；非有限数按 `NaN` 透出，由调用方判非法。 */
-export function readMs(v: unknown): number {
-	const n = typeof v === "number" ? v : Number(v);
-	return Number.isFinite(n) ? sec2ms(n) : Number.NaN;
-}
-
-// ────────────────────────────── 导出链 ──────────────────────────────
-
-/** 一个元素经导出链算出的全部写出值（整毫秒域，写文件前再 `ms2sec`）。 */
-export interface DerivedMs {
-	trackStMs: number;
-	trackEdMs: number;
-	durationMs: number;
-	clipStMs: number | null;
-	clipEdMs: number | null;
-	/** 帧数，供「时长是几帧」类判断与回执用。 */
-	durFrames: number;
-}
-
-/**
- * 导出链：由三个自由变量算出全部写出值。**这是本模块唯一允许产出时码的路径。**
- *
- * ⚠️ `durationMs` 恒取 `trackEdMs − trackStMs`（导出 ④），
- * MUST NOT 写成 `f2ms(durFrames, rate)`——两者不是同一个数。
- */
-export function derive(view: FrameView, rate: number): DerivedMs {
-	const edFrame = view.stFrame + view.durFrames; // 导出 ①
-	const trackStMs = f2ms(view.stFrame, rate); // 导出 ②
-	const trackEdMs = f2ms(edFrame, rate); // 导出 ③
-	const durationMs = trackEdMs - trackStMs; // 导出 ④ —— 恒是两端之差
-	const clipStMs = view.clipStMs;
-	const clipEdMs = clipStMs === null ? null : clipStMs + durationMs; // 导出 ⑤
-	return { trackStMs, trackEdMs, durationMs, clipStMs, clipEdMs, durFrames: view.durFrames };
-}
+// ────────────────────────────── 帧域换算（正本已迁 frame-domain.ts） ──────────────────────────────
+//
+// [link-time-domain-discipline] 帧域三件套（`sec2frame / f2ms / derive`）与配套 `sec2ms / ms2sec / readMs`、
+// `FrameView / DerivedMs` 原样搬到 `./frame-domain`（零 IO、零依赖，供 lay 模块直接接、不再反向依赖本文件）；
+// 此处 re-export 保既有 import 路径不变。搬出时取整方向一字未改；其后 `fix-matrix-lay-frame-grid` D5
+// 把 `f2ms` 改为向下投影（理由与往返可逆证明见 `frame-domain.ts` 头注）。
+import { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
+import type { FrameView, DerivedMs } from "./frame-domain";
+export { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
+export type { FrameView, DerivedMs } from "./frame-domain";
 
 // ────────────────────────────── 元素收集与寻址 ──────────────────────────────
 
@@ -312,32 +247,38 @@ export function validateAll(gtrk: Obj): Violation[] {
 
 	for (const el of els) {
 		const cls = classifyForValidation(el);
-		const where = `${el.ref.kind}:${el.ref.trackIndex}#${el.ref.clipArrayIndex}`;
 		const id = el.clipId || "(gap)";
+		// `where` 只进人读 message（带数组序号，方便定位）；`ident` 才进集合差用的 key。
+		// ⚠️ 数组序号 MUST NOT 入 key：`insertElement`（split 后半）会让插入点之后的元素全部换号，
+		//    序号入 key 就把入档既存的违规判成「本次造成」而硬拒（真机实证：切在既存 E1 之前的 split 被拒、
+		//    且文案指向与改动无关的 clip）。key = 元素身份 + 违规码 + 该违规自身的证据数值：未触碰元素的
+		//    数值一字不变 ⇒ key 位置无关；被触碰元素只有当编辑真改了该违规涉及的数值时才会重判为本次。
+		const where = `${el.ref.kind}:${el.ref.trackIndex}#${el.ref.clipArrayIndex}`;
+		const ident = `${el.ref.kind}:${el.ref.trackIndex}:${id}`;
 		const stMs = readMs(el.clip.track_st);
 		const durMs = readMs(el.clip.duration);
 		const edMs = readMs(el.clip.track_ed);
 
 		if (!Number.isFinite(stMs) || !Number.isFinite(durMs)) {
-			out.push({ key: `${where}/required`, code: "missing_required_timecode",
+			out.push({ key: `${ident}/required`, code: "missing_required_timecode",
 				message: `${where}（${id}）缺 track_st 或 duration` });
 			continue;
 		}
 		// E6：duration > 0
 		if (durMs <= 0) {
-			out.push({ key: `${where}/dur_positive`, code: "duration_not_positive",
+			out.push({ key: `${ident}/dur_positive/${durMs}`, code: "duration_not_positive",
 				message: `${where}（${id}）duration=${ms2sec(durMs)}s，须 > 0` });
 		}
 		// E2：track_ed − track_st = duration（整毫秒域，零容差）
 		if (Number.isFinite(edMs) && edMs - stMs !== durMs) {
-			out.push({ key: `${where}/E2`, code: "track_identity_broken",
+			out.push({ key: `${ident}/E2/${edMs - stMs}!=${durMs}`, code: "track_identity_broken",
 				message: `${where}（${id}）track_ed − track_st = ${edMs - stMs}ms ≠ duration ${durMs}ms` });
 		}
 
 		if (cls === "gap" || cls === "beat") {
 			// E7 / E8：gap 与 beat MUST NOT 写 clip_st / clip_ed
 			if (el.clip.clip_st !== undefined || el.clip.clip_ed !== undefined) {
-				out.push({ key: `${where}/no_src_range`, code: "src_range_on_non_clip",
+				out.push({ key: `${ident}/no_src_range`, code: "src_range_on_non_clip",
 					message: `${where}（${id}）是 ${cls}，MUST NOT 含 clip_st/clip_ed` });
 			}
 			continue;
@@ -348,13 +289,13 @@ export function validateAll(gtrk: Obj): Violation[] {
 		const cedMs = readMs(el.clip.clip_ed);
 		// E1：clip_ed − clip_st = duration（整毫秒域，零容差）
 		if (Number.isFinite(cstMs) && Number.isFinite(cedMs) && cedMs - cstMs !== durMs) {
-			out.push({ key: `${where}/E1`, code: "clip_identity_broken",
+			out.push({ key: `${ident}/E1/${cedMs - cstMs}!=${durMs}`, code: "clip_identity_broken",
 				message: `${where}（${id}）clip_ed − clip_st = ${cedMs - cstMs}ms ≠ duration ${durMs}ms` });
 		}
 		// E4：material 须在 materials 中
 		const matId = typeof el.clip.material === "string" ? el.clip.material : String(el.clip.material ?? "");
 		if (matId && !mats.has(matId)) {
-			out.push({ key: `${where}/E4`, code: "material_not_found",
+			out.push({ key: `${ident}/E4/${matId}`, code: "material_not_found",
 				message: `${where}（${id}）material=${matId} 不在 materials 中` });
 		}
 		// E5 源界。⚠️ 上界那个 1ms 是全档校验器里**唯一**的容差，且恒为 1ms：
@@ -362,16 +303,16 @@ export function validateAll(gtrk: Obj): Violation[] {
 		//    容差 MUST NOT 扩大到下界、MUST NOT 扩大到 clip_st < clip_ed、MUST NOT 用于任何恒等式。
 		if (Number.isFinite(cstMs)) {
 			if (cstMs < 0) {
-				out.push({ key: `${where}/E5_lower`, code: "src_out_of_range",
+				out.push({ key: `${ident}/E5_lower/${cstMs}`, code: "src_out_of_range",
 					message: `${where}（${id}）clip_st=${ms2sec(cstMs)}s < 0` });
 			}
 			if (Number.isFinite(cedMs) && cstMs >= cedMs) {
-				out.push({ key: `${where}/E5_order`, code: "src_range_not_increasing",
+				out.push({ key: `${ident}/E5_order/${cstMs}>=${cedMs}`, code: "src_range_not_increasing",
 					message: `${where}（${id}）clip_st 须 < clip_ed` });
 			}
 			const matDur = mats.get(matId);
 			if (matDur !== null && matDur !== undefined && Number.isFinite(cedMs) && cedMs > matDur + 1) {
-				out.push({ key: `${where}/E5_upper`, code: "src_exceeds_material",
+				out.push({ key: `${ident}/E5_upper/${cedMs}>${matDur}`, code: "src_exceeds_material",
 					message: `${where}（${id}）clip_ed=${ms2sec(cedMs)}s 超出素材时长 ${ms2sec(matDur)}s（容差 1ms）` });
 			}
 		}
@@ -691,11 +632,25 @@ export function classOf(el: Element): "clip" | "gap" | "beat" {
 	return classifyForValidation(el);
 }
 
-/** 顶层 `video_rate`。契约保证恒为正整数且已吸附标准帧率表；缺失或非正 ⇒ 抛。 */
+/**
+ * 顶层 `video_rate` 的**读侧判据**：契约保证恒为**正整数**；缺失 / 非正 / 非整数 ⇒ 抛（同一条话术，含修复指引）。
+ *
+ * 本函数只判不吸附——**写侧吸附函数 = `frame-domain.ts deliveryRate`**（add-frame-rate-table-vfr-detect T6：
+ * 标准帧率表只在 `frame-domain.ts` 一处，本仓写顶层 `video_rate` 的模块经 `deliveryRate` 取整数；客户端保存即吸附）。
+ * 此前头注写「已吸附标准帧率表」而全仓并无该表——读侧判据假设写侧吸附过、写侧却各自 `Math.round`，本件补齐写侧。
+ *
+ * 整数判据（fix-matrix-lay-frame-grid 2.8）：契约说「恒为正整数」而本函数此前只判正数，
+ * 客户端本地写出的 29.97 之类会漏过 ⇒ 帧域三件套在非整帧率上往返不再可逆。
+ * `gtrk patch` / `matrix lay` / `gtrk render` 共用本读法（D7：缺席即报错退出、零副作用，MUST NOT 静默退回毫秒路，
+ * `render` MUST NOT 静默吸附后渲染——按 29.97 与按 30 分配的帧数不同，吸附即第二个权威）。
+ */
 export function videoRateOf(gtrk: Obj): number {
 	const r = gtrk.video_rate;
-	if (typeof r !== "number" || !Number.isFinite(r) || r <= 0) {
-		throw new Error(`工程缺少合法的 video_rate（读到 ${JSON.stringify(r)}）——帧对齐无从谈起`);
+	if (typeof r !== "number" || !Number.isFinite(r) || r <= 0 || !Number.isInteger(r)) {
+		throw new Error(
+			`工程缺少合法的 video_rate（读到 ${JSON.stringify(r)}，须为正整数）——帧对齐无从谈起。` +
+				"修复：用客户端打开该工程重存一次即吸附到标准帧率（29.97 → 30、23.976 → 24），或手工把顶层 video_rate 改成正整数",
+		);
 	}
 	return r;
 }

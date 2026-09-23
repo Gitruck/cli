@@ -29,6 +29,7 @@ import {
 	type Transcript,
 } from "./projection";
 import { log } from "./log";
+import { r3 } from "./frame-domain";
 
 export interface ReprojectSpan {
 	from: string;
@@ -207,11 +208,6 @@ export interface ReprojectRequest {
 	entries: ReprojectEntryInput[];
 	/** 注入时间戳（测试可复现）。 */
 	now?: string;
-}
-
-/** 3 位小数（与投影层 r3 同式）。 */
-function r3(n: number): number {
-	return Math.round(n * 1000) / 1000;
 }
 
 /** 工程 slug（与 split.ts / matrix.ts 同式：保留 CJK，分隔符折叠为 -）。 */

@@ -16,6 +16,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg } from "./ffmpeg";
 import { probeGeometry, probeDuration } from "./media";
+import { r3, deliveryRate, sec2ms } from "./frame-domain";
+import { readJsonSync } from "./read-json";
 
 /** 粗对齐 PCM 采样率（Hz）。 */
 const PCM_RATE = 4000;
@@ -260,10 +262,12 @@ export async function muxExternalAudio(
 	const vDur = probeDuration(videoAbs, ffmpegPath);
 	const filters: string[] = [];
 	const args = ["-y", "-v", "error", "-i", videoAbs];
-	if (offsetSec >= 0.0005) {
+	// 分流阈在整毫秒格上（unify-time-consumers-and-tolerance）：`adelay` 只能表达整毫秒，不足 1ms 的偏移就是零偏移。
+	const offsetMs = sec2ms(offsetSec);
+	if (offsetMs >= 1) {
 		args.push("-i", extAudioAbs);
-		filters.push(`adelay=${Math.round(offsetSec * 1000)}:all=1`);
-	} else if (offsetSec <= -0.0005) {
+		filters.push(`adelay=${offsetMs}:all=1`);
+	} else if (offsetMs <= -1) {
 		args.push("-ss", (-offsetSec).toFixed(4), "-i", extAudioAbs);
 	} else {
 		args.push("-i", extAudioAbs);
@@ -280,7 +284,6 @@ export async function muxExternalAudio(
 }
 
 const fwd = (p: string): string => resolve(p).replace(/\\/g, "/");
-const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 
 /** 低置信兜底：产对齐工程（Profile B 双素材；两 clip 相对错开表达正负偏移，各自 ≥0）。 */
 export function buildAlignProject(
@@ -292,13 +295,16 @@ export function buildAlignProject(
 ): Record<string, unknown> {
 	const vStart = r3(Math.max(0, -offsetEstimate));
 	const aStart = r3(Math.max(0, offsetEstimate));
+	// 顶层 / 素材 `video_rate` 经标准帧率表交付视图取整数（add-frame-rate-table-vfr-detect T6；此前裸 `Math.round`）：
+	// 29.97 → 30、23.98 → 24 与旧值同，fps 缺失（0）不再静默变 1 而是报错——帧率是时间基，MUST NOT 兜底。
+	const rate = deliveryRate(geo.fps);
 	return {
 		version: "v1",
 		video_size: [geo.width, geo.height],
-		video_rate: Math.max(1, Math.round(geo.fps)),
+		video_rate: rate,
 		duration: r3(Math.max(vStart + geo.duration, aStart + extDuration)),
 		materials: [
-			{ id: "align-video", path: fwd(videoAbs), duration: r3(geo.duration), video_size: [geo.width, geo.height], video_rate: Math.max(1, Math.round(geo.fps)) },
+			{ id: "align-video", path: fwd(videoAbs), duration: r3(geo.duration), video_size: [geo.width, geo.height], video_rate: rate },
 			{ id: "align-ext-audio", path: fwd(extAudioAbs), duration: r3(extDuration), audio_channel: "stereo" },
 		],
 		video_track: [
@@ -330,7 +336,7 @@ export interface AlignResumeInfo {
 
 /** 读回对齐工程：素材路径 + 人工确认偏移。 */
 export function readAlignOffset(gtrkPath: string): AlignResumeInfo {
-	const j = JSON.parse(readFileSync(gtrkPath, "utf8")) as Record<string, unknown>;
+	const j = readJsonSync(gtrkPath, ".gtrk 工程") as Record<string, unknown>;
 	const materials = (j.materials ?? []) as Array<Record<string, unknown>>;
 	const byId = new Map(materials.map((m) => [String(m.id), m]));
 	const vTracks = (j.video_track ?? []) as Array<Record<string, unknown>>;

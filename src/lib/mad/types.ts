@@ -57,6 +57,32 @@ export interface MadManifest {
 	assets_base: string;
 }
 
+/**
+ * 技法目录条目（`catalog` 数据集，pattern 级；add-mad-technique-whitelist）。
+ * 目录原结构是 `{version, categories:[{name, patterns:[…]}]}`，装载时把 `categories[].name`
+ * 下放成每条的 `cat`——下游（解析 / 检索 / 报错候选）都要类目，逐条回查父节点纯属自找麻烦。
+ * `pid` 在 JSON 里是数字、在 `PoolEntry` 里声明为 string；两边一律归一成 string 再比，
+ * 免得「0 == '0'」这种事按调用路径不同而结果不同。
+ */
+export interface CatalogPattern {
+	/** pattern id（与 PoolEntry.pid 同一维度，归一为 string）。 */
+	pid: string;
+	/** 技法名（图鉴站上显示的那个）。 */
+	pattern: string;
+	/** 别名（全库 640 条，用户/Agent 多半说的是这些）。 */
+	aliases: string[];
+	/** 类目（10 类之一）。 */
+	cat: string;
+	/** 经典度（候选排序用）。 */
+	n_seen: number;
+}
+
+/** 技法目录（装载后的扁平形态）。 */
+export interface MadCatalog {
+	version: number;
+	patterns: CatalogPattern[];
+}
+
 /** 用户素材（扫描 + ffprobe 后）。 */
 export interface UserVideo {
 	path: string;

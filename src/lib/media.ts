@@ -14,7 +14,7 @@ import { hasLocalFonts } from "./runtime-assets";
 export interface Geometry {
 	width: number;
 	height: number;
-	/** 帧率（r_frame_rate 求值），如 30 / 29.97。 */
+	/** 帧率（r_frame_rate 求值），如 30 / 29.97。解析不到为 0——调用方按 T6「缺失即错」处置，MUST NOT 兜底 25/30。 */
 	fps: number;
 	/** 时长（秒）。 */
 	duration: number;
@@ -22,7 +22,18 @@ export interface Geometry {
 	codecName?: string;
 	/** 像素格式（`yuv420p`/`yuv422p10le`…）。硬解静态门入参——4:2:2/4:4:4 消费级卡无硬解。 */
 	pixFmt?: string;
+	/** 平均帧率（`avg_frame_rate` 求值；add-frame-rate-table-vfr-detect）。容器无该项 / 解析不到为 undefined。 */
+	avgFps?: number;
+	/** 是否 VFR（`|avg − r| / r > VFR_MISMATCH_RATIO`）三态：`true / false / null`——`avg` 缺席（或 `r` 为 0）时 `null` 不判。
+	 *  fake probe 夹具不给 `avgFps` ⇒ `vfr` 缺省 undefined，语义同 `null`（零告警）。 */
+	vfr?: boolean | null;
 }
+
+/**
+ * VFR 判据（add-frame-rate-table-vfr-detect D2）：`|avg_frame_rate − r_frame_rate| / r_frame_rate` 超过此值即判 VFR。
+ * **一个常量两处用**：源片侧 `probeGeometry`（本文件）与成片侧 `qc.ts` 的 `vfr` 项 MUST import 同一份，MUST NOT 内联第二份阈值。
+ */
+export const VFR_MISMATCH_RATIO = 0.01;
 
 function parseFps(rate: unknown): number {
 	if (typeof rate !== "string") return 0;
@@ -31,29 +42,92 @@ function parseFps(rate: unknown): number {
 	return n / d;
 }
 
-/** 探原片真实几何 {width,height,fps,duration}（客户端本地探得，随请求回传给云端做工程画布与计费校验）。 */
+/** ffprobe `-show_entries stream=… format=…` 的 JSON 形态（导出供解析器单测造假输出）。 */
+export interface ProbeInfo {
+	streams?: Array<Record<string, unknown>>;
+	format?: Record<string, unknown>;
+}
+
+/**
+ * ffprobe JSON → `Geometry`（纯函数，零进程；`probeGeometry` 与单测共用）。
+ * `avg_frame_rate` 缺席 / 解析为 0 ⇒ `avgFps` undefined、`vfr = null`；`r_frame_rate` 为 0 同样不判 VFR（fps 缺失由调用方报错）。
+ */
+export function geometryFromProbe(info: ProbeInfo): Geometry {
+	const s = (info.streams && info.streams[0]) || {};
+	const duration = Number(info.format?.duration) || 0;
+	const fps = parseFps(s.r_frame_rate);
+	const avg = parseFps(s.avg_frame_rate);
+	const avgFps = avg > 0 ? avg : undefined;
+	const vfr = avgFps !== undefined && fps > 0 ? Math.abs(avgFps - fps) / fps > VFR_MISMATCH_RATIO : null;
+	return {
+		width: Number(s.width) || 0,
+		height: Number(s.height) || 0,
+		fps,
+		duration,
+		codecName: typeof s.codec_name === "string" ? s.codec_name : undefined,
+		pixFmt: typeof s.pix_fmt === "string" ? s.pix_fmt : undefined,
+		avgFps,
+		vfr,
+	};
+}
+
+/** 探原片真实几何 {width,height,fps,duration,…}（客户端本地探得，随请求回传给云端做工程画布与计费校验）。 */
 export function probeGeometry(inputAbs: string, ffmpegPath?: string): Geometry {
 	const { ffprobe } = requireFfmpeg(ffmpegPath);
 	const info = ffprobeJson(ffprobe, [
 		"-v", "error",
 		"-select_streams", "v:0",
-		// codec_name/pix_fmt 是 speedup-matrix-index-proxy-decode 的硬解静态门入参：
-		// 挂在这次 ffprobe 上 ⇒ 零额外进程（另起一次 ffprobe 在 NAS 素材上要几百毫秒）
-		"-show_entries", "stream=width,height,r_frame_rate,codec_name,pix_fmt",
+		// codec_name/pix_fmt 是 speedup-matrix-index-proxy-decode 的硬解静态门入参、
+		// avg_frame_rate 是 add-frame-rate-table-vfr-detect 的 VFR 判据入参：
+		// 都挂在这次 ffprobe 上 ⇒ 零额外进程（另起一次 ffprobe 在 NAS 素材上要几百毫秒）
+		"-show_entries", "stream=width,height,r_frame_rate,avg_frame_rate,codec_name,pix_fmt",
 		"-show_entries", "format=duration",
 		"-of", "json",
 		inputAbs,
-	]) as { streams?: Array<Record<string, unknown>>; format?: Record<string, unknown> };
-	const s = (info.streams && info.streams[0]) || {};
-	const duration = Number(info.format?.duration) || 0;
-	return {
-		width: Number(s.width) || 0,
-		height: Number(s.height) || 0,
-		fps: parseFps(s.r_frame_rate),
-		duration,
-		codecName: typeof s.codec_name === "string" ? s.codec_name : undefined,
-		pixFmt: typeof s.pix_fmt === "string" ? s.pix_fmt : undefined,
-	};
+	]) as ProbeInfo;
+	return geometryFromProbe(info);
+}
+
+// ---------------------------------------------------------------- 源片帧率门与 VFR 可见（add-frame-rate-table-vfr-detect D4/D5）
+
+/**
+ * 上传前帧率硬门（D5）：`parseFps` 得 0 / NaN ⇒ 抛「源文件帧率不可解析」。
+ * MUST 排在抽取与上传之前（零抽取、零上传、零产物目录）；MUST NOT 以 25 / 30 兜底。
+ */
+export function assertSourceFrameRate(geo: Pick<Geometry, "fps">): void {
+	if (!(Number.isFinite(geo.fps) && geo.fps > 0)) {
+		throw new Error(
+			`源文件帧率不可解析（ffprobe r_frame_rate 求值得 ${String(geo.fps)}），已在上传前拦下（零抽取、零上传、零产物）。` +
+				"不以 25 / 30 兜底：帧率是工程时间基，猜错会让整条时间线错格。请先用 ffmpeg 重封装（-c copy）或重编码后再试",
+		);
+	}
+}
+
+/**
+ * VFR 告警文案（D4）：`geo.vfr === true` 时给一行含 `r / avg` 两值的人话，否则 `null`。
+ * 只告警不阻断：几何仍回传真实 `r_frame_rate`（契约「回传原片真实几何」），决策层吸附网格不因 VFR 改变。
+ */
+export function vfrNotice(geo: Pick<Geometry, "fps" | "avgFps" | "vfr">): string | null {
+	if (geo.vfr !== true) return null;
+	const r = geo.fps.toFixed(3);
+	const avg = geo.avgFps !== undefined ? geo.avgFps.toFixed(3) : "?";
+	return (
+		`源文件疑似可变帧率（VFR）：名义帧率 r_frame_rate = ${r}fps、平均帧率 avg_frame_rate = ${avg}fps（差 > ${VFR_MISMATCH_RATIO * 100}%）。` +
+		"几何按名义帧率原样回传、任务照常进行；但 VFR 源在客户端 / 渲染器上的帧对齐可能逐段漂移，" +
+		"稳妥做法是先用 ffmpeg 转成固定帧率（-vsync cfr -r <名义帧率>）再剪"
+	);
+}
+
+/** `--json source` 块（D4）：源片帧率账面，`vfr` 三态原样透出（`null` = 容器无 avg_frame_rate、未判）。 */
+export interface SourceRateInfo {
+	path: string;
+	fps: number;
+	avg_fps: number | null;
+	vfr: boolean | null;
+}
+
+export function sourceRateInfo(inputAbs: string, geo: Pick<Geometry, "fps" | "avgFps" | "vfr">): SourceRateInfo {
+	return { path: inputAbs, fps: geo.fps, avg_fps: geo.avgFps ?? null, vfr: geo.vfr ?? null };
 }
 
 /** 探任意媒体文件时长（秒），用于抽出物一致性自检。 */
@@ -130,7 +204,14 @@ export async function compress720p(inputAbs: string, ffmpegPath?: string): Promi
 	return out;
 }
 
-/** 抽出物时长与原片一致性自检（容差默认 1s）；不一致抛错（防残缺上传少计费/异常）。 */
+/**
+ * 抽出物时长与原片一致性自检（容差默认 1s）；不一致抛错（防残缺上传少计费/异常）。
+ *
+ * 时钟对声明（add-cross-clock-adapter D7，T5 点名的具名适配器之一）：`source_container → asr_extract`——
+ * 比的是**派生上传物**（16k mp3 / 720p 代理）与原片容器这一对；1.0s 是「抽取有没有残缺 / 服务端计费口径对不对」的
+ * 计费护栏，**不是时基容差**（T4 的时基容差只有 1ms / 1 帧，归 `clock-adapter.ts` / `gtrk-invariants.ts`）。
+ * MUST NOT 拿这个 1.0s 去放宽任何 `clip_ed` 上界或时码比对。
+ */
 export function assertDurationConsistent(
 	originalDuration: number,
 	artifactAbs: string,

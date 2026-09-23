@@ -8,11 +8,16 @@
  */
 import { join, basename, dirname } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
+import { collectWriteViolations, type WriteViolation } from "./gtrk-invariants";
 import { download as realDownload, type OralCutOutput } from "./cloud";
 import { copyJianyingDraft } from "./jianying";
 import { renderGtrk, readGtrkFile, type GtrkV1 } from "./render";
+import { prepareParticlesForRender } from "./particle-qtrle";
+import type { SourceRateInfo } from "./media";
 import { openFolder } from "./open";
 import { log } from "./log";
+import { ensureLandingWritable, type LandingWaitDeps } from "./landing-wait";
+import { readJson } from "./read-json";
 
 /** 把云端返回的细分格式名归一化到基础格式（jianying_draft/jianying_meta → jianying）。 */
 export function baseFormat(fmt: string): string {
@@ -40,6 +45,14 @@ export interface MaterializeOpts {
 	fileId?: string | null;
 	/** 剪映草稿根目录（有则把草稿拷进去）。 */
 	draftDir?: string;
+	/**
+	 * Gate B（落点闸的兜底面，add-artifact-landing-gate §4.4a）。
+	 * `materializeResult` 是 `gtrk oralcut` 与 `gtrk oralcut-result` **共用的**唯一落地入口，
+	 * 故两条命令的 Gate B MUST 经由这里的同一个等待器，MUST NOT 各自实现。
+	 * ⚠️ 不注入**不等于**放行：缺等待器时按非交互形态硬失败（更严，不是旁路）——
+	 * 本地写入失败在任何情况下都 MUST NOT 退化成 `log.warn` + 继续 + 退出码 0。
+	 */
+	landingWait?: Partial<LandingWaitDeps>;
 	render?: boolean;
 	crf?: string;
 	codec?: string;
@@ -53,6 +66,34 @@ export interface MaterializeOpts {
 	quiet?: boolean;
 	/** 可注入下载实现（测试用）；缺省真 download。 */
 	download?: (url: string, dest: string) => Promise<void>;
+	/**
+	 * 云端产物落地复核（add-cross-clock-adapter D5，spec `clock-adapter`「云端产物落地 SHALL 复核不变量，只报告不改写」）：
+	 * 以**本地原片实测时长**为墙（上传前 `probeGeometry` 的 `geo.duration`，`source_container` 钟）替换 gtrk 里同路径 material 的
+	 * 自述时长，跑 `collectWriteViolations` 报告模式。给了才复核（跑批路）；恢复命令（`oralcut result`）无原片几何 ⇒ 缺席不复核。
+	 */
+	landingWall?: LandingWall;
+	/**
+	 * 源片帧率账面（add-frame-rate-table-vfr-detect D4）：上传前 `probeGeometry` 的 `r / avg / vfr` 三值，原样进 `--json source`
+	 * 与 result.json（`vfr` 三态；VFR 的人读 WARN 已在上传前打过，这里只是机读对应物）。跑批路给；恢复命令无原片几何 ⇒ 缺席。
+	 */
+	source?: SourceRateInfo;
+}
+
+/** 落地复核之墙：`sourcePath` = 上传前的毛片绝对路径（云端把它原样写进 `materials[].path`），`durationSec` = 本地 ffprobe 实测。 */
+export interface LandingWall {
+	sourcePath: string;
+	durationSec: number;
+}
+
+/** 落地复核报告（`--json landing_check` / result.json）：只报告，MUST NOT 改写产物、MUST NOT 非 0 退出。 */
+export interface LandingCheck {
+	gtrk: string;
+	wall: { source_path: string; duration_sec: number; clock: "source_container" };
+	/** 被本地实测时长替换了自述的 material 数（0 = 产物里没有同路径 material，此时按产物自述跑）。 */
+	materials_walled: number;
+	violations: WriteViolation[];
+	/** 读不到 / 解析不了产物时的原因（此时 `violations` 为空，不代表合规）。 */
+	error?: string;
 }
 
 export interface MaterializeResult {
@@ -65,9 +106,64 @@ export interface MaterializeResult {
 	errors: Record<string, string>;
 	taskId: string;
 	fileId: string | null;
+	/** 仅给了 `landingWall` 且 gtrk 已落盘时出现。 */
+	landing_check?: LandingCheck;
+	/** 仅跑批路（给了 `source`）出现：源片 `fps / avg_fps / vfr`。 */
+	source?: SourceRateInfo;
+	/**
+	 * 存在**未消解的本地写入失败**时为 true（机读位，供调用方置非零退出码）。
+	 * 与 `ok` 正交且不改 `ok` 的语义（`errors` 非空即 false，逐字不动）：
+	 * 它回答的是「这次失败是本地还是云端」——云端 404 过期 MUST NOT 置本位。
+	 */
+	localWriteFailed?: true;
 }
 
 const isExpired404 = (msg: string): boolean => /HTTP 404/.test(msg);
+
+/** 本地写入失败 errno（与 `outdir-guard.LOCAL_WRITE_ERRNOS` 同表）。 */
+const LOCAL_WRITE_ERRNOS = new Set(["EACCES", "EPERM", "EROFS", "ENOSPC", "ENAMETOOLONG"]);
+
+/**
+ * 本地写入失败判据（4.1）。今日 `EACCES` 与网络 404 共用一条 catch，`isExpired404` 不命中
+ * 就一律报「产物下载失败」——用户照着网络问题排查，永远修不好一个权限问题。
+ * 判 `e.code` 而非文案：文案会随 Node / 上游库版本漂移。
+ */
+function isLocalWriteError(e: unknown): boolean {
+	const code = (e as NodeJS.ErrnoException | null)?.code;
+	return typeof code === "string" && LOCAL_WRITE_ERRNOS.has(code);
+}
+
+const wallLabel = (w: LandingWall): string => `${basename(w.sourcePath)} ${w.durationSec.toFixed(3)}s · source_container`;
+
+/** 路径同一性（Windows 反斜杠 / 大小写）：云端把 `source_path` 原样写回，这里只消反斜杠与 `/` 的差。 */
+const normSlash = (p: string): string => p.split("\\").join("/").toLowerCase();
+const samePath = (a: unknown, b: string): boolean => typeof a === "string" && normSlash(a) === normSlash(b);
+
+/**
+ * 落地复核（D5）：读产物 → 同路径 material 的 `duration` 换成本地实测 → `collectWriteViolations`（与写方自检**同一套断言、同一遍历**）。
+ * 纯报告：产物文件一个字节不碰（改的是内存里的副本），任何异常都收进 `error` 而不是抛。
+ */
+export async function landingCheckGtrk(gtrkPath: string, wall: LandingWall): Promise<LandingCheck> {
+	const report: LandingCheck = {
+		gtrk: gtrkPath,
+		wall: { source_path: wall.sourcePath, duration_sec: wall.durationSec, clock: "source_container" },
+		materials_walled: 0,
+		violations: [],
+	};
+	try {
+		const gtrk = await readJson(gtrkPath, ".gtrk 工程") as Record<string, unknown>;
+		const materials = Array.isArray(gtrk.materials) ? (gtrk.materials as unknown[]) : [];
+		const walled = materials.map((m) => {
+			if (typeof m !== "object" || m === null || !samePath((m as { path?: unknown }).path, wall.sourcePath)) return m;
+			report.materials_walled += 1;
+			return { ...(m as Record<string, unknown>), duration: wall.durationSec };
+		});
+		report.violations = collectWriteViolations({ ...gtrk, materials: walled }, "landing");
+	} catch (e) {
+		report.error = e instanceof Error ? e.message : String(e);
+	}
+	return report;
+}
 
 /** 从 gtrk materials[0].path 推毛片基名（供成片命名）。 */
 function gtrkSourceName(gtrk: GtrkV1): string | undefined {
@@ -99,12 +195,32 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			errors,
 			taskId,
 			fileId: opts.fileId ?? null,
+			...(opts.source ? { source: opts.source } : {}),
 			...extra,
 		};
 		await writeFile(resultPath, JSON.stringify(r, null, 2));
 		return r;
 	};
 	await writeResult({});
+
+	// ══ Gate B（add-artifact-landing-gate §4.4a）══
+	// 本地写入失败 ⇒ 阻塞重探到可写为止，然后**只重跑这一段**（下载/拷贝），
+	// MUST NOT 重新提交任务、MUST NOT 二次计费。非交互当场硬失败。
+	// 未消解则置 localWriteFailed，由调用方转非零退出码——MUST NOT 退化成 warn + 继续 + 退 0。
+	let localWriteFailed = false;
+	const gateB = async (target: string, label: string): Promise<boolean> => {
+		try {
+			await ensureLandingWritable(target, label, {
+				json: opts.json,
+				deps: opts.landingWait,
+				recoveryHint: `修好后可用：gtrk oralcut-result ${taskId} --out <目录>（按 task_id 取回，不重跑、不二次计费）`,
+			});
+			return true;
+		} catch {
+			localWriteFailed = true;
+			return false;
+		}
+	};
 
 	// 拉回三方产物（按基础格式分组到 <out>/<格式>/）；下载 404=产物过期，记错不整体中止
 	log.step("拉回产物到本地…");
@@ -120,6 +236,35 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			log.info(`${FORMAT_META[base]?.label ?? f.format} ← ${f.filename}`);
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
+			// ── 本地写入失败：与云端失败分开呈现，MUST NOT 报成「产物下载失败」 ──
+			if (isLocalWriteError(e)) {
+				log.warn(`本地写入失败（${f.filename}）：写不进 ${fmtDir} —— ${msg}`);
+				if (await gateB(fmtDir, "产物目录")) {
+					try {
+						await dl(f.download_url, dest); // 只重跑这一段
+						(byFormat[base] ??= []).push(dest);
+						log.info(`${FORMAT_META[base]?.label ?? f.format} ← ${f.filename}（重试成功）`);
+						continue;
+					} catch (e2) {
+						const m2 = e2 instanceof Error ? e2.message : String(e2);
+						// ⚠️ 重试是**完整重新拉网**（→ cloud.ts 的 fetch + writeFile），第二次的失败
+						// 完全可能是网络/过期而不是权限。用 e2 自己的来源判据分流，
+						// MUST NOT 一律贴「本地写入失败」——那和改前把权限问题谎报成网络问题是同一种病，
+						// 只是方向反了（2026-09-08 审计订正）。
+						const localAgain = isLocalWriteError(e2);
+						errors[`${f.format}:${f.filename}`] = localAgain
+							? `本地写入失败（重试后仍失败）：${fmtDir} —— ${m2}`
+							: isExpired404(m2)
+								? `产物已过期（重试时）：${f.filename} 已被清理 —— ${m2}`
+								: `产物下载失败（重试时）：${m2}`;
+						if (localAgain) localWriteFailed = true;
+						log.warn(errors[`${f.format}:${f.filename}`]);
+						continue;
+					}
+				}
+				errors[`${f.format}:${f.filename}`] = `本地写入失败：${fmtDir} —— ${msg}`;
+				continue;
+			}
 			errors[`${f.format}:${f.filename}`] = msg;
 			if (isExpired404(msg)) log.warn(`产物已过期（${f.filename}）：文件已被清理，报告仍可用`);
 			else log.warn(`产物下载失败（${f.filename}）：${msg}`);
@@ -142,8 +287,38 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 				log.warn(errors["jianying:draft"]);
 			}
 		} catch (e) {
-			errors["jianying:draft"] = e instanceof Error ? e.message : String(e);
-			log.warn(`剪映草稿落盘失败：${errors["jianying:draft"]}`);
+			const msg = e instanceof Error ? e.message : String(e);
+			// 本地写入失败与「两件套不全」是两回事：后者的记 errors 与告警义务归
+			// `jianying-draft-landing` 管辖（上面那支，逐字不动），此处只分类本地写失败。
+			if (isLocalWriteError(e)) {
+				log.warn(`本地写入失败：剪映草稿写不进 ${dest} —— ${msg}`);
+				if (await gateB(opts.draftDir, "剪映草稿根")) {
+					try {
+						const again = await copyJianyingDraft(join(outDir, "jianying"), dest);
+						if (again.complete) {
+							jianyingDraftPath = dest;
+							log.info(`剪映草稿已落到：${dest}（重试成功）`);
+						} else {
+							errors["jianying:draft"] = `草稿两件套不全（缺 ${again.missing.join("、")}），剪映列表里不会显示：${dest}`;
+							log.warn(errors["jianying:draft"]);
+						}
+					} catch (e2) {
+						const m2 = e2 instanceof Error ? e2.message : String(e2);
+						// 同上：第二次失败按 e2 自己的来源分流，MUST NOT 一律贴「本地写入失败」。
+						const localAgain = isLocalWriteError(e2);
+						errors["jianying:draft"] = localAgain
+							? `本地写入失败（重试后仍失败）：${dest} —— ${m2}`
+							: `剪映草稿落盘失败（重试时）：${m2}`;
+						if (localAgain) localWriteFailed = true;
+						log.warn(errors["jianying:draft"]);
+					}
+				} else {
+					errors["jianying:draft"] = `本地写入失败：${dest} —— ${msg}`;
+				}
+			} else {
+				errors["jianying:draft"] = msg;
+				log.warn(`剪映草稿落盘失败：${errors["jianying:draft"]}`);
+			}
 		}
 	}
 
@@ -158,11 +333,19 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			const project = await readGtrkFile(gtrkPath);
 			const name = opts.projName ?? gtrkSourceName(project) ?? taskId;
 			const outMp4 = join(outDir, `${name}.mp4`);
+			// ★ add-render-overlay-compositing：与 `gtrk render` **共用同一条**颗粒编排（含计费闸），
+			// MUST NOT 分叉出第二套。本路径是**起盘态**落地（oralcut / long2short 刚出的工程），
+			// 结构上还没有 `beat_track` ⇒ 实际是零动作、零计费；此处接线是为了将来精修态复用
+			// 这条落地入口时不至于静默丢颗粒。`--json` 透传保证机读模式下缺 `--yes` 是硬拒而非挂起。
+			const particles = await prepareParticlesForRender(project, dirname(gtrkPath), {
+				...(opts.json ? { json: true } : {}),
+			});
 			const r = await renderGtrk(project, outMp4, {
 				crf: opts.crf != null ? Number(opts.crf) : undefined,
 				codec: opts.codec,
 				ffmpegPath: opts.ffmpegPath,
 				gtrkDir: dirname(gtrkPath),
+				particlePaths: particles.paths,
 				onLine: (l) => {
 					const m = l.match(/time=(\S+)/);
 					if (m) log.tick(`渲染中 ${m[1]}`);
@@ -174,8 +357,34 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 		}
 	}
 
+	// 云端产物落地复核（D5）：gtrk 已落盘且给了墙才跑；WARN 逐条 + 机读 landing_check，产物逐字节不改、退出码不变
+	let landing_check: LandingCheck | undefined;
+	const landedGtrk = (byFormat.gtrk ?? [])[0];
+	if (opts.landingWall && landedGtrk) {
+		landing_check = await landingCheckGtrk(landedGtrk, opts.landingWall);
+		if (landing_check.error) {
+			log.warn(`落地复核未能进行（${basename(landedGtrk)}）：${landing_check.error}——产物已落盘、未改动`);
+		} else if (landing_check.violations.length) {
+			log.warn(
+				`落地复核：云端工程 ${basename(landedGtrk)} 对本地原片实测时长（${wallLabel(opts.landingWall)}）有 ${landing_check.violations.length} 条不变量违例` +
+					"（只报告、产物未改；客户端打开后重存或 `gtrk patch` 可修）：",
+			);
+			for (const v of landing_check.violations) log.warn(`  · [${v.kind}] ${v.message}`);
+		} else {
+			log.info(`落地复核：云端工程对本地原片实测时长（${wallLabel(opts.landingWall)}）零违例（${landing_check.materials_walled} 条 material 按实测复核）`);
+		}
+	}
+
 	// result.json 补写解析出的本地路径
-	const result = await writeResult({ files: byFormat, jianyingDraftPath, rendered });
+	const result = await writeResult({
+		files: byFormat,
+		jianyingDraftPath,
+		rendered,
+		...(landing_check ? { landing_check } : {}),
+		// 未消解的本地写入失败：机读位，调用方据此置非零退出码。
+		// 云端 404 过期 MUST NOT 置本位（过期时仍能取回报告，是本命令的主要价值）。
+		...(localWriteFailed ? { localWriteFailed: true as const } : {}),
+	});
 
 	// 三方打开提示（人读；--json / quiet 跳过，避免污染 stdout 机读 JSON）
 	if (!opts.json && !opts.quiet) {
