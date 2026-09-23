@@ -24,6 +24,12 @@
 		"AGENT.md",
 		"README.md",
 		"README.en.md",
+		"docs/reference.md",
+		"docs/reference.en.md",
+		"docs/workflow.md",
+		"docs/workflow.en.md",
+		"docs/development.md",
+		"docs/development.en.md",
 		"LICENSE",
 		"CHANGELOG.md"
 	],

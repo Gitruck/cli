@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="170" viewBox="0 0 560 170" role="img" aria-labelledby="title">
+  <title id="title">gtrk CLI</title>
+  <text x="84" y="128" fill="#f43b48" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="150" font-weight="750" letter-spacing="-9">gtrk</text>
+  <path d="M403 63v61" stroke="#f43b48" stroke-opacity=".3" stroke-width="2"/>
+  <text x="425" y="106" fill="#888888" font-family="Consolas, monospace" font-size="28" letter-spacing="3">CLI</text>
+</svg>
