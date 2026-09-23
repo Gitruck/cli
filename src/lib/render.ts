@@ -25,7 +25,7 @@
  * 后端那条链结构性不合成叠加层（明文「只渲 track_index 最小的一条 video_track」「beat_track 忽略」），
  * **不存在**可对拍的后端向量 ⇒ MUST NOT 声称同源，改以 CLI 自有黄金向量对拍。
  */
-import { writeFile, unlink } from "node:fs/promises";
+import { readFile, writeFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -80,8 +80,7 @@ const CLIP_SCALE_NOTICE = 1000;
  *  两套母带口径会让同一工程出两种听感）：−1 dBFS 限幅 + 2% 余量的总音量。
  *  施加在 `amix` **之后**；`amix` 的 `normalize=0`（fix-render-audio-volume 成果）MUST 保持。 */
 const MASTER_CHAIN = "alimiter=limit=0.891:attack=1:release=120,volume=0.98";
-/** 帧对齐补齐余量（帧，fix-render-frame-drift）：截到裁定帧数前先备出的富余帧数。
- * 2 帧足够覆盖 `fps` 出帧数随 trim 起点相位的 ±1 摆动；富余帧够用时被 end_frame 原样截掉。 */
+/** 合成黑场的长度余量；视频尾帧复制由 end_frame 限定消费，不使用该余量。 */
 const PAD_FRAMES = 2;
 
 /** Python %g 近似：6 位有效数字并去尾零（fps 格式化对齐后端）。 */
@@ -408,6 +407,8 @@ function laneATimeline(
 }
 
 export interface RenderParams {
+	/** 正式渲染收集源窗首帧检查标签；与成片同进程解码，空窗必须失败。 */
+	sourceChecks?: string[];
 	crf?: number;
 	codec?: string;
 	audio_crossfade_ms?: number;
@@ -578,6 +579,15 @@ export function buildFilterGraph(
 	const chains: string[] = [];
 	let labelN = 0;
 	const label = (): string => `s${++labelN}`;
+	const sourceHead = (idx: number, st: number, ed: number, frames: number): string => {
+		const head = `[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,`;
+		if (!params.sourceChecks || frames <= 0) return head;
+		const check = `source_check_${params.sourceChecks.length}`;
+		params.sourceChecks.push(check);
+		chains.push(`${head}split=2[${check}_render][${check}_input]`);
+		chains.push(`[${check}_input]trim=end_frame=1,scale=1:1,setsar=1,format=gray[${check}]`);
+		return `[${check}_render]`;
+	};
 
 	// 视频轨（main）
 	const [vElements, vEnd] = normalizeTrack(mainVideoTrack.track_timeline);
@@ -618,15 +628,11 @@ export function buildFilterGraph(
 			const idx = inputOf(el.material);
 			const st = el.clip_st;
 			const ed = el.clip_st + el.duration;
-			// fps 之后按**输出帧号**截到裁定值（trim=end_frame 与源时基解耦，VFR 源同样成立）。
-			// 截断前先 tpad 克隆末帧补足 PAD_FRAMES 帧：`fps` 的实际出帧数随 trim 起点相对源帧的
-			// **相位**在 floor/ceil 之间摆动（合成源实测：同为 d=2.010s，start=5.000 出 61 帧、
-			// start=5.008 出 60 帧），只截不补会在裁定值恰好取到高位时少一帧、逐段累成短片
-			// （打样实测 5100 vs 应有 5103）。补出来的帧在够用时被 end_frame 原样截掉；
-			// 真不够时最多多驻留一帧末帧（不可见），MUST NOT 靠外扩源窗补——那会把邻场景帧截进来。
+			// 在 fps 前复制原裁窗末帧，避免单源帧被 fps 吃成零帧；end_frame 限定消费预算。
+			// 不扩源窗，不借邻镜头；正预算空窗由同次解码的 sourceChecks 显式拒绝。
+			const head = sourceHead(idx, st, ed, frames);
 			chains.push(
-				`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
-					`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
+				head + `tpad=stop_mode=clone:stop=-1,fps=${g(rate)},` +
 					`trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
 					`scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
 					`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[${lab}]`,
@@ -640,7 +646,8 @@ export function buildFilterGraph(
 		}
 		vLabels.push(lab);
 	});
-	chains.push(vLabels.map((x) => `[${x}]`).join("") + `concat=n=${vLabels.length}:v=1:a=0[vout]`);
+	chains.push(vLabels.map((x) => `[${x}]`).join("") +
+		`concat=n=${vLabels.length}:v=1:a=0,setpts=N/(${g(rate)}*TB)[vout]`);
 
 	// ══ 叠加层合成（★ add-render-overlay-compositing）══════════════════════════════
 	//
@@ -734,8 +741,8 @@ export function buildFilterGraph(
 				const st = L.clipSt;
 				const ed = L.clipSt + L.duration;
 				const trimHead =
-					`[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,` +
-					`fps=${g(rate)},tpad=stop_mode=clone:stop_duration=${f6(PAD_FRAMES / rate)},` +
+					sourceHead(idx, st, ed, w.frames) +
+					`tpad=stop_mode=clone:stop=-1,fps=${g(rate)},` +
 					`trim=end_frame=${w.frames},`;
 				const geo = computeOverlayGeometry({
 					canvas: [width, height],
@@ -877,6 +884,10 @@ export function buildFilterGraph(
 		);
 	}
 
+	if (params.sourceChecks?.length) {
+		chains.push(params.sourceChecks.map(x => `[${x}]`).join("") +
+			`concat=n=${params.sourceChecks.length}:v=1:a=0,setpts=N/(${g(rate)}*TB)[source_checks]`);
+	}
 	return {
 		inputs,
 		graph: chains.join(";"),
@@ -1128,7 +1139,9 @@ export async function renderGtrk(
 	// ★ link-clip-mask-contract-render：几何分母 + 蒙版纹理都在开渲前备齐（纯函数只消费）
 	const materialSizes = collectMaterialSizes(ffprobe, gtrk, materialPaths, overlayMaterialsNeedingSize(gtrk));
 	const masks = prepareOverlayMasks(gtrk, materialSizes, opts.gtrkDir);
+	const sourceChecks: string[] = [];
 	const { inputs, graph, total, audio, overlay, videoLabel, scale } = buildFilterGraph(gtrk, materialPaths, {
+		sourceChecks,
 		crf,
 		materialHasAudio,
 		materialSizes,
@@ -1189,9 +1202,10 @@ export async function renderGtrk(
 	}
 
 	const filterFile = join(tmpdir(), `gtrk-filter-${process.pid}-${inputs.length}.txt`);
+	const checkFile = `${filterFile}.framehash`;
 	await writeFile(filterFile, graph, "utf8");
 	try {
-		const args = ["-y"];
+		const args = ["-y", "-abort_on", "empty_output_stream"];
 		for (const p of inputs) args.push("-i", p);
 		args.push(
 			"-filter_complex_script", filterFile,
@@ -1202,11 +1216,23 @@ export async function renderGtrk(
 			"-movflags", "+faststart",
 			outputPath,
 		);
+		if (sourceChecks.length > 0) {
+			args.push("-map", "[source_checks]", "-c:v", "rawvideo", "-threads:v", "1",
+				"-fps_mode", "passthrough", "-f", "framehash", checkFile);
+		}
 		await runFfmpeg(ffmpeg, args, opts.onLine);
+		if (sourceChecks.length > 0) {
+			const observed = (await readFile(checkFile, "utf8")).split(/\r?\n/)
+				.filter(line => line.trim() && !line.startsWith("#")).length;
+			if (observed !== sourceChecks.length) {
+				throw new Error(`视频裁切范围内无可解码画面：${sourceChecks.length - observed} 个片段；请检查素材与裁切起止，未返回成功成片`);
+			}
+		}
 		// 零音源同样照常产出、退出码 0（成片不因无声而失败）——诚实体现在上面的 INFO 与 audio.silent 上
 		return { outputPath, duration: total, audio, overlay, scale };
 	} finally {
 		await unlink(filterFile).catch(() => {});
+		await unlink(checkFile).catch(() => {});
 	}
 }
 
