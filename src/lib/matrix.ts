@@ -12,6 +12,7 @@ import type { FilmDispatch } from "./splitdoc";
 import type { ColumnBroll } from "./column-config";
 import { parseJson, CloudError, type ApiResp } from "./cloud";
 import { r3 } from "./frame-domain";
+import type { OnlineOrigin } from "./online-broll-contract";
 
 // ── 类型（broll-plan-contract spec 字段级）────────────────────────────────
 
@@ -25,7 +26,11 @@ import { r3 } from "./frame-domain";
  * `local_path`/`cover_path` 替代 `url`/`cover_url`（无 24h 签名过期语义，url 系字段 MUST NOT 出现）；
  * `segments` 结构与云端形态逐字段一致。云端形态字段与语义不变（无 source 键即云端）。 */
 export interface PlanResult {
+	score_model?: "qwen-vl-reranker" | "jina-clip-cosine";
+	vector_score?: number;
 	clip_id: string;
+	/** 在线平台来源；与 preview/raw 媒体状态独立。 */
+	origin?: OnlineOrigin;
 	score: number;
 	/** 云端形态必有；本地形态（source:"local"）MUST NOT 出现。 */
 	url?: string;
@@ -219,7 +224,15 @@ export function validateLocalResult(r: PlanResult): string[] {
 	return errs;
 }
 
+export interface OnlineSearchDiagnostics {
+	task_id: string;
+	platforms: Record<string, unknown>[];
+	failures: Record<string, unknown>[];
+	manifest: { url: string; file_id: string };
+}
+
 export interface PlanQuery {
+	online?: OnlineSearchDiagnostics;
 	query: string;
 	/** 服务端回显（过滤前真实召回数）——results 的兄弟字段。 */
 	recalled?: number;
@@ -609,7 +622,7 @@ export interface BrollPlan {
 	plan_version: "v1";
 	generated_at: string;
 	/** 云端双口沿用 internal/external；本地检索（--local）为 "local"。 */
-	member_type: "internal" | "external" | "local";
+	member_type: "internal" | "external" | "local" | "online";
 	/** 常量注记（云端形态必含）：结果 url 带签名默认 24h 过期，重跑 gtrk matrix 即重签。
 	 * 本地形态 MUST NOT 出现（无签名过期语义，broll-plan-contract）。 */
 	url_ttl_note?: string;
@@ -649,6 +662,7 @@ export interface SearchBody {
 }
 
 export interface SearchRespData {
+	online?: OnlineSearchDiagnostics;
 	request_id?: string | null;
 	recalled?: number;
 	results?: PlanResult[];
@@ -807,7 +821,7 @@ export function buildPlanBeat(entry: FilmDispatch, outcomes: QueryOutcome[]): Pl
 		}
 		const results = (o.data?.results ?? []).map((r) => ({ ...r }));
 		markExcluded(results, exclude);
-		const pq: PlanQuery = { query: o.query, results };
+		const pq: PlanQuery = { query: o.query, results, ...(o.data?.online ? { online: o.data.online } : {}) };
 		if (typeof o.data?.recalled === "number") pq.recalled = o.data.recalled; // results 的兄弟字段
 		beat.queries.push(pq);
 	}
@@ -821,7 +835,7 @@ export function buildPlanBeat(entry: FilmDispatch, outcomes: QueryOutcome[]): Pl
 
 export function buildPlan(opts: {
 	generatedAt: string;
-	memberType: Tier | "local";
+	memberType: Tier | "local" | "online";
 	projectSlug?: string;
 	columnId?: string;
 	beats: PlanBeat[];

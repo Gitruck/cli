@@ -31,6 +31,7 @@
  * 恒不漏出底下的 A-roll 口播。默认开，`--no-black-bed` 关。
  */
 import type { BrollPlan, PlanBeat, PlanResult } from "./matrix";
+import { onlineMediaWindow, type OnlineOrigin } from "./online-broll-contract";
 // [fix-describe-window-coverage] 值导入（此前只有 import type）：射程判据的**唯一实现**在 matrix.ts
 // ——那是契约模块，`describe.at_sec` 的语义与缺省推定口径都写在它的头注里。
 // `matrix.ts` 不 import 本文件（本文件的 LOCAL_CLIP_PREFIX 在那边是独立声明的、注释里点名「避免环依赖」）
@@ -271,9 +272,9 @@ export const SIGNAL_COVERAGE_LOW = 0.5;
 /** 去重粒度（D1）：scene=场景级（默认）；material=严格档（同一素材文件整轮只消费一次）。 */
 export type DedupScope = "scene" | "material";
 
-/** 来源层（D2 层序铁律，写死不配置）：自上而下 local > concept > common（common 最下、紧贴口播/黑底之上）。 */
-export type SourceLayer = "local" | "concept" | "common";
-/** 层带语义序（自上而下 local > concept > common）。
+/** 来源层（D2 层序铁律，写死不配置）：自上而下 local > online > concept > common（common 最下、紧贴口播/黑底之上）。 */
+export type SourceLayer = "local" | "online" | "concept" | "common";
+/** 层带语义序（自上而下 local > online > concept > common）。
  * ★ fix-broll-zorder-contract-drift（2026-08-19 打样实锤）：gtrk v1 契约为
  * **track_index 越大越靠前（上层）**（composition-contract-v1 §video_track:「最小=底轨 main，
  * 越大越靠前」）——本模块此前以相反世界观（小=上层）分配
@@ -297,9 +298,9 @@ export type SourceLayer = "local" | "concept" | "common";
  * 至此契约 / 本模块 / 后端 / 客户端导入 / 客户端导出**五处同向**。
  * ⚠️ 本模块的方向依据 SHALL 只认**契约条文**，MUST NOT 拿任一消费方当下的实现当锚（对侧会改）。
  * 正本见 spec `broll-source-layering`「层序铁律的 track_index 落法」。 */
-export const SOURCE_LAYER_ORDER: readonly SourceLayer[] = ["local", "concept", "common"];
+export const SOURCE_LAYER_ORDER: readonly SourceLayer[] = ["local", "online", "concept", "common"];
 
-const isSourceLayer = (v: unknown): v is SourceLayer => v === "local" || v === "concept" || v === "common";
+const isSourceLayer = (v: unknown): v is SourceLayer => v === "local" || v === "online" || v === "concept" || v === "common";
 
 /**
  * 消费单元键（D1/D4 分配即消费）：
@@ -374,6 +375,7 @@ export interface FillSlot {
 
 export interface BrollMetaCandidate {
 	clip_id: string;
+	origin?: OnlineOrigin;
 	score: number;
 	/** 云端候选封面 url；本地候选恒 null（封面走 cover_path，MUST NOT 推导远程 URL）。 */
 	cover_url: string | null;
@@ -393,6 +395,7 @@ export interface BrollMetaCandidate {
 
 export interface BrollMetaBeat {
 	beat: string;
+	online_search_task_ids?: string[];
 	track_st: number;
 	track_ed: number;
 	per_shot_sec?: number;
@@ -539,6 +542,7 @@ export function mergedCandidates(beat: PlanBeat): PlanResult[] {
 
 /** 代理 url 决策：出参 preview_url 优先；缺失按 cover_url 模式推导。 */
 export function previewUrlFor(result: PlanResult): string | null {
+	if (result.origin?.kind === "online") return result.origin.preview_url;
 	const direct = (result as { preview_url?: unknown }).preview_url;
 	if (typeof direct === "string" && direct) return direct;
 	const cover = result.cover_url;
@@ -2292,7 +2296,9 @@ function fastFillBeatGaps(o: {
 					if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
 					for (const sg of rr.segments ?? []) {
 						if (sec2ms(sg.start) <= sec2ms(slot.clip_st) && sec2ms(slot.clip_ed) <= sec2ms(sg.end)) {
-							return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
+							return { lo: sg.start, hi: sg.end, ...(typeof rr.duration === "number" ? {
+								dur: rr.origin ? rr.origin.preview_clock.source_start + rr.origin.preview_clock.duration : rr.duration,
+							} : {}) };
 						}
 					}
 					if (!rr.segments?.length) return { lo: 0, hi: rr.duration ?? slot.clip_ed, ...(typeof rr.duration === "number" ? { dur: rr.duration } : {}) };
@@ -3422,7 +3428,7 @@ export function layBrollTracks(opts: {
 	const unverifiedSamples: string[] = [];
 	const blackBedOn = opts.blackBed !== false;
 	const forceRelay = opts.forceRelay === true;
-	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : "common");
+	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : plan.member_type === "online" ? "online" : "common");
 	const warnings: string[] = [];
 	const infos: string[] = [];
 	// ── 帧率（fix-matrix-lay-frame-grid D7）：写出侧帧格化的锚，与 gtrk patch 同一读法与话术；缺席 / 非正 / 非整数
@@ -3592,7 +3598,7 @@ export function layBrollTracks(opts: {
 	// 判据抽为 projectHasShieldTrack 纯函数（adjust-main-track-gap-fill 复用同一形态口径，两处不写两遍）
 	const hasShieldTargetTrack = projectHasShieldTrack(keptOtherTracks);
 	const blackBedReserved = blackBedOn && hasShieldTargetTrack ? 1 : 0;
-	const bandCounts: Record<SourceLayer, number> = { local: 0, concept: 0, common: 0 };
+	const bandCounts: Record<SourceLayer, number> = { local: 0, online: 0, concept: 0, common: 0 };
 	for (const b of keptBandTracks) bandCounts[b.layer]++;
 	const bandStart = {} as Record<SourceLayer, number>;
 	let bandEnd = baseIndex + blackBedReserved;
@@ -3662,14 +3668,25 @@ export function layBrollTracks(opts: {
 				// 素材上界的真相源（add-cross-clock-adapter D1）：代理有实测就用文件本身的墙——否则 materials[] 写实测、
 				// 上界却按自述，代理比原片短时 assertSourceBound 会在写回前把本轮整个抛掉。判据（min / +1ms）一字未改。
 				const probed = s.material_id === undefined ? opts.proxyProbes?.get(s.clip_id) : undefined;
-				const matDur = injected ? injected.duration : probed && "wall" in probed ? probed.wall.durationSec : candById.get(s.clip_id)?.duration;
+				const origin = injected ? undefined : candById.get(s.clip_id)?.origin;
+				const fileDuration = injected ? injected.duration : probed && "wall" in probed ? probed.wall.durationSec
+					: origin?.preview_clock.duration ?? candById.get(s.clip_id)?.duration;
+				// 决策槽仍用源片时间：文件时长的上界须先加代理源起点。
+				const matDur = typeof fileDuration === "number" ? fileDuration + (origin?.preview_clock.source_start ?? 0) : fileDuration;
 				const segMs = segEnd === undefined ? undefined : sec2ms(segEnd);
 				const matMs = typeof matDur === "number" && Number.isFinite(matDur) && matDur > 0 ? sec2ms(matDur) + 1 : undefined;
 				return segMs === undefined ? matMs : matMs === undefined ? segMs : Math.min(segMs, matMs);
 			});
 			shiftedTotal += projected.shifted;
 			for (const m of projected.info) infos.push(`${beat.beat} 轨 ${trackIndex}：${m}`);
-			const slots = projected.slots;
+			// 写出工程及 laid 槽使用文件内部时间；候选 seg/origin 保留源片时间。
+			const slots = projected.slots.map(s => {
+				const origin = s.material_id === undefined ? candById.get(s.clip_id)?.origin : undefined;
+				if (!origin) return s;
+				onlineMediaWindow(s.clip_st, s.clip_ed, origin.preview_clock);
+				const offsetMs = sec2ms(origin.preview_clock.source_start);
+				return { ...s, clip_st: ms2sec(sec2ms(s.clip_st) - offsetMs), clip_ed: ms2sec(sec2ms(s.clip_ed) - offsetMs) };
+			});
 			if (!slots.length) continue;
 			const bucket = trackClips.get(trackIndex) ?? [];
 			slots.forEach((s, i) => {
@@ -3811,6 +3828,8 @@ export function layBrollTracks(opts: {
 
 		const metaBeat: BrollMetaBeat = {
 			beat: beat.beat,
+			...(targetLayer === "online" ? { online_search_task_ids: [...new Set(beat.queries.flatMap(q =>
+				typeof q.online?.task_id === "string" && /^\d{1,30}$/.test(q.online.task_id) ? [q.online.task_id] : []))] } : {}),
 			track_st: beat.track_st,
 			track_ed: beat.track_ed,
 			candidates: merged.slice(0, BROLL_META_CANDIDATE_CAP).map((c) => {
@@ -3819,6 +3838,9 @@ export function layBrollTracks(opts: {
 				const isLocal = c.source === "local" || typeof c.local_path === "string";
 				const entry: BrollMetaCandidate = {
 					clip_id: c.clip_id,
+					...(c.origin ? { origin: c.origin } : {}),
+					...(c.score_model ? { score_model: c.score_model } : {}),
+					...(c.vector_score !== undefined ? { vector_score: c.vector_score } : {}),
 					score: c.score,
 					cover_url: c.cover_url ?? null,
 					// 本地素材无 preview 代理概念（dl.rel 是素材绝对路径），preview_path 恒 null，消费方走 local_path
@@ -3936,7 +3958,7 @@ export function layBrollTracks(opts: {
 		const survivors = new Map<number, { newIndex: number; layer?: SourceLayer }>();
 		for (const [oldIndex, v] of bandIndexRemap) survivors.set(oldIndex, v);
 		for (const idx of transitionKeptIndices) if (!survivors.has(idx)) survivors.set(idx, { newIndex: idx });
-		if (prevBroll && survivors.size > 0) {
+		if (prevBroll) {
 			const beatsByName = new Map(metaBeats.map((b) => [b.beat, b]));
 			for (const pb of Array.isArray(prevBroll.beats) ? prevBroll.beats : []) {
 				if (!pb || typeof pb !== "object") continue;
@@ -3949,9 +3971,15 @@ export function layBrollTracks(opts: {
 				const survivingCands = (Array.isArray(pb.candidates) ? pb.candidates : []).filter(
 					(c) => isSourceLayer(c?.source_layer) && c.source_layer !== targetLayer,
 				);
-				if (!survivingLaid.length && !survivingCands.length) continue;
+				const survivingTaskIds = targetLayer === "online" ? [] :
+					(Array.isArray(pb.online_search_task_ids) ? pb.online_search_task_ids : [])
+						.filter(id => typeof id === "string" && /^\d{1,30}$/.test(id));
+				if (!survivingLaid.length && !survivingCands.length && !survivingTaskIds.length) continue;
 				const into = beatsByName.get(pb.beat);
 				if (into) {
+					if (survivingTaskIds.length) into.online_search_task_ids = [...new Set([
+						...(into.online_search_task_ids ?? []), ...survivingTaskIds,
+					])];
 					into.laid.push(...survivingLaid);
 					for (const c of survivingCands) {
 						if (!into.candidates.some((x) => x.clip_id === c.clip_id && x.source_layer === c.source_layer)) {
@@ -3960,6 +3988,8 @@ export function layBrollTracks(opts: {
 					}
 				} else {
 					const carried: BrollMetaBeat = { ...pb, candidates: survivingCands, laid: survivingLaid };
+					if (survivingTaskIds.length) carried.online_search_task_ids = [...new Set(survivingTaskIds)];
+					else delete carried.online_search_task_ids;
 					metaBeats.push(carried);
 					beatsByName.set(carried.beat, carried);
 				}

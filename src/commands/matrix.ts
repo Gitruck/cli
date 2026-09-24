@@ -1,3 +1,6 @@
+import { searchOnlineBroll, onlineSearchOutcome } from "../lib/online-broll-client";
+import { claimOnlineSearch } from "../lib/online-search-journal";
+import { parseOnlinePlatforms } from "../lib/online-broll-contract";
 /**
  * gtrk matrix —— B-roll 检索（Wave2 Change C + add-matrix-local-search 第三路）。
  *
@@ -208,6 +211,9 @@ interface MatrixOpts {
 	// ── 本地第三路（add-matrix-local-search）──
 	/** `--local`：本地索引检索模式（显式开关，跳过身份探针，不触任何云端检索端点）。 */
 	local?: boolean;
+	online?: boolean;
+	platforms?: string;
+	onlineSession?: string;
 	/** `--dirs a,b`：本地素材**文件夹或单个素材文件**（index 的索引范围 / --local 的检索域）。
 	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。
 	 *
@@ -322,6 +328,9 @@ export function registerMatrix(program: Command): void {
 		.option("--column <id>", "栏目配置 id（缺省取 config defaultColumn，再缺省内置默认栏目；仅云端模式）")
 		.option("--top-k <n>", `每 query 候选数上限（覆盖派单 shots 翻译；云端服务端上限 50；matrix material 缺省 ${MATERIAL_TOP_K_DEFAULT}）`)
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
+		.option("--online", "从外部视频平台检索 B-roll 镜头")
+		.option("--platforms <list>", "外网平台：youtube,vimeo,tiktok,bilibili")
+		.option("--online-session <name>", "外网检索批次；同批次续跑，换名称发起新搜索")
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
 		.option(
 			"--dirs <a,b,...>",
@@ -634,6 +643,13 @@ export function parseDirsOption(raw: string | string[] | undefined): string[] {
  *   - --plan / --materials / --source-window 出现在不适用模式一律参数错误。
  */
 export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void {
+ if (opts.online && opts.local) throw new Error("--online 与 --local 不能同时使用");
+ if (opts.platforms !== undefined && !opts.online) throw new Error("--platforms 需要 --online");
+ if (opts.onlineSession !== undefined && (!opts.online || !opts.onlineSession.trim())) throw new Error("--online-session 需要 --online 且名称不能为空");
+ if (opts.online && pos.kind === "search" && !opts.out) throw new Error("外网检索需要 --out <结果.json>，用于保存结果与断线恢复记录");
+ if (opts.online && pos.kind !== "search" && pos.kind !== "plan") throw new Error("--online 仅用于检索或派单消费");
+ if (opts.online && pos.kind === "plan" && !opts.project && !opts.dispatch) throw new Error("需 --project <目录> 或显式 --dispatch <path>");
+ if (opts.online) parseOnlinePlatforms(opts.platforms);
 	const dirs = parseDirsOption(opts.dirs);
 	// 通用素材检索专属参数（add-matrix-material-search）：出现在别的模式一律参数错误（不静默忽略）
 	if (pos.kind !== "material") {
@@ -740,9 +756,10 @@ export function parseSourceWindow(raw: string | undefined): [number, number] | u
 }
 
 export interface MatrixResult {
+	online?: import("../lib/matrix").OnlineSearchDiagnostics;
 	ok: boolean;
 	mode: "plan" | "search" | "lay";
-	memberType: Tier | "local";
+	memberType: Tier | "local" | "online";
 	columnId?: string;
 	planPath?: string;
 	results?: PlanResult[];
@@ -837,7 +854,7 @@ export interface MatrixIndexResult {
 interface SearchCtx {
 	/** 云端凭据（云端编排端点由 base 推导；`--arrange local` 时不读它）。 */
 	cfg: { base: string; apiKey: string };
-	memberType: Tier | "local";
+	memberType: Tier | "local" | "online";
 	columnId?: string;
 	/** 本轮铺轨来源层（add-broll-dedup-and-layering D2）：--local → local；
 	 * 云端按检索口判——internal 且 material_class=concept → concept，其余云端 → common。 */
@@ -876,7 +893,25 @@ export async function runMatrix(
 		});
 	}
 
-	// ── 本地检索模式（--local）：跳过身份探针，不触任何云端检索端点 ──
+	if (opts.online) {
+  const platforms = parseOnlinePlatforms(opts.platforms);
+  const journalDir = pos.kind === "search" ? `${resolve(opts.out!)}.online-search`
+   : join(opts.dispatch ? dirname(dirname(resolve(opts.dispatch))) : resolve(opts.project!), "split", ".online-search");
+  const ctx: SearchCtx = { cfg, memberType: "online", sourceLayer: "online", search: async (query) => {
+   const request = {query, platforms, top_k: opts.topK ? Number(opts.topK) : 12};
+   const submission = await claimOnlineSearch(journalDir, cfg, request, opts.onlineSession);
+   const output = await searchOnlineBroll(cfg, request, {
+    submission,
+    onSubmitted: (id) => { log.info(`外网检索任务：${id}`); },
+    onTick: (state, progress) => { log.info(`外网检索 ${state}${progress === undefined ? "" : ` ${progress}%`}`); },
+   });
+   for (const report of output.platforms) if (report.status !== "ok") log.warn(`外网平台 ${report.platform}: ${report.status}`);
+   return {results: output.results, recalled: output.results.length, request_id: output.task_id, online: {task_id: output.task_id, platforms: output.platforms, failures: output.failures, manifest: output.manifest}};
+  }};
+  return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts, deps);
+ }
+
+ // ── 本地检索模式（--local）：跳过身份探针，不触任何云端检索端点 ──
 	if (opts.local) {
 		return withEmbedJsonGuard(pos.kind, opts, async () => {
 			const ctx = await buildLocalSearchCtx(cfg, opts);
@@ -1828,7 +1863,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 	const effPlan: BrollPlan = { ...plan, beats };
 
 	// 来源层：plan 无层登记，按 member_type 推导（local → local，云端 → common；概念层重铺请走检索命令）
-	const sourceLayer: SourceLayer = plan.member_type === "local" ? "local" : "common";
+	const sourceLayer: SourceLayer = plan.member_type === "local" ? "local" : plan.member_type === "online" ? "online" : "common";
 
 	// ── 美观度权重（add-audio-project-atoms）：w>0 才建 mark 查询闭包（describes 缓存就近命中）──
 	const markWeight = parseMarkWeight(opts.markWeight);
@@ -1931,7 +1966,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 	// 卡脖子 upsell（extend-upsell-to-clip-search）：external 档留了空槽才提示——
 	// 空槽落到成片就是黑底空洞，是 B-roll 主链路上最直观的「素材池不够」信号。
 	// 独立顶层字段，lay 账面一字不改；internal 与本地模式恒不提示。
-	const layUpsell = decideLayUpsell(
+	const layUpsell = plan.member_type === "online" ? undefined : decideLayUpsell(
 		plan.member_type,
 		Number((laySummary as { dedup?: { emptySlots?: number } } | undefined)?.dedup?.emptySlots ?? 0),
 	);
@@ -2123,6 +2158,11 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 			try {
 				const data = await ctx.search(q, entry);
 				outcomes.push({ query: q, data });
+				if (data.online && onlineSearchOutcome({ results: data.results ?? [], platforms: data.online.platforms, failures: data.online.failures }) === "unavailable") {
+					errCount++;
+					log.warn(`${entry.beat}「${q}」外网平台或素材处理失败，未产出候选；诊断保留在 plan。`);
+					continue;
+				}
 				// ⚠️ `okCount` 的判据是「`ctx.search` 没抛异常」= **执行**成功，与有没有产出无关。
 				// 这条语义此前被摘要行的「N/N query 成功」四个字含混掉了，故下面单独记零产出。
 				okCount++;
@@ -2163,7 +2203,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	const totalQueries = okCount + errCount;
 	// 判据用 rawQueue：队列本来就空 ≠ 被重投影全判零存活（后者已由重投影摘要单独报因）
 	if (rawQueue.length === 0) log.warn("无 B-roll 派单（film_broll 队列为空）——照常写出空 plan");
-	if (totalQueries > 0 && okCount === 0) {
+	if (totalQueries > 0 && okCount === 0 && ctx.memberType !== "online") {
 		throw new Error(`全部 ${totalQueries} 个 query 检索失败，未写入 plan（逐条原因见上方日志）`);
 	}
 
@@ -2195,13 +2235,17 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	if (zeroYieldQueries.length > 0) {
 		const head = zeroYieldQueries.slice(0, 5).map((q) => `「${q}」`).join("、");
 		log.warn(
-			`${zeroYieldQueries.length} 条 query 执行成功但**零候选**：${head}${zeroYieldQueries.length > 5 ? ` 等 ${zeroYieldQueries.length} 条` : ""}。\n` +
+			ctx.memberType === "online"
+				? `${zeroYieldQueries.length} 条外网检索完成但零候选：${head}。可调整检索描述后重试；原参数需新批次才会重新检索。`
+				: `${zeroYieldQueries.length} 条 query 执行成功但**零候选**：${head}${zeroYieldQueries.length > 5 ? ` 等 ${zeroYieldQueries.length} 条` : ""}。\n` +
 				"这些词在索引域里一条都没检出（≠ 被 beat 内去重折叠——折叠的那种仍在同 beat 兄弟 query 名下，池子不少料）。\n" +
 				"想补：换更具象的检索词，或给这些 beat 补素材后重跑。",
 		);
 	}
 	if (isLocal) {
 		log.info("清单只含引用不含素材：本地素材以绝对路径直引（local_path，无 url 签名/过期语义）；封面铺轨时现抽。");
+	} else if (ctx.memberType === "online") {
+		log.info("清单保存外网来源与低清代理引用；确认最终选段后再取高清素材。");
 	} else {
 		log.info("清单只含引用不含素材：cover_url 可直接预览；url 带签名默认 24h 过期，过期重跑本命令即重签。");
 	}
@@ -2210,7 +2254,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	//    幂等替换自产轨 → 原子写回。工程缺失/非 v1 = 告警跳过（plan 已产，铺轨是增值不是门槛）。
 	const layN = parseLay(opts.lay);
 	let laid: LayOutcome | undefined;
-	if (layN > 0) {
+	if (layN > 0 && !(ctx.memberType === "online" && resultCount === 0)) {
 		laid = await layIntoProject(
 			baseDir,
 			plan,
@@ -2242,13 +2286,14 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	const declined = laid?.declined === true;
 	// 卡脖子 upsell（extend-upsell-to-clip-search）：external 档留了空槽才提示——
 	// 空槽落到成片就是黑底空洞。独立顶层字段，lay 账面一字不改；internal 与本地模式恒不提示。
-	const layUpsell = decideLayUpsell(
+	const layUpsell = ctx.memberType === "online" ? undefined : decideLayUpsell(
 		ctx.memberType,
 		Number((laySummary as { dedup?: { emptySlots?: number } } | undefined)?.dedup?.emptySlots ?? 0),
 	);
 	const result: MatrixResult = {
-		ok: refused === undefined && !declined,
+		ok: refused === undefined && !declined && !(ctx.memberType === "online" && resultCount === 0),
 		mode: "plan",
+		...(ctx.memberType === "online" && resultCount === 0 ? { reason: "online_no_candidates" } : {}),
 		memberType: ctx.memberType,
 		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		planPath,
@@ -4040,7 +4085,7 @@ async function downloadProxy(
 			return "preview";
 		}
 	}
-	if (opts.previewOnly) return null;
+	if (opts.previewOnly || cand.origin?.kind === "online") return null;
 	if (typeof cand.url === "string" && cand.url) {
 		const raw = await tryFetch(cand.url);
 		if (raw) {
@@ -4058,29 +4103,34 @@ async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promis
 	log.step(`▶ ad-hoc 检索「${query}」（${ctx.memberType === "local" ? "本地索引" : `${ctx.memberType} 口`}）…`);
 	const data = await ctx.search(query);
 	const results = data.results ?? [];
-	log.ok(`${results.length} 条候选（召回 ${data.recalled ?? "?"}）`);
+	const onlineOutcome = data.online ? onlineSearchOutcome({results, platforms: data.online.platforms, failures: data.online.failures}) : undefined;
+	const onlineEmpty = onlineOutcome === "empty" || onlineOutcome === "unavailable";
+	if (onlineEmpty) log.warn(onlineOutcome === "unavailable" ? "外网检索未产出候选，存在平台或素材处理失败；详见结果诊断。" : "外网检索已完成，但没有可用候选。");
+	else log.ok(`${results.length} 条候选（召回 ${data.recalled ?? "?"}）`);
 
 	// 卡脖子 upsell（extend-upsell-to-clip-search）：external 档搜不到才提示；
 	// 本地索引模式（memberType==="local"）恒不提示——本地素材与矩阵无关，提了驴唇不对马嘴。
 	// `--top-k` 缺省时按服务端默认值计，口径与 matrix material 完全一致。
 	const adhocUpsell =
-		ctx.memberType === "local"
+		(ctx.memberType === "local" || ctx.memberType === "online")
 			? undefined
 			: decideMaterialUpsell(ctx.memberType, results.length, opts.topK ? Number(opts.topK) : TOP_K_DEFAULT);
 
 	const result: MatrixResult = {
-		ok: true,
+		ok: !onlineEmpty,
 		mode: "search",
+		...(onlineOutcome ? { outcome: onlineOutcome } : {}),
+		...(data.online ? { online: data.online } : {}),
 		memberType: ctx.memberType,
 		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		results,
-		counts: { beats: 0, queries: 1, results: results.length, errors: 0 },
+		counts: { beats: 0, queries: 1, results: results.length, errors: onlineOutcome === "unavailable" ? 1 : 0 },
 		// 独立顶层字段：MUST NOT 混进 results（agent 拿 results 当候选消费）
 		...(adhocUpsell ? { upsell: adhocUpsell } : {}),
 	};
 	if (opts.out) {
 		const outPath = resolve(opts.out);
-		await writeFile(outPath, JSON.stringify({ query, recalled: data.recalled, results }, null, 2));
+		await writeFile(outPath, JSON.stringify({ query, recalled: data.recalled, results, ...(data.online ? { ok: result.ok, outcome: onlineOutcome, online: data.online } : {}) }, null, 2));
 		log.ok(`结果已落盘：${outPath}`);
 		result.outPath = outPath;
 	} else if (!opts.json) {
@@ -4092,6 +4142,7 @@ async function runAdhoc(query: string, ctx: SearchCtx, opts: MatrixOpts): Promis
 		}
 	}
 	if (adhocUpsell && !opts.json) log.warn(adhocUpsell.message);
+	if (!result.ok) process.exitCode = 1;
 	if (opts.json) console.log(JSON.stringify(result));
 	return result;
 }

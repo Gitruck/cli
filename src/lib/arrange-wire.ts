@@ -178,7 +178,7 @@ export interface WireDirectSlot {
 
 export interface WirePlan {
 	plan_version: "v1";
-	member_type: "internal" | "external" | "local";
+	member_type: "internal" | "external" | "local" | "online";
 	beats: WireBeat[];
 }
 
