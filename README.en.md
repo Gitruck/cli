@@ -11,6 +11,7 @@
 <a href="#demo">Demo</a> ·
 <a href="#quick-start">Quick start</a> ·
 <a href="https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk">Tutorials</a> ·
+<a href="https://github.com/Gitruck/ai-drama-desk">AI Drama Desk</a> ·
 <a href="docs/development.en.md">Develop</a> ·
 <a href="README.md">简体中文</a>
 </p>
@@ -158,6 +159,32 @@ flowchart LR
 
 The three-format rough-cut output and the export of a fully packaged project have different support boundaries. The [workflow guide](docs/workflow.en.md) explains where each deliverable opens and which effects need rendering.
 
+## gtrk + AI Drama Desk: from storyboard to editable clips
+
+For AI-generated story scenes, connect [Gitruck AI Drama Desk](https://github.com/Gitruck/ai-drama-desk) to the same project workflow. The responsibilities stay separate:
+
+| Component | What it does | Output |
+| --- | --- | --- |
+| `gtrk CLI` | Understands the request in your agent, orchestrates workflows and manages `.gtrk` projects | An editable video project |
+| `AI Drama Desk` | Imports storyboards, manages characters and styles, generates keyframes / I2V clips and exports a handoff package | A `return-v1` clip package + `manifest` |
+| `gtrk ai-drama lay` | Places exported clips back into the project by beat windows | A dedicated AI video track |
+
+The typical path looks like this:
+
+```text
+storyboard.md → AI Drama Desk → references / keyframes / I2V → return-v1 package
+                                                                  ↓
+                                      gtrk ai-drama lay → .gtrk project → client refinement
+```
+
+The desk supports mock, cloud and optional local ComfyUI engines. Start with a zero-GPU, zero-key rehearsal, then enable a real engine when needed. For an existing desk project, the CLI only needs the **API base and project ID**; it does not scan the repository:
+
+```bash
+gtrk ai-drama lay --project ./my-video --desk-project <project-id>
+```
+
+→ [AI Drama Desk README](https://github.com/Gitruck/ai-drama-desk) · [AI drama tutorial](https://hocassian.feishu.cn/wiki/FRAKwUvBWib2vrkqZ5XcLDRqnOe) · [command reference](docs/reference.en.md#command-reference)
+
 ## Use just one tool, too
 
 | What you need | Start here |
@@ -167,8 +194,6 @@ The three-format rough-cut output and the export of a fully packaged project hav
 | A spectrum video for a song | [Music visualizer Skill](skills/gtrk-music-visualizer/SKILL.md) |
 | A visual style for your show | [Style-maker Skill](skills/gtrk-style-maker/SKILL.md) |
 | Third-party animation, typography or creative Skills | [Skill map](https://hocassian.feishu.cn/wiki/SxRtwJ0G7inTbQkwckFcZmClnrd) |
-
-AI reenactments and AI drama workflows can use external generation services or a separate production desk, then bring clips back into the project. Those services and dependencies require separate setup. [AI drama tutorial](https://hocassian.feishu.cn/wiki/GkZwwOy36iND5ZkIQDEcQ6zRnEA)
 
 ## FAQ
 
@@ -191,6 +216,16 @@ The CLI runs across platforms. The Windows client provides visual preview and re
 **Skills are missing, or a task failed. What now?**
 
 Open a new agent session and run `gtrk doctor`. Use `gtrk skills install` to refresh Skills. If a task already has an ID, recover its results before submitting it again. See [workflow and troubleshooting](docs/workflow.en.md).
+
+## Star History
+
+<a href="https://star-history.com/#Gitruck/cli&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Gitruck/cli&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gitruck/cli&type=Date" />
+    <img alt="gtrk CLI Star History" src="https://api.star-history.com/svg?repos=Gitruck/cli&type=Date" />
+  </picture>
+</a>
 
 ## Documentation and contributions
 

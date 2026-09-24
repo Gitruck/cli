@@ -11,6 +11,7 @@
 <a href="#demo">观看演示</a> ·
 <a href="#quick-start">快速开始</a> ·
 <a href="https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk">使用教程</a> ·
+<a href="https://github.com/Gitruck/ai-drama-desk">AI Drama Desk</a> ·
 <a href="docs/development.md">开发文档</a> ·
 <a href="README.en.md">English</a>
 </p>
@@ -158,6 +159,32 @@ flowchart LR
 
 粗剪阶段的三端工程，与完整包装后的导出支持范围不同；[工作流指南](docs/workflow.md)说明每种交付物在哪打开、哪些效果需要渲染。
 
+## gtrk + AI Drama Desk：从分镜到可回轨片段
+
+如果你的素材不是实拍，而是希望把一份分镜稿变成 AI 情景片段，可以把 [Gitruck AI Drama Desk](https://github.com/Gitruck/ai-drama-desk) 接到同一条工程链里。两者分工很清楚：
+
+| 组件 | 负责什么 | 产物 |
+| --- | --- | --- |
+| `gtrk CLI` | 在 Agent 中理解需求、组织工作流、管理 `.gtrk` 工程 | 可继续精修的视频工程 |
+| `AI Drama Desk` | 导入分镜稿、管理角色与画风、生成 keyframe / I2V 片段、导出回轨包 | `return-v1` 片段包 + `manifest` |
+| `gtrk ai-drama lay` | 把工作台导出的片段按 beat 区间铺回工程 | 独立 AI 视频轨 |
+
+典型路径是：
+
+```text
+分镜稿 md → AI Drama Desk → 角色参考图 / keyframe / I2V → return-v1 导出包
+                                                          ↓
+                                      gtrk ai-drama lay → .gtrk 工程 → 客户端精修
+```
+
+工作台支持 mock、云端出口和可选的本地 ComfyUI；你可以先零 GPU、零 Key 跑通流程，再按需要启用真实引擎。已有工作台项目时，CLI 只需要 **API 地址 + 项目 ID**，不需要扫描仓库目录：
+
+```bash
+gtrk ai-drama lay --project ./my-video --desk-project <project-id>
+```
+
+→ [AI Drama Desk README](https://github.com/Gitruck/ai-drama-desk) · [AI 漫剧教程](https://hocassian.feishu.cn/wiki/FRAKwUvBWib2vrkqZ5XcLDRqnOe) · [命令参考](docs/reference.md#命令参考)
+
 ## 成片之外，也能只做一件事
 
 | 想做什么 | 从这里开始 |
@@ -167,8 +194,6 @@ flowchart LR
 | 把一首歌做成频谱视频 | [音乐可视化 Skill](skills/gtrk-music-visualizer/SKILL.md) |
 | 给自己的栏目建立视觉风格 | [风格体系 Skill](skills/gtrk-style-maker/SKILL.md) |
 | 接入第三方动画、排版或创作 Skills | [Skill 地图](https://hocassian.feishu.cn/wiki/SxRtwJ0G7inTbQkwckFcZmClnrd) |
-
-AI 再现与 AI 漫剧可接入外部生成平台或独立工作台，生成的片段再回到工程；相关生成服务及依赖需另行准备。[查看 AI 漫剧教程](https://hocassian.feishu.cn/wiki/GkZwwOy36iND5ZkIQDEcQ6zRnEA)
 
 ## 常见问题
 
@@ -191,6 +216,16 @@ CLI 可以跨平台执行。Windows 客户端用于可视化预览与精修；�
 **安装后找不到 Skills，或任务出错怎么办？**
 
 重新打开 Agent 会话，运行 `gtrk doctor` 检查环境；补装用 `gtrk skills install`。任务已有 ID 时优先恢复结果，避免重新提交云端任务。详见[工作流与排障](docs/workflow.md)。
+
+## Star History
+
+<a href="https://star-history.com/#Gitruck/cli&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Gitruck/cli&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gitruck/cli&type=Date" />
+    <img alt="gtrk CLI Star History" src="https://api.star-history.com/svg?repos=Gitruck/cli&type=Date" />
+  </picture>
+</a>
 
 ## 文档与参与
 
