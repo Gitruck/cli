@@ -1,5 +1,6 @@
 import { searchOnlineBroll, onlineSearchOutcome } from "../lib/online-broll-client";
 import { claimOnlineSearch } from "../lib/online-search-journal";
+import { onlineNeedsForEntry } from "../lib/online-broll-needs";
 import { parseOnlinePlatforms } from "../lib/online-broll-contract";
 /**
  * gtrk matrix —— B-roll 检索（Wave2 Change C + add-matrix-local-search 第三路）。
@@ -897,8 +898,8 @@ export async function runMatrix(
   const platforms = parseOnlinePlatforms(opts.platforms);
   const journalDir = pos.kind === "search" ? `${resolve(opts.out!)}.online-search`
    : join(opts.dispatch ? dirname(dirname(resolve(opts.dispatch))) : resolve(opts.project!), "split", ".online-search");
-  const ctx: SearchCtx = { cfg, memberType: "online", sourceLayer: "online", search: async (query) => {
-   const request = {query, platforms, top_k: opts.topK ? Number(opts.topK) : 12};
+  const ctx: SearchCtx = { cfg, memberType: "online", sourceLayer: "online", search: async (query, entry) => {
+   const request = {query, ...(entry?.need ? {need: entry.need} : {}), platforms, top_k: opts.topK ? Number(opts.topK) : 12};
    const submission = await claimOnlineSearch(journalDir, cfg, request, opts.onlineSession);
    const output = await searchOnlineBroll(cfg, request, {
     submission,
@@ -906,7 +907,9 @@ export async function runMatrix(
     onTick: (state, progress) => { log.info(`外网检索 ${state}${progress === undefined ? "" : ` ${progress}%`}`); },
    });
    for (const report of output.platforms) if (report.status !== "ok") log.warn(`外网平台 ${report.platform}: ${report.status}`);
-   return {results: output.results, recalled: output.results.length, request_id: output.task_id, online: {task_id: output.task_id, platforms: output.platforms, failures: output.failures, manifest: output.manifest}};
+   const eligible = output.results.filter(result => result.auto_eligible === true);
+   return {results: eligible, recalled: output.results.length, request_id: output.task_id, online: {task_id: output.task_id, platforms: output.platforms, failures: output.failures, manifest: output.manifest,
+    diagnostics: output.diagnostics, review_candidates: output.results.filter(result => result.auto_eligible !== true)}};
   }};
   return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts, deps);
  }
@@ -2142,6 +2145,9 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	// 且 MUST 在这里（`buildPlanBeat` 去重之前）落账——去重之后再扫 plan 会把 beat 内折叠
 	// （命中被折进兄弟 query 的 also_matched_queries）误算成零产出，那是完全不同的两件事。
 	const zeroYieldQueries: string[] = [];
+	// 全部需求先校验，避免跑到后半程才发现结构错误。其他素材来源保留原查询口径。
+	const needsByEntry = new Map(queue.map(entry => [entry, ctx.memberType === "online" ? onlineNeedsForEntry(entry) : []]));
+	if (ctx.memberType === "online") log.info(`本轮 ${[...needsByEntry.values()].reduce((n, needs) => n + needs.length, 0)} 条素材需求；查询变体在单次搜索内处理，恢复沿用原建单身份。`);
 	for (const entry of queue) {
 		const outcomes: QueryOutcome[] = [];
 		// 锚 query 并入同一检索链（add-keyword-anchored-broll）：与普通 queries 同口同参跑；
@@ -2153,10 +2159,14 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 					.filter((q) => typeof q === "string" && q && !entry.queries.includes(q)),
 			),
 		];
-		for (const q of [...entry.queries, ...anchorQueries]) {
+		const requests = ctx.memberType === "online"
+			? needsByEntry.get(entry)!.map(need => ({ query: need.intent, entry: { ...entry, need } }))
+			: [...entry.queries, ...anchorQueries].map(query => ({ query, entry }));
+		for (const request of requests) {
+			const q = request.query;
 			const isAnchorQ = anchorQueries.includes(q);
 			try {
-				const data = await ctx.search(q, entry);
+				const data = await ctx.search(q, request.entry);
 				outcomes.push({ query: q, data });
 				if (data.online && onlineSearchOutcome({ results: data.results ?? [], platforms: data.online.platforms, failures: data.online.failures }) === "unavailable") {
 					errCount++;
@@ -2178,6 +2188,16 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 				outcomes.push({ query: q, error: { ...(code != null ? { code } : {}), msg } });
 				errCount++;
 				log.warn(`${entry.beat}「${q}」失败：${msg}`);
+			} finally {
+			if (ctx.memberType === "online") {
+				const partial = buildPlan({ generatedAt: new Date().toISOString(), memberType: ctx.memberType,
+					projectSlug: slugify(basename(baseDir)), columnId: ctx.columnId,
+					beats: [...beats, buildPlanBeat(entry, outcomes)] });
+				const target = join(baseDir, "split", "broll-plan.json"), temporary = `${target}.${process.pid}.tmp`;
+				await mkdir(dirname(target), { recursive: true });
+				await writeFile(temporary, JSON.stringify({ ...partial, retrieval_progress: { complete: false, completed_needs: okCount + errCount } }, null, 2));
+				await rename(temporary, target);
+			}
 			}
 		}
 		const planBeat = buildPlanBeat(entry, outcomes);
@@ -2194,7 +2214,8 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 							: `${entry.beat} 锚「${a.keyword}」：句 ${a.utterance} 无当刻时码（重投影降级或该句已被剪）——本锚 degraded，铺轨退化普通槽`,
 					);
 				}
-				return { keyword: a.keyword, utterance: a.utterance, at_sec: at, query: a.query };
+				const onlineNeed = needsByEntry.get(entry)?.find(n => n.intent === a.query || n.query_hints?.includes(a.query));
+				return { keyword: a.keyword, utterance: a.utterance, at_sec: at, query: onlineNeed?.intent ?? a.query };
 			});
 		}
 		beats.push(planBeat);
@@ -2218,7 +2239,13 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	const splitDir = join(baseDir, "split");
 	await mkdir(splitDir, { recursive: true });
 	const planPath = join(splitDir, "broll-plan.json");
-	await writeFile(planPath, JSON.stringify(plan, null, 2));
+	if (ctx.memberType === "online") {
+		const temporary = `${planPath}.${process.pid}.tmp`;
+		await writeFile(temporary, JSON.stringify({ ...plan, retrieval_progress: { complete: true, completed_needs: totalQueries } }, null, 2));
+		await rename(temporary, planPath);
+	} else {
+		await writeFile(planPath, JSON.stringify(plan, null, 2));
+	}
 	// [add-broll-plan-summary-honesty] 摘要行三段数：「执行成功」「有产出」「落盘还剩多少」是三件事。
 	// 真机 P1 260902：`resultCount` 报 15 条候选，plan 里只有 8 行 result、且全指向 **1 条**素材
 	// ——只看那一个数会让调用方判「料够了」，而实际上这个 beat 一删就空。
@@ -3598,7 +3625,9 @@ async function layIntoProject(
 			dlStats.local++;
 			continue;
 		}
-		const rel = `${BROLL_PREVIEW_DIR}/${clipId}.mp4`;
+		const proxyKey = cand.origin?.kind === "online"
+			? (cand.origin.media_version ?? cand.origin.preview_file_id ?? clipId) : clipId;
+		const rel = `${BROLL_PREVIEW_DIR}/${proxyKey}.mp4`;
 		const abs = join(gtrkDir, ...rel.split("/"));
 		if (existsSync(abs)) {
 			const prev = prevSource.get(clipId);

@@ -6,6 +6,7 @@
  * 并入 report；部分 dropped → 按存活包络收缩、标 shrunk。落地产 struct_meta.split 快照 + dispatch 派单清单。
  */
 import type { ProjectionView } from "./projection";
+import { onlineNeedsForEntry } from "./online-broll-needs";
 import {
 	VISUAL_JOBS,
 	briefLooksSingular,
@@ -405,7 +406,12 @@ function validateHandoff(
 	}
 	if (lane === "FILM_BROLL") {
 		const q = handoff?.queries;
-		if (!Array.isArray(q) || q.length === 0 || !q.every((x) => isNonEmptyStr(x))) {
+		if (handoff?.needs !== undefined || handoff?.need !== undefined) {
+			try {
+				onlineNeedsForEntry({ beat: String(b.id), queries: [], track_st: 0, track_ed: 6,
+					needs: handoff.needs as FilmDispatch["needs"], need: handoff.need as FilmDispatch["need"] });
+			} catch (error) { errors.push(`${tag}：${error instanceof Error ? error.message : String(error)}`); }
+		} else if (!Array.isArray(q) || q.length === 0 || !q.every((x) => isNonEmptyStr(x))) {
 			errors.push(`${tag}：FILM_BROLL 缺检索 query（handoff.queries 必须为非空字符串数组）`);
 		}
 		return;
@@ -689,6 +695,8 @@ export interface MgDispatch {
 	span?: SplitSpan;
 }
 export interface FilmDispatch {
+	needs?: import("./online-broll-needs").OnlineMaterialNeed[];
+	need?: import("./online-broll-needs").OnlineMaterialNeed;
 	beat: string;
 	queries: string[];
 	shots?: unknown;
@@ -838,10 +846,12 @@ export function buildLanding(
 			const anchors = Array.isArray(h.anchors) && h.anchors.length ? (h.anchors as SplitAnchor[]) : undefined;
 			dispatch.film_broll.push({
 				beat: beat.id,
-				queries: Array.isArray(h.queries) ? (h.queries as string[]) : [],
+				queries: Array.isArray(h.queries) ? (h.queries as string[]) : (Array.isArray(h.needs) ? h.needs : h.need ? [h.need] : []).map(n => (n as import("./online-broll-needs").OnlineMaterialNeed).intent),
 				shots: h.shots,
 				per_shot_sec: h.per_shot_sec,
 				exclude: h.exclude,
+				...(Array.isArray(h.needs) ? { needs: h.needs as import("./online-broll-needs").OnlineMaterialNeed[] } : {}),
+				...(h.need ? { need: h.need as import("./online-broll-needs").OnlineMaterialNeed } : {}),
 				...(anchors ? { anchors } : {}),
 				track_st,
 				track_ed,

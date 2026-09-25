@@ -6,6 +6,7 @@ import type { PlanResult } from "./matrix";
 import { parseOnlineOrigin, type OnlinePlatform } from "./online-broll-contract";
 
 export interface OnlineSearchRequest {
+	need?: import("./online-broll-needs").OnlineMaterialNeed;
 	query: string;
 	platforms?: OnlinePlatform[];
 	discovery_queries?: string[];
@@ -14,6 +15,7 @@ export interface OnlineSearchRequest {
 }
 
 export interface OnlineSearchResult {
+	diagnostics?: Record<string, unknown>;
 	results: PlanResult[];
 	platforms: Record<string, unknown>[];
 	failures: Record<string, unknown>[];
@@ -31,9 +33,10 @@ export function onlineSearchOutcome(value: Pick<OnlineSearchResult, "results" | 
 	return value.results.length > 0 ? (degraded ? "partial" : "ready") : (degraded ? "unavailable" : "empty");
 }
 
-function searchPayload(request: OnlineSearchRequest): OnlineSearchRequest {
+export function searchPayload(request: OnlineSearchRequest): OnlineSearchRequest {
 	// 固定字段顺序并复制数组；恢复必须使用首次保存的完整参数。
 	return { query: request.query,
+		...(request.need ? { need: structuredClone(request.need) } : {}),
 		...(request.platforms !== undefined ? { platforms: [...request.platforms] } : {}),
 		...(request.discovery_queries !== undefined ? { discovery_queries: [...request.discovery_queries] } : {}),
 		...(request.max_videos !== undefined ? { max_videos: request.max_videos } : {}),
@@ -45,7 +48,8 @@ export function parseOnlineSearchResult(raw: unknown): OnlineSearchResult {
 	const value = raw as Record<string, unknown>;
 	if (!Array.isArray(value.results) || !Array.isArray(value.platforms) || !Array.isArray(value.failures))
 		throw new Error("外网检索结果缺少候选或平台状态");
-	const results = value.results.map((item: unknown): PlanResult => {
+	if (value.review_candidates !== undefined && !Array.isArray(value.review_candidates)) throw new Error("外网待核候选格式错误");
+	const results = [...value.results, ...(value.review_candidates as unknown[] ?? [])].map((item: unknown): PlanResult => {
 		if (!item || typeof item !== "object") throw new Error("外网候选格式错误");
 		const candidate = item as Record<string, unknown>;
 		if (candidate.score_model !== undefined && candidate.score_model !== "qwen-vl-reranker" && candidate.score_model !== "jina-clip-cosine")
@@ -73,6 +77,7 @@ export function parseOnlineSearchResult(raw: unknown): OnlineSearchResult {
 		|| typeof manifest.file_id !== "string" || !/^\d+$/.test(manifest.file_id))
 		throw new Error("外网检索缺少完整镜头清单引用");
 	return { results, platforms: value.platforms, failures: value.failures,
+		diagnostics: Object.fromEntries(["need", "budget", "stop_reason", "source_screening", "discovery_queries", "score_model", "degraded_reason", "cache"].filter(k => value[k] !== undefined).map(k => [k, value[k]])),
 		manifest: { url: manifest.url, file_id: manifest.file_id } };
 }
 

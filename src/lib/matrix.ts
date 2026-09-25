@@ -225,6 +225,8 @@ export function validateLocalResult(r: PlanResult): string[] {
 }
 
 export interface OnlineSearchDiagnostics {
+	diagnostics?: Record<string, unknown>;
+	review_candidates?: PlanResult[];
 	task_id: string;
 	platforms: Record<string, unknown>[];
 	failures: Record<string, unknown>[];

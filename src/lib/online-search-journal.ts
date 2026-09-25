@@ -4,15 +4,12 @@ import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { CloudConfig } from "./config";
 import type { OnlineSearchRequest, OnlineSearchSubmission } from "./online-broll-client";
+import { searchPayload } from "./online-broll-client";
 
 export async function claimOnlineSearch(
 	directory: string, cfg: CloudConfig, request: OnlineSearchRequest, session = "default",
 ): Promise<OnlineSearchSubmission> {
-	const payload: OnlineSearchRequest = { query: request.query,
-		...(request.platforms ? { platforms: [...request.platforms] } : {}),
-		...(request.discovery_queries ? { discovery_queries: [...request.discovery_queries] } : {}),
-		...(request.max_videos !== undefined ? { max_videos: request.max_videos } : {}),
-		...(request.top_k !== undefined ? { top_k: request.top_k } : {}) };
+	const payload = searchPayload(request);
 	const scope = createHmac("sha256", cfg.apiKey).update(JSON.stringify([
 		cfg.base.replace(/\/+$/, ""), session, payload,
 	])).digest("hex");

@@ -374,6 +374,7 @@ export interface FillSlot {
 }
 
 export interface BrollMetaCandidate {
+	eligibility?: "eligible" | "review_only";
 	clip_id: string;
 	origin?: OnlineOrigin;
 	score: number;
@@ -3832,13 +3833,17 @@ export function layBrollTracks(opts: {
 				typeof q.online?.task_id === "string" && /^\d{1,30}$/.test(q.online.task_id) ? [q.online.task_id] : []))] } : {}),
 			track_st: beat.track_st,
 			track_ed: beat.track_ed,
-			candidates: merged.slice(0, BROLL_META_CANDIDATE_CAP).map((c) => {
+			// 仅展示层追加待核候选；它们从未进入分配器的 merged/候选池。
+			candidates: [...merged, ...(targetLayer === "online" ? beat.queries.flatMap(q => q.online?.review_candidates ?? []) : [])]
+				.filter((c, i, all) => all.findIndex(x => x.clip_id === c.clip_id) === i)
+				.slice(0, BROLL_META_CANDIDATE_CAP).map((c) => {
 				const dl = downloads.get(c.clip_id);
 				const seg = c.segments?.[0];
 				const isLocal = c.source === "local" || typeof c.local_path === "string";
 				const entry: BrollMetaCandidate = {
 					clip_id: c.clip_id,
 					...(c.origin ? { origin: c.origin } : {}),
+					...(c.eligibility === "eligible" || c.eligibility === "review_only" ? { eligibility: c.eligibility } : {}),
 					...(c.score_model ? { score_model: c.score_model } : {}),
 					...(c.vector_score !== undefined ? { vector_score: c.vector_score } : {}),
 					score: c.score,

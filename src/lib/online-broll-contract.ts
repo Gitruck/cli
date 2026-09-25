@@ -7,6 +7,8 @@ export interface OnlineClock {
 	verified: true;
 }
 export interface OnlineOrigin {
+	preview_file_id?: string;
+	media_version?: string;
 	kind: "online";
 	platform: OnlinePlatform;
 	video_id: string;
@@ -43,6 +45,8 @@ export function parseOnlineOrigin(raw: unknown): OnlineOrigin | null {
 		|| o.source_end > clock.source_start + clock.duration + 0.001) return null;
 	return {
 		kind: "online", platform: o.platform as OnlinePlatform, video_id: o.video_id as string,
+		...(typeof o.preview_file_id === "string" && /^\d+$/.test(o.preview_file_id) ? { preview_file_id: o.preview_file_id } : {}),
+		...(typeof o.media_version === "string" && /^[a-f0-9]{64}$/.test(o.media_version) ? { media_version: o.media_version } : {}),
 		part: o.part as string, asset_id: o.asset_id as string, source_url: o.source_url as string,
 		search_task_id: o.search_task_id as string, preview_url: o.preview_url as string,
 		title: typeof o.title === "string" ? o.title : "", uploader: typeof o.uploader === "string" ? o.uploader : "",
