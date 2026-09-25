@@ -159,7 +159,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - 视频防抖：`gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo --json`。支持 `fast`、`exp`、`turbo`；未传时由服务端使用 `turbo`，`exp` 只按实验方式转述，不承诺观感。
 - 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
 - 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method ffmpeg --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
-- 按框直接去除：`gtrk tool video_purify ./clip.mp4 --purify-scope region --purify-region 0.8,0.02,0.18,0.08,0,5 --json`（图片把工具换成 `image_purify`、框只写 `x,y,w,h`）。`--purify-region` 可重复，最多 16 个框，视频框后可带 `start,end` 秒。`custom` 只去除框内识别到的文字；`region` 不做识别、**框内全部内容都会被处理（包括画面主体）**——用户要去的是图形台标、半透明图案或只在某段时间出现的角标时选 `region`，并提醒框越小越贴边效果越好。
+- 按框直接去除：`gtrk tool video_purify ./clip.mp4 --purify-scope region --purify-region 0.8,0.02,0.18,0.08,0,5 --json`（图片把工具换成 `image_purify`、框只写 `x,y,w,h`）。`--purify-region` 可重复，图片最多 16 个框、视频按服务资源限制，视频框后可带 `start,end` 秒。`custom` 只去除框内识别到的文字；`region` 不做识别、**框内全部内容都会被处理（包括画面主体）**——用户要去的是图形台标、半透明图案或只在某段时间出现的角标时选 `region`，并提醒框越小越贴边效果越好。
 - 视频超分：`gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime --json`。输入最多 60 秒，放大后任一边超过 4000 px 会由服务端拒绝；这是实验性增强，不能承诺主观画质一定提升。
 - 视频插帧：`gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 --json`。支持 `2`、`3`、`4`，不套用旧总览里的 1 分钟限制；原视频任一边超过 4000 px 时由服务端拒绝。
 
@@ -176,3 +176,11 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 ## 毕业条款
 
 某个工具若长出复杂度——需要多模式子命令、需要分步用户确认、需要注入栏目风格——它就该从工具族**毕业**成独立命令 / 独立 skill（照成片车道命令的先例）。毕业后旧的 `gtrk tool <名>` 会报错并指路新命令。你只要跟着 `gtrk tool list` 的当前清单走即可。
+
+## 可审阅的视频净化
+
+不确定误检时：先 `gtrk purify detect <视频> --out <工程目录> --json`，消费摘要与代表时间查看原片，再用 `gtrk purify edit <区域文件> --select-roi x,y,w,h --out <最终文件>` 筛选。edit 还支持重复的 --delete-id / --watermark-region / --protect-region。最后 `gtrk purify apply <最终文件> --json`，最终清单不会被重新检测覆盖。
+
+用户明确清理范围时：`gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --json`。不得将全屏文字候选默认当成水印；full_screen 需明确选择。图形台标需 Agent 补框。
+
+中断后用 `gtrk purify resume <回执中的运行记录> --json`。空清单直接返回原视频；完整万级区域保存在文件，勿逐条读进模型上下文。保护框优先于去除框，新处理请求会先检查服务支持 review_protocol=2，否则在上传计费前停止；ffmpeg 是模糊、raft 是内容修复。

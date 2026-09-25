@@ -8,6 +8,23 @@
 > → 拉回 gtrk/剪映/PR 三方工程文件 →（可选）本地 ffmpeg 渲染成片 → 三端打开**。云端零改动、纯结构产物，
 > 源视频不出本地。结果/报告恒落盘 `result.json`，可按 `task_id` 秒级取回、无需重跑（见 §2.1 / §4）。
 
+## Agent 去水印/去字幕
+
+按用户意图选择流程，文字候选不等于该删除的内容；图形台标由 Agent 判断并补框。
+
+1. `gtrk purify detect <视频> --out <目录> --json`：只检测，返回待审区域文件、摘要、代表时间点和运行记录。
+2. 读取摘要、按代表时间查看原片；用 `gtrk purify edit <区域文件> --select-roi x,y,w,h --delete-id det-000001 --watermark-region x,y,w,h --protect-region x,y,w,h --out <最终文件>` 做本地筛选和补框。各筛选参数按需使用；完整 JSON 留在文件，不灌入对话。
+3. `gtrk purify apply <最终文件> --json`：只按最终清单处理，不重新检测。
+
+用户明确全部清理范围时，可用 `gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --json` 连续完成。run 必须明确 full_screen/subtitle/custom；custom 同时传 --detect-roi。
+
+- `--purify-func-type ffmpeg|raft`：默认 ffmpeg 模糊；raft 内容修复。保留处用 protect-region，保护优先。
+- `gtrk purify resume <运行记录.json> --json`：继续已有任务和下载。提交结果未知时停止重发，先核对云端任务。
+- 空最终清单直接返回原视频，不创建处理任务。
+- 检测与处理按原计费口径各计一次；本地 edit 免费。源路径、SHA256 与云文件绑定，换片须重检。
+- JSON 回执给出实际文件路径；状态是 awaiting_review / completed / unchanged。
+- 新处理请求会先查询 /task/video_purify/capabilities，必须支持 review_protocol=2；未升级会在上传与计费前停止。先更新 worker，再开放 HTTP 能力声明。
+
 > **写/改 structure 级成片图纸**（旅拍 / 口播链 / 直播切片 / Vlog……）先过 `docs/成片型图纸公约.md`
 > ——双模式命名（快速成片 / 逐步推进）、决策前置三条腿、MG 临场泛化的横切正本与自检清单都在那里。
 

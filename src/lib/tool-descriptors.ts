@@ -59,7 +59,7 @@ const PURIFY_SCOPE_OPTION: ToolOption = {
 };
 const PURIFY_REGION_OPTION: ToolOption = {
 	flag: "--purify-region <box>",
-	desc: "region 模式要直接去除的区域框，可重复（最多 16 个）：视频 x,y,w,h[,start[,end]]（秒，end 省略即到结尾），图片 x,y,w,h；框内全部内容都会被处理",
+	desc: "region 模式直接去除的区域框，可重复（图片最多 16 个，视频按服务资源限制）：视频 x,y,w,h[,start[,end]]，图片 x,y,w,h；框内全部内容都会被处理",
 	repeatable: true,
 };
 
@@ -774,7 +774,7 @@ function applyPurifyRegions(
 	}
 	const boxes = fromCli.length > 0 ? fromCli : fromParams;
 	if (!Array.isArray(boxes) || boxes.length === 0) throw new Error("params-json.regions 必须是非空数组");
-	if (boxes.length > MAX_PURIFY_REGIONS) throw new Error(`区域框最多 ${MAX_PURIFY_REGIONS} 个`);
+	if (!withTime && boxes.length > MAX_PURIFY_REGIONS) throw new Error(`图片区域框最多 ${MAX_PURIFY_REGIONS} 个`);
 	const parsed = boxes.map((box) => parsePurifyRegion(box, { withTime }));
 	if (fromCli.length > 0) payload.regions = parsed;
 }

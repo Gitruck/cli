@@ -483,7 +483,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 | `video_canvas_adapt` | 单条本地视频；可选目标宽高、片段、画布模式和无音轨输出 | 比例适配视频 | 运行前实时查询 | 已上线 |
 | `video_stabilizer` | 单条本地视频；可选 `fast` / `exp` / `turbo` | 防抖视频 | 运行前实时查询 | 已上线 |
 | `video_vaporwave` | 单条本地视频；滤镜使用精确预设名称 | 蒸汽波滤镜视频 | 运行前实时查询 | 已上线 |
-| `video_purify` | 单条本地视频；可选 `full_screen` / `subtitle` / `custom` / `region`、`ffmpeg` / `raft`、归一化 ROI 与可带时间段的区域框（仅处理有权修改的素材） | 一条净化视频 | 运行前实时查询 | 已上线 |
+| `video_purify` | 单条本地视频；单点模式支持 `full_screen` / `subtitle` / `custom` / `region`；Agent 编排请用顶层 `gtrk purify detect/edit/apply`，审阅最终区域后执行 | 一条净化视频，或检测 JSON + 净化视频 | 运行前实时查询 | 已上线 |
 | `video_upscale` | 单条本地视频（**≤1 分钟**）；可选 `2` / `3` / `4` 倍与 `Reality` / `Anime` | 一条超分视频 | 运行前实时查询 | 已上线 |
 | `video_interpolate` | 单条本地视频；可选 `2` / `3` / `4` 倍，不附加 1 分钟限制 | 一条插帧视频 | 运行前实时查询 | 已上线 |
 | `video_segment` | 单条本地视频；可选 `--detector content\|adaptive`、`--threshold` | 分镜区间结构 `result-output.json`（结构化数据，非下载文件） | 运行前实时查询 | 已上线 |
@@ -527,7 +527,11 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - `gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo [--json]` — 视频防抖；支持 `fast`、`exp`、`turbo`，其中 `exp` 为实验方式，产物观感需自行检查。
 - `gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" [--json]` — 使用精确预设名称添加蒸汽波滤镜；省略时显式使用 `愈漸升溫`。
 - `gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method ffmpeg --purify-roi 0,0.78,1,0.2 [--json]` — 净化用户有权修改的视频；ROI 为归一化 `x,y,w,h` 且只和 `custom` 同用。`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用该限制；不承诺还原被遮挡内容。
-- `gtrk tool video_purify ./clip.mp4 --purify-scope region --purify-region 0.8,0.02,0.18,0.08,0,5 --purify-region 0.3,0.85,0.4,0.1,120 [--json]` — 按框直接去除，可重复给多个框（最多 16 个）；框后可带 `start,end`（秒，`end` 省略即到结尾）。不做识别，**框内全部内容都会被处理（包括画面主体）**；`ffmpeg` 在框内做模糊、`raft` 做修复补全，框越小、越贴边效果越好。`--purify-region` 只能和 `region` 同用。
+- `gtrk purify detect ./clip.mp4 --out ./purify-work --json` — 只检测，返回待审清单、摘要与代表时间。
+- `gtrk purify edit ./purify-work/detect-xxx-final.json --select-roi 0,0.7,1,0.3 --out ./purify-work/final.json` — 本地筛选；还支持 --delete-id / --watermark-region / --protect-region。
+- `gtrk purify run ./clip.mp4 --detect-scope subtitle --watermark-region 0.8,0.02,0.18,0.08 --json` — 明确范围的自动组合；full_screen 必须显式指定。
+- `gtrk purify apply ./purify-work/final.json --json` — 最终清单唯一权威；空清单不建单。
+- `gtrk purify resume ./purify-work/run-xxx.json --json` — 恢复已有任务和下载，不重复计费建单。保护区域需新版后端；ffmpeg 为模糊，raft 为内容修复。
 - `gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime [--json]` — 实验性视频超分；输入最多 60 秒，放大后任一边不得超过 4000 px，支持 `2`、`3`、`4` 倍和 `Reality`、`Anime`。
 - `gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 [--json]` — 视频插帧；支持 `2`、`3`、`4` 倍，不套用旧文档中的 1 分钟限制，原视频任一边不得超过 4000 px。
 - `gtrk tool video_segment ./clip.mp4 [--detector adaptive] [--threshold 27] [--json]` — 机械分镜；产**结构化** `result-output.json`（`scene_list` 各段起止/时长），非下载文件。
