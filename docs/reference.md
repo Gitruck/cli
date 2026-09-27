@@ -530,8 +530,12 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - `gtrk purify detect ./clip.mp4 --out ./purify-work --json` — 只检测，返回待审清单、摘要与代表时间。
 - `gtrk purify edit ./purify-work/detect-xxx-final.json --select-roi 0,0.7,1,0.3 --out ./purify-work/final.json` — 本地筛选；还支持 --delete-id / --watermark-region / --protect-region。
 - `gtrk purify run ./clip.mp4 --detect-scope subtitle --watermark-region 0.8,0.02,0.18,0.08 --json` — 明确范围的自动组合；full_screen 必须显式指定。
+- `gtrk purify ./clip.mp4 --no-detect --watermark-region 0.8,0.02,0.18,0.08,0,5 --out ./purify-work --json` — 只处理给定角标框的前 5 秒，跳过文字检测；省略时间则覆盖全片。框为画面归一化 `x,y,w,h`，每条视频分别定位，不能直接套用另一条视频的选区。
 - `gtrk purify apply ./purify-work/final.json --json` — 最终清单唯一权威；空清单不建单。
 - `gtrk purify resume ./purify-work/run-xxx.json --json` — 恢复已有任务和下载，不重复计费建单。保护区域需新版后端；ffmpeg 为模糊，raft 为内容修复。
+
+上述 `detect-xxx-final.json` 和 `run-xxx.json` 仅示意：实际路径以命令回执中的 `finalRegionsJson` 和 `journal` 为准。检测与处理各建一次任务、分别计费；`edit` 只在本地编辑。用户明确要求直接采用检测结果时可用 `run`，仅按框去角标则用 `--no-detect`。`resume` 用于已有任务或下载中断；云端明确失败时保留任务 ID 排查，不把重复提交当成恢复。
+
 - `gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime [--json]` — 实验性视频超分；输入最多 60 秒，放大后任一边不得超过 4000 px，支持 `2`、`3`、`4` 倍和 `Reality`、`Anime`。
 - `gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 [--json]` — 视频插帧；支持 `2`、`3`、`4` 倍，不套用旧文档中的 1 分钟限制，原视频任一边不得超过 4000 px。
 - `gtrk tool video_segment ./clip.mp4 [--detector adaptive] [--threshold 27] [--json]` — 机械分镜；产**结构化** `result-output.json`（`scene_list` 各段起止/时长），非下载文件。

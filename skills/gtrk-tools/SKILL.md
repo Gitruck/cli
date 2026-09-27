@@ -183,4 +183,6 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 用户明确清理范围时：`gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --json`。不得将全屏文字候选默认当成水印；full_screen 需明确选择。图形台标需 Agent 补框。
 
+只处理明确的角标框时：`gtrk purify <视频> --no-detect --watermark-region x,y,w,h[,start[,end]] --out <工程内产物目录> --json`，跳过文字检测。省略时间表示全片；每条视频分别确认角标位置，不复用上一条视频的框。用户已经明确授权采用检测结果时，按其要求执行，无需重复要求审阅。检测和处理分别计费，纯人工框只创建处理任务。
+
 中断后用 `gtrk purify resume <回执中的运行记录> --json`。空清单直接返回原视频；完整万级区域保存在文件，勿逐条读进模型上下文。保护框优先于去除框，新处理请求会先检查服务支持 review_protocol=2，否则在上传计费前停止；ffmpeg 是模糊、raft 是内容修复。
