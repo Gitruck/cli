@@ -3,7 +3,8 @@
  * 抽出物按原片指纹（size:mtime）命名缓存到 ~/.gitruck/audio-cache/，同一毛片重剪免重抽。
  * 全部委托 ffmpeg/ffprobe（绝对路径，见 ffmpeg.ts），不碰用户环境。
  */
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
@@ -201,6 +202,27 @@ export async function compress720p(inputAbs: string, ffmpegPath?: string): Promi
 		"-c:a", "aac", "-movflags", "+faststart",
 		out,
 	]);
+	return out;
+}
+
+/** 角色 Cut 专用分析代理：720p/12fps，保留音频与首条内嵌字幕流，输出 MKV。 */
+export async function compressCharacterAnalysisProxy(inputAbs: string, ffmpegPath?: string, destination?: string): Promise<string> {
+	const { ffmpeg } = requireFfmpeg(ffmpegPath);
+	const out = destination ?? await artifactPath(inputAbs, "character-v2-720p.mkv");
+	if (existsSync(out)) return out;
+	const tmp = `${out}.${randomUUID()}.mkv`;
+	try {
+		await runFfmpeg(ffmpeg, [
+			"-y", "-v", "error", "-copyts", "-start_at_zero", "-i", inputAbs,
+			"-map", "0:v:0", "-map", "0:a:0?", "-map", "0:s:0?",
+			"-vf", "scale=w=-2:h='min(720,ih)':flags=lanczos,fps=12:start_time=0",
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+			"-c:a", "aac", "-b:a", "64k", "-ac", "1", "-ar", "16000",
+			"-c:s", "copy", "-max_interleave_delta", "0",
+			tmp,
+		]);
+		await rename(tmp, out);
+	} finally { await rm(tmp, { force: true }); }
 	return out;
 }
 

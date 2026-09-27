@@ -491,6 +491,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 | `video_motion_cut` | 单条本地视频 | 运镜/高光片段结构 `result-output.json`（结构化数据，非下载文件） | 运行前实时查询 | 已上线 |
 | `video_speaker_detect` | 单条本地视频；可选 `--language`/`--max-faces-per-frame`/`--detect-body`/`--track-sample-fps`（重 GPU） | 可见说话人结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
 | `video_face_track` | 单条本地视频；可选 `--sample-fps`/`--max-faces`/`--min-face-ratio`/`--enable-body-match`/`--similarity-threshold`；`time_ranges` 走 `--params-json`（重 GPU） | 人物 ID/时间段/轨迹结构 `result-output.json`（时基以服务端输出为准） | 运行前实时查询 | 已上线 |
+| `video_character_cut` | 单条本地视频；角色名、身份种子窗；多人时加 `--seed-bbox x,y,w,h`；本地镜头清单 + ≤720p/12fps 代理 | v2 原片半开毫秒时间戳、核心/上下文证据及待复核项，不下载视频 | 运行前实时查询 | v2 重构验证中，未部署 |
 | `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤5000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法/字幕/**句间停顿**（`--fragment-interval <秒>`，**仅自训音色**；云引擎音色传了会**报错**而非静默忽略，合法区间由服务端校验并在报错里给出） | 配音音频 wav/mp3（+ 可选字幕）；按文本字符数计费，计量单位与单价以 `gtrk tool list` 实时显示为准 | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color`。默认只传本地抽出的音频（毛片不上传） | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `subtitle_translate` | 单个**字幕文件** `.ass` / `.srt`；`--language <码>` 与 `--translate-language <码>` **双必填**；可选 `--output-format`、`--line-mode`、`--bilingual`、`--subtitle-type`、`--subtitle-color`、`--canvas <WxH>`。不含语音识别 | 译文字幕 `.ass` 或 `.srt` + `result-output.json`（条数统计 + 降级标记） | 运行前实时查询 | 已上线 |
@@ -560,6 +561,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - `gtrk tool video_split_screen a.mp4 b.mp4 --clips-json '[{"input":0,"begin_time_ms":0,"end_time_ms":5000},{"input":1,"crop":{"x":0.1,"y":0,"width":0.8,"height":1}}]'` — 精确档：按 0 起索引指定每段毫秒区间与归一化裁剪框；同一文件可多条目出多窗口。
 - `gtrk tool video_speaker_detect ./talk.mp4 --language zh-CN` — 检测画面里谁在何时说话，出结构化 JSON（重 GPU）。
 - `gtrk tool video_face_track ./talk.mp4 --params-json '{"time_ranges":[{"begin_time":0,"end_time":30000}]}'` — 人脸追踪/身份聚类，可限定时间段（**单位毫秒**；重 GPU）。
+- `gtrk tool video_character_cut "./movie.mkv" --character "智代" --seed-range "00:12:27.500,00:12:29.500" --json` — 角色 Cut 检索（v2 尚待部署）；全片逐镜头分析，视觉种子确认身份，只上传分析代理。多人种子加 `--seed-bbox "0.445,0.36,0.16,0.5"`。结果 `cuts` 为有视觉证据的镜头及相关上下文，`review_candidates` 为身份未知镜头，`context_review` 为待复核关系；`partial` 必须展示缺口，`identity_unresolved` 要求换种子或框选。稀疏采样仅声明镜头含目标，不代表角色在整个区间逐帧可见。
 - `gtrk tool audio_tts_clone --text "欢迎收听本期节目" --speaker narrator` — 文字转配音音频（音色列表见官网文档）。
 - `gtrk tool audio_tts_clone --text-file 稿子.txt --speaker sweet_female --output-format mp3` — 长文合成，缺省跟随音色调好的语速与切分参数。
 - `gtrk tool mad ./素材 [--bgm 歌.mp3] [--duration 20] [--seed 42] [--technique 技法名,…] [--refresh] [--json]` — 一键剪 MAD：扫素材文件夹 → 选技法 → 单一 `.jsx`（AE 2020+ 跑一遍出母合成成片工程）。`--seed` 可复现；`result.json` 记 seed/数据版本/降级档位/选中技法。

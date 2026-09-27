@@ -16,6 +16,8 @@ import { renderProReport } from "./clip-brief";
 import { assertEnum, catalogEnumSync } from "./enum-catalog";
 import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
 import { readJson } from "./read-json";
+import { sec2ms } from "./frame-domain";
+import { prepareCharacterInput, type CharacterManifest } from "./character-input";
 
 // ---------------------------------------------------------------- 类型
 
@@ -666,14 +668,14 @@ const videoVaporwave: ToolDescriptor = {
 type NormalizedRoi = { x: number; y: number; w: number; h: number };
 
 /** Parse and validate the public video_purify normalized ROI contract. */
-export function parseNormalizedRoi(value: unknown): NormalizedRoi {
+export function parseNormalizedRoi(value: unknown, flag = "--purify-roi"): NormalizedRoi {
 	let rawValues: unknown[];
 	let acceptNumericStrings = false;
 	if (typeof value === "string") {
 		acceptNumericStrings = true;
 		const parts = value.split(",");
 		if (parts.length !== 4 || parts.some((part) => !part.trim())) {
-			throw new Error("--purify-roi 必须是 x,y,w,h 四个归一化数字");
+			throw new Error(`${flag} 必须是 x,y,w,h 四个归一化数字`);
 		}
 		rawValues = parts;
 	} else if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -1210,6 +1212,86 @@ const videoFaceTrack: ToolDescriptor = {
 		return p;
 	},
 	mapResult(out) {
+		return out as Record<string, unknown>;
+	},
+};
+
+function parseCharacterTimecode(value: unknown, flag: string): number {
+	const text = String(value ?? "").trim();
+	if (!text) throw new Error(flag + " 不能为空");
+	const parts = text.split(":");
+	let seconds: number;
+	if (parts.length === 1) seconds = Number(parts[0]);
+	else if (parts.length <= 3) {
+		if (parts.slice(0, -1).some((part) => !/^\d+$/.test(part)) || !/^\d+(?:\.\d+)?$/.test(parts.at(-1)!) || parts.slice(1).some((part) => Number(part) >= 60)) {
+			throw new Error(flag + " 需使用有效的 MM:SS.mmm 或 HH:MM:SS.mmm");
+		}
+		seconds = 0;
+		for (const part of parts) seconds = seconds * 60 + Number(part);
+	} else throw new Error(flag + " 需使用秒或 HH:MM:SS.mmm");
+	if (!Number.isFinite(seconds) || seconds < 0) throw new Error(flag + " 需要非负时间");
+	return sec2ms(seconds);
+}
+
+function parseCharacterSeedRange(value: unknown): { start_ms: number; end_ms: number } {
+	const raw = String(value ?? "");
+	const parts = raw.split(",");
+	if (parts.length !== 2) throw new Error("--seed-range 需使用 start,end，例如 00:12:30.000,00:12:42.000");
+	const start_ms = parseCharacterTimecode(parts[0], "--seed-range 起点");
+	const end_ms = parseCharacterTimecode(parts[1], "--seed-range 终点");
+	if (end_ms <= start_ms) throw new Error("--seed-range 必须满足起点 < 终点");
+	return { start_ms, end_ms };
+}
+
+const characterPrepared = new WeakMap<ToolContext, CharacterManifest>();
+const videoCharacterCut: ToolDescriptor = {
+	name: "video_character_cut",
+	title: "角色 Cut 检索",
+	description: "围绕目标角色检索全片场景，吸收正反打、反应镜头和对白上下文，只返回时间戳 JSON，不生成视频。",
+	kind: "cloud",
+	input: { kind: "video" },
+	priceKey: "video_character_cut_for_cli",
+	outputHint: "角色 Cut 时间戳与上下文结构（result-output.json）",
+	enabled: true,
+	taskType: "cli/video_character_cut_for_cli",
+	pollTimeoutMs: 60 * 60 * 1000,
+	options: [
+		{ flag: "--character <name>", desc: "目标角色名（结果标签，视觉身份由种子画面确定）" },
+		{ flag: "--seed-range <start,end>", desc: "角色身份锚点时间窗，支持秒或 HH:MM:SS.mmm，必须提供" },
+		{ flag: "--seed-bbox <x,y,w,h>", desc: "多人种子画面中的目标选框（0–1归一化坐标，可选）" },
+	],
+	async preprocess(ctx) {
+		if (!ctx.inputAbs) throw new Error("video_character_cut 缺少视频输入");
+		if (!ctx.outDir) throw new Error("角色分析缺少产物目录");
+		const prepared = await prepareCharacterInput(ctx.inputAbs, ctx.outDir, ctx.ffmpegPath, ctx.warn);
+		characterPrepared.set(ctx, prepared.manifest);
+		return prepared.artifact;
+	},
+	buildPayload(fileId, ctx) {
+		const character = String(ctx.opts.character ?? "").trim();
+		if (!character) throw new Error("--character 必填");
+		if (character.length > 128) throw new Error("--character 长度不能超过 128 个字符");
+		const seed_range = parseCharacterSeedRange(ctx.opts.seedRange);
+		const seed_bbox = ctx.opts.seedBbox ? parseNormalizedRoi(String(ctx.opts.seedBbox), "--seed-bbox") : undefined;
+		const manifest = characterPrepared.get(ctx);
+		if (fileId !== "__dry_run__" && !manifest) throw new Error("角色分析尚未生成原片镜头索引");
+		const geo = ctx.inputAbs ? probeGeometry(ctx.inputAbs, ctx.ffmpegPath) : undefined;
+		if (geo && seed_range.end_ms > (manifest?.duration_ms ?? sec2ms(geo.duration))) {
+			throw new Error("--seed-range 终点超过原片时长");
+		}
+		return {
+			file_id: fileId,
+			character,
+			seed_range,
+			...(seed_bbox ? { seed_bbox } : {}),
+			...(manifest ? { source_manifest: manifest } : {}),
+			...(geo ? { source_duration_ms: manifest?.duration_ms ?? sec2ms(geo.duration) } : {}),
+		};
+	},
+	mapResult(out) {
+		if (out.version !== "video_character_cut.v2" || !["complete", "partial", "identity_unresolved"].includes(String(out.status))) {
+			throw new Error("服务端未返回角色 Cut v2 契约；请同步部署 v2 API/worker 后重试，不能把旧结果当作完整检索");
+		}
 		return out as Record<string, unknown>;
 	},
 };
@@ -2515,6 +2597,7 @@ export const TOOL_REGISTRY: ToolDescriptor[] = [
 	videoMotionCut,
 	videoSpeakerDetect,
 	videoFaceTrack,
+	videoCharacterCut,
 	audioSpeakerSplit,
 	audioStretch,
 	pianoAudioToMidi,
