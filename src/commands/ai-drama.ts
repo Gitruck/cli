@@ -5,10 +5,11 @@
  *   `swap`  原地替换某 clip 背后的素材文件，断言结构等价、`.gtrk` 一字不动（出口）
  */
 import type { Command } from "commander";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { copyFile, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { aiDramaTracksEdited, layAiDramaTracks, type AiDramaLayPackage } from "../lib/ai-drama-lay";
+import { aiDramaTracksEdited, assertAiDramaAppend, layAiDramaTracks, type AiDramaLayPackage } from "../lib/ai-drama-lay";
+import { createHash } from "node:crypto";
 // [adjust-lay-frame-domain D1] 顶层 video_rate 与 matrix lay / gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
 import { videoRateOf } from "../lib/gtrk-patch";
 import { r3 } from "../lib/frame-domain";
@@ -37,6 +38,7 @@ interface AiDramaOpts {
 	/** AI Drama Desk 的项目 id，可重复；由 desk-locate 解析成导出包目录后并入 package。 */
 	deskProject?: string[];
 	replaceAll?: boolean;
+	append?: boolean;
 	json?: boolean;
 	// ── pack ──
 	beat?: string;
@@ -105,6 +107,7 @@ export function registerAiDrama(program: Command, deps: AiDramaDeps = {}): void 
 			collectPath,
 		)
 		.option("--replace-all", "[lay] 已铺 AI 轨在客户端被编辑过时仍重置重铺（会覆盖该 AI 轨上的手调）")
+		.option("--append", "[lay] 只添加新 beat 到独立轨，保留全部已有轨道及手调；已有 beat 拒绝重复添加")
 		.option("--beat <id>", "[pack] 要打包的 beat，如 B03")
 		.option("--dir <path>", "[pack] 存放该 beat 各镜视频的目录")
 		.option("--dispatch <path>", "[pack] 派单清单（缺省 <project>/split/dispatch.json）")
@@ -146,6 +149,7 @@ async function readPackage(input: string): Promise<{ exportDir: string; pkg: AiD
 	if (!existsSync(manifestPath)) throw new Error(`找不到 AI 导出清单：${manifestPath}`);
 	const manifest = await readJson(manifestPath, "AI 导出清单") as ReturnManifest;
 	if (typeof manifest.slug !== "string" || !manifest.slug) throw new Error(`${manifestPath}：缺 slug`);
+	safeLeafFile(manifest.slug, `${manifestPath} slug`);
 	if (typeof manifest.beatId !== "string" || !/^B\d+$/i.test(manifest.beatId)) throw new Error(`${manifestPath}：beatId 须形如 B03`);
 	if (!finite(manifest.trackSt) || !finite(manifest.trackEd) || manifest.trackEd <= manifest.trackSt) {
 		throw new Error(`${manifestPath}：trackSt/trackEd 窗口无效`);
@@ -201,8 +205,10 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 				"  swap --project <目录> --clip <clip_id> --file <新素材>",
 		);
 	}
+	if (opts.append && words[0] !== "lay") throw new Error("--append 只适用于 ai-drama lay");
 	if (words[0] === "pack") return runAiDramaPack(opts, deps);
 	if (words[0] === "swap") return runAiDramaSwap(opts, deps);
+	if (opts.append && opts.replaceAll) throw new Error("--append 与 --replace-all 不能同时使用");
 	if (!opts.project) throw new Error("ai-drama lay 需要 --project <目录>");
 	if (!opts.package?.length && !opts.deskProject?.length) {
 		throw new Error("ai-drama lay 至少需要一个 --package <导出目录或manifest.json> 或 --desk-project <id>");
@@ -231,11 +237,12 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 	// ── 帧率预检（adjust-lay-frame-domain D1）：AI 轨落轨锚在顶层 video_rate；缺席 / 非正 / 非整数在这里就抛
 	//    （与 matrix lay / layAiDramaTracks 同一读法与话术）——此刻零复制、零改动，MUST NOT 静默退回毫秒路。
 	videoRateOf(gtrk);
-	if (!opts.replaceAll && aiDramaTracksEdited(gtrk)) {
+	if (!opts.append && !opts.replaceAll && aiDramaTracksEdited(gtrk)) {
 		throw new Error("已铺 AI 轨在客户端被编辑过，已拒绝覆盖；确认要丢弃该 AI 轨上的手调后再加 --replace-all");
 	}
 
 	const loaded = await Promise.all(packageInputs.map(readPackage));
+	if (opts.append) assertAiDramaAppend(gtrk, loaded.map((p) => p.pkg));
 	const beatIds = loaded.map((p) => p.pkg.beatId);
 	if (new Set(beatIds).size !== beatIds.length) throw new Error(`同一 beat 重复传包：${beatIds.join("、")}`);
 	log.step(`▶ AI 情景片段回填：${loaded.length} 个 beat / ${loaded.reduce((n, p) => n + p.pkg.items.length, 0)} 个镜头…`);
@@ -262,7 +269,11 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 			...p.pkg,
 			trackSt,
 			trackEd,
-			items: p.pkg.items.map((it) => ({ ...it, relPath: `${assetRelDir}/${it.file}` })),
+			items: p.pkg.items.map((it) => {
+				// 增量媒体用内容寻址，不能覆盖旧轨仍引用的同名文件。
+				const hash = opts.append ? createHash("sha256").update(readFileSync(join(p.exportDir, it.file))).digest("hex") : "";
+				return { ...it, relPath: opts.append ? `${assetRelDir}/${p.pkg.beatId.toLowerCase()}/${hash}-${it.file}` : `${assetRelDir}/${it.file}` };
+			}),
 		});
 	}
 	if (!packages.length) throw new Error("所有 AI beat 都已从当刻成片中剪除，没有可回填内容；工程未改动");
@@ -277,10 +288,9 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 	const vfrSamples: string[] = [];
 	for (const pkg of packages) {
 		const src = loaded.find((p) => p.pkg.slug === pkg.slug && p.pkg.beatId === pkg.beatId)!;
-		const assetDir = join(gtrkDir, "assets", "ai-drama", pkg.slug);
-		await mkdir(assetDir, { recursive: true });
 		for (const item of pkg.items) {
-			const dst = join(assetDir, item.file);
+			const dst = join(gtrkDir, item.relPath);
+			await mkdir(dirname(dst), { recursive: true });
 			await copyFile(join(src.exportDir, item.file), dst);
 			const declared = wallFromDeclared(item.measuredSec, "external_manifest", "return-v1 manifest")!; // readPackage 已判正数
 			try {
@@ -327,7 +337,7 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 	}
 
 	const generatedAt = new Date().toISOString();
-	const laid = layAiDramaTracks({ gtrk, packages, generatedAt, warn: log.warn, info: log.info });
+	const laid = layAiDramaTracks({ gtrk, packages, generatedAt, append: opts.append, warn: log.warn, info: log.info });
 	laid.meta.timecode_source = reproj.summary.mode === "reprojected" ? "reprojected" : "dispatch_snapshot";
 	if (reproj.summary.projected_at) laid.meta.reprojected_at = reproj.summary.projected_at;
 	if (reproj.summary.reason) laid.meta.timecode_degrade_reason = reproj.summary.reason;
@@ -336,12 +346,13 @@ export async function runAiDrama(words: string[], opts: AiDramaOpts, deps: AiDra
 	log.ok(`AI 轨回填完成：${laid.summary.beats} 个 beat / ${laid.summary.laidClips} 个镜头 → video_track ${laid.summary.laidTrack ?? "-"}`);
 	log.info("既有 A-roll、BGM 与 B-roll 轨均未改动；AI 片段已复制进工程 assets/ai-drama，可直接进客户端精剪。");
 	if (laid.summary.laidClips > 0 && laid.summary.laidTrack != null) {
-		log.info(`需要贴合口播切点时，可先运行 gtrk patch snap --project <工程目录> --track video:${laid.summary.laidTrack} --audio <口播音频路径> --dry-run 检查，再确认执行；之后用 patch seal 补缝。回轨不会自动改动切点。`);
+		log.info(`需要贴合口播切点时，可先运行 gtrk patch snap --project <工程目录> --track video:${laid.summary.laidTrack} --audio <口播音频路径> --dry-run 检查。稀疏关键镜头的空档应保留；只有明确要求连续覆盖时才考虑 patch seal。回轨不会自动改动切点。`);
 	}
 	if (integrity) reportMaterialIntegrity(integrity, log);
 	const result = {
 		ok: skipped.length === 0,
 		mode: "lay",
+		append: opts.append === true,
 		project: baseDir,
 		gtrk: gtrkPath,
 		laidTrack: laid.summary.laidTrack,

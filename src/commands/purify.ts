@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { log, routeLogsToStderr } from "../lib/log";
 import { appendRegionSpecs, parseRegionSpec, parseRoiSpec, summarizeRegions, validateDocument } from "../lib/purify-contract";
 import { startPurify, resumePurify, writeJsonAtomic, type PurifyDeps, type PurifyOpts, type PurifyResult } from "../lib/purify-flow";
+import { PURIFY_METHOD_HELP } from "../lib/purify-method";
 export { parseRegionSpec, startPurify, resumePurify };
 export { checkPurifyProtocol } from "../lib/purify-flow";
 export type { PurifyOpts, PurifyDeps, PurifyResult };
@@ -29,7 +30,7 @@ export async function runPurify(input: string, opts: PurifyOpts = {}, deps: Part
 }
 function options(command: Command, detect: boolean): Command {
 	command.option("-o, --out <dir>", "产物目录（相同请求自动恢复已有任务）")
-		.option("--purify-func-type <ffmpeg|raft>", "ffmpeg 模糊 / raft 内容修复", "ffmpeg")
+		.option("--purify-func-type <ffmpeg|raft>", PURIFY_METHOD_HELP + "；处理前必选，无默认值")
 		.option("--watermark-region <box>", "追加人工框 x,y,w,h[,start[,end]]，可重复", collect, [])
 		.option("--protect-region <box>", "保护框，优先于处理范围，可重复", collect, [])
 		.option("--reupload", "首次上传忽略缓存；恢复任务不重传")
@@ -59,9 +60,10 @@ export function registerPurify(program: Command, deps: Partial<PurifyDeps> = {})
 			});
 	}
 	root.command("resume <journal>").description("继续已有任务或下载，不重复建单")
+		.option("--purify-func-type <ffmpeg|raft>", "旧记录尚未提交处理任务时，补充用户明确选择的模式；已提交任务不能改模式")
 		.option("--json", "输出 JSON").action(async (path: string, _opts: PurifyOpts, command: Command) => {
 			const opts = effectiveOptions(command);
-			if (opts.json) routeLogsToStderr(); print(await resumePurify(path, deps), opts);
+			if (opts.json) routeLogsToStderr(); print(await resumePurify(path, deps, opts), opts);
 		});
 	root.command("edit <regions-json>").description("本地筛选/补框，输出新的最终清单；无云端调用")
 		.option("-o, --out <file>", "另存的最终区域文件（必填）")

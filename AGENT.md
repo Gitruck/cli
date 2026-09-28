@@ -12,14 +12,16 @@
 
 按用户意图选择流程，文字候选不等于该删除的内容；图形台标由 Agent 判断并补框。
 
+**去除前必须主动问用户选模式并等答复**：快速 ffmpeg 做基础模糊，可能留涂抹痕迹；慢速 raft 做内容修复，通常更自然、可接近无痕，但不保证无损或还原遮挡细节。不得替用户默认任何模式。“无需复核选区”不等于选了模式；本任务已经明确选择的无需重复问。仅检测、编辑和空清单原片返回不受影响。模式不可因失败、耗时或限额自动切换，本地 ffmpeg 兜底也须另获用户同意。
+
 1. `gtrk purify detect <视频> --out <目录> --json`：只检测，返回待审区域文件、摘要、代表时间点和运行记录。
 2. 读取摘要、按代表时间查看原片；用 `gtrk purify edit <区域文件> --select-roi x,y,w,h --delete-id det-000001 --watermark-region x,y,w,h --protect-region x,y,w,h --out <最终文件>` 做本地筛选和补框。各筛选参数按需使用；完整 JSON 留在文件，不灌入对话。
-3. `gtrk purify apply <最终文件> --json`：只按最终清单处理，不重新检测。
+3. `gtrk purify apply <最终文件> --purify-func-type <用户选定模式> --json`：只按最终清单处理，不重新检测。
 
-用户明确全部清理范围时，可用 `gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --json` 连续完成。run 必须明确 full_screen/subtitle/custom；custom 同时传 --detect-roi。
+用户明确全部清理范围时，可用 `gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --purify-func-type <用户选定模式> --json` 连续完成。run 必须明确 full_screen/subtitle/custom；custom 同时传 --detect-roi。
 
-- `--purify-func-type ffmpeg|raft`：默认 ffmpeg 模糊；raft 内容修复。保留处用 protect-region，保护优先。
-- `gtrk purify resume <运行记录.json> --json`：继续已有任务和下载。提交结果未知时停止重发，先核对云端任务。
+- `--purify-func-type ffmpeg|raft`：处理前显式必选，无默认值；ffmpeg 快速模糊，raft 慢速内容修复。保留处用 protect-region，保护优先。
+- `gtrk purify resume <运行记录.json> --json`：继续已有任务和下载，沿用已选模式；旧记录尚未建处理任务时须询问并补 --purify-func-type。提交结果未知时停止重发，先核对云端任务。
 - 空最终清单直接返回原视频，不创建处理任务。
 - 检测与处理按原计费口径各计一次；本地 edit 免费。源路径、SHA256 与云文件绑定，换片须重检。
 - JSON 回执给出实际文件路径；状态是 awaiting_review / completed / unchanged。

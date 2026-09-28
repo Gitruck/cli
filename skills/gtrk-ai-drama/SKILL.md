@@ -5,6 +5,8 @@ description: AI 情景动画分镜稿生成器——把成片 SOP 第③步（B-
 
 # AI 情景动画分镜稿生成器（gtrk-ai-drama）
 
+用户要求间隔取关键镜头、剩余由实况补齐时，先读 [稀疏关键场景与角色参考](references/sparse-key-scenes.md)。其短 beat 窗口、时基、逐镜参考和留空规则优先于下文针对连续 AI 段落的时长预算；不转入通篇 AI 图纸。
+
 把口播派单里分到 **`AI_DRAMA` 车道**的 beat，逐个拆成分镜、为每个 beat 产 **四段朴素描述 + 独立视觉基调 + 时长预算**（中英双版），落到 `<project>/ai-drama/<beat_id>.md`，再交棒 AI Drama Desk 或任意外部平台出片；标准工作台导出包由 CLI 自动回填时间线。
 
 > **脑手分工**：本 skill 负责创作（拆镜 + 注入栏目风格 + 管用户交互），外部工作台负责生成；`gtrk ai-drama lay` 只消费 AI Drama Desk 的 return-v1 导出包，把已经生成好的片段复制进工程并铺到一条独立 AI 视频轨。该命令不生成内容、不调用模型、不计费，也不改既有 A-roll / BGM / 三条 B-roll 候选轨。

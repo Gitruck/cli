@@ -7,7 +7,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 飞书使用教程统一入口：[gtrk CLI 使用教程](https://hocassian.feishu.cn/wiki/HCFpwoF7SivIFbkKosgcFMcEnxk)。
 
-`gtrk tool <name> [输入...]` 是 gtrk 的**单点能力**族：一个工具 = 单发单收（给一份输入、出一份产物；多文件图片工具的「一份输入」是一组图片路径，顺序即拼装顺序），没有 SOP 次序、没有用户检查点链——与成片管线的车道命令（`oralcut` / `split` / `matrix` / `mg`）是两回事。本 skill 是这个族的**统一调用向导**：认清有哪些工具、按纪律驱动 `gtrk tool` 命令、把产物和计费如实回给用户。
+`gtrk tool <name> [输入...]` 是 gtrk 的**单点能力**族：一个工具 = 单发单收（给一份输入、出一份产物；多文件图片工具的「一份输入」是一组图片路径，顺序即拼装顺序），没有成片 SOP 次序；视频去水印必须先完成下文的用户模式选择——与成片管线的车道命令（`oralcut` / `split` / `matrix` / `mg`）是两回事。本 skill 是这个族的**统一调用向导**：认清有哪些工具、按纪律驱动 `gtrk tool` 命令、把产物和计费如实回给用户。
 
 > **本 skill 已含你需要的全部信息**（工具清单、调用纪律、恢复语义、排错话术）。工具清单以 `gtrk tool list --json` 为**唯一真相**——本文件与它漂移时以命令输出为准并回来修本文件。参数细节以 `gtrk tool --help` 为准。
 
@@ -159,7 +159,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - 视频比例转换：`gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 12 --clip-end 60 --without-audio --json`。`--clip-start/--clip-end` 传起止帧序号；省略选项就沿用服务端默认，需要保留音轨时不要传 `--without-audio`。
 - 视频防抖：`gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo --json`。支持 `fast`、`exp`、`turbo`；未传时由服务端使用 `turbo`，`exp` 只按实验方式转述，不承诺观感。
 - 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
-- 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method ffmpeg --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
+- 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method <用户选定模式> --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
 - 按框直接去除：`gtrk tool video_purify ./clip.mp4 --purify-scope region --purify-region 0.8,0.02,0.18,0.08,0,5 --json`（图片把工具换成 `image_purify`、框只写 `x,y,w,h`）。`--purify-region` 可重复，图片最多 16 个框、视频按服务资源限制，视频框后可带 `start,end` 秒。`custom` 只去除框内识别到的文字；`region` 不做识别、**框内全部内容都会被处理（包括画面主体）**——用户要去的是图形台标、半透明图案或只在某段时间出现的角标时选 `region`，并提醒框越小越贴边效果越好。
 - 视频超分：`gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime --json`。输入最多 60 秒，放大后任一边超过 4000 px 会由服务端拒绝；这是实验性增强，不能承诺主观画质一定提升。
 - 视频插帧：`gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 --json`。支持 `2`、`3`、`4`，不套用旧总览里的 1 分钟限制；原视频任一边超过 4000 px 时由服务端拒绝。
@@ -180,10 +180,27 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 ## 可审阅的视频净化
 
-不确定误检时：先 `gtrk purify detect <视频> --out <工程目录> --json`，消费摘要与代表时间查看原片，再用 `gtrk purify edit <区域文件> --select-roi x,y,w,h --out <最终文件>` 筛选。edit 还支持重复的 --delete-id / --watermark-region / --protect-region。最后 `gtrk purify apply <最终文件> --json`，最终清单不会被重新检测覆盖。
+### 先选模式，再处理（必须）
 
-用户明确清理范围时：`gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --json`。不得将全屏文字候选默认当成水印；full_screen 需明确选择。图形台标需 Agent 补框。
+Agent 在任何去除处理之前 MUST 主动向用户说明两种模式，并等待明确选择：
 
-只处理明确的角标框时：`gtrk purify <视频> --no-detect --watermark-region x,y,w,h[,start[,end]] --out <工程内产物目录> --json`，跳过文字检测。省略时间表示全片；每条视频分别确认角标位置，不复用上一条视频的框。用户已经明确授权采用检测结果时，按其要求执行，无需重复要求审阅。检测和处理分别计费，纯人工框只创建处理任务。
+- **快速去除（ffmpeg）**：速度快，做基础模糊去除，可能留下模糊块或涂抹痕迹，适合更看重速度、能接受基础效果的场景。
+- **精细修复（raft）**：速度慢，做内容修复，通常更自然，合适素材可接近无痕；不保证无损或还原被遮挡的真实细节。
 
-中断后用 `gtrk purify resume <回执中的运行记录> --json`。空清单直接返回原视频；完整万级区域保存在文件，勿逐条读进模型上下文。保护框优先于去除框，新处理请求会先检查服务支持 review_protocol=2，否则在上传计费前停止；ffmpeg 是模糊、raft 是内容修复。
+建议问法：「这次要快速还是精细？快速处理更快，但效果基础、可能留模糊痕迹；精细处理更慢，通常更自然、可接近无痕，但不保证所有画面都能完美修复。你选哪一种？」
+
+**没有回答就不开始去除，不替用户默认 ffmpeg，也不默认 raft。** 用户在本次任务已明确选好模式时无需重复询问；批量素材只有在用户明确说明整批沿用该模式时才能统一使用。“直接处理”“无需复核选区”“按检测结果去除”只授权范围，不代表选择了处理模式。只做 detect/edit 可以继续；空清单直接返回原片，不为不发生的处理追问。
+
+用户选定后才把对应值显式传给命令：顶层 `--purify-func-type ffmpeg|raft`，旧工具入口 `--purify-method ffmpeg|raft`。这些参数没有默认值；下面的 `<用户选定模式>` 必须替换为本次选择，不能照示例猜一个。
+
+不确定误检时：先 `gtrk purify detect <视频> --out <工程目录> --json`，消费摘要与代表时间查看原片，再用 `gtrk purify edit <区域文件> --select-roi x,y,w,h --out <最终文件>` 筛选。edit 还支持重复的 --delete-id / --watermark-region / --protect-region。最后 `gtrk purify apply <最终文件> --purify-func-type <用户选定模式> --json`，最终清单不会被重新检测覆盖。
+
+用户明确清理范围时：`gtrk purify run <视频> --detect-scope subtitle --watermark-region x,y,w,h --purify-func-type <用户选定模式> --json`。不得将全屏文字候选默认当成水印；full_screen 需明确选择。图形台标需 Agent 补框。
+
+只处理明确的角标框时：`gtrk purify <视频> --no-detect --watermark-region x,y,w,h[,start[,end]] --purify-func-type <用户选定模式> --out <工程内产物目录> --json`，跳过文字检测。省略时间表示全片；每条视频分别确认角标位置，不复用上一条视频的框。用户已授权采用检测结果时无需再审选区，但仍须完成模式选择。检测和处理分别计费，纯人工框只创建处理任务。
+
+中断后用 `gtrk purify resume <回执中的运行记录> --json`。新记录沿用用户已选模式；旧记录尚未建处理任务且无法确认选择时，先询问用户，再在 resume 补 `--purify-func-type <用户选定模式>`。已建单只能继续查询下载，不能通过 resume 换模式。
+
+**慢速失败、排队或暂不可用时，必须先告知原因及切换快速去除的效果代价，等用户同意后才能另建快速任务；严禁自行手搓本地 ffmpeg 交差。** 长片超出 raft 限制时先说明限制，讨论分段或改模式，不因时长自动降档。交付时写明实际模式与已知效果问题，不把 ffmpeg 结果描述为无痕修复。
+
+完整万级区域保存在文件，勿逐条读进模型上下文。保护框优先于去除框，新处理请求会先检查服务支持 review_protocol=2，否则在上传计费前停止。

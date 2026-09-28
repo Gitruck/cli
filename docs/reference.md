@@ -527,12 +527,14 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - `gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 12 --clip-end 60 --without-audio [--json]` — 视频比例转换；`--clip-start/--clip-end` 是起止帧序号，省略字段时沿用服务端默认，画布模式只接受 `normal`、`rectangle`、`square`。
 - `gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo [--json]` — 视频防抖；支持 `fast`、`exp`、`turbo`，其中 `exp` 为实验方式，产物观感需自行检查。
 - `gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" [--json]` — 使用精确预设名称添加蒸汽波滤镜；省略时显式使用 `愈漸升溫`。
-- `gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method ffmpeg --purify-roi 0,0.78,1,0.2 [--json]` — 净化用户有权修改的视频；ROI 为归一化 `x,y,w,h` 且只和 `custom` 同用。`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用该限制；不承诺还原被遮挡内容。
+视频去水印必须先问用户选快速（ffmpeg：基础模糊，可能留痕）还是精细（raft：较慢的内容修复，通常更自然、可接近无痕，不保证无损还原）。没有默认模式；`<用户选定模式>` 必须替换为用户已选择的 ffmpeg 或 raft，失败后不得自行降档。只检测、编辑和空清单不要求选择。旧运行记录尚未建处理任务时，resume 也须补显式模式；已建单继续原任务。
+
+- `gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method <用户选定模式> --purify-roi 0,0.78,1,0.2 [--json]` — 净化用户有权修改的视频；ROI 为归一化 `x,y,w,h` 且只和 `custom` 同用。`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用该限制；不承诺还原被遮挡内容。
 - `gtrk purify detect ./clip.mp4 --out ./purify-work --json` — 只检测，返回待审清单、摘要与代表时间。
 - `gtrk purify edit ./purify-work/detect-xxx-final.json --select-roi 0,0.7,1,0.3 --out ./purify-work/final.json` — 本地筛选；还支持 --delete-id / --watermark-region / --protect-region。
-- `gtrk purify run ./clip.mp4 --detect-scope subtitle --watermark-region 0.8,0.02,0.18,0.08 --json` — 明确范围的自动组合；full_screen 必须显式指定。
-- `gtrk purify ./clip.mp4 --no-detect --watermark-region 0.8,0.02,0.18,0.08,0,5 --out ./purify-work --json` — 只处理给定角标框的前 5 秒，跳过文字检测；省略时间则覆盖全片。框为画面归一化 `x,y,w,h`，每条视频分别定位，不能直接套用另一条视频的选区。
-- `gtrk purify apply ./purify-work/final.json --json` — 最终清单唯一权威；空清单不建单。
+- `gtrk purify run ./clip.mp4 --purify-func-type <用户选定模式> --detect-scope subtitle --watermark-region 0.8,0.02,0.18,0.08 --json` — 明确范围的自动组合；full_screen 必须显式指定。
+- `gtrk purify ./clip.mp4 --purify-func-type <用户选定模式> --no-detect --watermark-region 0.8,0.02,0.18,0.08,0,5 --out ./purify-work --json` — 只处理给定角标框的前 5 秒，跳过文字检测；省略时间则覆盖全片。框为画面归一化 `x,y,w,h`，每条视频分别定位，不能直接套用另一条视频的选区。
+- `gtrk purify apply ./purify-work/final.json --purify-func-type <用户选定模式> --json` — 最终清单唯一权威；空清单不建单。
 - `gtrk purify resume ./purify-work/run-xxx.json --json` — 恢复已有任务和下载，不重复计费建单。保护区域需新版后端；ffmpeg 为模糊，raft 为内容修复。
 
 上述 `detect-xxx-final.json` 和 `run-xxx.json` 仅示意：实际路径以命令回执中的 `finalRegionsJson` 和 `journal` 为准。检测与处理各建一次任务、分别计费；`edit` 只在本地编辑。用户明确要求直接采用检测结果时可用 `run`，仅按框去角标则用 `--no-detect`。`resume` 用于已有任务或下载中断；云端明确失败时保留任务 ID 排查，不把重复提交当成恢复。

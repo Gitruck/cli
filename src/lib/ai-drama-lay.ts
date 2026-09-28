@@ -85,6 +85,8 @@ export interface StructMetaAiDrama {
 	timecode_source?: "reprojected" | "dispatch_snapshot";
 	reprojected_at?: string;
 	timecode_degrade_reason?: string;
+	/** 完整轨快照用于识别源窗、变换、音量、移轨等手调，不仅比较起止秒。 */
+	track_snapshots?: LooseTrack[];
 }
 
 export interface AiDramaLayResult {
@@ -115,6 +117,11 @@ function previousMeta(gtrk: Record<string, unknown>): Partial<StructMetaAiDrama>
 /** 已登记 AI 轨是否在客户端被改过。判不准时宁可拒绝覆盖。 */
 export function aiDramaTracksEdited(gtrk: Record<string, unknown>): boolean {
 	const prev = previousMeta(gtrk);
+	if (Array.isArray(prev?.track_snapshots)) {
+		const tracks = (Array.isArray(gtrk.video_track) ? gtrk.video_track : []) as LooseTrack[];
+		return prev.track_snapshots.some((snapshot) =>
+			JSON.stringify(tracks.find((t) => t.track_index === snapshot.track_index)) !== JSON.stringify(snapshot));
+	}
 	const indices = Array.isArray(prev?.lay_tracks) ? prev.lay_tracks.filter((n): n is number => typeof n === "number") : [];
 	if (!indices.length) return false;
 	const tracks = (Array.isArray(gtrk.video_track) ? gtrk.video_track : []) as LooseTrack[];
@@ -141,6 +148,8 @@ export function layAiDramaTracks(opts: {
 	warn?: (message: string) => void;
 	/** 帧格化的人读 INFO 出口（越素材前移一帧 / 不足一帧跳过，逐次一行）；命令层接 `log.info`，纯函数单测可不传。 */
 	info?: (message: string) => void;
+	/** 仅添加新 beat，现有轨道、素材及手调逐对象保留。 */
+	append?: boolean;
 }): AiDramaLayResult {
 	const { gtrk, generatedAt } = opts;
 	// 帧率读法与 `matrix lay` / `gtrk patch` 同源（fix-matrix-lay-frame-grid D7 的整数判据）：缺席 / 非正 / 非整数即抛，
@@ -149,8 +158,9 @@ export function layAiDramaTracks(opts: {
 	const info = opts.info ?? (() => {});
 	const packages = [...opts.packages].sort((a, b) => a.trackSt - b.trackSt || a.beatId.localeCompare(b.beatId));
 	const prev = previousMeta(gtrk);
-	const oldIndices = new Set(Array.isArray(prev?.lay_tracks) ? prev.lay_tracks.filter((n): n is number => typeof n === "number") : []);
-	const oldMaterialIds = new Set(Array.isArray(prev?.material_ids) ? prev.material_ids.filter((s): s is string => typeof s === "string") : []);
+	if (opts.append) assertAiDramaAppend(gtrk, packages);
+	const oldIndices = new Set(!opts.append && Array.isArray(prev?.lay_tracks) ? prev.lay_tracks.filter((n): n is number => typeof n === "number") : []);
+	const oldMaterialIds = new Set(!opts.append && Array.isArray(prev?.material_ids) ? prev.material_ids.filter((s): s is string => typeof s === "string") : []);
 	const tracks = (Array.isArray(gtrk.video_track) ? gtrk.video_track : []) as LooseTrack[];
 	const keptTracks = tracks.filter((t) => !(typeof t.track_index === "number" && oldIndices.has(t.track_index)));
 	const materials = (Array.isArray(gtrk.materials) ? gtrk.materials : []) as LooseMaterial[];
@@ -252,10 +262,13 @@ export function layAiDramaTracks(opts: {
 	const meta: StructMetaAiDrama = {
 		contract_version: "v1",
 		generated_at: generatedAt,
-		lay_tracks: createdTracks.map((t) => t.track_index),
-		material_ids: materialIds,
-		packages: metaPackages,
+		lay_tracks: [...(opts.append ? prev?.lay_tracks ?? [] : []), ...createdTracks.map((t) => t.track_index)],
+		material_ids: [...(opts.append ? prev?.material_ids ?? [] : []), ...materialIds],
+		packages: [...(opts.append ? prev?.packages ?? [] : []), ...metaPackages],
+		track_snapshots: structuredClone([...(opts.append ? prev?.track_snapshots ?? [] : []), ...createdTracks]),
 	};
+	// 旧格式没有完整快照时，不把新增批次的快照误当成全部旧轨的基线。
+	if (opts.append && prev?.lay_tracks?.length && !prev.track_snapshots) delete meta.track_snapshots;
 	const structMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}), ai_drama: meta };
 	const next: Record<string, unknown> = { ...gtrk, materials: [...keptMaterials, ...newMaterials], video_track: [...keptTracks, ...createdTracks], struct_meta: structMeta };
 	// 写方自检（gtrk-writer-invariants，写回前唯一出口）：本次写出的 AI clip 查恒等式 / 素材上界 / 与同轨邻居零重叠，
@@ -276,4 +289,22 @@ export function layAiDramaTracks(opts: {
 			frameGrid: { rate, shifted, dropped },
 		},
 	};
+}
+
+/** 在复制媒体之前也调用：重复 beat、clip/material 身份冲突均不允许悄悄覆盖。 */
+export function assertAiDramaAppend(gtrk: Record<string, unknown>, packages: AiDramaLayPackage[]): void {
+	const prev = previousMeta(gtrk);
+	const beats = new Set((prev?.packages ?? []).map((p) => p.beat.toUpperCase()));
+	const ids = new Set((Array.isArray(gtrk.materials) ? gtrk.materials : []).map((m) => m.id));
+	const clipIds = new Set((Array.isArray(gtrk.video_track) ? gtrk.video_track : []).flatMap((t) => t.track_timeline ?? []).map((c) => c.clip_id));
+	for (const pkg of packages) {
+		if (beats.has(pkg.beatId.toUpperCase())) throw new Error(`--append 不覆盖已有 beat ${pkg.beatId}；等规格换片用 ai-drama swap，重铺须显式选择完整包集合`);
+		beats.add(pkg.beatId.toUpperCase());
+		for (const item of pkg.items) {
+			const clip = `${pkg.slug}-${pkg.beatId.toLowerCase()}-s${item.shotIndex}`;
+			const material = `${AI_DRAMA_MATERIAL_PREFIX}${clip}`;
+			if (ids.has(material) || clipIds.has(clip)) throw new Error(`--append 身份冲突：${clip}`);
+			ids.add(material); clipIds.add(clip);
+		}
+	}
 }

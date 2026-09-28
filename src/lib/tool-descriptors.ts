@@ -17,6 +17,7 @@ import { assertEnum, catalogEnumSync } from "./enum-catalog";
 import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
 import { readJson } from "./read-json";
 import { sec2ms } from "./frame-domain";
+import { PURIFY_METHOD_HELP, requirePurifyMethod } from "./purify-method";
 import { prepareCharacterInput, type CharacterManifest } from "./character-input";
 
 // ---------------------------------------------------------------- 类型
@@ -797,7 +798,7 @@ const videoPurify: ToolDescriptor = {
 		PURIFY_SCOPE_OPTION,
 		{
 			flag: "--purify-method <ffmpeg|raft>",
-			desc: "净化方式；未传时使用服务端 ffmpeg 默认值，raft 仅支持 20 分钟以内视频",
+			desc: PURIFY_METHOD_HELP + "；必选，无默认值，raft 仅支持 20 分钟以内视频",
 		},
 		{ flag: "--purify-roi <x,y,w,h>", desc: "custom 模式的归一化矩形区域" },
 		PURIFY_REGION_OPTION,
@@ -810,13 +811,6 @@ const videoPurify: ToolDescriptor = {
 			throw new Error("--purify-scope 只支持 full_screen、subtitle、custom 或 region");
 		}
 		if (scope != null) payload.purify_scope = scope;
-
-		const methodRaw = ctx.opts.purifyMethod;
-		const method = methodRaw == null ? undefined : String(methodRaw);
-		if (method != null && method !== "ffmpeg" && method !== "raft") {
-			throw new Error("--purify-method 只支持 ffmpeg 或 raft");
-		}
-		if (method != null) payload.purify_func_type = method;
 
 		const roiRaw = ctx.opts.purifyRoi;
 		if (roiRaw != null) {
@@ -831,6 +825,9 @@ const videoPurify: ToolDescriptor = {
 			parseNormalizedRoi(ctx.extraParams.roi);
 		}
 		applyPurifyRegions(scope, ctx, true, payload);
+		const method = Object.prototype.hasOwnProperty.call(ctx.extraParams, "purify_func_type")
+			? ctx.extraParams.purify_func_type : ctx.opts.purifyMethod;
+		payload.purify_func_type = requirePurifyMethod(method, "--purify-method");
 		return payload;
 	},
 	mapOutputs(out, ctx) {

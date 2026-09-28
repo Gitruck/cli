@@ -197,7 +197,7 @@ export function buildHealthReport(input: {
 		findings.push({
 			code: "track_gap",
 			level: "warn",
-			message: `视觉底轨有 ${gaps.length} 处缝隙，最长 ${worst.gap}s（${worst.track} 的 ${worst.st}–${worst.ed}s）——成片里会闪黑；跑 gtrk patch seal 可补平`,
+			message: `视觉底轨有 ${gaps.length} 处缝隙，最长 ${worst.gap}s（${worst.track} 的 ${worst.st}–${worst.ed}s）——请结合其他轨与覆盖计划检查；稀疏关键镜头保留空档，仅连续覆盖且源素材足够时考虑 gtrk patch seal`,
 			detail: gaps,
 		});
 	} else if (bed.length) {

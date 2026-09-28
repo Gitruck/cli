@@ -9,6 +9,7 @@ import { uploadCached } from "./upload-cache";
 import { submitTask, cloudErrorCode } from "./cloud";
 import { downloadStream, pollToolTask } from "./tool-runner";
 import { log } from "./log";
+import { requirePurifyMethod } from "./purify-method";
 import { appendRegionSpecs, parseRoiSpec, summarizeRegions, validateDocument, validateRegions, type PurifyDocument } from "./purify-contract";
 
 const TASK = "video_purify";
@@ -26,6 +27,7 @@ interface Journal {
 	version: 1; identity: string; mode: "detect" | "apply" | "run"; base: string;
 	document: PurifyDocument; options: PurifyOpts; detect?: Phase; purify?: Phase;
 	finalDocument?: PurifyDocument; result?: PurifyResult;
+	methodSelected?: true;
 }
 export interface PurifyResult {
 	ok: true; status: "awaiting_review" | "completed" | "unchanged"; journal: string;
@@ -73,8 +75,8 @@ export async function checkPurifyProtocol(cfg: CloudConfig): Promise<void> {
 	if (!response.ok || body?.code !== 200 || (body.data?.review_protocol ?? 0) < 2) throw new Error("服务尚未支持净化确认协议 v2，已停止处理，避免保护区域或精确范围被旧服务忽略。请升级后端后重试。");
 }
 function validateOptions(mode: string, opts: PurifyOpts, doc: PurifyDocument): PurifyOpts {
-	const method = opts.purifyFuncType ?? "ffmpeg";
-	if (!["ffmpeg", "raft"].includes(method)) throw new Error("处理方式只能是 ffmpeg（模糊）或 raft（内容修复）");
+	const method = opts.purifyFuncType;
+	if (method != null) requirePurifyMethod(method);
 	if (mode !== "apply") {
 		if (!opts.detectScope || !["full_screen", "subtitle", "custom"].includes(opts.detectScope)) throw new Error("请明确 --detect-scope full_screen|subtitle|custom；全屏检测不等于所有文字都该删除");
 		if (opts.detectScope === "custom" && !opts.detectRoi) throw new Error("custom 需要 --detect-roi x,y,w,h");
@@ -83,6 +85,7 @@ function validateOptions(mode: string, opts: PurifyOpts, doc: PurifyDocument): P
 	}
 	doc.regions = validateRegions(appendRegionSpecs(doc.regions, opts.watermarkRegion ?? [], doc.video.duration), doc.video.duration);
 	doc.protect_regions = validateRegions(appendRegionSpecs(doc.protect_regions ?? [], opts.protectRegion ?? [], doc.video.duration, "protect"), doc.video.duration);
+	if (mode === "run" || (mode === "apply" && doc.regions.length)) requirePurifyMethod(method);
 	return { ...opts, purifyFuncType: method };
 }
 
@@ -129,6 +132,9 @@ async function execute(journalPath: string, state: Journal, d: PurifyDeps): Prom
 		state.result = result; await save(); return result;
 	}
 	// 在任何新上传/计费请求之前验证服务能力；已建单的恢复只轮询下载。
+	if (state.mode !== "detect" && !state.purify?.taskId) {
+		requirePurifyMethod(state.methodSelected ? state.options.purifyFuncType : undefined);
+	}
 	if (state.mode !== "detect" && !state.purify?.taskId) await d.checkProtocol(d.cfg);
 	if (!state.document.source.file_id) {
 		const uploaded = await d.upload(d.cfg, state.document.source.input_path, { force: state.options.reupload });
@@ -189,17 +195,28 @@ export async function startPurify(mode: "detect" | "apply" | "run" | "manual", i
 	return locked(dir, async () => {
 		const state: Journal = existsSync(path) ? await readJson(path) : { version: 1, identity, mode, base: d.cfg.base, document: doc, options };
 		if (state.identity !== identity) throw new Error("运行记录与请求不匹配");
+		if (state.options.purifyFuncType !== options.purifyFuncType) throw new Error("运行记录的模式已改变，请使用 resume 继续该记录，或指定新的产物目录");
+		if (options.purifyFuncType) state.methodSelected = true;
 		await writeJsonAtomic(path, state);
 		return execute(path, state, d);
 	});
 }
 
-export async function resumePurify(path: string, overrides: Partial<PurifyDeps> = {}): Promise<PurifyResult> {
+export async function resumePurify(path: string, overrides: Partial<PurifyDeps> = {}, opts: Pick<PurifyOpts, "purifyFuncType"> = {}): Promise<PurifyResult> {
 	path = resolve(path);
 	return locked(dirname(path), async () => {
 		const state = await readJson(path) as Journal;
 		if (state.version !== 1 || !["detect", "apply", "run"].includes(state.mode) || !state.identity) throw new Error("不是 purify 运行记录");
 		validateDocument(state.document);
+		if (opts.purifyFuncType != null) {
+			const method = requirePurifyMethod(opts.purifyFuncType);
+			if (state.purify && state.purify.status !== "rejected" && method !== state.options.purifyFuncType) {
+				throw new Error("已有处理任务或提交结果未知，不能通过 resume 切换模式；请先核对原任务");
+			}
+			state.options.purifyFuncType = method;
+			state.methodSelected = true;
+			await writeJsonAtomic(path, state);
+		}
 		const empty = state.mode === "apply" && !(state.finalDocument ?? state.document).regions.length;
 		const d = dependencies(empty ? { ...overrides, cfg: overrides.cfg ?? { base: state.base, apiKey: "" } } : overrides);
 		return execute(path, state, d);
