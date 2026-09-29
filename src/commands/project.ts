@@ -195,6 +195,14 @@ export function buildExportPayload(
 	out.materials = materials;
 	out.video_track = Array.isArray(out.video_track) ? out.video_track : [];
 	out.audio_track = Array.isArray(out.audio_track) ? out.audio_track : [];
+	// 客户端旧版 overlay 轨可能没有 track_size；video_project_struct 的上行契约要求每条视频轨都带尺寸。
+	// 只在缺键时从工程画布补齐，保留已有轨道尺寸与源工程对象不变。
+	const canvas = Array.isArray(out.video_size) && out.video_size.length === 2 ? out.video_size : undefined;
+	if (canvas) {
+		out.video_track = (out.video_track as Record<string, unknown>[]).map((track) =>
+			track.track_size === undefined ? { ...track, track_size: [...(canvas as [number, number])] } : track,
+		);
+	}
 
 	if (opts.draftDir) {
 		const current = out.struct_meta && typeof out.struct_meta === "object" && !Array.isArray(out.struct_meta) ? out.struct_meta : {};
