@@ -611,6 +611,9 @@ export async function runProjectExport(
 	if (droppedByContract.missingMaterialPaths.length) {
 		log.warn(`素材路径不存在（只告警、不拦结构导出）：${droppedByContract.missingMaterialPaths.join("、")}`);
 	}
+	if (wantsNle && hasBeats && noParticles) {
+		log.warn(`已跳过 ${droppedByContract.beatClips} 颗 MG 颗粒预渲；本次 NLE 导出不含这些颗粒，如需带上颗粒请去掉 --no-particles`);
+	}
 	if (particleSkipped.length) {
 		log.warn(`颗粒有 ${particleSkipped.length} 条未能预渲，结构导出继续；对应颗粒不会进入 video_track`);
 	}
