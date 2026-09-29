@@ -273,6 +273,20 @@ gtrk split <拆分稿.json> --project <目录> --md --json  # ⑤ 校验落地�
 
 > **skill 分工**：拆 beat / 选 lane / 写 handoff 是脑（`gtrk-splitter` skill）的活；投影 / 校验 / 落地 / 写时码是手（本命令）的活。skill 铁律：只引用视图存在的 utterance id、不抄原文定位、不碰时码。
 
+### 2.2 精修工程导出：`gtrk project export --project <目录>`
+
+口播起盘用 `gtrk project init`，精修收尾用 `gtrk project export`；已经在客户端铺过 B-roll、MG 或 BGM 的 `.gtrk`，直接导出 NLE 工程，**不要重跑 `oralcut`**，否则会丢掉精修并重复计费。
+
+```bash
+gtrk project export --project ./my-video --formats jianying,xml
+gtrk project export --gtrk ./my-video/gtrk/project.gtrk --formats xml --no-open
+```
+
+- 颗粒会随 NLE 工程一起导出：命令会预渲 qtrle；首次导出按分钟计费，客户端已经烤过或第二次导出命中 `.tonghe-cache/particles/` 时复用缓存。
+- 本命令有两个计费面：工程结构按次，颗粒按分钟；这和 `project init` 的 0 积分不是一回事。执行前会分别提示实时价格。
+- 只选择 `gtrk` 时会自动跳过颗粒预渲（gtrk 原生保留 `beat_track`），不要再手动加 `--no-particles`；`--no-particles` 只在明确接受 NLE 导出缺少颗粒时使用。
+- `--json` 只在 stdout 输出一行结果 JSON；产物目录恒写 `result.json`，源 `.gtrk` 只读不改。
+
 ### 2.3 视频转文字稿：`gtrk transcript <本地视频>`
 
 这一能力由独立的 `gtrk-transcript` Skill 驱动，不属于 `gtrk-tools` 单点工具族。用户说「视频转文字 / 视频转文字稿 / 提取视频文稿 / 把本地视频整理成妙记式文稿」时，直接运行：

@@ -490,6 +490,88 @@ export function visibleBeats(gtrk: {
 	return out;
 }
 
+/**
+ * 把可见 beat_track 投影成 NLE 可承接的透明 video_track。
+ *
+ * 这是 `gtrk project export` 专属的结构投影：颗粒已经由
+ * `ensureParticleQtrle()` 烤成 qtrle MOV，投影只负责登记本地 MOV 并保留
+ * beat 轨的相对层序。输入对象永不原地修改；调用方在投影后应删除
+ * `beat_track`，避免同一颗粒同时以 HTML 和视频两种形态进入提交体。
+ */
+export function projectBeatTracksToVideoTracks(
+	gtrk: Record<string, unknown>,
+	particlePaths: Record<string, string>,
+): { videoTracks: Record<string, unknown>[]; materials: Record<string, unknown>[]; dropped: { beatClips: number; failedClips: string[] } } {
+	const existingTracks = Array.isArray(gtrk.video_track) ? (gtrk.video_track as Record<string, unknown>[]) : [];
+	const existingMaterials = Array.isArray(gtrk.materials) ? (gtrk.materials as Record<string, unknown>[]) : [];
+	const maxTrack = existingTracks.reduce((max, t) => {
+		const n = Number(t.track_index);
+		return Number.isFinite(n) ? Math.max(max, n) : max;
+	}, -1);
+	const beatTracks = Array.isArray(gtrk.beat_track) ? (gtrk.beat_track as Record<string, unknown>[]) : [];
+	const videoTracks: Record<string, unknown>[] = [];
+	const materials: Record<string, unknown>[] = [];
+	const failedClips: string[] = [];
+	let dropped = 0;
+	let nextTrack = maxTrack + 1;
+	const rate = Number.isFinite(Number(gtrk.video_rate)) ? Number(gtrk.video_rate) : 30;
+
+	for (const beatTrack of beatTracks) {
+		if (beatTrack.hidden === true) continue;
+		const timeline = Array.isArray(beatTrack.track_timeline) ? (beatTrack.track_timeline as Record<string, unknown>[]) : [];
+		const clips: Record<string, unknown>[] = [];
+		for (let i = 0; i < timeline.length; i++) {
+			const source = timeline[i]!;
+			const clipId = typeof source.clip_id === "string" && source.clip_id ? source.clip_id : `beat-${nextTrack}-${i}`;
+			const path = particlePaths[clipId];
+			if (!path) {
+				dropped++;
+				failedClips.push(clipId);
+				continue;
+			}
+			const duration = Number(source.duration);
+			const trackSt = Number(source.track_st);
+			if (!(duration > 0) || !Number.isFinite(trackSt)) {
+				dropped++;
+				failedClips.push(clipId);
+				continue;
+			}
+			const materialId = `p_${clipId}`;
+			materials.push({
+				id: materialId,
+				path,
+				duration,
+				video_size: [PARTICLE_CAPTURE_SIZE.width, PARTICLE_CAPTURE_SIZE.height],
+				video_rate: rate,
+			});
+			clips.push({
+				clip_id: clipId,
+				material: materialId,
+				clip_st: 0,
+				clip_ed: duration,
+				track_st: trackSt,
+				track_ed: trackSt + duration,
+				duration,
+				...(source.clip_transform !== undefined ? { clip_transform: source.clip_transform } : {}),
+			});
+		}
+		if (clips.length) {
+			videoTracks.push({
+				track_index: nextTrack++,
+				track_size: [PARTICLE_CAPTURE_SIZE.width, PARTICLE_CAPTURE_SIZE.height],
+				muted: true,
+				track_timeline: clips,
+			});
+		}
+	}
+
+	return {
+		videoTracks,
+		materials: [...existingMaterials, ...materials],
+		dropped: { beatClips: dropped, failedClips },
+	};
+}
+
 export interface PrepareParticlesOpts {
 	/** 逃生舱：跳过颗粒预渲与颗粒叠加（overlay video_track **照叠**，那部分零计费纯本地）。 */
 	noParticles?: boolean;

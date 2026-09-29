@@ -437,6 +437,27 @@ Project entry points that start from **a voice-over** instead of a talking-head 
 
 `project init` also takes `--canvas <WxH>` (default 1080x1920), `-o/--out`, `--reupload`, `--no-open` and `--json` with the same semantics as `oralcut`; with `--json` both commands emit a single-line result JSON on stdout (human logs go to stderr).
 
+### `gtrk project export` — export a refined project
+
+Exports an already refined `.gtrk` project (after `matrix lay` / `mg` / `audio lay`) to Jianying, Premiere XML, FCPXML or OTIO without rewriting the source project. The default output directory is `export-<YYMMDD-HHMMSS>/` under the project directory.
+
+```bash
+gtrk project export --project <project-dir>
+gtrk project export --gtrk <project-file> --formats jianying,xml --out <output-dir>
+```
+
+| Option | Purpose |
+|---|---|
+| `--project <dir>` / `--gtrk <path>` | Locate the standard `gtrk/project.gtrk`, or explicitly select a project file; use one of the two |
+| `-f, --formats <list>` | `xml`, `fcpxml`, `otio`, `jianying`, `capcut`, `gtrk`; default `jianying,xml`; legacy fine-grained names are also accepted |
+| `--jianying-draft-dir <dir>` | Jianying/CapCut draft root; when omitted, use user config and standard locations |
+| `--no-particles` | Skip MG particle pre-rendering while continuing structural export; skipped particles are recorded in the result |
+| `--particle-concurrency <n>` | Particle qtrle pre-render concurrency, 1–8, default 6 |
+
+There are two billing surfaces: structural project export is billed per task, while unique particles missing from `.tonghe-cache/particles/` are billed per minute. `gtrk project init` remains zero-credit; that does not apply to `export`. Particle cache keys and the client implementation are byte-compatible, so particles rendered by the client can be reused.
+
+Before particle rendering, the command performs HTML, path and cache preflight; a preflight failure submits no cloud task. A single particle render or download failure is recorded in `result.json` while other formats continue. With `--json`, stdout contains one result JSON line and human logs go to stderr.
+
 > **`--beat-align`**: follows the climax-anchor rule in the table above; an explicit `--climax` overrides the automatic selector. The mode calls `audio_music_analyze` and incurs its listed charge.
 
 

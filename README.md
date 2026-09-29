@@ -159,6 +159,8 @@ flowchart LR
 
 粗剪阶段的三端工程，与完整包装后的导出支持范围不同；[工作流指南](docs/workflow.md)说明每种交付物在哪打开、哪些效果需要渲染。
 
+客户端精修 `.gtrk` 后，用 `gtrk project export --project <目录>` 导出剪映、Premiere XML、FCPXML 或 OTIO，保留精修时间线；不要重跑 `oralcut`，否则会重新生成粗剪。导出会把 MG 颗粒预渲进 NLE 工程，结构导出按次计费，未命中共享缓存的颗粒按分钟计费；`project init` 仍是 0 积分。只选 `gtrk` 时会保留原生 `beat_track` 并自动跳过颗粒预渲。
+
 ## gtrk + AI Drama Desk：从分镜到可回轨片段
 
 如果你的素材不是实拍，而是希望把一份分镜稿变成 AI 情景片段，可以把 [Gitruck AI Drama Desk](https://github.com/Gitruck/ai-drama-desk) 接到同一条工程链里。两者分工很清楚：

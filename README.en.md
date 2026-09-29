@@ -159,6 +159,8 @@ flowchart LR
 
 The three-format rough-cut output and the export of a fully packaged project have different support boundaries. The [workflow guide](docs/workflow.en.md) explains where each deliverable opens and which effects need rendering.
 
+After refining a `.gtrk` project in the client, use `gtrk project export --project <dir>` to produce Jianying, Premiere XML, FCPXML or OTIO while preserving the refined timeline; do not rerun `oralcut`, which rebuilds the rough cut. Export renders MG particles into the NLE package: structural export is billed per task, and particles missing from the shared cache are billed by the minute. `project init` remains zero-credit. When only `gtrk` is requested, the native `beat_track` is kept and particle rendering is skipped.
+
 ## gtrk + AI Drama Desk: from storyboard to editable clips
 
 For AI-generated story scenes, connect [Gitruck AI Drama Desk](https://github.com/Gitruck/ai-drama-desk) to the same project workflow. The responsibilities stay separate:

@@ -8,7 +8,9 @@
  *
  * 非 B-roll 素材不设防（口播主轨 material 的 path 本就是原片本地绝对路径，属既有契约形态）。
  * 挂载点：uploadAndSubmitTask（云端任务提交唯一漏斗）对 .gtrk 工程文件生效；
- * 未来新增云渲类命令 SHALL 复用 assertCloudSubmittableGtrk。
+ * 「云渲类」仅指云端要读取素材本体的任务；纯结构转换（`video_project_struct`）与颗粒层渲染
+ * （`html_render_simple`，只上行 HTML 文本）不属此列。未来新增云渲类命令 SHALL 复用
+ * assertCloudSubmittableGtrk。
  */
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { BROLL_LOCAL_MATERIAL_PREFIX, BROLL_MATERIAL_PREFIX } from "./matrix-lay";

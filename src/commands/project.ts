@@ -23,18 +23,42 @@
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
-import { CloudError, cloudErrorCode, download as realDownload, getTaskResult, parseJson } from "../lib/cloud";
+import {
+	CloudError,
+	cloudErrorCode,
+	download as realDownload,
+	getTaskResult,
+	parseJson,
+	pollTask as realPollTask,
+	submitTask as realSubmitTask,
+} from "../lib/cloud";
 import { invalidateUpload, uploadCached } from "../lib/upload-cache";
 import { readJson } from "../lib/read-json";
 import { DEFAULT_VISIBILITY_BACKOFF_MS } from "../lib/upload-submit";
 import { defaultExtsFor, extFromUrl, pickUrl } from "../lib/tool-descriptors";
-import { FORMAT_META } from "../lib/materialize";
+import { FORMAT_META, materializeResult as realMaterializeResult, type MaterializeResult } from "../lib/materialize";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
 import { r3 } from "../lib/frame-domain";
+import { assertGtrkV1, readGtrk as realReadGtrk } from "../lib/gtrk-writeback";
+import {
+	buildParticlePlan,
+	ensureParticleQtrle,
+	PARTICLE_TASK_TYPE,
+	projectBeatTracksToVideoTracks,
+	QTRLE_DELIVERY_RECIPE,
+	PARTICLE_RENDER_ABI,
+	type ParticleDeps,
+	type ParticlePlan,
+	visibleBeats,
+} from "../lib/particle-qtrle";
+import { resolveToolPricing, type PriceResolver } from "../lib/tool-pricing";
+import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
+import { resolveJianyingDraftDir } from "../lib/jianying";
+import { createOutDir, timestamp as toolTimestamp } from "../lib/tool-runner";
 
 // cli 域同步轻接口（SYNC_INLINE 家族）：cloud.ts 的 /task/${taskType} 模板天然拼出该路径
 const TASK_TYPE = "cli/audio_project_struct";
@@ -44,21 +68,148 @@ const TTS_TASK_TYPE = "audio_tts_clone";
 export const DEFAULT_CANVAS: [number, number] = [1080, 1920];
 
 /** 本地时间戳 YYMMDD-HHMMSS（与 oralcut 同式），产物目录命名用。 */
-function timestamp(): string {
-	const d = new Date();
-	const p = (n: number) => String(n).padStart(2, "0");
-	return `${p(d.getFullYear() % 100)}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+/** positional 解析：project 族当前支持 init / export。 */
+export function parseProjectPositional(words: string[] | undefined): "init" | "export" {
+	if (!words || words.length === 0) {
+		throw new Error(
+			"缺少子命令——用法：gtrk project init --tts-task <task_id> | --audio <配音> --transcript <json>；或 gtrk project export --project <目录>",
+		);
+	}
+	if (words.length > 1 || (words[0] !== "init" && words[0] !== "export")) {
+		throw new Error(`未知子命令「${words.join(" ")}」——当前支持：gtrk project init、gtrk project export`);
+	}
+	return words[0] as "init" | "export";
 }
 
-/** positional 解析：仅支持 `init`（后续族命令在此扩展）。 */
-export function parseProjectPositional(words: string[] | undefined): "init" {
-	if (!words || words.length === 0) {
-		throw new Error("缺少子命令——用法：gtrk project init --tts-task <task_id> | --audio <配音> --transcript <json>");
+/** 服务端公开工程格式；顺序也是默认提示与提交体的稳定顺序。 */
+export const PUBLIC_PROJECT_FORMATS = ["xml", "fcpxml", "otio", "jianying", "capcut", "gtrk"] as const;
+/** 服务端兼容的旧细粒度格式。它们允许输入，但不在 --help 的首选示例中宣传。 */
+export const PROJECT_FORMAT_ALIASES = ["jianying_draft", "jianying_meta", "capcut_draft", "capcut_meta"] as const;
+export const DEFAULT_PROJECT_EXPORT_FORMATS = ["jianying", "xml"] as const;
+
+/** `--formats` 纯本地解析：trim、去空、去重保序、公开值 + 兼容别名白名单。 */
+export function parseExportFormats(raw?: string): string[] {
+	if (raw === undefined) return [...DEFAULT_PROJECT_EXPORT_FORMATS];
+	const values = raw.split(",").map((v) => v.trim());
+	if (values.length === 0 || values.some((v) => !v)) {
+		throw new Error(
+			`--formats 不能为空；合法值：${PUBLIC_PROJECT_FORMATS.join(", ")}（兼容别名：${PROJECT_FORMAT_ALIASES.join(", ")}）`,
+		);
 	}
-	if (words[0] !== "init" || words.length > 1) {
-		throw new Error(`未知子命令「${words.join(" ")}」——当前仅支持：gtrk project init`);
+	const allowed = new Set<string>([...PUBLIC_PROJECT_FORMATS, ...PROJECT_FORMAT_ALIASES]);
+	const illegal = values.filter((v) => !allowed.has(v));
+	if (illegal.length) {
+		throw new Error(
+			`--formats 含非法值 ${illegal.join(", ")}；合法值：${PUBLIC_PROJECT_FORMATS.join(", ")}（兼容别名：${PROJECT_FORMAT_ALIASES.join(", ")}）`,
+		);
 	}
-	return "init";
+	return [...new Set(values)];
+}
+
+function cloneJson<T>(value: T): T {
+	return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function exportUsesNle(formats: readonly string[]): boolean {
+	return formats.some((f) => f !== "gtrk");
+}
+
+/** 工程文件可能从 Windows 客户端带来；即使 CLI 在 Linux 上跑，也要认出盘符/UNC 绝对路径。 */
+function isPortableAbsolutePath(value: string): boolean {
+	return isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+export interface ExportContractDrops {
+	clientVisualElements: boolean;
+	clientVisualElementCount: number;
+	noPathMaterialIds: string[];
+	missingMaterialPaths: string[];
+	beatClips: number;
+	failedParticleClips: string[];
+}
+
+/** 只读盘面契约诊断；不改变提交体，也不把合法云端引用误报成悬空本地素材。 */
+export function inspectContractDrops(
+	gtrk: Record<string, unknown>,
+	gtrkDir: string,
+	failedParticleClips: string[] = [],
+): ExportContractDrops {
+	const materials = Array.isArray(gtrk.materials) ? (gtrk.materials as Record<string, unknown>[]) : [];
+	const noPathMaterialIds = materials
+		.filter((m) => typeof m.path !== "string" || !m.path)
+		.map((m) => (typeof m.id === "string" ? m.id : "<无 id>"));
+	const missingMaterialPaths = materials
+		.filter((m) => {
+			if (typeof m.path !== "string" || !m.path || /^[a-z][a-z\d+.-]*:\/\//i.test(m.path)) return false;
+			const path = isPortableAbsolutePath(m.path) ? m.path : resolve(gtrkDir, m.path);
+			return !existsSync(path);
+		})
+		.map((m) => {
+			const path = String(m.path);
+			return isPortableAbsolutePath(path) ? path : resolve(gtrkDir, path);
+		});
+	const lanes = (gtrk.struct_meta as Record<string, unknown> | undefined)?.client_visual_elements;
+	const clientVisualElementCount = Array.isArray(lanes)
+		? lanes.length
+		: lanes && typeof lanes === "object" && Array.isArray((lanes as Record<string, unknown>).lanes)
+			? ((lanes as Record<string, unknown>).lanes as unknown[]).length
+			: lanes && typeof lanes === "object"
+				? Object.keys(lanes).length
+			: 0;
+	const beatClips = Array.isArray(gtrk.beat_track)
+		? (gtrk.beat_track as Record<string, unknown>[]).reduce(
+				(total, t) => (t.hidden === true ? total : total + (Array.isArray(t.track_timeline) ? t.track_timeline.length : 0)),
+				0,
+			)
+		: 0;
+	return {
+		clientVisualElements: clientVisualElementCount > 0,
+		clientVisualElementCount,
+		noPathMaterialIds,
+		missingMaterialPaths,
+		beatClips,
+		failedParticleClips: [...failedParticleClips],
+	};
+}
+
+export interface BuildExportPayloadOptions {
+	gtrkPath: string;
+	formats: string[];
+	particlePaths?: Record<string, string>;
+	draftDir?: string;
+}
+
+/** 构造 video_project_struct 提交体；源 gtrk 只读，返回全新对象。 */
+export function buildExportPayload(
+	gtrk: Record<string, unknown>,
+	opts: BuildExportPayloadOptions,
+): Record<string, unknown> {
+	const out = cloneJson(gtrk);
+	const gtrkDir = dirname(resolve(opts.gtrkPath));
+	const materials = Array.isArray(out.materials) ? (out.materials as Record<string, unknown>[]) : [];
+	for (const material of materials) {
+		if (typeof material.path === "string" && material.path && !isPortableAbsolutePath(material.path)) {
+			material.path = resolve(gtrkDir, material.path);
+		}
+	}
+	out.materials = materials;
+	out.video_track = Array.isArray(out.video_track) ? out.video_track : [];
+	out.audio_track = Array.isArray(out.audio_track) ? out.audio_track : [];
+
+	if (opts.draftDir) {
+		const current = out.struct_meta && typeof out.struct_meta === "object" && !Array.isArray(out.struct_meta) ? out.struct_meta : {};
+		out.struct_meta = { ...(current as Record<string, unknown>), nle_draft_dir: resolve(opts.draftDir) };
+	}
+
+	if (exportUsesNle(opts.formats)) {
+		const projection = projectBeatTracksToVideoTracks(out, opts.particlePaths ?? {});
+		out.materials = projection.materials;
+		out.video_track = [...(out.video_track as Record<string, unknown>[]), ...projection.videoTracks];
+		// beat_track 是 HTML 形态，NLE 侧已投影成 qtrle，不得让服务端再透传一份。
+		delete out.beat_track;
+	}
+	out.project_formats = [...opts.formats];
+	return out;
 }
 
 /** `--canvas WxH` 解析：缺省 1080x1920；非法即参数错误（不做静默忽略）。 */
@@ -216,6 +367,13 @@ export interface ProjectInitOpts {
 	keepPunctuation?: boolean;
 	open?: boolean;
 	json?: boolean;
+	// project 族共享 commander 选项；init 模式收到这些值时由命令层硬拒。
+	project?: string;
+	gtrk?: string;
+	formats?: string;
+	jianyingDraftDir?: string;
+	particles?: boolean;
+	particleConcurrency?: string | number;
 }
 
 /** 测试注入面（MUST NOT 真调云端）；缺省 = 真实现。 */
@@ -247,6 +405,251 @@ export interface ProjectInitResult {
 	/** materials[].path 改写条数。 */
 	rewritten: number;
 	errors: Record<string, string>;
+}
+
+export interface ProjectExportOpts {
+	project?: string;
+	gtrk?: string;
+	formats?: string;
+	out?: string;
+	open?: boolean;
+	json?: boolean;
+	jianyingDraftDir?: string;
+	/** commander 对 `--no-particles` 的反向值；false 表示跳过预渲。 */
+	particles?: boolean;
+	particleConcurrency?: string | number;
+}
+
+export interface ProjectExportDeps {
+	cfg?: CloudConfig;
+	loadCfg?: () => CloudConfig;
+	readGtrk?: typeof realReadGtrk;
+	assertV1?: typeof assertGtrkV1;
+	submitTask?: typeof realSubmitTask;
+	pollTask?: typeof realPollTask;
+	materialize?: typeof realMaterializeResult;
+	resolvePricing?: PriceResolver;
+	particle?: ParticleDeps;
+	download?: typeof realDownload;
+	landingWait?: Partial<LandingWaitDeps>;
+	openFolder?: (dir: string) => void;
+}
+
+export interface ProjectExportResult extends MaterializeResult {
+	mode: "export";
+	gtrkPath: string;
+	formats: string[];
+	particles: {
+		total: number;
+		unique: number;
+		cacheHit: number;
+		rendered: number;
+		failed: number;
+	};
+	droppedByContract: ExportContractDrops;
+}
+
+function hasExportOnlyOptions(opts: ProjectInitOpts): string | undefined {
+	if (opts.project !== undefined) return "--project";
+	if (opts.gtrk !== undefined) return "--gtrk";
+	if (opts.formats !== undefined) return "--formats";
+	if (opts.jianyingDraftDir !== undefined) return "--jianying-draft-dir";
+	if (opts.particles === false) return "--no-particles";
+	if (opts.particleConcurrency !== undefined) return "--particle-concurrency";
+	return undefined;
+}
+
+function hasInitOnlyOptions(opts: ProjectExportOpts & ProjectInitOpts): string | undefined {
+	if (opts.ttsTask !== undefined) return "--tts-task";
+	if (opts.audio !== undefined) return "--audio";
+	if (opts.transcript !== undefined) return "--transcript";
+	if (opts.canvas !== undefined) return "--canvas";
+	if (opts.reupload) return "--reupload";
+	if (opts.keepPunctuation) return "--keep-punctuation";
+	return undefined;
+}
+
+function resolveProjectGtrkPath(opts: ProjectExportOpts): string {
+	if (opts.gtrk) {
+		const p = resolve(opts.gtrk);
+		if (!existsSync(p)) throw new Error(`找不到 --gtrk 指定的工程文件：${p}`);
+		return p;
+	}
+	if (!opts.project) throw new Error("project export 需要 --project <工程目录> 或 --gtrk <工程文件>");
+	const dir = resolve(opts.project);
+	const candidates = [join(dir, "gtrk", "project.gtrk"), join(dir, "project.gtrk")];
+	const hit = candidates.find((p) => existsSync(p));
+	if (!hit) throw new Error(`工程目录里找不到 .gtrk：已探查 ${candidates.join("、")}；可用 --gtrk <路径> 显式指定`);
+	return hit;
+}
+
+function exportBaseDir(gtrkPath: string): string {
+	const dir = dirname(resolve(gtrkPath));
+	return basename(dir).toLowerCase() === "gtrk" ? dirname(dir) : dir;
+}
+
+function parseParticleConcurrency(raw: string | number | undefined): number {
+	if (raw === undefined) return 6;
+	const n = Number(raw);
+	if (!Number.isInteger(n) || n < 1 || n > 8) throw new Error(`--particle-concurrency 必须是 1–8 的整数（收到 ${String(raw)}）`);
+	return n;
+}
+
+function formatParticleSummary(plan: ParticlePlan | undefined, rendered: number, skipped: { clipId: string; reason: string }[]) {
+	if (!plan) return { total: 0, unique: 0, cacheHit: 0, rendered: 0, failed: 0 };
+	return {
+		total: plan.total,
+		unique: plan.unique,
+		cacheHit: plan.cached,
+		rendered,
+		failed: skipped.length,
+	};
+}
+
+/**
+ * 精修态 `.gtrk` → video_project_struct 工程导出。
+ * 这条链只读源工程；所有路径绝对化、颗粒投影与结果落盘都发生在提交体/新产物目录。
+ */
+export async function runProjectExport(
+	opts: ProjectExportOpts,
+	depsOverride: ProjectExportDeps = {},
+): Promise<ProjectExportResult> {
+	if (opts.json) routeLogsToStderr();
+	const formats = parseExportFormats(opts.formats);
+	const gtrkPath = resolveProjectGtrkPath(opts);
+	const reader = depsOverride.readGtrk ?? realReadGtrk;
+	const read = reader(gtrkPath);
+	const gtrk = read.gtrk;
+	(depsOverride.assertV1 ?? assertGtrkV1)(gtrk);
+	const gtrkDir = dirname(resolve(gtrkPath));
+	const noParticles = opts.particles === false;
+	const wantsNle = exportUsesNle(formats);
+	const hasBeats = visibleBeats(gtrk as { beat_track?: { track_index?: number; track_timeline?: any[]; hidden?: unknown }[] }).length > 0;
+
+	let draftDir: string | undefined;
+	if (formats.some((f) => f === "jianying" || f === "capcut" || f === "jianying_draft" || f === "capcut_draft")) {
+		draftDir = resolveJianyingDraftDir(opts.jianyingDraftDir);
+		if (draftDir) log.info(`剪映/CapCut 草稿根：${draftDir}`);
+		else log.warn("未探测到剪映/CapCut 草稿根；结构导出继续，草稿不会自动拷入客户端目录（可用 --jianying-draft-dir 指定）");
+	}
+
+	const outCandidate = resolve(opts.out ?? join(exportBaseDir(gtrkPath), `export-${toolTimestamp()}`));
+	const outDir = await createOutDir(outCandidate, opts.out === undefined);
+	// Gate A：先探两个落点，再做任何云端任务。
+	await ensureLandingWritable(outDir, "产物目录", { json: opts.json, deps: depsOverride.landingWait });
+	if (draftDir && formats.some((f) => f === "jianying" || f === "capcut" || f === "jianying_draft" || f === "capcut_draft")) {
+		await ensureLandingWritable(draftDir, "剪映草稿根", { json: opts.json, deps: depsOverride.landingWait });
+	}
+
+	let plan: ParticlePlan | undefined;
+	let particlePaths: Record<string, string> = {};
+	let particleRendered = 0;
+	let particleSkipped: { clipId: string; reason: string }[] = [];
+	if (wantsNle && hasBeats && !noParticles) {
+		const fps = Math.round(Number.isFinite(Number(gtrk.video_rate)) ? Number(gtrk.video_rate) : 30);
+		plan = await buildParticlePlan(
+			visibleBeats(gtrk as { beat_track?: { track_index?: number; track_timeline?: any[]; hidden?: unknown }[] }),
+			(Array.isArray(gtrk.materials) ? gtrk.materials : []) as { id?: unknown; path?: unknown }[],
+			gtrkDir,
+			fps,
+			depsOverride.particle,
+		);
+		// preflight 失败必须发生在首个 submit 前，避免前半批已计费后才发现坏路径。
+		if (plan.skipped.length) {
+			const detail = plan.skipped.map((s) => `${s.clipId}：${s.reason}`).join("；");
+			throw new Error(`颗粒预检失败，尚未提交任何云任务：${detail}`);
+		}
+	}
+
+	const pricing = depsOverride.resolvePricing ?? resolveToolPricing;
+	const structPrice = await pricing("video_project_struct", "精修工程结构导出");
+	log.warn(`计费提示（按次）：${structPrice.billingHint}`);
+	if (plan) {
+		const particlePrice = await pricing(PARTICLE_TASK_TYPE, "MG 颗粒预渲（按分钟）");
+		log.warn(`计费提示（按分钟）：${particlePrice.billingHint}`);
+		log.warn(
+			`颗粒 ${plan.total} 颗 / 唯一 ${plan.unique} 颗 / 命中缓存 ${plan.cached} 颗 / 将提交 ${plan.miss} 个颗粒任务（缓存 ABI ${PARTICLE_RENDER_ABI}，qtrle 配方 ${QTRLE_DELIVERY_RECIPE}）`,
+		);
+	}
+
+	if (plan) {
+		const cfg = depsOverride.cfg ?? (depsOverride.loadCfg ?? loadConfig)();
+		const particleDeps: ParticleDeps = {
+			...(depsOverride.particle ?? {}),
+			submitTask: depsOverride.particle?.submitTask ?? depsOverride.submitTask,
+			pollTask: depsOverride.particle?.pollTask ?? depsOverride.pollTask,
+			download: depsOverride.particle?.download ?? depsOverride.download,
+		};
+		const rendered = await ensureParticleQtrle(
+			plan,
+			cfg,
+			{ concurrency: parseParticleConcurrency(opts.particleConcurrency), onTick: (done, total, id) => log.tick(`颗粒 ${done}/${total}（${id}）`) },
+			particleDeps,
+		);
+		particlePaths = rendered.paths;
+		particleRendered = rendered.rendered;
+		particleSkipped = rendered.failed;
+		log.tickEnd();
+	}
+
+	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, draftDir });
+	const droppedByContract = inspectContractDrops(gtrk, gtrkDir, particleSkipped.map((s) => s.clipId));
+	if (droppedByContract.clientVisualElements) {
+		log.warn(`契约告警：client_visual_elements 在导出链中不承接（${droppedByContract.clientVisualElementCount} 个顶层条目）`);
+	}
+	if (droppedByContract.noPathMaterialIds.length) {
+		log.warn(`契约告警：${droppedByContract.noPathMaterialIds.length} 条素材没有本机 path，将交服务端校验：${droppedByContract.noPathMaterialIds.join(", ")}`);
+	}
+	if (droppedByContract.missingMaterialPaths.length) {
+		log.warn(`素材路径不存在（只告警、不拦结构导出）：${droppedByContract.missingMaterialPaths.join("、")}`);
+	}
+	if (particleSkipped.length) {
+		log.warn(`颗粒有 ${particleSkipped.length} 条未能预渲，结构导出继续；对应颗粒不会进入 video_track`);
+	}
+
+	const cfg = depsOverride.cfg ?? (depsOverride.loadCfg ?? loadConfig)();
+	const submit = depsOverride.submitTask ?? realSubmitTask;
+	const poll = depsOverride.pollTask ?? realPollTask;
+	log.step(`▶ 精修工程导出：${basename(gtrkPath)} → ${formats.join("/")}`);
+	const taskId = await submit(cfg, "video_project_struct", payload);
+	const output = await poll(cfg, "video_project_struct", taskId);
+	const materialize = depsOverride.materialize ?? realMaterializeResult;
+	const landed = await materialize({
+		outDir,
+		output,
+		taskId,
+		draftDir,
+		render: false,
+		json: false,
+		quiet: true,
+		open: false,
+		landingWait: depsOverride.landingWait,
+	});
+
+	await mkdir(outDir, { recursive: true });
+	const result: ProjectExportResult = {
+		...landed,
+		mode: "export",
+		gtrkPath,
+		formats,
+		particles: formatParticleSummary(plan, particleRendered, particleSkipped),
+		droppedByContract,
+	};
+	await writeFile(join(outDir, "result.json"), JSON.stringify(result, null, 2));
+	if (opts.open !== false) {
+		(depsOverride.openFolder ?? openFolder)(outDir);
+		log.info("已打开导出产物目录");
+	}
+	if (!opts.json) {
+		log.ok(`精修工程导出完成：${outDir}`);
+		for (const [fmt, paths] of Object.entries(landed.files)) {
+			if (paths[0]) log.info(`${FORMAT_META[fmt]?.label ?? fmt}：${paths[0]}`);
+		}
+		log.info(`结果清单：${join(outDir, "result.json")}`);
+	} else {
+		console.log(JSON.stringify(result));
+	}
+	return result;
 }
 
 /** 兜底路：上传音频 + 调同步口（6004 共享恢复口径对齐 uploadAndSubmitTask：缓存失效重传一次、新 ID 短退避）。 */
@@ -285,6 +688,8 @@ async function uploadAndCall(
 /** 命令主逻辑（导出供测试）。 */
 export async function runProjectInit(opts: ProjectInitOpts, depsOverride: ProjectInitDeps = {}): Promise<ProjectInitResult> {
 	if (opts.json) routeLogsToStderr();
+	const misplaced = hasExportOnlyOptions(opts);
+	if (misplaced) throw new Error(`${misplaced} 只属于 gtrk project export；init 不接受该选项`);
 
 	// ── 入路互斥校验（参数错误明示，不做静默忽略；先纯本地校验再触配置/网络）──
 	const hasTts = !!opts.ttsTask?.trim();
@@ -336,7 +741,7 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 	// 产物目录：兜底路与音频同目录、主路落当前目录（oralcut 惯例 <名>-video-project-<时间戳>）
 	const projName = hasTts ? `tts-${opts.ttsTask!.trim()}` : basename(audioAbs!, extname(audioAbs!));
 	const baseDir = hasTts ? process.cwd() : dirname(audioAbs!);
-	const outDir = resolve(opts.out ?? join(baseDir, `${projName}-video-project-${timestamp()}`));
+	const outDir = resolve(opts.out ?? join(baseDir, `${projName}-video-project-${toolTimestamp()}`));
 
 	log.step(`▶ 音频驱动工程起盘：${hasTts ? `TTS 任务 ${opts.ttsTask}` : basename(audioAbs!)}（画布 ${canvas[0]}x${canvas[1]}）`);
 	log.info("工程 JSON 由服务端 producer 同步口生成（emit 链单一权威源）；本接口 0 积分不计费。");
@@ -441,7 +846,7 @@ export function registerProject(program: Command): void {
 	program
 		.command("project [words...]")
 		.description(
-			"音频驱动工程族：gtrk project init 从配音起盘建 .gtrk 工程（主路 --tts-task 引用 TTS 任务；兜底 --audio+--transcript 自备配音）",
+			"音频驱动工程族：project init 从配音起盘；project export 把精修 .gtrk 导出为剪映/XML/FCXML/OTIO 等工程",
 		)
 		.option("--tts-task <task_id>", "主路：引用已完成的 audio_tts_clone 任务（服务端取产物音频+句级 segments，零 ASR）")
 		.option("--audio <file>", "兜底路：自备配音音频（与 --transcript 成对使用；CLI 先上传归一）")
@@ -450,10 +855,22 @@ export function registerProject(program: Command): void {
 		.option("-o, --out <dir>", "产物目录（缺省 = <基目录>/<名>-video-project-<YYMMDD-HHMMSS>）")
 		.option("--reupload", "兜底路：强制重新上传配音音频，忽略本地上传缓存")
 		.option("--keep-punctuation", "transcript 文稿保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
+		.option("--project <dir>", "export：工程目录（自动定位 gtrk/project.gtrk 或 project.gtrk）")
+		.option("--gtrk <path>", "export：显式指定 .gtrk 工程文件")
+		.option("-f, --formats <list>", "export：逗号分隔格式（默认 jianying,xml；支持 xml/fcpxml/otio/jianying/capcut/gtrk）")
+		.option("--jianying-draft-dir <dir>", "export：剪映/CapCut 草稿根目录；可用 auto 自动探测")
+		.option("--no-particles", "export：跳过 MG 颗粒预渲，零颗粒任务")
+		.option("--particle-concurrency <n>", "export：颗粒预渲并发数（1–8，默认 6）")
 		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: ProjectInitOpts) => {
-			parseProjectPositional(words);
-			await runProjectInit(opts);
+			const mode = parseProjectPositional(words);
+			if (mode === "init") {
+				await runProjectInit(opts);
+				return;
+			}
+			const misplaced = hasInitOnlyOptions(opts);
+			if (misplaced) throw new Error(`${misplaced} 只属于 gtrk project init；export 不接受该选项`);
+			await runProjectExport(opts);
 		});
 }

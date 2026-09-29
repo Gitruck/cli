@@ -460,6 +460,27 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 
 `project init` 另有 `--canvas <WxH>`（默认 1080x1920）、`-o/--out`、`--reupload`、`--no-open`、`--json`，语义与 `oralcut` 一致；两命令 `--json` 恒出单行结果 JSON（人读日志走 stderr）。
 
+### `gtrk project export` — 精修工程导出
+
+把已经经过 `matrix lay` / `mg` / `audio lay` 精修的 `.gtrk` 只读导出为剪映、Premiere XML、FCPXML 或 OTIO。源工程不会被改写；缺省产物目录为工程目录下的 `export-<YYMMDD-HHMMSS>/`。
+
+```bash
+gtrk project export --project <工程目录>
+gtrk project export --gtrk <工程文件> --formats jianying,xml --out <产物目录>
+```
+
+| 参数 | 作用 |
+|---|---|
+| `--project <dir>` / `--gtrk <path>` | 自动定位标准布局的 `gtrk/project.gtrk`，或显式指定工程文件，二选一 |
+| `-f, --formats <list>` | `xml`、`fcpxml`、`otio`、`jianying`、`capcut`、`gtrk`；缺省 `jianying,xml`，也兼容旧细粒度格式名 |
+| `--jianying-draft-dir <dir>` | 剪映/CapCut 草稿根；省略时按用户配置与标准位置探测 |
+| `--no-particles` | 不预渲 MG 颗粒；结构导出仍继续，结果会记录被跳过的颗粒 |
+| `--particle-concurrency <n>` | 颗粒 qtrle 预渲并发数，1–8，默认 6 |
+
+本命令有两个计费面：工程结构导出按次计费；未命中本地 `.tonghe-cache/particles/` 的唯一颗粒按分钟计费。`gtrk project init` 仍是 0 积分，不能把这个结论套到 `export`。颗粒缓存键与客户端逐字节同构，客户端烤过的颗粒可直接复用。
+
+颗粒预渲前会先完成 HTML、路径和缓存预检；预检失败不会提交任何云任务。单颗粒渲染或下载失败会记录在 `result.json`，其余格式继续导出。`--json` 输出单行结果 JSON，人读日志走 stderr。
+
 > **`--beat-align`**：按表格中的高潮点锚定规则工作；显式 `--climax` 会覆盖自动判据。该模式会调用 `audio_music_analyze` 并产生相应计费。
 
 
