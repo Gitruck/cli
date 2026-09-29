@@ -12,3 +12,5 @@
 | 契约 | 版本 | 适用 handoff | 文档 |
 |---|---|---|---|
 | gsap-emit（HTML 动画颗粒逐帧 seek 合规） | v1 | MG（去品牌化前 RRV_MG，消费方查表前归一） | [gsap-emit-v1.md](gsap-emit-v1.md) |
+
+维护者证据附录：[`gsap-emit-v1-evidence.md`](gsap-emit-v1-evidence.md)。该文件不属于 agent 执行时的必读契约。

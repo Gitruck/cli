@@ -119,10 +119,10 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 ## 调用纪律（每次都照做）
 
 > **产物落点纪律（MUST · 全文见随包 `AGENT.md` 同名一节）**：
+> 交付物 MUST NOT 先写 agent 自有目录再拷进工程；中转本身即违规，体积不是豁免理由。
 > 一切产物只落 `outDir`（缺省 = 输入同目录）或**用户显式指定的 `--out`**；
 > **MUST NOT** 把成片、预览或任何大媒体文件复制到 agent 自有工作目录（如用户文档目录下 agent 产品自建的目录、agent 家目录缓存、会话工作区）——需要引用媒体时**用原路径引用**，不做副本；
-> 临时文件一律放系统 temp 且**用完即删**（含中断 / 失败路径）。违者后果 = 用户系统盘被静默吃满（真机事故，非假设）。
-> 交付物（颗粒 HTML / 工程文件 / 派单稿 / 文稿等）SHALL **直接以工程目录内的最终路径为写入路径**，MUST NOT 先写 agent 自有工作目录再拷进工程——**中转本身即违规**，不以「最后拷进去了」免责，**体积不是豁免理由**（2026-09-07 事故里漂掉的是 2.7–6.2 KB 的 HTML）。与上一条的分界：抽帧图这类**不交付**的中间物走系统 temp；**要交付的东西没有暂存态**。
+> 临时文件一律放系统 temp 且**用完即删**。交付物直接写入工程目录或用户显式指定的路径；引用媒体用原路径。
 
 1. **先看清单、再对号**：用户的意图对到某个工具名（拿不准就 `gtrk tool list --json` 核对触发语与输入要求）。
 2. **执行前转述实时计费提示**：先读本次 `gtrk tool list --json` 的 `billingHint`/`pricing`，再把实时结果如实告诉用户；不得引用本文件或记忆中的旧价格。若显示价格暂不可用，就说明最终以服务端结算为准。
@@ -133,7 +133,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 7. **透传高级参数**：命令没为某个云端参数开 flag 时，用 `--param k=v`（可重复）或 `--params-json '<对象>'` 直接透传（如 `image_move` 想指定输出几何 `--param width=1080 --param height=1920`）。
 8. **单发单收、批量靠循环**：一次一份输入；用户要批处理就你逐个循环调。例外是多文件图片工具（`image_classic_template` / `image_vertical_stitch`）——它们的一份输入天然是一组图片（一次任务一次计费），传参顺序即拼装顺序，别把它当批处理。
 
-图片比例转换常用形态：`gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --json`。`--canvas-type` 只接受实际运行时契约 `normal`、`rectangle`、`square`；不要传旧文档中的 `fit`。省略画布参数时不替服务端写死默认值。
+图片比例转换常用形态：`gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --json`。`--canvas-type` 只接受 `normal`、`rectangle`、`square`；省略画布参数时不替服务端写死默认值。
 
 图转运镜可指定运镜方式：`gtrk tool image_move ./photo.jpg --motion zoom_in_center --json`。`--motion` 未传时云端自动选择（构图 + 主体识别 + 随机，同图重跑结果会变）；显式指定后同图同参重跑结果一致。合法值 26 个、分三组，用户说「往右推 / 拉远 / 从左往右扫」这类自然语言时按语义对号入座，对不上就问清，别瞎猜：
 

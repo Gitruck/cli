@@ -234,7 +234,7 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 
 | 参数 | 作用 | 缺省 |
 |---|---|---|
-| `-o, --out <dir>` | 产物目录 | **必填**（2026-09-08 起无缺省；`--out .` = 当前目录本身） |
+| `-o, --out <dir>` | 产物目录 | **必填**（`--out .` = 当前目录本身） |
 | `--render` | 额外本地渲染成片（需原毛片仍在 gtrk 内嵌路径 + ffmpeg） | 关 |
 | `--jianying-draft-dir <dir>` | 剪映草稿根目录（或 `auto`） | 读 init 配置 / 自动探测 |
 | `--no-open` / `--json` | 同 `oralcut` | — |
@@ -318,7 +318,7 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 | `--highlight-weight <w>` | 仅 `matrix lay`：把「有没有看点」（信息量 / 戏剧性 / 情绪强度 / 稀缺性）融进候选排序，0..1。与 `--mark-weight`（画面好不好看）**正交**，两权之和钳到 1。⚠️ 看点分取 `describe` 的理解缓存，**没跑过 `describe` 就等于没开**——无缓存候选按中性处理，权重回吐给相似度 | `0`（关闭、零回归） |
 | `--decode-path <mode>` | 仅 `matrix index`：场景检测的解码路 `auto` \| `gpu` \| `cpu` \| `full`。`auto` 自动探测硬解并**逐素材降级**（推荐）；`gpu`/`cpu`/`full` 钉死某档且**失败不降级**（对照与排障用）。⚠️ 缺省仍是 `full`（旧行为），要提速得自己传 `auto` | `full` |
 | `--proxy-width <n>` | 仅 `matrix index`：代理解码宽度。⚠️ 再往下保真度明显劣化，**勿随手调小** | `384` |
-| `--proxy-scaler <name>` | 仅 `matrix index`：代理缩放算法。缺省 `neighbor`（点采样不滤波，实测比 `bicubic` 又快又准）。⚠️ 改它基本只有做对照实验才需要 | `neighbor` |
+| `--proxy-scaler <name>` | 仅 `matrix index`：代理缩放算法。缺省 `neighbor`（点采样不滤波）；需要其它算法时显式传入 | `neighbor` |
 | `--exclude-recent <n>` | 仅 `matrix material --scope audio`：选曲避让最近 n 首用过的 BGM。历史由 `audio lay` 落轨**自动记账**，不用自己维护 | `12` |
 | `--no-exclude-recent` | 关掉上一条的选曲避让，允许复用近期曲目 | 关（缺省避让） |
 | `--out <file>` | ad-hoc 模式结果落文件；`matrix fetch` 原片落盘目录（绝不写剪映草稿目录） | stdout / `./matrix-fetch/` |
@@ -367,9 +367,9 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 >
 > **机读账面：`counts.results` 是「去重前」口径**：`--json` 的 `counts.results` 恒是**逐 query 累加的检索响应条数**（既有口径不动）——15 条 query 各命中同一条素材时它就是 15，而 plan 落盘可能只有 8 行、只对应 1 个素材。要判「到底有多少料」读派单消费模式另出的三键：`counts.zero_yield`（**真·零产出**的 query 数，判据取**检索响应**为空，而非事后扫 plan 的 `results: []`——beat 内去重会把命中折进同 beat 的兄弟 query，折叠 ≠ 零产出）、`counts.plan_results`（plan **落盘后**的实际 result 行数，去重后）、`counts.distinct_clips`（plan 内 distinct `clip_id` 数）。这三键**只在派单消费模式**出现，ad-hoc `matrix search` 与 `matrix lay` 的 `counts` 逐字节不变（**缺席 = 没这个概念，不是「测出来是 0」**）。铺轨侧同理另出 `lay.beatsWithCandidates`（有候选的 beat 数）与 `lay.emptyBeats`（**零候选 beat 名单**——整段没有任何可铺的画面），两者恒满足 `beatsWithCandidates + emptyBeats.length = plan 的 beat 总数`。
 >
-> **素材落盘自检**：写回工程之后自动查一遍 `materials[].path` 是不是真的都落盘了（**只读、只报不动**）。相对路径恒以 **`.gtrk` 文件所在目录**（`<产物目录>/gtrk/`）为基准解析。`--json` 出 `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`——`dangling` 是工程自带素材的**悬空引用**（登记在、文件不在）全量清单，每条标出**是否被时间线引用**及引用位置（被引用 = 那一段没素材可放，比孤儿严重得多）；绝对路径缺失另计 `external`（外接盘没挂载也会这样，不混进主判）；http(s) 素材只计数、**不发网络请求**。**这是告知不是拦阻**：查出悬空不改 `ok`、不改退出码、不删任何素材条目或文件。悬空多半是历史遗留（如客户端「确认原片」下载中断），修法是在客户端重新确认原片或删掉那条 clip。没写回的运行（`--lay 0` / 拒铺 / 工程缺失）**不出 `integrity` 字段**——缺席 = 本次没查，不是「查过且干净」。
+> **素材落盘自检**：写回工程之后只读检查 `materials[].path` 是否落盘。相对路径以 `.gtrk` 文件所在目录（`<产物目录>/gtrk/`）为基准解析。`--json` 出 `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`；`dangling` 是登记存在但文件缺失的素材，并标出是否被时间线引用，绝对路径缺失另计 `external`，http(s) 素材只计数且不发网络请求。检查只告知，不改 `ok`、退出码、素材条目或文件；修复悬空引用请在客户端重新确认原片或删除对应 clip。未写回的运行（`--lay 0` / 拒铺 / 工程缺失）不出 `integrity` 字段。
 >
-> **纯黑底垫轨**：默认在全部候选轨之下、口播主轨之上垫一条纯黑底轨（`struct_meta.broll.black_track` 记其 `track_index`），按已落成的 beat 包络整条铺满，使 B-roll 期间（含候选轨留空处）不漏出底下的口播画面。**代价是「黑底空洞」**：候选轨没填满的地方就是纯黑压口播，铺轨会把它算出来——`--json` 恒出 `lay.blackBedHoleSec` 与逐段的 `lay.blackBedHoles`，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时另出一条非致命告警（不改退出码、不阻断铺轨），可据此调 `--score-floor`、改用 `--no-black-bed`、或到客户端手动补片。字节落 `assets/builtin/solid-000000-<W>x<H>.png`，与客户端内置纯色素材同 id 命名空间、幂等复用。删候选轨时别误删它；换片请拖到候选轨颗粒上、**别拖到黑底条上**——客户端 0.2.10 起（2026-07-31 发版强更）**拖到黑底条上会被直接拒绝并提示**。若客户端仍是 0.2.10 之前旧版（强更未拉到），旧行为是静默新建一条 video 轨插入、落点在下半区时预览完全看不见（按一次 `Ctrl+Z` 可整条撤销）——先重启客户端吃到强更。不想要黑底加 `--no-black-bed` 重跑即剥净。
+> **纯黑底垫轨**：默认在候选轨之下、口播主轨之上铺满已落成的 beat 包络，避免 B-roll 留空处露出底下画面。候选轨未填满的部分会形成「黑底空洞」；`--json` 恒出 `lay.blackBedHoleSec` 与 `lay.blackBedHoles`，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时给非致命告警。可调 `--score-floor`、改用 `--no-black-bed` 或在客户端补片。素材落在 `assets/builtin/solid-000000-<W>x<H>.png` 并幂等复用；换片请拖到候选轨，不要拖到黑底条。客户端 0.2.10+ 拖到黑底条会直接拒绝，旧客户端先升级；不需要黑底时用 `--no-black-bed` 重跑。
 
 **本地素材模式（`matrix index` / `--local`）**：素材不必入云端素材库，用你本地的素材文件夹（视频+图片混合）直接检索铺轨：
 
@@ -394,11 +394,11 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 >
 > **`false` 不要读成「无版权、可以随便用」——它恰恰相反。** 决定性反证：他人版权的概念素材入库固定写 `is_copyright=0`；这个字段若真是「是否受版权保护」，那批必须是 1。
 >
-> 这条警示是真机踩出来的：2026-09-02 有 AI 执行方连着两轮**特意去挑 `false`** 当「安全选择」，把不可商用素材铺进了 5 个工程，而唯一安全的 `true` 反倒被主动避开。所以 `--json` 里 CLI 会逐条**派生一个人话标签 `copyright_label`**（`"可商用"` / `"不可商用"`）——它由 `is_copyright` 推出、与之恒同向、缺席同缺席，判读认这两个键之一即可，别靠字段名去猜。
+> `is_copyright` 读作「能不能商用」：`true` = 可商用，`false` = 不可商用。`--json` 逐条派生 `copyright_label`（`"可商用"` / `"不可商用"`），它与 `is_copyright` 同向，字段缺席时也缺席；判读使用这两个键，不要从字段名猜语义。
 >
 > 该字段**只有矩阵成员口才有**：公开口没有它不是「不可商用」，而是服务端在源头就只放可商用素材（缺席即无需判，CLI 如实缺省、绝不补假值）。
 >
-> **缺省口径（⟲ 2026-09-06）**：矩阵成员档**缺省搜全库**（`copyright_scope=all`，含非商用/概念素材）——那正是成员身份买到的东西，命令不会替你收紧，随包 skill 也不许「保险起见」自行剔掉 `is_copyright:false` 的候选（但会**逐条如实标注**版权状态）。只要可商用时，自己加 `--commercial-only`。
+> **缺省口径**：矩阵成员档默认搜全库（`copyright_scope=all`，含非商用/概念素材），不会替你收紧；随包 skill 也不应自行剔除 `is_copyright:false`，而应逐条标注版权状态。只要可商用时，显式加 `--commercial-only`。
 
 编排配方（纯匹配 / 先理解后铺 / 时间窗 / 素材先行编剧 / 三层层叠）与 plan 编辑口径见随包 skill `/gtrk-matrix`。
 
@@ -421,14 +421,14 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 
 - **铺轨**（`gtrk mg --project <dir>`）：读 `dispatch.mg` → 逐 beat 从 `<project>/mg/<composition_id>.html` 取源颗粒 → lint → 铺进 `beat_track`，把 `struct_meta.mg` 原子写回 `.gtrk`（幂等登记自产轨 `lay_tracks`，重铺先剥旧自产物再 append、用户手加轨零连带）。「透明叠加 / 满屏底层」由颗粒 HTML 根 `background` 反推的 `opaque` 决定。缺 HTML / lint 失败的 beat 计入 `skipped`、不拦其余。
   - **剥离面 ≠ 「本次铺什么」，也 ≠ 「登记轨全集」**：`--only <beat>` **只剥命中的那几颗**（真增量合并）——轨上其余已铺颗粒的 clip / 素材 / 登记条目**原样保留**，连同用户在 opencut 对它们的手调（保留的是既有 clip 原件，非照登记重建，故透明度 `opaque` 不会丢）；这些保留条目**不重新 lint、不重新复制源 HTML**（工程自包含，`<project>/mg/` 下源文件删了也不影响）。全量重铺仍是「剥净再整轨重建」，**唯一例外**是本次派单里有、却因缺 HTML / lint 未过 / 重投影后零存活而**没铺成**的那几颗——它们上一轮的 clip 保留在轨上（不因为新的做坏了就把旧的也毁掉）；反之**派单里已不存在**的已铺条目仍照剥（计划变更 ≠ 做坏了）。要连其余已铺颗粒一起剥掉重来：`--replace-all` 显式授权。
-  - **素材表不囤积**：素材的剥离键按「**自产身份 × 零引用**」判（自产 = `mg-`/`rrv-` 前缀 **或** 落在 CLI 独占的 `assets/mg/` 下且文件名在自产登记里），**不认客户端可改写的 `html_material` 前缀**——所以在 opencut 里编辑过工程之后重铺，旧素材照样剥得掉，`mg-` 素材数**恒等于轨上颗粒数**，历史遗留的重复 / 孤儿条目一并清掉。**非自产素材零连带**（`broll-*` / `ex-solid-*` / 你自加的，哪怕零引用也不碰）；仍被存活 clip 引用的自产素材也不剥（不会剥出失联 clip）；盘上 `assets/mg/` 的 html 副本从不删。
+  - **素材表不囤积**：素材按「自产身份 × 零引用」剥离（自产 = `mg-`/`rrv-` 前缀，或位于 CLI 独占的 `assets/mg/` 且文件名在自产登记里），不依赖客户端可改写的 `html_material` 前缀。`mg-` 素材数与轨上颗粒数保持一致；重复或孤儿条目会清掉。非自产素材、仍被存活 clip 引用的自产素材，以及盘上 `assets/mg/` 的 HTML 副本都不动。
   - **「一条都没定位到」不是清空指令**：`--only` 打空、`dispatch.mg` 为空/缺失、或本次条目全被 skip，**而轨上已有已铺颗粒**时，同样拒绝写回（那是派单或选择器出问题的信号）。确要清空加 `--replace-all`。首次铺轨（轨上本就没有已铺条目）不受此限，照常走完报 `laid=0`。
   - **槽位窗口现场重投影**：铺轨与 lint 之前先用「`transcript` × 当刻 `.gtrk`」重算每条队列条目的 `[track_st, track_ed]`，之后 lint 的坑位包络（铁律⑦）与落轨 clip 时长一律以重算值为准（`--only` 同守；aux 派生颗粒按**自己的** span 重投影，不与主 beat 窗口混同）。`dispatch.mg` 里的时码只是**投影时刻快照**，仅在重投影不可行时兜底——**改完口播轨直接铺即可，不必先重跑 `gtrk split`**。`--json` 恒出 `reprojection:{mode,degraded,reason?,drifted,max_offset,shrunk,dropped}`（`--lint-only` 也有）。重投影后**零存活**的条目 skip 并计入 `skipped`（不复制 HTML、不按快照铺回去）；重投影不可行（transcript 缺失 / 工程定位不到 / 主轨查不到口播素材）→ 降级用快照 + 告警 + `--json` 标注，退出码不变；工程**非 v1** 的既有行为不变（铺轨路径版本门非 0 退出、`--lint-only` 照旧出报告）。铺轨成功会把本次时码来源（`timecode_source` / `reprojected_at`）纯追加登记进 `struct_meta.mg`。
 - **lint**（`gtrk mg lint <颗粒.html> [--dispatch <path>]`）：纯本地静态校验颗粒 HTML 的铁律机器可判定子集（`<template>` 包裹、`data-composition-id` + 1920×1080、`gsap.timeline({ paused: true })`、`window.__timelines` 注册、无 `Math.random` / `Date.now`、自包含无相对外链、根 `background` 与 `opaque` 自洽…）；给 `--dispatch` 时校验 `composition_id` 命中派单。任一致命项非 0 退出并逐条报因。
   - **期望 id 一致性**（`1-cid-expect`，**致命**）：HTML 内 `data-composition-id` 必须等于期望 id（铺轨=该条派单的 `composition_id`；`mg lint`=文件名，仅当它命中派单或形如 `…-B<数字>[-aux<n>]` 时比对，`./tmp.html` 这类改过名的副本不比对）。防的是「复制 `<id>.html` 改名时漏改内部 id」——落轨会写出以文件名命名的 clip/material，而文件注册的是另一个 `__timelines` 键、还与同名颗粒抢同一个样式作用域。
   - **铁律⑦ tl 总长估长**（`7-fill-slot` / `7-no-estimate` / `7-infinite-repeat`，**恒非致命、不拦铺轨**）：已知坑位包络时（铺轨逐颗；`mg lint --dispatch` 命中派单条目）对 GSAP 时间线做**静态下界估算**——逐调用降级，能解析的计入（`duration×(repeat+1) + repeatDelay×repeat`，`yoyo` 不加时长），表达式 position / 非字面量 duration 那条**跳过不计**（忽略若干调用仍是合法下界）。估长 < 包络 → 告警；一条都算不出 → 显式提示「无法静态估长，铁律⑦未校验，须真引擎 seek 验收」（**不静默**，「算不出」与「算过且通过」在输出上可区分）；含 `repeat:-1` → 告警「无限循环令总长 Infinity、铁律⑦不可静态验证，请改按坑位算死的有限 repeat」。真判据永远是渲染引擎逐帧，本项只做提醒层。
   - **铁律⑧重复图元合并**（`8-primitive-merge`，**恒非致命、不拦铺轨**）：识别「循环体内创建，或由循环调用具名工厂创建；落到同一父节点；且没有逐元素动画驱动」的可合并 `line` / `rect` / `path` / `polyline` / `polygon` 批次。同一父节点的纯数字循环 trip count 累加后 **≥ 8** 才报数；边界含 `.length` / 具名常量而算不出时仍报「条数未知」，不做常量折叠；逐元素 `gsap.set` / tween 或被 tween 首实参使用的元素数组会被排除。本项只提示「这里有一批可**无损**合并的重复图元，合并后画面逐像素不变」，**不是风险判定**：命中不代表该颗粒会复现缺陷，未命中也不代表安全，真判据仍是真渲染出片抽帧。
-  - **回调与 seek 语义**（`x-callback-driven` / `x-engine-api-override` / `x-raf-interval`，**恒非致命、不拦铺轨**）：对齐契约同名一节（2026-07-26 增补）。GSAP `seek(t)` 默认抑制回调 → 补间属性照常插值、但 `onUpdate` 里的 DOM 写入不执行，翻车形态是**画面定在初始态而非黑屏**。契约把保证压在**引擎侧**（定帧 MUST 用 `seek(t,false)` / `time(t)` / `progress(p)`），故颗粒**用回调驱动画面是合规写法**；lint 这三项只是**哨兵**：`x-callback-driven` = 回调写 DOM 且无任何 seek 兜底（有兜底则沉默，避免重复提醒）；`x-engine-api-override` = 颗粒运行时覆写 `tl.seek` 或把 `__timelines[…]` 换成包装对象（会推翻引擎显式传的 `seek(t,true)`，且引擎改走 `time()`/`progress()` 即失效，属过渡态）；`x-raf-interval` = 含 `requestAnimationFrame(` / `setInterval(`（自有时钟不被 seek，等于冻结）。三项 MUST NOT 致命——「用回调驱动画面」不是违规。
+  - **回调与 seek 语义**（`x-callback-driven` / `x-engine-api-override` / `x-raf-interval`，**恒非致命、不拦铺轨**）：对齐契约同名一节。引擎定帧 MUST 使用 `seek(t,false)` / `time(t)` / `progress(p)`；颗粒可用时间线回调驱动画面，但不得覆写 `tl.seek` 或替换 `window.__timelines[…]`。三项 lint 只作提醒，不要求作者添加垫片。
 - **status**（`gtrk mg status --project <dir>`）：汇总 MG 流水线——`dispatch.mg` beat 总数 / 已产源 HTML 数 / 已铺进 `.gtrk` 数，并逐 beat 标注（缺 HTML / 已产未铺 / 已铺）。
 - **render**（`gtrk mg render <颗粒.html> --duration <sec> [--out <dir>] [--yes]`）：**脱离工程**把单颗颗粒云渲成剪映可读的 qtrle 透明 alpha MOV（精剪补给口——粗剪导剪映后缺一颗动态图，不回客户端就能补）。链路 = lint 前置（包络 = `--duration`，任一致命项本地拦截、零提交零计费）→ **计费预估确认**（实时查价；CLI 无本地 HTML 渲染引擎，独立颗粒唯一路 = 云渲计费任务，`--yes` 跳过确认）→ 内联提交云端 → `<composition_id>.mov` 落盘 + `task.json`/`result.json` 面包屑（崩溃可凭 task_id 恢复）。**射程**：首发只出 qtrle（`--format webm` 明确拒绝，剪映不吃 VP8-alpha）、只收 1920×1080 颗粒（契约未开竖屏/异形口）、`--duration` 必填。产物不进 `.gtrk`、不写剪映草稿目录；qtrle 无损体积偏大，适合秒级颗粒。注意与 `gtrk render`（整片成片渲染）同词不同物。
 - **fetch**（`gtrk mg fetch <检索词|块名> [--top 3] [--all]` / `gtrk mg fetch --pick <块名> --slot <beat> --project <dir>` / `--pick <块名> --as <composition_id> --duration <sec> [--out <dir>]`）：**registry 中性颗粒源**——没建栏目也能出 MG。候选态**离线**（快照随包、钉死来源 commit）按检索词列 2–3 件（含 compat 标记与海报链接）；取块态按三源顺序取块（我方镜像优先、jsdelivr、GitHub raw，每源 5 s，**逐源 sha256 强校验**，三源皆败零落盘）→ 机械改写八条（`<template>` 包裹 / 改 id / 去 data-start 贴坑位 / 实心底下沉子层 / GSAP 源换契约 CDN / 字体换运行时镜像可证的 CJK 字体 / 时长贴坑位 / 信箱缩放不拉伸）→ `gtrk mg lint` 致命项不过不落盘 → 落 `<project>/mg/<composition_id>.html`。**骨架不是成品**：返回的 `editable`（文案 / 数值数组 / 色值）MUST 按 beat 与栏目改写后再铺。契约当前只收 1920×1080 颗粒，其它画布拒绝；`excluded` 件拒取，`review` 件（canvas / 铁律 8 高危形态）可取但须真渲验收。`GITRUCK_MG_REGISTRY_BASE` 可整体覆盖取块前缀。
@@ -456,12 +456,12 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 | `gtrk audio lay … --beat-align` | **高潮点锚定**（`audio_music_analyze`，计费一次）：把 BGM 的情绪峰值 `H`（服务端 `highlight.time`）压到成片高潮点 `A` 上，映射恒为 `轨秒 = A + (BGM 秒 − H)`；**两侧都够长就零平铺**（恰好 1 个 clip），不够长才按小节线平铺补齐、接缝吸附 downbeat（轨的两个硬边界处的截断不吸附）。`A` 取自 `struct_meta.split.beats` 的判据链：升华段 → 容器转折 → 回扣段 → `0.75×全片`兜底，**命中哪一档 CLI 如实报出，兜底档会明示是猜的**。无 Key / 分析失败 / 曲子缺高潮点一律降级为不锚定，命令不失败 |
 | `gtrk audio lay … --beat-align --climax <轨秒>` | 高潮点**逃生门**：一律覆盖上面那条判据链。越界（≤ `--offset` 或 ≥ 工程末尾）或非数**直接报错**，不静默回落 —— 显式给错了值要当场知道。须与 `--beat-align` 同用 |
 | `gtrk audio lay … --no-loop` | 不平铺补齐：开了 `--beat-align` 时只放锚点那一段、头尾留白（**留白秒数如实报出**）；未开 `--beat-align` 时保留单次、不循环叠满至工程末尾 |
-| `gtrk audio tighten --project <目录>` | 收紧配音轨的**句间**停顿（**纯本地、零计费**）：只压跨句界的静音，**句内换气与原声引用段不动**，出参如实报「跳过句内换气 N 处」。`--keep <秒>` 收紧后保留的静音、`--min-silence <秒>` 短于此不动、`--boundary-tol <秒>` 判「贴着句界」的容差、`--dry-run` 只报会压几处共几秒、不写盘。三个缺省值见 `gtrk audio tighten --help`（实测认可值，换题材/音色可调） |
+（缺省值见 `gtrk audio tighten --help`，可按题材/音色调整）
 
 `project init` 另有 `--canvas <WxH>`（默认 1080x1920）、`-o/--out`、`--reupload`、`--no-open`、`--json`，语义与 `oralcut` 一致；两命令 `--json` 恒出单行结果 JSON（人读日志走 stderr）。
 
-> ⚠️ **`--beat-align` 的语义在 2026-09-02 整套换过**（change `redesign-beat-align-climax-anchor`，主理人拍板）。旧实现是「把整条 BGM 后推 `firstDownbeat` 秒」—— 分析的是 **BGM 自己的时间轴**，工程时间轴里根本没有它的消费方，净效果只是**付一次云端分析的钱换来片头一段等长静音**。
-> ⇒ **开过 `--beat-align` 的旧产物不再逐字节可复现**；没开这个 flag 的缺省路径产物**字节零变化**。
+> **`--beat-align`**：按表格中的高潮点锚定规则工作；显式 `--climax` 会覆盖自动判据。该模式会调用 `audio_music_analyze` 并产生相应计费。
+
 
 > **`tighten` 该在铺轨之前跑**：它会改配音轨时长，`gtrk split` / `gtrk matrix` 的 beat 时码按当刻工程重投影——先收紧再铺轨，省一次返工。想要合成时就对，自训音色可在 TTS 阶段直接传 `--fragment-interval`（见下节 `audio_tts_clone`）；云引擎音色不支持该参数，才用本命令在合成之后收。
 
@@ -520,7 +520,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - `gtrk tool image_move ./photo.jpg [--motion zoom_in_center] [--json]` — 图转运镜；产物落 `photo-image_move/`。`--motion` 显式指定运镜方式（26 值：平移 8 `up_to_down`/`down_to_up`/`left_to_right`/`right_to_left` 及四对角线、放大锚点 9 `zoom_in_{up,down,left,right,left_up,right_up,left_down,right_down,center}`、缩小锚点 9 `zoom_out_` 同九方位），未传由云端自动选择；`--param width=1080 --param height=1920` 覆盖推导几何。
 - `gtrk tool image_matting ./portrait.jpg` / `gtrk tool video_matting ./clip.mp4` — 图片/视频抠像。
 - `gtrk tool image_blackborder_remove ./photo.jpg [--json]` — 自动裁去单张图片四周黑边。
-- `gtrk tool image_canvas_adapt ./photo.jpg --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle [--json]` — 图片比例转换；省略画布参数时沿用服务端默认。画布模式按实际运行时契约只接受 `normal`、`rectangle`、`square`，不接受旧文档中的 `fit`。
+仅接受 `normal`、`rectangle`、`square`
 - `gtrk tool image_purify ./photo.jpg [--json]` — 清理你有权处理的图片中的水印、Logo 或叠加元素。
 - `gtrk tool image_purify ./photo.jpg --purify-scope region --purify-region 0.02,0.02,0.15,0.08 [--json]` — 按框直接去除：不做识别，**框内全部内容都会被处理**；框越小、越贴近要去除的元素效果越好。
 - `gtrk tool video_blackborder_remove ./clip.mp4 [--json]` — 自动裁去单条视频四周黑边并保留原音轨。

@@ -28,7 +28,7 @@ description: 通用配音视频创作图纸（配音链快速成片预设）—�
 
 一张表一次问完；**未经检查点①确认 MUST NOT 发起 TTS 计费动作**。
 
-> ⟲ **推荐面（公约 §三‴）**：问答收口时多问一句「要不要看看第三方 skill？」，不列名；题材命中场景触发词才多 1–2 句定向推（`gtrk skills recommend --scene <id> --json` 取 tier 最高者，各给一句为什么），用户追问才展开完整块；轻提加定向合计不超三句、同会话同场景只推一次、答「不要」零动作。
+> **推荐面（公约 §三‴）**：问答收口时可问一句「要不要看看第三方 skill？」；题材命中场景触发词才定向推荐，读取 `gtrk skills recommend --scene <id> --json`；用户拒绝后不执行推荐动作。
 
 ## 二、快速成片编排
 
@@ -36,7 +36,7 @@ description: 通用配音视频创作图纸（配音链快速成片预设）—�
 # ①② 写稿（三段式通用框架层 + 文风铁律自校验）→ 产前六秒方案（公约 §三⁗：基于稿件首段改写钩子文案三候选 + 画面层建议 + 字卡节奏，只改开口不改事实）→ 检查点①拍板
 gtrk matrix material "<情绪 调性 检索词>" --scope audio --top-k 5 --json   # BGM 候选附试听
 #   ⚠️ is_copyright：1/true=可商用、0/false=**不可商用**（反直觉，MUST NOT 读成「无版权、可随便用」）。
-#   ⟲ 260906 拍板：矩阵成员档**缺省搜全库**，MUST NOT 默认加 --commercial-only、也 MUST NOT 擅自剔掉
+#   矩阵成员档**缺省搜全库**，MUST NOT 默认加 --commercial-only、也 MUST NOT 擅自剔掉
 #   false 的候选；对价是推荐时 MUST 逐条带上派生位 copyright_label 的中文标签（不追问不阻塞）。
 #   用户**特意说明**只要可商用 / 要商用发布 / 客户商单时，才加 --commercial-only 收紧。
 
