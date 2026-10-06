@@ -190,6 +190,7 @@ import { requireFfmpeg, resolveFfmpeg } from "../lib/ffmpeg";
 import { EXCLUDE_RECENT_DEFAULT, filterRecentlyUsed, recentBgmKeys } from "../lib/bgm-history";
 import { log, routeLogsToStderr } from "../lib/log";
 import { readJson, readJsonSync } from "../lib/read-json";
+import { importSources } from "../lib/source-import";
 
 interface MatrixOpts {
 	/** matrix index：解码路径（speedup-matrix-index-proxy-decode）。 */
@@ -215,6 +216,9 @@ interface MatrixOpts {
 	online?: boolean;
 	platforms?: string;
 	onlineSession?: string;
+	url?: string[];
+	urls?: string;
+	beat?: string;
 	/** `--dirs a,b`：本地素材**文件夹或单个素材文件**（index 的索引范围 / --local 的检索域）。
 	 *  传文件即把域收窄到该素材——解说链一稿对一片时 MUST 这么传，否则邻片候选会抢占。
 	 *
@@ -322,7 +326,7 @@ export function registerMatrix(program: Command): void {
 	program
 		.command("matrix [words...]")
 		.description(
-			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 剪辑向检索；`matrix material \"<query>\"`=通用三态素材检索（下载向，clip/image/audio，BGM 主场）；`matrix fetch <clip_id...>`=精剪期拉原片（对已授予素材免费重签+下载落盘）；`matrix index --dirs <a,b>`=本地素材索引；`matrix describe`=按需理解零件（plan 注入/素材文件）；`matrix lay`=消费（agent 编辑后的）plan 文件铺轨",
+			"B-roll 检索：无 positional=消费 split/dispatch.json 的 film_broll 队列产候选清单；`matrix search \"<query>\"`=单条 ad-hoc 剪辑向检索；`matrix source-import --project <dir> --beat <beat> --url <url>`=指定视频链接进入 B-roll beat；`matrix material \"<query>\"`=通用三态素材检索（下载向，clip/image/audio，BGM 主场）；`matrix fetch <clip_id...>`=精剪期拉原片（对已授予素材免费重签+下载落盘）；`matrix index --dirs <a,b>`=本地素材索引；`matrix describe`=按需理解零件（plan 注入/素材文件）；`matrix lay`=消费（agent 编辑后的）plan 文件铺轨",
 		)
 		.option("--project <dir>", "oralcut 产物目录（定位 split/dispatch.json 与产物落点）")
 		.option("--dispatch <path>", "显式指定 dispatch.json（非标准布局兜底）")
@@ -332,6 +336,9 @@ export function registerMatrix(program: Command): void {
 		.option("--online", "从外部视频平台检索 B-roll 镜头")
 		.option("--platforms <list>", "外网平台：youtube,vimeo,tiktok,bilibili")
 		.option("--online-session <name>", "外网检索批次；同批次续跑，换名称发起新搜索")
+		.option("--url <url>", "matrix source-import：指定视频链接；可重复传", collectPathArg)
+		.option("--urls <file>", "matrix source-import：逐行读取指定视频链接文件")
+		.option("--beat <beat>", "matrix source-import：目标 B-roll beat")
 		.option("--local", "本地检索模式：走本地素材索引检索（须配 --dirs；跳过身份探针，不触任何云端检索端点）")
 		.option(
 			"--dirs <a,b,...>",
@@ -483,6 +490,7 @@ export function registerMatrix(program: Command): void {
 export type MatrixPositional =
 	| { kind: "plan" }
 	| { kind: "search"; query: string }
+	| { kind: "source-import" }
 	| { kind: "material"; query: string }
 	| { kind: "fetch"; clipIds: string[] }
 	| { kind: "index" }
@@ -492,6 +500,10 @@ export type MatrixPositional =
 /** positional 解析：空 = 派单消费；`search <query…>`；`material <query…>`；`index`；`describe`；`lay`；其他开头 = 报错给正确用法。 */
 export function parseMatrixPositional(words: string[] | undefined): MatrixPositional {
 	if (!words || words.length === 0) return { kind: "plan" };
+	if (words[0] === "source-import") {
+		if (words.length > 1) throw new Error("matrix source-import 不接受 positional 参数，请使用 --url/--urls");
+		return { kind: "source-import" };
+	}
 	if (words[0] === "material") {
 		const q = words.slice(1).join(" ").trim();
 		if (!q) throw new Error('检索词不能为空：gtrk matrix material "<query>"');
@@ -645,6 +657,12 @@ export function parseDirsOption(raw: string | string[] | undefined): string[] {
  */
 export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void {
  if (opts.online && opts.local) throw new Error("--online 与 --local 不能同时使用");
+	if (pos.kind === "source-import") {
+		if (opts.online || opts.local || opts.dispatch || opts.plan || opts.materials || opts.dirs) throw new Error("matrix source-import 只接受 --project/--beat/--url/--urls/--out");
+		if (!opts.url?.length && !opts.urls) throw new Error("matrix source-import 需要至少一个 --url 或 --urls 文件");
+		if (!opts.project && !opts.out) throw new Error("matrix source-import 需要 --project <目录> 或 --out <结果.json>");
+		return;
+	}
  if (opts.platforms !== undefined && !opts.online) throw new Error("--platforms 需要 --online");
  if (opts.onlineSession !== undefined && (!opts.online || !opts.onlineSession.trim())) throw new Error("--online-session 需要 --online 且名称不能为空");
  if (opts.online && pos.kind === "search" && !opts.out) throw new Error("外网检索需要 --out <结果.json>，用于保存结果与断线恢复记录");
@@ -871,6 +889,12 @@ export async function runMatrix(
 	if (opts.json) routeLogsToStderr();
 	assertModeOptions(pos, opts);
 	const cfg = loadConfig();
+	if (pos.kind === "source-import") return withEmbedJsonGuard("source-import", opts, async () => {
+		const result = await importSources(cfg, { project: opts.project, beat: opts.beat, url: opts.url,
+			urls: opts.urls, out: opts.out, onlineSession: opts.onlineSession });
+		if (opts.json) console.log(JSON.stringify(result));
+		return result as unknown as MatrixResult;
+	});
 
 	// ── 本地索引模式（matrix index）──
 	if (pos.kind === "index") return withEmbedJsonGuard("index", opts, () => runIndexMode(cfg, opts, deps));

@@ -376,6 +376,8 @@ export interface FillSlot {
 export interface BrollMetaCandidate {
 	eligibility?: "eligible" | "review_only";
 	clip_id: string;
+	/** 媒体类型；缺省按 video 兼容旧工程。 */
+	kind?: "video" | "image";
 	origin?: OnlineOrigin;
 	score: number;
 	/** 云端候选封面 url；本地候选恒 null（封面走 cover_path，MUST NOT 推导远程 URL）。 */
@@ -384,6 +386,8 @@ export interface BrollMetaCandidate {
 	source: "preview" | "raw" | "local" | null;
 	raw_url: string | null;
 	seg: { start: number; end: number; best: number } | null;
+	/** 完整素材时长；旧候选缺少 seg 时供客户端建立整段视频来源窗口。 */
+	duration?: number;
 	/** 本地候选附加：素材绝对路径。云端候选不出现该键（云端产物逐字节不变）。 */
 	local_path?: string;
 	/** 本地候选附加：工程内封面相对路径（assets/broll-cover/<id>.jpg；抽取失败为 null）。 */
@@ -3842,6 +3846,7 @@ export function layBrollTracks(opts: {
 				const isLocal = c.source === "local" || typeof c.local_path === "string";
 				const entry: BrollMetaCandidate = {
 					clip_id: c.clip_id,
+					...(c.kind === "video" || c.kind === "image" ? { kind: c.kind } : {}),
 					...(c.origin ? { origin: c.origin } : {}),
 					...(c.eligibility === "eligible" || c.eligibility === "review_only" ? { eligibility: c.eligibility } : {}),
 					...(c.score_model ? { score_model: c.score_model } : {}),
@@ -3853,6 +3858,7 @@ export function layBrollTracks(opts: {
 					source: dl?.source ?? (isLocal ? "local" : null),
 					raw_url: c.url ?? null,
 					seg: seg ? { start: seg.start, end: seg.end, best: seg.best } : null,
+					...(typeof c.duration === "number" && Number.isFinite(c.duration) && c.duration > 0 ? { duration: c.duration } : {}),
 					// 层登记（add-broll-dedup-and-layering 3.1）：候选逐条继承本轮来源层
 					source_layer: targetLayer,
 				};

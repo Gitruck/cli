@@ -3,11 +3,11 @@ import { createHmac, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { CloudConfig } from "./config";
-import type { OnlineSearchRequest, OnlineSearchSubmission } from "./online-broll-client";
+import type { OnlineRequest, OnlineSearchSubmission } from "./online-broll-client";
 import { searchPayload } from "./online-broll-client";
 
 export async function claimOnlineSearch(
-	directory: string, cfg: CloudConfig, request: OnlineSearchRequest, session = "default",
+	directory: string, cfg: CloudConfig, request: OnlineRequest, session = "default",
 ): Promise<OnlineSearchSubmission> {
 	const payload = searchPayload(request);
 	const scope = createHmac("sha256", cfg.apiKey).update(JSON.stringify([

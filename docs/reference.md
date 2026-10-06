@@ -292,6 +292,19 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 >
 > ⚠️ 空档（gap）不能用 `--clip ""` 寻址：契约允许多个 gap 共享该取值，它不构成地址；用 `--track/--at`。
 
+### `gtrk matrix source-import` — 指定视频链接进入某个 B-roll beat
+
+当你已经选定视频链接，不需要关键词检索时，可以把它们直接送进指定 beat：
+
+```bash
+gtrk matrix source-import --project <工程目录> --beat B07 --url <视频链接> --url <另一个链接> --json
+gtrk matrix source-import --project <工程目录> --beat B07 --urls links.txt --json
+```
+
+`--url` 可重复传，`--urls` 是逐行读取的文件；两者可同时使用，合计 1–32 条，支持 YouTube、Vimeo、TikTok、bilibili 的 HTTPS 视频页。带 `--project` 时 CLI 只追加 `struct_meta.broll` 中该 beat 的候选，不改时间线，也不会执行 `matrix lay`；完整任务回执会保存到 `split/.source-import/`。只想让 AI 或其它自动化消费结果时，改用 `--out <result.json>`，省略 `--project/--beat`。
+
+每个指定来源生成一个整段低清预览候选，`source-import` 本身不会下载高清原片、不会改时间线，也不会创建 `online_broll_resolve`。候选的时间窗就是该来源已下载预览的完整窗口。客户端对它仍可双击打开 Trim 对话框，但裁剪范围严格限制在该候选来源窗口内；预裁剪会随拖拽进入时间线。用户把候选放入轨道并点击“确认 B-roll”后，客户端才把当前源时间窗口提交给 `online_broll_resolve`，由云端下载高清窗口并置换当前低清素材。`更多外网候选` 只对关键词检索任务分页，不会把指定来源任务重复当作搜索结果。
+
 ### `gtrk matrix` — B-roll 检索 + 候选铺轨
 
 **无 positional = 派单消费**：读 `split/dispatch.json` 的 `film_broll` 队列 → 双口检索 → 产候选清单 `split/broll-plan.json` + 下载 preview 代理、在工程里平铺 N 条候选轨（opencut 打开即可用轨道小眼睛对比挑选）。**`matrix search "<query>"` = 单条 ad-hoc 检索**（不依赖派单）。**`matrix fetch <clip_id...>` = 精剪期拉原片**（脱离工程，见下）。

@@ -302,6 +302,19 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 > ⚠️ A gap cannot be addressed with `--clip ""`: the contract lets multiple gaps share that value, so it is
 > not an address. Use `--track/--at` instead.
 
+### `gtrk matrix source-import` — Put selected video URLs into a B-roll beat
+
+When the source videos are already known, send them directly to one beat instead of running keyword search:
+
+```bash
+gtrk matrix source-import --project <project-dir> --beat B07 --url <video-url> --url <another-url> --json
+gtrk matrix source-import --project <project-dir> --beat B07 --urls links.txt --json
+```
+
+Repeat `--url`, or provide one URL per line with `--urls` (1–32 total). Supported pages are HTTPS YouTube, Vimeo, TikTok and bilibili URLs. With `--project`, the CLI only appends candidates to that beat's `struct_meta.broll`; it does not touch the timeline or run `matrix lay`. The complete task receipt is kept under `split/.source-import/`. For an agent or another automation to consume the result without a project, use `--out <result.json>` and omit `--project/--beat`.
+
+Each source becomes one low-resolution full-window preview candidate. `source-import` itself does not download the high-resolution source, change the timeline, or create an `online_broll_resolve` task. The client may still open the Trim dialog by double-clicking it, but the selectable range is strictly bounded by that candidate's source window; the pretrim is carried into the timeline when dragged. After the user places the candidate on a track and clicks “Confirm B-roll”, the client submits the selected source window to `online_broll_resolve`; the cloud downloads that high-resolution window and replaces the low-resolution timeline media. `更多外网候选` / `More external candidates` paginates keyword-search tasks only and never treats manually specified sources as another search page.
+
 ### `gtrk matrix` — B-roll retrieval + candidate track laying
 
 **No positional argument = consume the dispatch**: reads the `film_broll` queue from `split/dispatch.json` → dual-endpoint retrieval → produces the candidate list `split/broll-plan.json`, downloads preview proxies, and lays N candidate tracks in the project (open it in opencut and toggle track visibility to compare and choose). **`matrix search "<query>"` = a one-off ad-hoc search** (independent of any dispatch). **`matrix fetch <clip_id...>` = pull raw footage during the fine cut** (project-independent; see below).

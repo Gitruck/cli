@@ -22,9 +22,12 @@ export interface OnlineSearchResult {
 	manifest: { url: string; file_id: string };
 }
 
+export interface SourceImportRequest { source_urls: string[] }
+export type OnlineRequest = OnlineSearchRequest | SourceImportRequest;
+
 export interface OnlineSearchSubmission {
 	requestId: string;
-	request: OnlineSearchRequest;
+ request: OnlineRequest;
 }
 
 export function onlineSearchOutcome(value: Pick<OnlineSearchResult, "results" | "platforms" | "failures">): "ready" | "partial" | "empty" | "unavailable" {
@@ -33,7 +36,8 @@ export function onlineSearchOutcome(value: Pick<OnlineSearchResult, "results" | 
 	return value.results.length > 0 ? (degraded ? "partial" : "ready") : (degraded ? "unavailable" : "empty");
 }
 
-export function searchPayload(request: OnlineSearchRequest): OnlineSearchRequest {
+export function searchPayload(request: OnlineRequest): OnlineRequest {
+ if ("source_urls" in request) return { source_urls: [...request.source_urls] };
 	// 固定字段顺序并复制数组；恢复必须使用首次保存的完整参数。
 	return { query: request.query,
 		...(request.need ? { need: structuredClone(request.need) } : {}),
