@@ -1,4 +1,4 @@
-// Generated from gitruck-infra/contracts/subtitle-font-metrics.json. Do not edit.
+// Generated from gitruck-infra/docs/subtitle-font-metrics.json. Do not edit.
 export const SUBTITLE_FONT_METRICS = {
   "version": 1,
   "family": "思源黑体 CN Bold",

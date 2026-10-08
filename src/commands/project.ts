@@ -3,7 +3,8 @@
  *
  * `gtrk project init`：从配音起盘建 `.gtrk` 工程。★ 甲方案（主理人拍板）：工程 JSON 由服务端
  * producer（infra add-audio-project-producer 的 `POST /task/cli/audio_project_struct` **同步口**）生成
- * ——emit 链纯函数（gtrk_emit/transcript_emit）是全宇宙唯一权威源，CLI MUST NOT 本地复刻工程生成逻辑。
+ * ——init 的 emit 链纯函数（gtrk_emit/transcript_emit）是配音 producer 的唯一权威源，CLI MUST NOT 本地复刻。
+ * `compose` 只在本地编排已存在的媒体与文稿，不执行 init 的 TTS 取产物、ASR 或字幕拆行算法。
  *
  * 两条入路（互斥）：
  *   - 主路 `--tts-task <task_id>`：引用已完成的 audio_tts_clone 任务（产物自带句级 segments，零 ASR）；
@@ -59,6 +60,8 @@ import { resolveToolPricing, type PriceResolver } from "../lib/tool-pricing";
 import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { createOutDir, timestamp as toolTimestamp } from "../lib/tool-runner";
+import { composeProject } from "../lib/project-compose";
+export { buildComposedProject, parseComposeList, composeProject } from "../lib/project-compose";
 
 // cli 域同步轻接口（SYNC_INLINE 家族）：cloud.ts 的 /task/${taskType} 模板天然拼出该路径
 const TASK_TYPE = "cli/audio_project_struct";
@@ -69,16 +72,16 @@ export const DEFAULT_CANVAS: [number, number] = [1080, 1920];
 
 /** 本地时间戳 YYMMDD-HHMMSS（与 oralcut 同式），产物目录命名用。 */
 /** positional 解析：project 族当前支持 init / export。 */
-export function parseProjectPositional(words: string[] | undefined): "init" | "export" {
+export function parseProjectPositional(words: string[] | undefined): "init" | "export" | "compose" {
 	if (!words || words.length === 0) {
 		throw new Error(
 			"缺少子命令——用法：gtrk project init --tts-task <task_id> | --audio <配音> --transcript <json>；或 gtrk project export --project <目录>",
 		);
 	}
-	if (words.length > 1 || (words[0] !== "init" && words[0] !== "export")) {
-		throw new Error(`未知子命令「${words.join(" ")}」——当前支持：gtrk project init、gtrk project export`);
+	if (words.length > 1 || !["init", "export", "compose"].includes(words[0]!)) {
+		throw new Error(`未知子命令「${words.join(" ")}」——当前支持：gtrk project init、gtrk project export、gtrk project compose`);
 	}
-	return words[0] as "init" | "export";
+	return words[0] as "init" | "export" | "compose";
 }
 
 /** 服务端公开工程格式；顺序也是默认提示与提交体的稳定顺序。 */
@@ -365,6 +368,7 @@ export async function callAudioProjectStruct(
 }
 
 export interface ProjectInitOpts {
+	list?: string;
 	ttsTask?: string;
 	audio?: string;
 	transcript?: string;
@@ -865,8 +869,9 @@ export function registerProject(program: Command): void {
 	program
 		.command("project [words...]")
 		.description(
-			"音频驱动工程族：project init 从配音起盘；project export 把精修 .gtrk 导出为剪映/XML/FCXML/OTIO 等工程",
+			"工程组装与交付：init 从配音起盘；compose 本地分段拼接；export 导出剪映/XML/FCPXML/OTIO 等工程",
 		)
+		.option("--list <json>", "compose：本地分段清单（live/image/narration；源 in/out 秒；原片不上传）")
 		.option("--tts-task <task_id>", "主路：引用已完成的 audio_tts_clone 任务（服务端取产物音频+句级 segments，零 ASR）")
 		.option("--audio <file>", "兜底路：自备配音音频（与 --transcript 成对使用；CLI 先上传归一）")
 		.option("--transcript <file>", "兜底路：transcript.json（gtrk transcript <配音音频> --json 产出）")
@@ -884,6 +889,21 @@ export function registerProject(program: Command): void {
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: ProjectInitOpts) => {
 			const mode = parseProjectPositional(words);
+			if (mode === "compose") {
+				if (opts.json) routeLogsToStderr();
+				if (!opts.list || !opts.out) throw new Error("compose 需要 --list <清单.json> --out <新的工程目录>");
+				for (const key of ["ttsTask", "audio", "transcript", "reupload", "keepPunctuation", "project", "gtrk", "formats", "jianyingDraftDir", "particleConcurrency"] as const) {
+					if (opts[key] !== undefined) throw new Error(`compose 不接受 ${key}；先用既有工具生成媒体，再引用本地文件`);
+				}
+				if (opts.particles === false) throw new Error("compose 不接受 --no-particles");
+				const result = await composeProject({ list: opts.list, out: opts.out, canvas: parseCanvas(opts.canvas) });
+				for (const warning of result.warnings) log.warn(warning);
+				log.ok(`分段工程已就绪：${result.gtrk}`);
+				if (opts.open !== false) openFolder(result.out_dir);
+				if (opts.json) console.log(JSON.stringify(result));
+				return;
+			}
+			if (opts.list !== undefined) throw new Error("--list 只属于 gtrk project compose");
 			if (mode === "init") {
 				await runProjectInit(opts);
 				return;

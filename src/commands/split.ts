@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import {
 	describeProjectionSource,
 	projectTranscript,
+	transcriptMaterialIds,
 	type GtrkProject,
 	type ProjectionSourceReport,
 	type ProjectionView,
@@ -181,7 +182,8 @@ async function runView(
 	const transcript = await loadTranscript(transcriptPath);
 	const { gtrk } = readGtrk(gtrkPath);
 	const view = projectTranscript(transcript, gtrk, { words: opts.words });
-	const source = reportProjectionSource(gtrk, transcript.material_id);
+	const sources = transcriptMaterialIds(transcript).map(id => reportProjectionSource(gtrk, id));
+	const source = sources[0]!;
 
 	const splitDir = join(baseDir, "split");
 	await mkdir(splitDir, { recursive: true });
@@ -200,6 +202,7 @@ async function runView(
 		counts: { entries: view.utterances.length, dropped },
 		// 投影源诊断（纯追加）：让机读侧也能分辨「全被剪」与「主轨没关联上口播素材」
 		main_track: mainTrackField(source),
+		...(sources.length > 1 ? { source_tracks: sources.map(mainTrackField) } : {}),
 		view,
 	};
 	if (opts.json) console.log(JSON.stringify(result));
@@ -248,13 +251,14 @@ async function runLand(
 	// ③ 现场投影 + 落地计算（内存）
 	const projectedAt = new Date().toISOString();
 	const view: ProjectionView = projectTranscript(transcript, gtrk, { projectedAt });
-	const source = reportProjectionSource(gtrk, transcript.material_id);
+	const sources = transcriptMaterialIds(transcript).map(id => reportProjectionSource(gtrk, id));
+	const source = sources[0]!;
 	// 零命中拒写（fix-projection-main-track-black-bed G1，主理人 2026-08-20 拍板）：
 	// 此时全部 beat 必被跳过，而 ④ 的 writeStructMetaSplit 是**无条件**写回——空 beats 会把工程里
 	// 原本正确的拆分账本覆写掉。判据 MUST 取「命中素材 clip 数 = 0」而**不是**「落轨 beat 数 = 0」：
 	// 后者与「用户真把内容剪光了」不可分辨，前者构造性地只在关联断裂时成立。
 	// 位置在 ④ 之前 ⇒ 与既有校验失败同款「零副作用」。
-	if (source.matched_clips === 0) {
+	if (sources.every(s => s.matched_clips === 0)) {
 		throw new Error(
 			`当刻工程里没有命中口播素材（material_id=${source.material_id}）的 clip：落地会把空 beats 覆写进 ` +
 				`struct_meta.split（工程里原有的拆分账本会被清掉），已拒写、未改动任何产物。\n` +
@@ -267,10 +271,10 @@ async function runLand(
 		projectSlug,
 		projectedAt,
 		// 源时基索引（add-split-source-ranges）：.gtrk 自包含 source_ranges/material_id，客户端跟随投影免读 transcript
-		sourceIndex: {
-			materialId: String(transcript.material_id),
+		sourceIndex: sources.length === 1 ? {
+			materialId: source.material_id,
 			utterances: new Map(transcript.utterances.map((u) => [u.id, { st: u.st, ed: u.ed }])),
-		},
+		} : undefined,
 	});
 
 	// ④ 三件产物：struct_meta.split 原子写回（内容 revision 冲突拒写 + rename 前重检）→ dispatch.json → --md
@@ -320,6 +324,7 @@ async function runLand(
 		projected_at: projectedAt,
 		beats: { total: doc.beats.length, landed: landing.split.beats.length, skipped: landing.skipped, shrunk: landing.shrunk },
 		main_track: mainTrackField(source),
+		...(sources.length > 1 ? { source_tracks: sources.map(mainTrackField) } : {}),
 		queues: {
 			mg: landing.dispatch.mg.length,
 			film_broll: landing.dispatch.film_broll.length,

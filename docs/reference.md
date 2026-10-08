@@ -1,5 +1,13 @@
 # Agent、配置与命令参考
 
+`project compose --list <分段清单.json> --out <新工程目录> --canvas 1920x1080` 在本地组装分段工程，不上传原片、不自动合成声音。清单示例：
+
+```json
+{"version":1,"segments":[{"kind":"live","source":"原片.mp4","in":3,"out":11},{"kind":"narration","source":"旁白.wav","transcript":"旁白.json"},{"kind":"image","source":"照片.jpg","duration":4}]}
+```
+
+路径相对清单；视频默认保留独立同期声，`keep_audio:false` 关闭；旁白段留同长画面空档。图片段为静帧，运镜先经 `tool image_move` 产视频。文稿用源时基 `utterances:[{st,ed,text}]`；合并文稿逐句绑定素材，供 `split`、`subtitle lay` 随剪辑重投影，切点截断的整句会省略并报告。输出目录必须不存在，已有工程精修走 `patch`，避免覆盖。
+
 `matrix describe` 的本地视觉交接：`--prepare <工程内目录>` 生成带时码、源指纹与图片哈希的审阅任务，零豆包调用；当前 Agent 看图填写回执后，以相同 `--materials` 或 `--plan` 参数加 `--review <visual-review.json>` 导入。仅明确标记无法完成并给出原因的条目回退豆包；缺答、素材变化或准则不一致会报错，不自动上云。这个接力由 Agent 完成，不要求用户填表。纯本地完成时无需 API Key，回退豆包时需要云端配置。
 
 视频素材概览按场景最多六秒间距覆盖；`describe --materials <视频> --source-window <起秒,止秒>` 在指定窗内按最多两秒间距细查，可与 prepare/review 组合。图片没有源时间窗。`--plan` 保持每候选 best 帧口径，单帧描述不证明整段动作。索引的 stable 长场景同样按六秒单元抽帧，普通长场景仍每两秒；下次显式 index 会更新欠覆盖的旧 stable 素材，并报告新增处理。
@@ -284,6 +292,7 @@ gtrk patch set   --project <dir> --track audio:1 --at 3.0 --volume 0.5
 | `--in` / `--out` / `--set-in` / `--set-out` / `--slip` | `trim` 的五种语义（前两个相对、中两个绝对、`--slip` 只换源窗） | — |
 | `--cut <sec\|Nf>` | `split` 的切点。⚠️ 与寻址用的 `--at` 是两个参数 | — |
 | `--muted` / `--volume <gain>` / `--opaque` | `set` 的元素级参数（`--volume` 是线性增益不是 dB） | — |
+| `--audio-track <index>` | `set`：将音频片段转入已有音轨；时码、素材和有效音量/静音不变，拒绝重叠或无法保真的轨级设置，移除变空的原轨 | — |
 | `--total <sec\|Nf\|max>` | `set` 的顶层总长（工程级 op，与元素寻址互斥） | — |
 | `--ops <file\|->` | 批量事务：一次读、全算、全校验、一次写；任一条失败**零写** | 关 |
 | `--dry-run` | 只算与校验、不写文件 | 关 |

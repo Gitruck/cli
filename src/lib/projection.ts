@@ -32,6 +32,10 @@ export interface TranscriptWord {
 
 export interface TranscriptUtterance {
 	id: string;
+	/** 分段工程可按句指定源素材；缺省沿用 transcript.material_id。 */
+	material_id?: string;
+	/** 纪实原声句只有完整保留时才显示；避免切点截掉声音后留下整句字。 */
+	require_full_span?: boolean;
 	st: number;
 	ed: number;
 	text: string;
@@ -47,6 +51,12 @@ export interface Transcript {
 	text_hash: string;
 	duration?: number;
 	utterances: TranscriptUtterance[];
+}
+
+/** 文稿源身份集合；多源分段与单源存量共用。 */
+export function transcriptMaterialIds(t: Transcript): string[] {
+	const ids = [...new Set(t.utterances.map(u => typeof u.material_id === "string" && u.material_id ? u.material_id : t.material_id))];
+	return ids.length ? ids : [t.material_id];
 }
 
 /** gtrk clip（投影只用时码字段；其余键随工程透传、投影不读）。 */
@@ -444,15 +454,23 @@ export function projectTranscript(
 	opts: { words?: boolean; projectedAt?: string } = {},
 ): ProjectionView {
 	const materialId = String(transcript.material_id);
-	const clips = collectProjectionClips(gtrk, materialId)
-		.clips.filter((c) => c.material != null && String(c.material) === materialId)
-		.map(normClip);
+	const clipCache = new Map<string, ReturnType<typeof normClip>[]>();
+	const clipsFor = (id: string) => {
+		let clips = clipCache.get(id);
+		if (!clips) {
+			clips = collectProjectionClips(gtrk, id).clips.filter(c => c.material != null && String(c.material) === id).map(normClip);
+			clipCache.set(id, clips);
+		}
+		return clips;
+	};
 
 	const entries: Entry[] = [];
 	transcript.utterances.forEach((utt, sourceIndex) => {
+		const clips = clipsFor(utt.material_id ?? materialId);
 		const totalWords = utt.words?.length ?? 0;
 		const instances: Instance[] = [];
 		for (const clip of clips) {
+			if (utt.require_full_span && (utt.st < clip.clip_st || utt.ed > clip.clip_ed)) continue;
 			const surviving: ViewWord[] = [];
 			for (const word of utt.words ?? []) {
 				// 与 clip 源区间夹逼后相交（严格重叠，零长不算存活）

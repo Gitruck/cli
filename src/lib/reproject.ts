@@ -23,6 +23,7 @@ import {
 	countMainTrackMaterialClips,
 	describeProjectionSource,
 	projectTranscript,
+	transcriptMaterialIds,
 	PROJECTION_SOURCE_HINT,
 	type GtrkProject,
 	type ProjectionView,
@@ -334,10 +335,11 @@ export async function reprojectDispatchWindows(req: ReprojectRequest): Promise<R
 	if (!transcript) return degradeAll(entries, "transcript_unreadable");
 
 	const gtrkProject = req.gtrk as unknown as GtrkProject;
-	if (countMainTrackMaterialClips(gtrkProject, transcript.material_id) === 0) {
+	const materialIds = transcriptMaterialIds(transcript);
+	if (materialIds.every(id => countMainTrackMaterialClips(gtrkProject, id) === 0)) {
 		// 诊断指向真因（fix-projection-main-track-black-bed）：真因可能是 CLI 自己铺的黑底垫轨 /
 		// B-roll 候选轨，而不是用户删轨或 relink——话术与投影层同源，别在此另写一份。
-		return degradeAll(entries, "no_material_clip", describeProjectionSource(gtrkProject, transcript.material_id).text);
+		return degradeAll(entries, "no_material_clip", materialIds.map(id => describeProjectionSource(gtrkProject, id).text).join("\n"));
 	}
 
 	// ── 现场重投影：transcript × 当刻 .gtrk，同一段代码（projectTranscript）──

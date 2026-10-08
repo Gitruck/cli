@@ -74,6 +74,8 @@ export interface PatchOpts {
 	muted?: boolean;
 	volume?: string;
 	opaque?: boolean;
+	/** set：把音频片段移入已有 track_index，保持时间与声音参数。 */
+	audioTrack?: string;
 	// set 的工程级 op
 	total?: string;
 	/** `seal` 专用：超过此秒数的空隙只报不补（缺省 0.5）。 */
@@ -409,6 +411,39 @@ function applySetParams(
 		if (!Number.isFinite(v) || v < 0) fail("bad_volume", `--volume 须是 ≥0 的数（线性增益，不是 dB），读到「${opts.volume}」`);
 		setOne("volume", v);
 	}
+	if (opts.audioTrack !== undefined) {
+		if (el.ref.kind !== "audio") fail("audio_track_only", "--audio-track 仅支持音频片段");
+		if (!/^\d+$/.test(String(opts.audioTrack))) fail("bad_audio_track", "--audio-track 需已有音轨的 track_index");
+		const tracks = gtrk.audio_track as Record<string, unknown>[];
+		const matches = tracks.filter((t) => t.track_index === Number(opts.audioTrack));
+		if (matches.length !== 1) fail("audio_track_not_found", "目标音轨不存在或 track_index 重复");
+		const target = matches[0];
+		// 未识别的轨级效果不可在转轨时静默丢失。声音的已知继承值固化到片段。
+		const structural = new Set(["track_index", "track_timeline", "track_name", "id", "muted", "volume"]);
+		for (const key of new Set([...Object.keys(track), ...Object.keys(target)])) {
+			if (!structural.has(key) && JSON.stringify(track[key]) !== JSON.stringify(target[key]))
+				fail("audio_track_settings_differ", `两条音轨的 ${key} 不同，不能无损转轨`);
+		}
+		for (const key of ["muted", "volume"] as const) {
+			const value = nextClip[key] ?? track[key] ?? CONTRACT_DEFAULTS[key];
+			if (value !== (target[key] ?? CONTRACT_DEFAULTS[key])) nextClip[key] = value;
+		}
+		const targetClips = target.track_timeline as Record<string, unknown>[];
+		if (targetClips.some((c) => c !== el.clip && c.clip_id !== "" &&
+			Number(c.track_st) < Number(nextClip.track_ed) && Number(c.track_ed) > Number(nextClip.track_st)))
+			fail("audio_track_overlap", "目标轨此时间段已有音频，已拒绝重叠");
+		forms.audio_track = `${el.ref.trackIndex}->${opts.audioTrack}`;
+		const next = replaceElement(gtrk, el.ref, nextClip);
+		if (target === track) return { next, forms };
+		const nextTracks = next.audio_track as Record<string, unknown>[];
+		const from = nextTracks[el.ref.trackArrayIndex];
+		const moved = (from.track_timeline as Record<string, unknown>[]).splice(el.ref.clipArrayIndex, 1)[0];
+		const to = nextTracks.find((t) => t.track_index === Number(opts.audioTrack))!;
+		(to.track_timeline as Record<string, unknown>[]).push(moved);
+		(to.track_timeline as Record<string, unknown>[]).sort((a, b) => Number(a.track_st) - Number(b.track_st));
+		next.audio_track = nextTracks.filter((t) => t !== from || (t.track_timeline as unknown[]).length > 0);
+		return { next, forms };
+	}
 	if (Object.keys(forms).length === 0) fail("set_no_params", "set 需给 --muted / --volume / --opaque 之一，或用 --total 改工程总长");
 	return { next: replaceElement(gtrk, el.ref, nextClip), forms };
 }
@@ -488,7 +523,8 @@ function applyOneOp(
 	rate: number,
 ): { next: Record<string, unknown>; receipt: OpReceipt } {
 	const elementAddrGiven = opts.clip !== undefined || opts.track !== undefined || opts.at !== undefined;
-	const elementParamGiven = opts.muted !== undefined || opts.volume !== undefined || opts.opaque !== undefined;
+	const elementParamGiven = opts.muted !== undefined || opts.volume !== undefined || opts.opaque !== undefined || opts.audioTrack !== undefined;
+	if (opts.audioTrack !== undefined && action !== "set") fail("audio_track_wrong_action", "--audio-track 只属 patch set");
 
 	if (opts.total !== undefined) {
 		if (action !== "set") fail("total_wrong_action", "--total 只属 `patch set`");
@@ -979,7 +1015,8 @@ export async function runPatchCommand(words: string[], opts: PatchOpts, deps: Pa
 
 	// `--total` 是工程级 op，与元素寻址互斥（delta「寻址」Requirement）
 	const elementAddrGiven = opts.clip !== undefined || opts.track !== undefined || opts.at !== undefined;
-	const elementParamGiven = opts.muted !== undefined || opts.volume !== undefined || opts.opaque !== undefined;
+	const elementParamGiven = opts.muted !== undefined || opts.volume !== undefined || opts.opaque !== undefined || opts.audioTrack !== undefined;
+	if (opts.audioTrack !== undefined && action !== "set") fail("audio_track_wrong_action", "--audio-track 只属 patch set");
 	if (opts.total !== undefined) {
 		if (action !== "set") fail("total_wrong_action", "--total 只属 `patch set`");
 		if (elementAddrGiven || elementParamGiven) {
@@ -1143,10 +1180,12 @@ export function registerPatch(program: Command): void {
 		.option("--ffmpeg-path <dir>", "指定 ffmpeg 所在目录（snap 抽 PCM 用）")
 		.option("--slip <delta>", "trim：只换源窗（轨上落点与时长都不动）")
 		.option("--muted", "set：静音")
+		.option("--audio-track <index>", "set：音频转入已有音轨，保持时码，拒绝重叠")
 		.option("--no-muted", "set：取消静音")
 		.option("--volume <gain>", "set：线性增益（不是 dB）")
 		.option("--opaque", "set：不透明")
 		.option("--total <sec|Nf|max>", "set：改顶层 duration（工程级 op，与元素寻址互斥）")
+		.option("--ops <file|->", "按 JSON 动作清单批量修改，一次校验与写回；- 从 stdin 读取")
 		.option("--dry-run", "只算与校验、不写文件")
 		.option("--expected-revision <sha256>", "跨命令写回断言：上次回执里的 revision，与盘上内容不符即拒写（agent 用；缺省只护本次读→改→写窗口）")
 		.option("--json", "机器可读回执到 stdout（日志转 stderr）")

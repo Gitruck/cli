@@ -798,7 +798,7 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 		);
 	}
 
-	// ── 同源幂等替换：同绝对路径素材所在的既有音轨全部剥除（含旧素材，零引用保护后）──
+	// 同源幂等只替换匹配片段；同轨其他旁白必须保留。
 	const materials = [...((freshGtrk.materials as LooseMaterial[] | undefined) ?? [])];
 	const audioTracks = [...((freshGtrk.audio_track as LooseTrack[] | undefined) ?? [])];
 	const materialId = audioLayMaterialId(audioAbs);
@@ -806,11 +806,17 @@ export async function runAudioLay(opts: AudioLayOpts, deps: AudioLayDeps = {}): 
 		materials.filter((m) => typeof m.id === "string" && m.path === audioAbs).map((m) => m.id as string),
 	);
 	sameSourceIds.add(materialId);
-	const keptTracks = audioTracks.filter(
-		(t) => !(t.track_timeline ?? []).some((c) => typeof c.material === "string" && sameSourceIds.has(c.material)),
-	);
+	let replacedClips = 0;
+	const keptTracks = audioTracks.flatMap((t) => {
+		const clips = (t.track_timeline ?? []).filter((c) => {
+			const replace = typeof c.material === "string" && sameSourceIds.has(c.material);
+			if (replace) replacedClips++;
+			return !replace;
+		});
+		return clips.length === (t.track_timeline ?? []).length ? [t] : clips.length ? [{ ...t, track_timeline: clips }] : [];
+	});
 	const replacedTracks = audioTracks.length - keptTracks.length;
-	if (replacedTracks > 0) log.info(`同源幂等：已替换 ${replacedTracks} 条既有同文件音轨（不叠加重复轨）`);
+	if (replacedClips > 0) log.info(`同源幂等：已替换 ${replacedClips} 个同文件音频片段，保留同轨其他素材`);
 
 	// 零引用保护：被剥素材若仍被其他轨（video/beat/保留音轨）引用则不删登记
 	const stillReferenced = new Set<string>();

@@ -2143,6 +2143,8 @@ export function lintParticle(
 	}
 
 	// 铁律2：paused timeline + __timelines 注册且 id 匹配（空白宽容；接受字面量与 var 常量两惯例）
+	if (!/<script\b[^>]*\bsrc\s*=\s*["'][^"']*gsap\.min\.js(?:[?#][^"']*)?["']/i.test(html))
+		push("x-gsap-loader-missing", false, "未声明 gsap.min.js 加载脚本；客户端按该声明注入内置 GSAP，缺失会使 gsap 未定义、动画空白。请在 template 内、动画脚本前加入 GSAP 加载声明");
 	if (!/gsap\.timeline\s*\(\s*\{[^}]*\bpaused\s*:\s*true\b[^}]*\}\s*\)/.test(html))
 		push("2-paused", true, "缺 gsap.timeline({ paused: true })");
 	// 注册键可为字符串字面量 __timelines["id"] 或标识符 __timelines[ID]（ID 由 var/const/let 赋字面串）

@@ -29,7 +29,7 @@ description: Vlog 纪实类一站式成片图纸——纪实 Vlog 是散文的�
 >
 > **表达形态上的定义性特征**：纪实类是**双声道交替**——现场同期声承载真实感与人格，后期旁白承载知识与升华。**同期声片段是内容本体，不是可替换的配画**。这是它区别于口播链与配音链的根本。
 >
-> ⚠️ **当前实现状态**：链路形态采用 **C 分段拼接** 与默认保留部分毛边，但 `gtrk project compose` 命令**尚未实现**。A/C 档在 compose 落地前不可跑；B 档可走配音链，「立神+选段+旁白稿」创作件可独立交付。用户要做时**MUST**先说明当前状态，细节见 `openspec/.plans/explore-vlog-docu-skill.md` §四之二。
+> **当前实现状态**：本地候选 CLI 已支持 `gtrk project compose`，按清单组装视频、图片和已合成旁白。先用 `gtrk project --help` 核对当前安装版本是否提供 compose；旧版不支持时停在图纸，不手写工程冒充链路。声音仍经检查点确认后生成。
 
 ### 高光发现与失败兜底（仅本图纸使用）
 
@@ -47,7 +47,7 @@ gtrk tool video_highlight "<本地视频>" --out "<工程目录>/highlight/<素�
 
 在工程目录维护一份可持续修改的视听脚本，按顺序列出：段落目的、源素材、源入出点、预计片长、画面事实、同期声或环境声、旁白、照片运镜、证据覆盖与待核对项。素材时间轴与成片时间轴分列。旁白草稿不当作录音事实，未听清的同期声不编台词，文件名日期不自动当作真实行程日期。
 
-连同全批素材概览、采用/舍弃理由、高光调用与回退记录一起交付。先审这份完整图纸；用户认可后再合成旁白、组装工程和渲染。当前 `project compose` 的缺口不能靠手写 `.gtrk` 绕过，也不能把图纸完成标成成片链路完成。
+连同全批素材概览、采用/舍弃理由、高光调用与回退记录一起交付。先审这份完整图纸；用户认可后再合成旁白、组装工程和渲染。组装必须走 `project compose`，不能手写 `.gtrk`；图纸确认和成片验收分别记账。
 
 ## 一、输入契约与三档识别
 
@@ -85,7 +85,7 @@ gtrk tool video_highlight "<本地视频>" --out "<工程目录>/highlight/<素�
 ④ 写稿        只写定调层旁白（§三）→ 稿 + 标题 + HashTag
 ⑤ 检查点①    【必停】神 · 配比档 · 稿件 · 画幅 · 音色 · BGM · 字幕样式（§四）
 ⑥ 配音        gtrk tool audio_tts_clone（仅旁白段，★ 分段合成）
-⑦ 拼主轨      gtrk project compose（分段清单 → live 段引用原片区间 + narration 段落位）★ 待实现
+⑦ 拼主轨      gtrk project compose（分段清单 → live 段引用原片区间 + narration 段落位）
 ⑧ 拆分派单    gtrk split：live 段=A_ROLL/真人出镜|口播继续；narration 段=FILM_BROLL|MG/旁白主导
 ⑨ B-roll      matrix --local --dirs → describe → lay（只铺 narration 段空档）
 ⑩ 字幕层      吐槽/观察/进度/梗卡进 MG 派单（§六）→ mg lint → mg --project
@@ -225,7 +225,11 @@ HKRR 四维（缺哪补哪）：
 
 > **链路形态：C 分段拼接**——全片切 N 段，每段声明 `live`（同期声段，引用原片区间，**内容本体**）或 `narration`（旁白段，TTS + B-roll 空档），由 `gtrk project compose` 按序拼主轨。设计草案见探索工件 §四之二。
 >
-> ⚠️ **`gtrk project compose` 尚未实现**。当前可跑的降级通道：**B 档（旁白主导）走配音链**（`project init`，同期声片段当带声 B-roll）。**A/C 档在 compose 落地前 MUST NOT 假装能跑**；可先交付「立神+选段+旁白稿」创作件。
+> compose 只引用本地文件：TTS 先合成落地，再以 narration 的 source 引用；需要旁白叠在已确认画面上时，用既有 `audio lay --offset` 另铺音轨。图片要运动，先用 image_move 产视频再入 live；image 段本身只显示静帧。
+
+分段旁白铺完后，使用 `gtrk patch set --clip <旁白片段ID> --audio-track <首条旁白轨的track_index> --project <工程目录>` 将同一讲述者的各段收进同一条旁白轨，保持原时间位置；同期声与 BGM 各自独立。重铺旁白后也要归轨，不能把“一段一轨”的阶梯布局作为交付。目标时间段已有片段时先检查重叠，不强行合并。
+
+大场景或活动转换处用简短 MG 交代叙事关系（如从游览转到参与体验），不按每个镜头机械加字卡，不杜撰日期/地点。手写 GSAP 颗粒须在 template 内先声明 gsap.min.js，再创建并注册 paused 时间线；静态 lint 通过不等于预览可见，交付前还应检查客户端播放环境内的入场与驻留。
 
 ```bash
 # ① 理解与定档（抽听 1-2 条代表素材；live 段的 in/out 时码后面全从这份转写里读）
@@ -240,15 +244,18 @@ gtrk tool audio_tts_clone --text-file <旁白段1.txt> --speaker <voice_id> --js
 gtrk tool audio_tts_clone --text-file <旁白段2.txt> --speaker <voice_id> --json
 #   ↑ 每段单独合成，compose 按段落位；同参重合成走缓存不重复扣费
 
-# ⑦ 拼主轨（★ 待实现：add-project-compose-command 落地后启用）
-# gtrk project compose --list <分段清单.json> --canvas 1920x1080 --json
-#   分段清单：agent 写语义（live: source+in/out+keep_rough / narration: tts_task），
-#   时间线时码全归 CLI（沿用 split 的「时码归 CLI」纪律）；
-#   live 段引用原片区间零切片零上传；narration 段留空档给 B-roll；
-#   产物含合并 transcript.json（live 句级时码按落位偏移 + TTS segments），下游零改造
-#
-#   ★ 毛边口径（拍板默认）：live 段 keep_rough=true——只剪长静默/明显重来/跑题闲聊，
-#     语气词与自然停顿保留（「嗯…那个…」是真实感的组成部分，MUST NOT 照口播链剪干净）
+# ⑦ 拼主轨（新目录；不覆盖既有精修工程）
+gtrk project compose --list <分段清单.json> --out <新工程目录> --canvas 1920x1080 --json
+# 清单：{"version":1,"segments":[
+#   {"kind":"live","source":"原片.mp4","in":3,"out":11},
+#   {"kind":"narration","source":"旁白.wav","transcript":"旁白-transcript.json"},
+#   {"kind":"image","source":"合影.jpg","duration":4}
+# ]}
+# live 默认保留原声；keep_audio:false 才关闭。旁白段留画面空档给 B-roll。
+# 原片不上传；路径相对清单；in/out 单位秒。transcript 为源时基 st/ed/text 句表。
+# 毛边由选段保留；compose 不做静默删除或自动精剪。
+# 多源文稿逐句绑定素材，split/subtitle 根据当刻工程重投影。
+# 没提供 transcript 的素材不生成猜测字幕，跨切点整句会省略并报告。
 
 # ⑧ 拆分派单（★ 本类型的车道映射，词表无需扩展）
 gtrk split --project "<工程目录>" --json          # 投影拿句表
@@ -338,7 +345,7 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 
 ## 十、已知边界与排障
 
-- **`gtrk project compose` 的当前状态见顶部实现状态块**：A/C 档当前不可跑，B 档走配音链，「立神+选段+旁白稿」创作件可独立交付；
+- **`gtrk project compose` 的当前状态见顶部实现状态块**：核对本地版本，组装与图纸分别验收；未完成声音、字幕、运镜时不得称为完整成片；
 - **毛边口径已定（默认保留部分毛边）**：只剪长静默/明显重来/跑题闲聊，语气词与自然停顿保留——MUST NOT 照口播链标准剪干净；
 - **旁白盖住现场声**：铺完先在客户端听一遍交界处；
 - **三源混音**（同期声/旁白/BGM）的响度平衡当前靠客户端手调，无自动 ducking；
