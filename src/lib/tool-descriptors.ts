@@ -19,6 +19,7 @@ import { readJson } from "./read-json";
 import { sec2ms } from "./frame-domain";
 import { PURIFY_METHOD_HELP, requirePurifyMethod } from "./purify-method";
 import { prepareCharacterInput, type CharacterManifest } from "./character-input";
+import { prepareHighlightInput, highlightRequestId, validateHighlightOutput, type HighlightInput } from "./highlight-input";
 
 // ---------------------------------------------------------------- 类型
 
@@ -1036,6 +1037,35 @@ const audioSilenceRemove: ToolDescriptor = {
  * video_segment —— 机械分镜（画面变动率切分区间）。only_struct=true 出纯结构，不切片产文件。
  * 结果经 mapResult 落 result-output.json（scene_count/scene_list[]），无文件下载。
  */
+const highlightPrepared = new WeakMap<ToolContext, HighlightInput>();
+const videoHighlight: ToolDescriptor = {
+    name: "video_highlight", title: "视频高光发现", kind: "cloud", enabled: true,
+    description: "泛高光探索：本地生成224p/4fps无声代理，返回按请求分组的三秒候选；当前仅内部验收。",
+    input: { kind: "video", exts: PUBLIC_VIDEO_EXTS, maxDurationSec: 1800 },
+    priceKey: "video_highlight", pricingContext: "当前仅内部成员验收；未开放外部收费",
+    taskType: "cli/video_highlight", outputHint: "分请求高光候选（result-output.json）", pollTimeoutMs: 12 * 60_000,
+    options: [{ flag: "--highlight-model <tiny|lite>", desc: "高光模型，默认 tiny；分数不跨请求比较" }],
+    async preprocess(ctx) {
+        if (!ctx.inputAbs || !ctx.outDir) throw new Error("高光分析缺少素材或工程目录");
+        ctx.warn("在本地生成低清无声分析代理，原片不上传；该步骤不替代画面与原声理解。");
+        const prepared = await prepareHighlightInput(ctx.inputAbs, ctx.outDir, ctx.ffmpegPath);
+        highlightPrepared.set(ctx, prepared);
+        return prepared.artifact;
+    },
+    buildPayload(fileId, ctx) {
+        const model = String(ctx.opts.highlightModel ?? "tiny");
+        if (model !== "tiny" && model !== "lite") throw new Error("--highlight-model 仅支持 tiny/lite");
+        const prepared = highlightPrepared.get(ctx);
+        if (fileId !== "__dry_run__" && !prepared) throw new Error("高光分析代理尚未准备好");
+        return { file_id: fileId, model, source_duration: prepared?.duration,
+            request_id: prepared ? highlightRequestId(prepared, model, fileId) : undefined };
+    },
+    mapResult(out, ctx) {
+        validateHighlightOutput(out);
+        return { ...out, source: ctx.inputAbs, source_fingerprint: highlightPrepared.get(ctx)?.sourceFingerprint };
+    },
+};
+
 const videoSegment: ToolDescriptor = {
 	name: "video_segment",
 	title: "视频机械分镜",
@@ -2573,6 +2603,7 @@ export const RESERVED_NAMES = new Set(["list"]);
 
 /** 工具族注册表（编译期数组）。接新工具在此追加一个 descriptor。 */
 export const TOOL_REGISTRY: ToolDescriptor[] = [
+	videoHighlight,
 	imageMove,
 	imageMatting,
 	imageBlackborderRemove,

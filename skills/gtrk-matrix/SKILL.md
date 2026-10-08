@@ -42,6 +42,18 @@ gtrk matrix describe --materials <同一素材> --review <工程目录/visual-ov
 
 准备和导入是 Agent 的内部工具接力，不要求用户逐帧填表。确实没有视觉能力时，可以直接用既有豆包 `describe`，报告回退原因。远端 URL 候选尚不支持本地交接，沿用豆包通道。`--plan` 仍只看每候选 `segments[0].best` 帧，动作细查走明确的 `--materials --source-window`；不能把候选描述当作整条视频都已审过。
 
+### 高光发现与失败兜底
+
+在全批概览之后，用户只说“挑高光”或某段值得探索但缺少明确事件线索时，按需执行：
+
+```bash
+gtrk tool video_highlight "<本地视频>" --out "<工程目录>/highlight/<素材名>" --json
+```
+
+该入口当前仅供内部验收。只上传本地生成的224p/4fps无声代理，结果在 `result-output.json`。`groups` 各自的 `top3` 只代表该请求内的三秒候选；不可跨素材、跨分块混排分数。用 `matrix describe --materials <原片> --source-window <起秒,止秒> --prepare <目录>` 查看候选前后过程，再结合原声判定它能否进入脚本。不要用三秒评分推断整段事件完整性。已有明确脚本时优先语义检索，不自动调用大疆，也不覆盖语义 best 或 VLM highlight。
+
+服务忙、冷却、超时、坏响应、无候选或接口未部署时，记录素材、任务号（若有）、失败原因和后续来源 `agent_semantic_overview`，继续从已观察素材按故事选材。视觉项当前 Agent 确实无法完成才标 `unavailable` 交豆包；两者都不可用则保留缺口，不写成已看过。纯粹请求“大疆评分结果”时，原子失败就如实报告未完成。已有任务号优先查询原任务；提交状态未知时用同一素材、模型、输出目录恢复，不换身份盲目建单。
+
 > 配方前置都一样：能跑 `gtrk` CLI；本地素材类配方先 `gtrk matrix index --dirs <素材夹>` 建索引。每条命令都带 `--json`。
 > ⚠️ **路径里有英文半角逗号**（`Bears, Salmon and Adventure` 这种）时 `--dirs` / `--materials` MUST **重复传**（`--dirs "A" --dirs "B"`，累加不覆盖），别塞进一串里 —— 缺省按半角逗号分隔。整串在盘上存在时会自动不拆，中文全角「，」从不参与拆分。
 
