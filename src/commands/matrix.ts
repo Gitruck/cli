@@ -16,7 +16,7 @@ import { parseOnlinePlatforms } from "../lib/online-broll-contract";
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename, isAbsolute, relative, sep } from "node:path";
-import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
 import { writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
@@ -132,6 +132,9 @@ import {
 } from "../lib/matrix-material";
 import {
 	describeImages,
+	prepareVisualReview,
+	readVisualReview,
+	DESCRIBE_CRITERIA_VERSION,
 	flagDescMismatchNote,
 	getNearestCachedMark,
 	getNearestCachedHighlight,
@@ -171,6 +174,7 @@ import { CloudError, cloudErrorCode } from "../lib/cloud";
 import {
 	SCENE_THRESHOLD_DEFAULT,
 	STABILITY_THRESHOLD_DEFAULT,
+	temporalFrameTimes,
 	brollLocalIdForFile,
 	detectScenes,
 	embedSpaceId,
@@ -249,6 +253,9 @@ interface MatrixOpts {
 	materials?: string | string[];
 	/** `--source-window <start,end>`：--local 检索源时间窗过滤（秒；段级交集）。 */
 	sourceWindow?: string;
+	/** 当前 Agent 视觉交接目录/回执；供制片流程使用。 */
+	prepare?: string;
+	review?: string;
 	// ── 美观度权重（add-audio-project-atoms，仅 matrix lay）──
 	/** `--mark-weight <0..1>`：融合分 = sim×(1-w)+(mark/100)×w；默认 0 零回归。 */
 	markWeight?: string;
@@ -349,7 +356,7 @@ export function registerMatrix(program: Command): void {
 		.option("--scene-threshold <f>", "matrix index：场景切换检测阈值（ffmpeg select gt(scene,X)，默认 0.3）")
 		.option(
 			"--stability-threshold <f>",
-			"matrix index：场景稳定性判定阈值——场景内最大帧间 scene score 低于此值判 stable（固定机位），抽帧收敛为中点 1 帧（默认 0.05，保守值待标定；误判 stable 丢检索粒度、误判 unstable 只是不省钱，宁严勿松）",
+			"matrix index：场景稳定性判定阈值——场景内最大帧间 scene score 低于此值判 stable（固定机位），抽帧按不超过六秒的间隔覆盖（默认 0.05，保守值待标定；误判 stable 丢检索粒度、误判 unstable 只是不省钱，宁严勿松）",
 		)
 		.option("--rebuild", "matrix index：忽略 size:mtime 指纹，强制全量重建索引")
 		.option(
@@ -384,6 +391,8 @@ export function registerMatrix(program: Command): void {
 			"--dedup-scope <scope>",
 			"铺轨去重粒度：scene=场景级（默认；同素材不同场景可分配，相邻槽位按跳剪豁免避让）| material=严格档（同一素材文件整轮只用一次）",
 		)
+		.option("--prepare <directory>", "仅 describe：生成供当前 Agent 看图的本地任务，不调用豆包")
+		.option("--review <file>", "仅 describe：导入当前 Agent 回执，仅明确不可判的条目回退豆包")
 		.option(
 			"--highlight-weight <w>",
 			"仅 matrix lay：看点权重 0..1（默认 0 关闭零回归）——与 --mark-weight 正交（mark=画面好不好看，highlight=有没有看点：信息量/戏剧性/情绪强度/稀缺性）；两权之和钳到 1，看点分取 describe 理解缓存，无缓存候选中性（权重回吐给 sim）",
@@ -685,6 +694,8 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 			}
 		}
 	}
+	if ((opts.prepare || opts.review) && pos.kind !== "describe") throw new Error("--prepare/--review 仅用于 matrix describe");
+	if (opts.prepare && opts.review) throw new Error("--prepare 与 --review 不能同时使用");
 	// --mark-weight 仅 lay 模式（spec 只对 matrix lay 立法；不做静默忽略）
 	if (opts.highlightWeight !== undefined && pos.kind !== "lay") {
 		throw new Error("--highlight-weight 仅用于 matrix lay（融合排序只在消费 plan 铺轨这一步生效，不做静默忽略）");
@@ -729,7 +740,8 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 			throw new Error("matrix describe 需要 --plan <path> 或 --materials <a,b,...> 之一（两者互斥；理解目标永远显式可见）");
 		}
 		if (opts.local || dirs.length) throw new Error("matrix describe 不接受 --local/--dirs（理解目标由 --plan/--materials 显式给出）");
-		if (opts.sourceWindow !== undefined) throw new Error("--source-window 仅用于 --local 检索（不做静默忽略）");
+		if (opts.sourceWindow !== undefined && !opts.materials) throw new Error("describe --source-window 需要 --materials 显式指定素材");
+		parseSourceWindow(opts.sourceWindow);
 		return;
 	}
 	if (pos.kind === "lay") {
@@ -888,7 +900,7 @@ export async function runMatrix(
 ): Promise<MatrixResult | MatrixIndexResult | MatrixDescribeResult | MatrixMaterialResult> {
 	if (opts.json) routeLogsToStderr();
 	assertModeOptions(pos, opts);
-	const cfg = loadConfig();
+	const cfg = pos.kind === "describe" && (opts.prepare || opts.review) ? { base: "", apiKey: "" } : loadConfig();
 	if (pos.kind === "source-import") return withEmbedJsonGuard("source-import", opts, async () => {
 		const result = await importSources(cfg, { project: opts.project, beat: opts.beat, url: opts.url,
 			urls: opts.urls, out: opts.out, onlineSession: opts.onlineSession });
@@ -1501,17 +1513,35 @@ async function collectMaterialDescribeItems(
 	return { items, skipped };
 }
 
-/** 缺省视频场景抽帧计划：ffprobe 时长 → 场景边界检测 → 每场景中点一帧（「按场景抽帧」口径，
- * 与索引期加密抽帧不同——理解按场景一帧足量且省钱）。
- * stable 场景联动（add-index-stability-sampling spec）：「对 stable 场景 SHALL 同样仅理解中点帧」
- * 由本口径**天然满足**——describe 对所有场景（stable/unstable 一视同仁）本就恒中点 1 帧，
- * MUST NOT 改成 stable 加帧/unstable 加帧。 */
-async function defaultVideoSceneFrames(path: string): Promise<{ materialId: string; frameTsSec: number[] }> {
+/** 素材概览按场景六秒覆盖；明确源窗口按两秒覆盖，交给 Agent 按时间顺序理解。 */
+async function defaultVideoSceneFrames(path: string, window?: [number, number]): Promise<{ materialId: string; frameTsSec: number[] }> {
+	// 索引已做过场景检测时复用其边界，避免概览与回执导入反复完整解码。
+	if (existsSync(localIndexDbPath())) {
+		const db = await openLocalIndexDb();
+		try {
+			const st = statSync(path);
+			const mat = db.get<{ id: number; material_id: string; duration_ms: number }>(
+				"SELECT id, material_id, duration_ms FROM materials WHERE path = ? AND size = ? AND mtime_ms = ?",
+				[resolve(path), st.size, Math.round(st.mtimeMs)]);
+			if (mat) {
+				if (window) {
+					if (window[0] >= mat.duration_ms / 1000) throw new Error("理解时间窗超出源素材");
+					return { materialId: mat.material_id, frameTsSec: temporalFrameTimes(window[0], Math.min(window[1], mat.duration_ms / 1000), 2) };
+				}
+				const scenes = db.all<{ st_ms: number; ed_ms: number }>("SELECT st_ms, ed_ms FROM scenes WHERE material_id = ? ORDER BY st_ms", [mat.id]);
+				if (scenes.length) return { materialId: mat.material_id, frameTsSec: scenes.flatMap((s) => temporalFrameTimes(s.st_ms / 1000, s.ed_ms / 1000)) };
+			}
+		} finally { db.close(); }
+	}
 	const ff = requireFfmpeg();
 	const geo = probeGeometry(path);
 	if (!(geo.duration > 0)) throw new Error("探测不到有效时长（疑似损坏/非视频文件）");
+	if (window) {
+		if (window[0] >= geo.duration) throw new Error("理解时间窗超出源素材");
+		return { materialId: await brollLocalIdForFile(path), frameTsSec: temporalFrameTimes(window[0], Math.min(window[1], geo.duration), 2) };
+	}
 	const scenes = await detectScenes(ff.ffmpeg, path, geo.duration, SCENE_THRESHOLD_DEFAULT);
-	return { materialId: await brollLocalIdForFile(path), frameTsSec: scenes.map((s) => s.st + (s.ed - s.st) / 2) };
+	return { materialId: await brollLocalIdForFile(path), frameTsSec: scenes.flatMap((s) => temporalFrameTimes(s.st, s.ed)) };
 }
 
 /**
@@ -1539,7 +1569,7 @@ async function runDescribeMode(
 	opts: MatrixOpts,
 	deps: MatrixRunDeps,
 ): Promise<MatrixDescribeResult> {
-	const endpoint = { url: resolveDescribeUrl(cfg.base), apiKey: cfg.apiKey };
+	const cloudConfig = () => cfg.apiKey ? cfg : loadConfig();
 	// [fix-highlight-rubric-wiring] 看点准则三级决议（L1 flag > L2 栏目配置 > L0 服务端缺省）。
 	// **这是全命令唯一的决议点**——describe 按它打分落桶、lay 按它读桶，两处各算各的哈希
 	// 就会把同一份准则拆成两个桶，用户看到的是「什么都没改又扣了一次看片钱」。
@@ -1549,7 +1579,10 @@ async function runDescribeMode(
 	// ——零回归靠结构保证，不靠下游记得判空。
 	const describeBatch =
 		deps.describeBatch ??
-		((images: string[]) => describeImages(endpoint, images, {}, rubric.text ? { highlightRubric: rubric.text } : undefined));
+		((images: string[]) => {
+			const c = cloudConfig();
+			return describeImages({ url: resolveDescribeUrl(c.base), apiKey: c.apiKey }, images, {}, rubric.text ? { highlightRubric: rubric.text } : undefined);
+		});
 	const extractFrame =
 		deps.extractFrame ?? (async (src: string, tsSec: number, outJpg: string) => extractFrameJpg(requireFfmpeg().ffmpeg, src, tsSec, outJpg));
 	// 计费身份探针（fix-describe-billing-report-honesty）：
@@ -1563,7 +1596,7 @@ async function runDescribeMode(
 		(async () => {
 			if (probedExempt !== undefined) return probedExempt;
 			try {
-				probedExempt = (await probeGcMemberType(cfg)) === "internal";
+				probedExempt = (await probeGcMemberType(cloudConfig())) === "internal";
 			} catch (e) {
 				log.warn(
 					`身份探测失败（${e instanceof Error ? e.message : String(e)}）——按非豁免（1 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）继续`,
@@ -1592,11 +1625,26 @@ async function runDescribeMode(
 		log.step(`▶ 理解 plan 候选：${items.length} 项（${planPath}${topK ? ` · 每 query 前 ${topK} 条` : ""}）…`);
 	} else {
 		const paths = parseDirsOption(opts.materials);
-		const got = await collectMaterialDescribeItems(paths, deps.videoSceneFrames ?? defaultVideoSceneFrames);
+		const window = parseSourceWindow(opts.sourceWindow);
+		if (window && paths.some((p) => materialKindForPath(p) !== "video")) throw new Error("源时间窗理解仅支持视频");
+		const got = await collectMaterialDescribeItems(paths, deps.videoSceneFrames ?? ((p) => defaultVideoSceneFrames(p, window)));
 		items = got.items;
 		skipped = got.skipped;
-		log.step(`▶ 理解素材文件：${paths.length} 个文件 → ${items.length} 帧（视频按场景中点、图片直传）…`);
+		log.step(`▶ 理解素材文件：${paths.length} 个文件 → ${items.length} 帧（${window ? "指定窗口两秒覆盖" : "视频长场景六秒覆盖、图片直传"}）…`);
 	}
+	if (opts.sourceWindow && skipped) throw new Error(`指定时间窗有 ${skipped} 项素材无法取帧，请修复后重试`);
+	if (opts.prepare) {
+		if (skipped) throw new Error(`有 ${skipped} 项素材无法取帧；修复后重新生成完整视觉任务`);
+		const job = await prepareVisualReview(items, opts.prepare, { criteria: DESCRIBE_CRITERIA_VERSION,
+			rubricHash: rubric.hash, rubric: rubric.text ?? "按视觉显著性、信息量、情绪强度与稀缺性评估单帧看点。", extractFrame });
+		const result: MatrixDescribeResult = { ok: true, mode: "describe", status: "awaiting_agent_review", ...job,
+			described: 0, cached: 0, called: 0, failed: 0, cached_stale_criteria: 0, credits_estimated: 0, credits_would_be: 0 };
+		log.info(`视觉任务已准备：${job.job}；当前 Agent 看图后填写 ${job.response}，再用相同参数加 --review 导入。`);
+		if (opts.json) console.log(JSON.stringify(result));
+		return result;
+	}
+	const localReview = opts.review ? readVisualReview(opts.review, items, DESCRIBE_CRITERIA_VERSION, rubric.hash) : undefined;
+	if (localReview) log.info(`当前 Agent 已理解 ${localReview.results.size} 帧；明确不可判 ${localReview.unavailable.length} 帧，仅这些条目允许豆包补齐（已有缓存优先）。`);
 
 	// 上行告知（fix-highlight-rubric-wiring）：**只说「已上行」不说「已生效」**——
 	// 服务端对扩参是宽松超集，未升级时整段忽略且产物形状完全一致，CLI 拿不到任何回执。
@@ -1609,6 +1657,7 @@ async function runDescribeMode(
 	let run;
 	try {
 		run = await runDescribeItems(items, {
+			localResults: localReview?.results,
 			db,
 			describeBatch,
 			extractFrame,
@@ -1735,12 +1784,13 @@ async function runDescribeMode(
 			// 非豁免档的**数字**要与本件落地前逐字一致（本件只订正措辞与豁免档，不改这一档的算法）。
 			? `实际调用 ${run.called} 张 ≈ ${run.called * 1} 积分（1 积分/张，异步任务计费：提交预扣→完成结算，失败自动退款）` +
 				(probeFailed ? "；⚠️ 计费身份没探到，这里按**非豁免**保守报数，实际可能不扣" : "")
-			: "零调用零计费（全部缓存命中）";
+			: "零豆包调用零计费（本地 Agent 或缓存已完成）";
 	log.info(`计费：${billNote}；理解产物已入本地缓存（同素材同帧下次零调用）。`);
 
 	const result: MatrixDescribeResult = {
 		ok: true,
 		mode: "describe",
+		...(localReview ? { local_agent: run.local ?? 0, visual_review: { path: resolve(opts.review!), job_sha256: localReview.jobSha256, unavailable: localReview.unavailable } } : {}),
 		...(planPath ? { planPath, injected } : {}),
 		described: run.described,
 		cached: run.cached,

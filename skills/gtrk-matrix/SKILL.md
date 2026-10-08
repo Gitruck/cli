@@ -24,6 +24,24 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 
 ## 配方库 v1（起手式，可变奏可自创）
 
+### 当前 Agent 的审片路径（本地素材优先）
+
+视觉理解优先由用户当前会话的 Agent 完成。CLI 不启动另一个 Agent；“本地”指编排位置，不保证当前 Agent 的模型在离线设备运行。
+
+1. **概览**：按素材时间顺序查看带时码的抽帧与照片；长场景也保留多个观察位置。结合 `gtrk transcript` 的原声转写整理事件、人物、环境和待核实之处，不从文件名猜内容。
+2. **细查**：脚本要求某个动作或情绪时，对相关素材用 `describe --materials <视频> --source-window <起秒,止秒> --prepare <工程目录/审阅目录>` 加密取帧；通过当前视觉工具检查过程。有音频依赖时回看/听对应原声，不以一张图证明完整动作。
+3. **回传**：查看任务中的实际图片后填写 `visual-review.json`，以相同输入参数加 `--review <回执路径>` 导入。全部本地完成时零豆包调用；不能看图或无法完成的单项标 `unavailable` 并说明原因，只有这些项由豆包补齐。不得把未查看项批量写成完成，也不得仅因省事直接调用豆包。
+4. **编排**：从已观察证据中按脚本意图选择片段。明确脚本以语义为主；泛泛“找高光”才调用高光发现能力提供候选。看片范围、未确认事实和原声覆盖均如实记录。
+
+```bash
+gtrk matrix describe --materials <本地视频或图片> --prepare <工程目录/visual-overview> --json
+# 当前 Agent 使用自身视觉工具查看 visual-job.json 列出的图片，填写 visual-review.json
+gtrk matrix describe --materials <同一素材> --review <工程目录/visual-overview/visual-review.json> --yes --json
+# 检索后的候选同理：--plan <plan.json> --prepare <目录>，回传时保持同一 --top-k 与 --highlight-rubric
+```
+
+准备和导入是 Agent 的内部工具接力，不要求用户逐帧填表。确实没有视觉能力时，可以直接用既有豆包 `describe`，报告回退原因。远端 URL 候选尚不支持本地交接，沿用豆包通道。`--plan` 仍只看每候选 `segments[0].best` 帧，动作细查走明确的 `--materials --source-window`；不能把候选描述当作整条视频都已审过。
+
 > 配方前置都一样：能跑 `gtrk` CLI；本地素材类配方先 `gtrk matrix index --dirs <素材夹>` 建索引。每条命令都带 `--json`。
 > ⚠️ **路径里有英文半角逗号**（`Bears, Salmon and Adventure` 这种）时 `--dirs` / `--materials` MUST **重复传**（`--dirs "A" --dirs "B"`，累加不覆盖），别塞进一串里 —— 缺省按半角逗号分隔。整串在盘上存在时会自动不拆，中文全角「，」从不参与拆分。
 
@@ -224,7 +242,7 @@ description: B-roll 检索铺轨编排手册——成片管线里第一个铺的
 | 圈定检索域 | `--dirs <a,b,...>` | 逗号分隔**目录或素材文件** · — | 检索域永远显式可见；绝不与云端结果混合。**传文件即把域收窄到该素材**——一稿对一片时钉到那一部片，避免同夹邻片抢候选 |
 | **源时间窗过滤** | `--source-window <start,end>` | 秒，`start<end` · 不过滤 | 仅 `--local`：只返回与窗口**有交集**的命中段（段边界不裁剪）；与其他过滤器 AND 叠加；图片候选自动排除；**空窗 = ok 空结果非错误**，扩窗是你的裁定 |
 | 场景切分粒度 | `--scene-threshold <f>` | 浮点 (0,1) · `0.3` | 仅 index：镜头切换快调高、长镜头调低 |
-| 固定机位判稳阈值 | `--stability-threshold <f>` | 浮点 (0,1) · `0.05` | 仅 index：场景内最大帧间变化低于此值判 stable，抽帧收敛为**中点 1 帧**（60s 固定机位从 30 帧省到 1 帧）；summary 分列 stable/unstable 场景数与省帧数；误判 stable 丢检索粒度、误判 unstable 只是不省钱——**宁严勿松**；默认为保守值待标定 |
+| 固定机位判稳阈值 | `--stability-threshold <f>` | 浮点 (0,1) · `0.05` | 仅 index：场景内最大帧间变化低于此值判 stable，抽帧按**不超过六秒的间隔覆盖整个场景**；summary 分列 stable/unstable 场景数与省帧数；误判 stable 丢检索粒度、误判 unstable 只是不省钱——**宁严勿松**；默认为保守值待标定 |
 | 索引强制重建 | `--rebuild` | 开关 · 关 | 忽略指纹全部重算向量；**理解缓存（describes）不清**。需要补齐切点、倍帧判定或段级运动量信号时使用；这些索引信号只在重建时落库 |
 | 不要图片候选 | `--no-image-broll` | 开关 · 默认参与 | 检索与铺轨完全排除图片（零图片上云）；pinned 也不豁免这条 |
 | 跳过计费确认 | `--yes` | 开关 · 关 | 图片运镜 / describe >20 张两处护栏通用 |

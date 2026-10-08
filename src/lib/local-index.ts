@@ -7,7 +7,7 @@
  * 顺手供场景稳定性判定，add-index-stability-sampling；黑段供渐变过黑检出
  * （fix-index-gradual-transition-blindness——逐帧打分对匀速渐变结构性失明，见 detectCutsFromScores
  * 头注）；**只记时间戳不产生任何切片文件**）
- * → 场景自适应抽帧（≤4s 场景中点 1 帧；>4s 每 2s 加密；**stable 场景收敛为中点 1 帧**；
+ * → 场景自适应抽帧（≤4s 场景中点 1 帧；>4s 每 2s 加密；stable 长场景按六秒时间覆盖；
  *   512px 最长边 jpg，抽到 ~/.gitruck/tmp）
  * → 自建 embed 端点向量化（批 ≤16，embed-client）→ SQLite 三表落库（帧图 embed 成功即删，即传即弃）。
  *
@@ -69,6 +69,15 @@ export const STABILITY_THRESHOLD_DEFAULT = 0.05;
 export const MIN_SCENE_SEC = 0.5;
 /** >4s 场景的加密抽帧间隔（秒）。 */
 export const FRAME_LONG_INTERVAL_SEC = 2.0;
+/** 稳定长场景仍须沿时间轴覆盖，避免固定机位中的动作被单帧省略。 */
+export const FRAME_STABLE_INTERVAL_SEC = 6.0;
+
+/** 均分时间单元取中点；间距不超过 interval，头尾距离不超过半个 interval。 */
+export function temporalFrameTimes(st: number, ed: number, interval = FRAME_STABLE_INTERVAL_SEC): number[] {
+	if (![st, ed, interval].every(Number.isFinite) || st < 0 || ed <= st || interval <= 0) return [];
+	const count = Math.ceil((ed - st) / interval);
+	return Array.from({ length: count }, (_, i) => st + (i + 0.5) * (ed - st) / count);
+}
 /** 抽帧最长边（px）。 */
 export const FRAME_MAX_EDGE = 512;
 /** 场景检测「产出够不够」的下限比例（实得帧数 / 时长×帧率）。
@@ -256,7 +265,7 @@ CREATE TABLE IF NOT EXISTS scenes (
   material_id INTEGER NOT NULL,         -- → materials.id（级联删由 deleteMaterialRows 显式做）
   st_ms INTEGER NOT NULL,
   ed_ms INTEGER NOT NULL,
-  stable INTEGER,                       -- 1=stable（固定机位，中点单帧）；NULL/0=unstable（旧行/图片行按 unstable 语义）
+  stable INTEGER,                       -- 1=stable（固定机位，低频时间覆盖）；NULL/0=unstable（旧行/图片行按 unstable 语义）
   -- 运动量分级信号（add-material-motion-signal）：去重后帧间分分位 + 样本数 + 倍帧注记。
   -- NULL = 该场景无信号（旧行未重建 / 样本不足），消费方按「不可判」兜底，MUST NOT 当 0 用。
   motion_p50 REAL,
@@ -1237,15 +1246,15 @@ export async function detectScenes(
 
 // ── 场景自适应抽帧计划（POC plan_frames 逐行对齐）──────────────────────────
 
-/** ≤4s 场景取中点 1 帧；>4s 场景自 st+1.0 起每 2s 一帧（t < ed-0.5 为界）。
- * stable 场景（add-index-stability-sampling）：无论长短收敛为中点 1 帧——固定机位 60s 场景
- * 从 30 帧收敛到 1 帧；不带 stable 标记（旧调用/旧注入面）行为与之前逐字节一致。 */
+/** 短场景取中点；普通长场景自 st+1 起每两秒一帧；stable 按六秒时间单元覆盖。 */
 export function planFrames(scenes: { st: number; ed: number; stable?: boolean }[]): { sceneIdx: number; ts: number }[] {
 	const plan: { sceneIdx: number; ts: number }[] = [];
 	for (let si = 0; si < scenes.length; si++) {
 		const { st, ed, stable } = scenes[si]!;
 		const dur = ed - st;
-		if (dur <= 4.0 || stable === true) {
+		if (stable === true) {
+			for (const ts of temporalFrameTimes(st, ed)) plan.push({ sceneIdx: si, ts });
+		} else if (dur <= 4.0) {
 			plan.push({ sceneIdx: si, ts: st + dur / 2 });
 		} else {
 			let t = st + 1.0;
@@ -1731,7 +1740,7 @@ async function planMaterialDefault(
 		onTick: ctx.onTick,
 	});
 	const scenes = det.scenes;
-	const plan = planFrames(scenes); // stable 场景在此收敛为中点 1 帧
+	const plan = planFrames(scenes); // stable 场景按低频时间覆盖
 	return {
 		materialId,
 		kind,
@@ -1946,11 +1955,17 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 			const size = st.size;
 			const mtimeMs = Math.round(st.mtimeMs);
 			const prev = db.get<MaterialRow>("SELECT * FROM materials WHERE path = ?", [path]);
-			if (prev && !opts.rebuild && prev.size === size && prev.mtime_ms === mtimeMs) {
+			// 仅在用户显式 index 时升级欠覆盖的旧 stable 素材；其余缓存保持增量。
+			const sparseStable = prev && db.get<{ id: number }>(
+				`SELECT s.id FROM scenes s LEFT JOIN frames f ON f.scene_id = s.id
+				 WHERE s.material_id = ? AND s.stable = 1 AND s.ed_ms - s.st_ms > 6000
+				 GROUP BY s.id HAVING COUNT(f.id) < (s.ed_ms - s.st_ms + 5999) / 6000 LIMIT 1`, [prev.id]);
+			if (prev && !opts.rebuild && !sparseStable && prev.size === size && prev.mtime_ms === mtimeMs) {
 				stats.skipped++;
 				progress(`[${name}] 指纹未变，跳过`);
 				continue;
 			}
+			if (sparseStable) progress(`[${name}] 旧稳定场景时间覆盖不足，更新该素材索引`);
 			// 进场行（spec §2）：本件之前，成功路径在阶段一**一条都不打**——四处 onProgress 全在
 			// 跳过 / 降级 / 失败分支上，于是「一切正常」恰恰是唯一完全静默的情形。
 			// ⚠️ 不带时长：时长要等 planOne 里那次 ffprobe 才有，为这一行提前探一次就是白烧一个进程
@@ -2174,8 +2189,8 @@ export async function indexLocalMaterials(opts: IndexRunOptions): Promise<IndexR
 			}
 			progress(
 				kind === "image"
-					? `[${p.name}] 图片 · 单帧向量${p.prev ? "（指纹变化，已级联重建）" : ""}`
-					: `[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${stableNote}${p.prev ? "（指纹变化，已级联重建）" : ""}`,
+					? `[${p.name}] 图片 · 单帧向量${p.prev ? "（索引已重建）" : ""}`
+					: `[${p.name}] 时长 ${(p.planned.durationMs / 1000).toFixed(1)}s · 场景 ${p.planned.scenes.length} · 帧 ${frames.length}${stableNote}${p.prev ? "（索引已重建）" : ""}`,
 			);
 		}
 		// 降级轮末聚合成一条：逐素材打会把真正的问题淹在良性噪声里（良性降级打可读 INFO）。

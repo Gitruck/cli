@@ -1,5 +1,9 @@
 # Agent, configuration and command reference
 
+Local visual handoff for `matrix describe`: `--prepare <project-directory>` writes a review job with source fingerprints, timestamps and image hashes, without calling Doubao. The current agent inspects the images, fills the response, then imports it with the same `--materials` or `--plan` arguments and `--review <visual-review.json>`. Only items explicitly marked unavailable with a reason fall back to Doubao. Missing answers, changed sources and mismatched criteria fail before cloud requests. This is an agent workflow, not a form the user must fill. Fully local completion requires no API key; cloud fallback requires configuration.
+
+Video overviews cover each scene at intervals of at most six seconds. `describe --materials <video> --source-window <start,end>` inspects only that source window at intervals of at most two seconds and supports prepare/review. Images have no temporal window. Plan mode still describes each candidate's best frame; a frame is not evidence of an entire action. Indexing uses six-second cells for stable scenes and retains two-second sampling for other long scenes. Explicit indexing refreshes old stable materials with insufficient coverage and reports the extra work.
+
 [Back to README](../README.en.md) · [Workflow](workflow.en.md) · [简体中文](reference.md)
 
 ## Using it with AI agents

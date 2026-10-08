@@ -72,6 +72,8 @@ const args = [
 	"-c",
 	[
 		"set -e",
+		// 媒体回归包含真实转场与 PTS/VFR 夹具，基础 node 镜像未带 ffmpeg。
+		"apt-get update -qq && apt-get install -y -qq --no-install-recommends ffmpeg >/dev/null",
 		"npm i -g bun --silent >/dev/null 2>&1",
 		'echo "[test:linux] bun $(bun --version) / node $(node -v)"',
 		"bun install --frozen-lockfile >/dev/null 2>&1",

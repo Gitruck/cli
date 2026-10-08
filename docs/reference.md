@@ -1,5 +1,9 @@
 # Agent、配置与命令参考
 
+`matrix describe` 的本地视觉交接：`--prepare <工程内目录>` 生成带时码、源指纹与图片哈希的审阅任务，零豆包调用；当前 Agent 看图填写回执后，以相同 `--materials` 或 `--plan` 参数加 `--review <visual-review.json>` 导入。仅明确标记无法完成并给出原因的条目回退豆包；缺答、素材变化或准则不一致会报错，不自动上云。这个接力由 Agent 完成，不要求用户填表。纯本地完成时无需 API Key，回退豆包时需要云端配置。
+
+视频素材概览按场景最多六秒间距覆盖；`describe --materials <视频> --source-window <起秒,止秒>` 在指定窗内按最多两秒间距细查，可与 prepare/review 组合。图片没有源时间窗。`--plan` 保持每候选 best 帧口径，单帧描述不证明整段动作。索引的 stable 长场景同样按六秒单元抽帧，普通长场景仍每两秒；下次显式 index 会更新欠覆盖的旧 stable 素材，并报告新增处理。
+
 [返回首页](../README.md) · [工作流](workflow.md) · [English](reference.en.md)
 
 ## 给 AI Agent 用

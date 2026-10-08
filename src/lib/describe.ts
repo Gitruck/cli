@@ -37,6 +37,7 @@ import { readUserConfig } from "./user-config";
 import { RUBRIC_DEFAULT_BUCKET } from "./highlight-rubric";
 import type { MaterialDescribeMeta } from "./matrix";
 import type { SqlDb } from "./local-index";
+export { prepareVisualReview, readVisualReview } from "./local-visual-review";
 
 export const DESCRIBE_UNREACHABLE_CODE = "describe_endpoint_unreachable";
 /** 计费单价（infra 拍板）：1 积分/张，异步任务计费（提交预扣→完成结算，失败自动退款；无会话）。 */
@@ -549,8 +550,10 @@ export function putCachedDescribe(
 	tsMs: number,
 	d: MaterialDescribe,
 	rubricHash: string = RUBRIC_DEFAULT_BUCKET,
+	replaceObjective = false,
 ): void {
 	const now = new Date().toISOString();
+	// 用户当前 Agent 的显式复核可以纠正既有描述，不能返回新结果却继续缓存旧结论。
 	// 客观层 **OR IGNORE 而非 OR REPLACE**：spec「换准则 MUST NOT 覆盖或失效客观层」。
 	// ⚠️ 这也正是本件之前的实际语义——那时客观层只在 `getCachedDescribe` 未命中（即行不存在）时才写，
 	//    REPLACE 从来没真的覆盖过任何一行。本件新增了「客观层在、看点桶不在 ⇒ 重新调用」这条路径，
@@ -566,7 +569,7 @@ export function putCachedDescribe(
 			" ON CONFLICT(material_id, ts_ms) DO UPDATE SET desc_text=excluded.desc_text, tags_json=excluded.tags_json," +
 			" mark=excluded.mark, flags_json=excluded.flags_json, subject=excluded.subject, action=excluded.action," +
 			" shot_size=excluded.shot_size, created_at=excluded.created_at, criteria_version=excluded.criteria_version" +
-			" WHERE describes.criteria_version IS NOT excluded.criteria_version",
+			" WHERE describes.criteria_version IS NOT excluded.criteria_version OR ?",
 		[
 			materialId,
 			tsMs,
@@ -579,10 +582,14 @@ export function putCachedDescribe(
 			d.shot_size,
 			now,
 			DESCRIBE_CRITERIA_VERSION,
+			replaceObjective ? 1 : 0,
 		],
 	);
 	// 看点分缺席（旧服务端不给这一维）时不落桶——落一行 NULL 会让「本桶已打过分」与
 	// 「本桶没有分」不可分辨，正是 getCachedDescribe 的命中判据要区分的那件事。
+	if (replaceObjective && d.highlight === null) {
+		db.run("DELETE FROM describe_highlights WHERE material_id = ? AND ts_ms = ? AND rubric_hash = ?", [materialId, tsMs, rubricHash]);
+	}
 	if (d.highlight !== null && d.highlight !== undefined) {
 		db.run(
 			"INSERT OR REPLACE INTO describe_highlights(material_id, ts_ms, rubric_hash, highlight, created_at) VALUES (?,?,?,?,?)",
@@ -812,6 +819,8 @@ export interface DescribeWorkItem {
 }
 
 export interface DescribeRunDeps {
+	/** 已经核验源指纹与帧图的当前 Agent 回执；缺项仅在明确 unavailable 后交云端。 */
+	localResults?: ReadonlyMap<string, MaterialDescribe>;
 	/** 索引库连接（describes 缓存宿主；openLocalIndexDb 产物）。 */
 	db: SqlDb;
 	/** 服务端批调用（≤32/批的切批与提交+轮询在 describeImages 内部；测试注入假端点/mock）。 */
@@ -838,6 +847,7 @@ export interface DescribeRunDeps {
 }
 
 export interface DescribeRunResult {
+	local?: number;
 	ok: boolean;
 	/** 计费确认被拒：零服务端调用中止。 */
 	declined?: boolean;
@@ -883,9 +893,17 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 	// 非缺省桶要求该桶已有看点分，否则按未命中重新打分（换准则的必然代价，见 getCachedDescribe）。
 	const pending: DescribeWorkItem[] = [];
 	let staleCriteria = 0;
+	let local = 0;
 	for (const it of items) {
 		const key = keyOf(it);
 		if (resolved.has(key)) continue;
+		const localResult = deps.localResults?.get(key);
+		if (localResult) {
+			resolved.set(key, localResult);
+			putCachedDescribe(deps.db, it.materialId, it.tsMs, localResult, rubricHash, true);
+			local++;
+			continue;
+		}
 		const hit = getCachedDescribe(deps.db, it.materialId, it.tsMs, rubricHash);
 		if (hit) resolved.set(key, hit);
 		else {
@@ -895,7 +913,7 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 			pending.push(it);
 		}
 	}
-	const cached = resolved.size - pending.length;
+	const cached = resolved.size - pending.length - local;
 	const creditsWouldBe = pending.length * DESCRIBE_CREDITS_PER_IMAGE;
 
 	// ── 计费身份探测（fix-describe-billing-report-honesty）──────────────────────────────
@@ -930,7 +948,8 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 				return {
 					ok: false,
 					declined: true,
-					described: cached,
+					described: cached + local,
+					...(deps.localResults ? { local } : {}),
 					cached,
 					staleCriteria,
 					called: 0,
@@ -985,7 +1004,8 @@ export async function runDescribeItems(items: DescribeWorkItem[], deps: Describe
 	const results = items.map((it) => resolved.get(keyOf(it)) ?? null);
 	return {
 		ok: true,
-		described: cached + called,
+		described: cached + called + local,
+		...(deps.localResults ? { local } : {}),
 		cached,
 		staleCriteria,
 		called,

@@ -426,6 +426,7 @@ export function searchLoadedIndex(
 	} = {},
 ): LocalSearchOutcome {
 	const topk = opts.topkFrames ?? TOPK_FRAMES_DEFAULT;
+	if (!Number.isInteger(topk) || topk <= 0) return { recalled: 0, results: [] };
 	const floor = opts.scoreFloor ?? LOCAL_SCORE_FLOOR_DEFAULT;
 	const win = opts.sourceWindowSec;
 	// 显式传窗口 = 图片素材整体排除（无时间轴，谈不上「落在窗内」）——与 includeImages AND 叠加
@@ -447,7 +448,27 @@ export function searchLoadedIndex(
 		if (!includeImages && index.materials[index.frames[i]!.matIdx]!.kind === "image") continue;
 		eligible.push(i);
 	}
-	const order = eligible.sort((a, b) => sims[b]! - sims[a]!).slice(0, topk);
+	const ranked = eligible.sort((a, b) => sims[b]! - sims[a]!);
+	// 先给不同素材保留最佳命中，再补充时间不同的高分帧。
+	// 小集合不裁剪，维持完整证据；大集合避免密集抽帧独占 topk。
+	const order: number[] = [];
+	if (ranked.length <= topk) order.push(...ranked);
+	else {
+		const materials = new Set<number>();
+		const cells = new Set<string>();
+		const cell = (i: number) => `${index.frames[i]!.matIdx}@${Math.floor(index.frames[i]!.ts_ms / AGG_GAP_MS)}`;
+		for (const i of ranked) {
+			const mat = index.frames[i]!.matIdx;
+			if (materials.has(mat)) continue;
+			materials.add(mat); cells.add(cell(i)); order.push(i);
+			if (order.length === topk) break;
+		}
+		for (const i of ranked) {
+			if (order.length >= topk) break;
+			if (cells.has(cell(i))) continue;
+			cells.add(cell(i)); order.push(i);
+		}
+	}
 
 	// 按素材分组（组内按 ts 升序）→ 聚合
 	const byMat = new Map<number, FrameHit[]>();
