@@ -200,7 +200,7 @@ export async function pollTask(
 		if (got.status === "completed") return got.output;
 		if (got.status === "failed" || got.status === "cancelled") {
 			const out = got.output as { error?: string };
-			throw new Error(out?.error ?? (got.status === "failed" ? "任务失败" : "任务已取消"));
+			throw Object.assign(new Error(out?.error ?? (got.status === "failed" ? "任务失败" : "任务已取消")), { taskStatus: got.status });
 		}
 		onTick?.(got.status || "处理中", got.progress);
 	}

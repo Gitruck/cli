@@ -569,6 +569,14 @@ export async function runProjectExport(
 		}
 	}
 
+	if (formats.includes("gtrk")) {
+		log.warn("导出的 gtrk 是有损的结构副本，工程编辑元数据和镜像原声轨不会完整保留；不要用它覆盖源工程");
+		if (wantsNle && hasBeats) {
+			log.warn(noParticles
+				? "混选 NLE 格式且跳过预渲，本次 gtrk 副本也不含 MG 颗粒"
+				: "混选 NLE 格式，成功预渲的 MG 颗粒会固化为视频，无法继续编辑原 HTML 颗粒");
+		}
+	}
 	const pricing = depsOverride.resolvePricing ?? resolveToolPricing;
 	const structPrice = await pricing("video_project_struct", "精修工程结构导出");
 	log.warn(`计费提示（按次）：${structPrice.billingHint}`);
@@ -576,7 +584,7 @@ export async function runProjectExport(
 		const particlePrice = await pricing(PARTICLE_TASK_TYPE, "MG 颗粒预渲（按分钟）");
 		log.warn(`计费提示（按分钟）：${particlePrice.billingHint}`);
 		log.warn(
-			`颗粒 ${plan.total} 颗 / 唯一 ${plan.unique} 颗 / 命中缓存 ${plan.cached} 颗 / 将提交 ${plan.miss} 个颗粒任务（缓存 ABI ${PARTICLE_RENDER_ABI}，qtrle 配方 ${QTRLE_DELIVERY_RECIPE}）`,
+			`颗粒 ${plan.total} 颗 / 唯一 ${plan.unique} 颗 / 命中缓存 ${plan.cached} 颗 / 待备齐 ${plan.miss} 颗（优先恢复已有任务，不重复计费；缓存 ABI ${PARTICLE_RENDER_ABI}，qtrle 配方 ${QTRLE_DELIVERY_RECIPE}）`,
 		);
 	}
 
@@ -591,7 +599,7 @@ export async function runProjectExport(
 		const rendered = await ensureParticleQtrle(
 			plan,
 			cfg,
-			{ concurrency: parseParticleConcurrency(opts.particleConcurrency), onTick: (done, total, id) => log.tick(`颗粒 ${done}/${total}（${id}）`) },
+			{ concurrency: parseParticleConcurrency(opts.particleConcurrency), onTick: (done, total, id) => log.tick(`颗粒 ${done}/${total}（${id}）`), delivery: { json: opts.json, landingWait: depsOverride.landingWait } },
 			particleDeps,
 		);
 		particlePaths = rendered.paths;

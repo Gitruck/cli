@@ -43,6 +43,7 @@ import {
 import { resolveToolPricing, type PriceResolver } from "./tool-pricing";
 import { noticeOnce } from "./compliance-notice";
 import { log } from "./log";
+import { deliverParticle, preflightParticleDelivery, ParticleDeliveryError, type ParticleDeliveryOptions } from "./particle-delivery";
 
 /** 颗粒渲染器 ABI。出处：客户端 `tonghe/particle-cache.ts:51 PARTICLE_RENDER_ABI`。
  *  v2 对应服务端 fix-particle-subcomposition-scale（声明尺寸 ≠ 720p 根舞台时 wrapper 缩放）。
@@ -390,12 +391,13 @@ export interface ParticleRenderResult {
  *
  * 失败策略 = **continue**（与客户端的 `errorPolicy:"stop"` 有意分歧）：CLI 是批处理场景，
  * 一颗坏颗粒不该毁掉整片渲染。失败颗粒**记名**返回，由命令层如实告知，MUST NOT 静默。
- * 缓存写失败同样只降级（内容寻址产物可重烤，误失效的代价上界 = 一次重烤）。
+ * export 传入 delivery 时，状态未确认或缓存交付失败必须停止，保留回执恢复原任务。
+ * 未传 delivery 的既有 render 调用仍沿用原失败策略。
  */
 export async function ensureParticleQtrle(
 	plan: ParticlePlan,
 	cfg: CloudConfig,
-	opts: { concurrency?: number; onTick?: (done: number, total: number, note: string) => void } = {},
+	opts: { concurrency?: number; onTick?: (done: number, total: number, note: string) => void; delivery?: ParticleDeliveryOptions } = {},
 	deps: ParticleDeps = {},
 ): Promise<ParticleRenderResult> {
 	const submit = deps.submitTask ?? realSubmitTask;
@@ -415,6 +417,8 @@ export async function ensureParticleQtrle(
 	}
 
 	const queue = plan.groups.filter((g) => !g.cached);
+	if (opts.delivery) await preflightParticleDelivery(queue.map(g => g.leader.cachePath), opts.delivery);
+	let deliveryError: unknown;
 	let done = 0;
 	let rendered = 0;
 	const total = queue.length;
@@ -432,6 +436,16 @@ export async function ensureParticleQtrle(
 				trackIndex: it.trackIndex,
 				id: it.clipId,
 			});
+			if (opts.delivery) {
+				const result = await deliverParticle(it.cachePath, opts.delivery, {
+					submit: () => submit(cfg, PARTICLE_TASK_TYPE, payload),
+					poll: id => poll(cfg, PARTICLE_TASK_TYPE, id) as Promise<{ download_url?: unknown }>,
+					download: dl,
+				});
+				if (result.submitted) rendered++;
+				for (const id of g.members) paths[id] = it.cachePath;
+				return;
+			}
 			const taskId = await submit(cfg, PARTICLE_TASK_TYPE, payload);
 			const out = (await poll(cfg, PARTICLE_TASK_TYPE, taskId)) as unknown as Record<string, unknown>;
 			// ⚠️ 按 Record<string, unknown> 取值：MUST NOT 改 cloud.ts 的 OralCutOutput 类型
@@ -443,6 +457,10 @@ export async function ensureParticleQtrle(
 			rendered++;
 			for (const id of g.members) paths[id] = it.cachePath;
 		} catch (e) {
+			if (e instanceof ParticleDeliveryError) {
+				deliveryError ??= e;
+				return;
+			}
 			const reason = (e as Error).message;
 			for (const id of g.members) failed.push({ clipId: id, reason });
 			log.warn(`颗粒 ${it.clipId} 渲染失败，本片将不含这一颗（其余照常）：${reason}`);
@@ -456,12 +474,14 @@ export async function ensureParticleQtrle(
 	let cursor = 0;
 	const worker = async (): Promise<void> => {
 		for (;;) {
+			if (deliveryError) return;
 			const i = cursor++;
 			if (i >= queue.length) return;
 			await runOne(queue[i]!);
 		}
 	};
 	await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
+	if (deliveryError) throw deliveryError;
 
 	return { paths, rendered, failed };
 }
