@@ -38,14 +38,14 @@ export async function prepareHighlightInput(input: string, out: string, ffmpegPa
 	} finally { await rm(temporary, { force: true }); }
 }
 
-export function highlightRequestId(prepared: HighlightInput, model: string, fileId: string): string {
-	return sha(JSON.stringify(["highlight-v2", prepared.proxySha256, prepared.duration, model, fileId]));
+export function highlightRequestId(prepared: HighlightInput, fileId: string): string {
+	return sha(JSON.stringify(["video-highlight-v1", prepared.proxySha256, prepared.duration, fileId]));
 }
 
 /** 不把空候选、越界时码或旧版跨块混排响应当作成功发现。 */
 export function validateHighlightOutput(out: Record<string, any>): void {
 	const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-	if (out._meta?.schema_version !== "dji-highlight-v2" || out.score_scope !== "per_request"
+	if (out._meta?.schema_version !== "video-highlight-v1" || out.score_scope !== "per_request"
 		|| !finite(out.dur) || out.dur <= 3 || !Array.isArray(out.groups) || !out.groups.length) {
 		throw new Error("高光结果版本、时长或分组不匹配，不能用作已验证候选");
 	}

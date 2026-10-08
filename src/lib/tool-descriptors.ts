@@ -1044,7 +1044,6 @@ const videoHighlight: ToolDescriptor = {
     input: { kind: "video", exts: PUBLIC_VIDEO_EXTS, maxDurationSec: 1800 },
     priceKey: "video_highlight", pricingContext: "当前仅内部成员验收；未开放外部收费",
     taskType: "cli/video_highlight", outputHint: "分请求高光候选（result-output.json）", pollTimeoutMs: 12 * 60_000,
-    options: [{ flag: "--highlight-model <tiny|lite>", desc: "高光模型，默认 tiny；分数不跨请求比较" }],
     async preprocess(ctx) {
         if (!ctx.inputAbs || !ctx.outDir) throw new Error("高光分析缺少素材或工程目录");
         ctx.warn("在本地生成低清无声分析代理，原片不上传；该步骤不替代画面与原声理解。");
@@ -1053,16 +1052,18 @@ const videoHighlight: ToolDescriptor = {
         return prepared.artifact;
     },
     buildPayload(fileId, ctx) {
-        const model = String(ctx.opts.highlightModel ?? "tiny");
-        if (model !== "tiny" && model !== "lite") throw new Error("--highlight-model 仅支持 tiny/lite");
         const prepared = highlightPrepared.get(ctx);
         if (fileId !== "__dry_run__" && !prepared) throw new Error("高光分析代理尚未准备好");
-        return { file_id: fileId, model, source_duration: prepared?.duration,
-            request_id: prepared ? highlightRequestId(prepared, model, fileId) : undefined };
+        return { file_id: fileId, source_duration: prepared?.duration,
+            request_id: prepared ? highlightRequestId(prepared, fileId) : undefined };
     },
     mapResult(out, ctx) {
         validateHighlightOutput(out);
-        return { ...out, source: ctx.inputAbs, source_fingerprint: highlightPrepared.get(ctx)?.sourceFingerprint };
+        const groups = (out.groups as Array<Record<string, unknown>>).map(group => Object.fromEntries(
+            ["request_index", "source_start", "source_end", "candidates", "top3"].filter(key => key in group).map(key => [key, group[key]])));
+        return { _meta: { schema_version: "video-highlight-v1" }, dur: out.dur, score_scope: "per_request",
+            candidate_count: out.candidate_count, cache_hit: out.cache_hit, groups,
+            source: ctx.inputAbs, source_fingerprint: highlightPrepared.get(ctx)?.sourceFingerprint };
     },
 };
 
