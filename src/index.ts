@@ -125,7 +125,7 @@ registerRender(program); // 本地渲染 gtrk 工程（EDL）→ 成片 mp4
 registerQc(program); // 成片质量扫描（闪帧/段内跳切/黑帧/冻结/爆音/静音/音画规整）
 registerSplit(program); // 视觉拆分派单器：transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch
 registerPatch(program); // 元素级编辑：move/trim/split/set —— 恒等式同步 + 帧对齐（agent 勿裸手改 JSON）
-// registerStruct(program);   // 已有 gtrk → 三方工程文件
+// 已有 .gtrk 的工程导出由 gtrk project export 承接，不另注册 struct 命令。
 registerMatrix(program); // B-roll 检索：dispatch.film_broll → split/broll-plan.json 候选清单（双口路由）
 registerMg(program); // MG 颗粒铺轨：dispatch.mg → 定位颗粒 HTML → lint → 铺 html-particle 到 beat_track（弃用别名 gtrk rrv）
 registerTool(program); // 单点工具族：gtrk tool <name> [input]（image_move/image_matting/video_matting…）+ gtrk tool list

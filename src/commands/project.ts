@@ -90,7 +90,7 @@ export const PUBLIC_PROJECT_FORMATS = ["xml", "fcpxml", "otio", "jianying", "cap
 export const PROJECT_FORMAT_ALIASES = ["jianying_draft", "jianying_meta", "capcut_draft", "capcut_meta"] as const;
 export const DEFAULT_PROJECT_EXPORT_FORMATS = ["jianying", "xml"] as const;
 
-/** `--formats` 纯本地解析：trim、去空、去重保序、公开值 + 兼容别名白名单。 */
+/** `--formats` 纯本地解析：trim、拒绝空项、去重保序、公开值 + 兼容别名白名单。 */
 export function parseExportFormats(raw?: string): string[] {
 	if (raw === undefined) return [...DEFAULT_PROJECT_EXPORT_FORMATS];
 	const values = raw.split(",").map((v) => v.trim());
@@ -869,21 +869,21 @@ export function registerProject(program: Command): void {
 	program
 		.command("project [words...]")
 		.description(
-			"工程组装与交付：init 从配音起盘；compose 本地分段拼接；export 导出剪映/XML/FCPXML/OTIO 等工程",
+			"工程组装与交付：init 从配音起盘；compose 本地分段拼接；export 导出剪映/XML/FCPXML/OTIO 等工程（结构按次计费，未命中缓存的 MG 颗粒按分钟计费）",
 		)
 		.option("--list <json>", "compose：本地分段清单（live/image/narration；源 in/out 秒；原片不上传）")
 		.option("--tts-task <task_id>", "主路：引用已完成的 audio_tts_clone 任务（服务端取产物音频+句级 segments，零 ASR）")
 		.option("--audio <file>", "兜底路：自备配音音频（与 --transcript 成对使用；CLI 先上传归一）")
 		.option("--transcript <file>", "兜底路：transcript.json（gtrk transcript <配音音频> --json 产出）")
 		.option("--canvas <WxH>", "画布尺寸（默认 1080x1920）")
-		.option("-o, --out <dir>", "产物目录（缺省 = <基目录>/<名>-video-project-<YYMMDD-HHMMSS>）")
+		.option("-o, --out <dir>", "产物目录（init 缺省为 <基目录>/<名>-video-project-<时间>；export 为 <工程目录>/export-<时间>；compose 必填）")
 		.option("--reupload", "兜底路：强制重新上传配音音频，忽略本地上传缓存")
 		.option("--keep-punctuation", "transcript 文稿保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
 		.option("--project <dir>", "export：工程目录（自动定位 gtrk/project.gtrk 或 project.gtrk）")
 		.option("--gtrk <path>", "export：显式指定 .gtrk 工程文件")
 		.option("-f, --formats <list>", "export：逗号分隔格式（默认 jianying,xml；支持 xml/fcpxml/otio/jianying/capcut/gtrk）")
 		.option("--jianying-draft-dir <dir>", "export：剪映/CapCut 草稿根目录；可用 auto 自动探测")
-		.option("--no-particles", "export：跳过 MG 颗粒预渲，零颗粒任务")
+		.option("--no-particles", "export：跳过 MG 颗粒预渲及其费用，NLE 工程不含这些颗粒；结构导出仍按次计费")
 		.option("--particle-concurrency <n>", "export：颗粒预渲并发数（1–8，默认 6）")
 		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")

@@ -1,5 +1,7 @@
 /**
- * 云渲/云端任务提交防线（add-matrix-local-search · matrix-lay-tracks spec「含本地素材工程的云渲提交防线」）。
+ * 素材本体云渲提交防线（add-matrix-local-search · matrix-lay-tracks spec「含本地素材工程的云渲提交防线」）。
+ * 仅适用于云端需要读取素材本体的任务；video_project_struct 纯结构转换、
+ * html_render_simple 仅上传颗粒 HTML 文本，不属于此防线的射程。
  *
  * 判据：工程 materials 里的 **B-roll 素材**（`broll-` 前缀家族）若
  *   ① id 带 `broll-local-` 前缀（本地素材身份，素材本体永不上云），或
