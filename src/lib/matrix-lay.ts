@@ -52,6 +52,7 @@ import { VFR_MISMATCH_RATIO } from "./media";
 import { compareWalls, wallFromDeclared, type SourceWall } from "./clock-adapter";
 import { videoRateOf } from "./gtrk-patch";
 import { assertGtrkWriteInvariants, assertTrackContinuity, assertTrimIdentity } from "./gtrk-invariants";
+import type { CompositeRefScan } from "./composite-particle";
 
 export const BROLL_PREVIEW_DIR = "assets/broll-preview";
 /** 本地素材封面目录（工程内相对路径；铺轨时 ffmpeg 现抽 best 帧落此，add-matrix-local-search 4.2）。 */
@@ -3033,6 +3034,16 @@ export interface LayResult {
 		frameGrid?: FrameGridSummary;
 		/** 时钟账面（add-cross-clock-adapter D2）：代理实测 / 回退自述 / 本地恒等计数与不一致明细。拒铺时缺席。 */
 		clock?: ClockSummary;
+		/**
+		 * 合成颗粒引用账面（link-composite-particle-profile D2）。★ 条件键：两项都为空时整键缺席
+		 * （无合成颗粒的工程 lay JSON 零新键）。`protected` = 本该剥离、因合成颗粒画中画槽位指着而保留的素材 id；
+		 * `readFailures` 非空 ⇒ 本轮一条素材登记都没剥（`held` = 原本要剥的条数），轨照常剥。
+		 */
+		compositeRefs?: {
+			protected: string[];
+			readFailures: Array<{ clipId: string; reason: string }>;
+			held: number;
+		};
 	};
 	broll: StructMetaBroll;
 	/** 铺轨过程中的非致命告警，交由命令层打印（纯函数不做 IO）。 */
@@ -3422,6 +3433,9 @@ export function layBrollTracks(opts: {
 	 * 应用与否由本函数以剥离后终态权威判定（音频驱动形态 ∧ 目标层首轨=最低号内容轨）；
 	 * 不适用时规划槽位（gap_fill 标记）被滤出落轨。缺席/mode none = 现状零回归。 */
 	gapFill?: { mode: GapFillMode; planned: GapFillEntry[] };
+	/** 合成颗粒引用扫描（link-composite-particle-profile D2）：命令层读颗粒 HTML 后传入，纯函数不做 IO。
+	 * 缺席 = 无合成颗粒保护（与本件落地前逐字节相同）。 */
+	compositeRefs?: CompositeRefScan;
 	/** 代理落盘即实测（add-cross-clock-adapter D2）：clip_id → 命令层对落盘代理 ffprobe 一次的结果。
 	 * 有实测 ⇒ 该 clip 的 `materials[]` 条目 `duration / video_size / video_rate` 取文件真值，云端自述只进比对（`summary.clock`）；
 	 * 探测失败 / 缺席 ⇒ 回退自述（与本件落地前逐字节相同）+ `unverified`。**决策层不消费它**（`refineWindow` 仍用 `cand.fps`）。 */
@@ -3557,7 +3571,36 @@ export function layBrollTracks(opts: {
 			}
 		}
 	}
+	// 合成颗粒（link-composite-particle-profile D2）：画中画槽位（own）指着的素材不在任何轨上，
+	// 只写在颗粒 HTML 的元数据块里——不计入就会被当成零引用剥掉，补充画面随之「需重新选择」。
+	const compositeProtected: string[] = [];
+	for (const id of opts.compositeRefs?.ids ?? []) {
+		if (removedMaterialIds.has(id) && !stillReferenced.has(id)) compositeProtected.push(id);
+		stillReferenced.add(id);
+	}
 	for (const id of stillReferenced) removedMaterialIds.delete(id);
+	// 有颗粒读不到 HTML：不知道它是不是合成颗粒、引用了谁 ⇒ 本轮一条素材登记都不剥（宁留勿删），轨照常剥。
+	const particleReadFailures = opts.compositeRefs?.readFailures ?? [];
+	const heldMaterials = particleReadFailures.length ? removedMaterialIds.size : 0;
+	if (particleReadFailures.length) {
+		removedMaterialIds.clear();
+		const head = particleReadFailures.slice(0, 5).map((f) => `${f.clipId}（${f.reason}）`).join("、");
+		warnings.push(
+			`有 ${particleReadFailures.length} 颗颗粒读不到 HTML：${head}${particleReadFailures.length > 5 ? ` 等` : ""}。` +
+				`无法判断它们是不是合成颗粒、引用了哪些素材，本轮未剥离任何素材登记` +
+				`${heldMaterials ? `（${heldMaterials} 条本该剥离的已保留）` : ""}；修好颗粒文件后重跑即可收敛。`,
+		);
+	}
+	if (compositeProtected.length) {
+		infos.push(
+			`因合成颗粒的画中画引用保留 ${compositeProtected.length} 条素材登记（不在轨上，但被颗粒元数据指着）：` +
+				`${compositeProtected.slice(0, 5).join("、")}${compositeProtected.length > 5 ? " 等" : ""}`,
+		);
+	}
+	const compositeRefsSummary =
+		compositeProtected.length || particleReadFailures.length
+			? { compositeRefs: { protected: compositeProtected, readFailures: particleReadFailures, held: heldMaterials } }
+			: {};
 	const keptMaterials = materials.filter((m) => !(typeof m.id === "string" && removedMaterialIds.has(m.id)));
 
 	// --force-relay 的后果必须先说清：raw 登记一删，盘上已下载的原片就地成孤儿（真机同类量级 1.27G）
@@ -4291,6 +4334,7 @@ export function layBrollTracks(opts: {
 				shifted: shiftedTotal,
 			},
 			clock,
+			...compositeRefsSummary,
 		},
 		broll,
 		warnings,

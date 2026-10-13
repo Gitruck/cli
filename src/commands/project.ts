@@ -509,12 +509,15 @@ function parseParticleConcurrency(raw: string | number | undefined): number {
 
 function formatParticleSummary(plan: ParticlePlan | undefined, rendered: number, skipped: { clipId: string; reason: string }[]) {
 	if (!plan) return { total: 0, unique: 0, cacheHit: 0, rendered: 0, failed: 0 };
+	// [link-composite-particle-profile] 按设计跳过的合成颗粒：条件键，没有时整键缺席（JSON 零新键）
+	const compositeSkipped = plan.skipped.flatMap((s) => (s.composite ? [{ clipId: s.clipId, compositionId: s.composite.compositionId }] : []));
 	return {
 		total: plan.total,
 		unique: plan.unique,
 		cacheHit: plan.cached,
 		rendered,
 		failed: skipped.length,
+		...(compositeSkipped.length ? { compositeSkipped } : {}),
 	};
 }
 
@@ -567,10 +570,14 @@ export async function runProjectExport(
 			depsOverride.particle,
 		);
 		// preflight 失败必须发生在首个 submit 前，避免前半批已计费后才发现坏路径。
-		if (plan.skipped.length) {
-			const detail = plan.skipped.map((s) => `${s.clipId}：${s.reason}`).join("；");
+		// [link-composite-particle-profile] 合成颗粒是**按设计跳过**（本版本不渲染），不算预检失败：
+		// 照常导出，该颗粒不进 video_track（与未能预渲的颗粒同一落法），并点名。
+		const failedPreflight = plan.skipped.filter((s) => !s.composite);
+		if (failedPreflight.length) {
+			const detail = failedPreflight.map((s) => `${s.clipId}：${s.reason}`).join("；");
 			throw new Error(`颗粒预检失败，尚未提交任何云任务：${detail}`);
 		}
+		for (const s of plan.skipped) if (s.composite) log.warn(`颗粒 ${s.clipId} 跳过：${s.reason}`);
 	}
 
 	if (formats.includes("gtrk")) {

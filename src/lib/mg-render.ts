@@ -23,6 +23,7 @@ import { submitTask as realSubmitTask, pollTask as realPollTask, download as rea
 import { lintParticle, parseCompositionId, type LintViolation } from "./mg-lint";
 import { resolveToolPricing, type PriceResolver } from "./tool-pricing";
 import { log } from "./log";
+import { compositeSkipReason, detectComposite } from "./composite-particle";
 
 export const MG_RENDER_TASK_TYPE = "html_render_simple";
 
@@ -64,7 +65,7 @@ export interface MgRenderOpts {
 export interface MgRenderResult {
 	ok: boolean;
 	mode: "render";
-	reason?: "geometry" | "lint" | "declined";
+	reason?: "geometry" | "lint" | "declined" | "composite";
 	composition_id?: string;
 	task_id?: string;
 	/** 产物 MOV 绝对路径。 */
@@ -120,6 +121,15 @@ export async function renderParticle(opts: MgRenderOpts, deps: MgRenderDeps = {}
 
 	const fileAbs = resolve(opts.file);
 	const html = await readFile(fileAbs, "utf8");
+
+	// ── 合成颗粒拒绝（link-composite-particle-profile）：本版本不渲染，零提交零计费 ─────────
+	// MUST NOT 当普通颗粒烤：画中画位置是透明占位，烤出来就是一块挖洞的图形层。
+	const composite = detectComposite(html);
+	if (composite.kind !== "none") {
+		const cid = composite.compositionId || basename(fileAbs).replace(/\.html?$/i, "");
+		log.err(`${compositeSkipReason(composite, cid)}——不提交云任务，零计费。`);
+		return { ok: false, mode: "render", reason: "composite", composition_id: cid };
+	}
 
 	// ── 几何拒绝（先于 lint，给专属话术）────────────────────────────────────────
 	//

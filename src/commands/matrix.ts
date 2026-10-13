@@ -16,7 +16,7 @@ import { parseOnlinePlatforms } from "../lib/online-broll-contract";
  */
 import type { Command } from "commander";
 import { resolve, join, dirname, basename, isAbsolute, relative, sep } from "node:path";
-import { existsSync, writeFileSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, statSync, readFileSync } from "node:fs";
 import { writeFile, mkdir, rename } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
@@ -26,6 +26,9 @@ import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 // [fix-matrix-lay-frame-grid D7] 顶层 video_rate 与 gtrk patch 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
 import { videoRateOf } from "../lib/gtrk-patch";
 import { sec2ms } from "../lib/frame-domain";
+// [link-composite-particle-profile D2] 合成颗粒画中画引用：命令层读颗粒 HTML，layBrollTracks 只收扫描结果
+import { scanCompositeOwnRefs } from "../lib/composite-particle";
+import { resolveParticleHtmlRef, type BeatLike, type MaterialLike } from "../lib/particle-qtrle";
 import {
 	BROLL_COVER_DIR,
 	BROLL_META_CANDIDATE_CAP,
@@ -3753,6 +3756,14 @@ async function layIntoProject(
 		);
 	}
 
+	// 合成颗粒引用（link-composite-particle-profile D2）：对**当刻**工程扫一遍颗粒 HTML（同步读，颗粒文件很小）。
+	// 读不到的颗粒交给 layBrollTracks 定夺（本轮零剥离素材登记），这里不吞错。
+	const compositeRefs = scanCompositeOwnRefs(freshGtrk, (clip) => {
+		const ref = resolveParticleHtmlRef(clip as BeatLike, (freshGtrk.materials as MaterialLike[] | undefined) ?? [], gtrkDir);
+		if (!ref) return undefined;
+		return ref.kind === "inline" ? ref.html : readFileSync(ref.path, "utf8");
+	});
+
 	let { next, summary, warnings, infos } = layBrollTracks({
 		gtrk: freshGtrk,
 		plan,
@@ -3767,6 +3778,7 @@ async function layIntoProject(
 		planPath: "split/broll-plan.json",
 		blackBed,
 		forceRelay,
+		compositeRefs,
 		...(gapModeEff !== "none" ? { gapFill: { mode: gapModeEff, planned: gapFills ?? [] } } : {}),
 	});
 
@@ -3834,6 +3846,8 @@ async function layIntoProject(
 				blackBed: false,
 				// 重跑必须原样带上 forceRelay：漏传会让「已授权强剥」的这次退回拒铺态（半截行为）
 				forceRelay,
+				// 同理：合成颗粒引用保护 MUST 原样带上，漏传 = 回退路径把补充画面剥掉
+				compositeRefs,
 				// PNG 无字节 ⇒ solid 兜底不可用 ⇒ gap 填充整体回退 none（fast 的 candidate 槽位同滤；
 				// 半套填充比已知现状更糟——磁吸风险以告警明示）
 			}));
@@ -4121,6 +4135,17 @@ async function layIntoProject(
 			removedTracks: summary.removedTracks,
 			keptEditedTracks: summary.keptEditedTracks,
 			blackTrack: summary.blackTrack,
+			// 合成颗粒引用账面（link-composite-particle-profile D2）：条件键，无合成颗粒 / 无读失败时整键缺席。
+			// ⚠️ 逐键重投影：决策层 summary.compositeRefs 不在这里补一行就到不了产物。
+			...(summary.compositeRefs
+				? {
+						composite_refs: {
+							protected: summary.compositeRefs.protected,
+							read_failures: summary.compositeRefs.readFailures,
+							held_materials: summary.compositeRefs.held,
+						},
+					}
+				: {}),
 			// 音频驱动跳铺明示（adjust-black-bed-audio-driven-skip）：仅跳铺时出现该键——
 			// 口播 / --no-black-bed 路径的 lay JSON 逐字节零新键
 			...(summary.blackBedSkipped ? { blackBedSkipped: summary.blackBedSkipped } : {}),

@@ -34,6 +34,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { CloudConfig } from "./config";
+import { compositeSkipReason, detectComposite } from "./composite-particle";
 import { loadConfig } from "./config";
 import {
 	submitTask as realSubmitTask,
@@ -253,6 +254,11 @@ export interface ParticleGroup {
 export interface ParticleSkip {
 	clipId: string;
 	reason: string;
+	/**
+	 * [link-composite-particle-profile] 合成颗粒本版本不渲染：有此键 = **按设计跳过**（该段按粗剪输出），
+	 * 不是预检失败——`gtrk project` 的「有 skipped 即拒导」MUST 排除它。缺席 = 既有的失败类跳过。
+	 */
+	composite?: { compositionId: string };
 }
 
 export interface ParticlePlan {
@@ -336,6 +342,17 @@ export async function buildParticlePlan(
 				skipped.push({ clipId, reason: `颗粒 HTML 读取失败（${ref.path}）：${(e as Error).message}` });
 				continue;
 			}
+		}
+		// 合成颗粒（含无效的）本版本不渲染：取到 HTML 之后、算键之前判身份，不进计划、不计费。
+		// MUST NOT 当普通颗粒提交——它的画中画位置是透明占位，烤出来叠上去就是一块挖洞的图形层。
+		const composite = detectComposite(html);
+		if (composite.kind !== "none") {
+			skipped.push({
+				clipId,
+				reason: compositeSkipReason(composite, clipId),
+				composite: { compositionId: composite.compositionId || clipId },
+			});
+			continue;
 		}
 		const opaque = beat.opaque === true;
 		const key = particleCacheKey({
