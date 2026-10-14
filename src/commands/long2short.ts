@@ -55,6 +55,8 @@ export interface Long2ShortOpts {
 	subtitleOut?: boolean;
 	/** 字幕保留全部标点（缺省服务端 B 案：逗号句号→空格、其余保留）→ subtitle.strip_punctuation=false。 */
 	keepPunctuation?: boolean;
+	/** 整体调速倍率（link-long2short-for-cli-speed）：0.5–2.0、保音高，云端写进逐 clip 工程、不渲染。 */
+	speedFactor?: string;
 	out?: string;
 	ffmpegPath?: string;
 	param: string[];
@@ -110,6 +112,9 @@ function buildDeps(o: Partial<Long2ShortDeps> = {}): Long2ShortDeps {
 	};
 }
 
+/** 调速倍率取值范围：与 infra `video_long2short/polish.py` 的 `SPEED_FACTOR_RANGE`、精剪 `speed.factor` 同值。 */
+export const SPEED_FACTOR_RANGE = [0.5, 2.0] as const;
+
 /** 超限报错的尾句：分段之后该干什么（长剪短侧 = 各段 clip 汇总成一张选题清单）。 */
 const DURATION_LIMIT_HINT = {
 	command: "long2short",
@@ -148,6 +153,15 @@ export function buildLong2ShortPayload(
 	if (subtitleFileId) p.subtitle_file_id = subtitleFileId;
 	if (opts.subtitleOut) p.outputs = ["project", "report", "subtitle"];
 	if (opts.keepPunctuation) p.subtitle = { strip_punctuation: false };
+	// 调速（link-long2short-for-cli-speed）：缺省 / 传 1 时零注入（payload 不含 speed 键）
+	if (opts.speedFactor != null) {
+		const n = Number(opts.speedFactor);
+		const [lo, hi] = SPEED_FACTOR_RANGE;
+		if (!Number.isFinite(n) || n < lo || n > hi) {
+			throw new Error(`--speed-factor 取值 ${lo}–${hi}（保音高，写进工程），拿到「${opts.speedFactor}」；更高倍率请在客户端对具体片段拖边变速`);
+		}
+		if (n !== 1) p.speed = { factor: n };
+	}
 	const duration: Record<string, unknown> = {};
 	if (opts.durationPref) duration.pref = opts.durationPref;
 	if (opts.maxClipSec != null) {
@@ -205,6 +219,34 @@ export async function copyClipDraftsToRoot(
 	return { paths, complete, attempted };
 }
 
+/**
+ * 根级 `files[]` 中的 transcript 条目 → `<outDir>/json/transcript.json`（导出供离线测试）。
+ * 返回落地路径；没有条目返回 undefined（老服务端），下载失败记 `errors.transcript` 并返回 undefined。
+ */
+export async function landTranscript(
+	files: Array<{ type?: string; download_url?: string }>,
+	outDir: string,
+	errors: Record<string, string>,
+	dl: (url: string, dest: string) => Promise<unknown> = download,
+): Promise<string | undefined> {
+	const item = files.find((f) => f.type === "transcript" && f.download_url);
+	if (!item?.download_url) {
+		log.info("本次服务端没有返回整片 transcript，无法自动上字幕（需要新版服务端）");
+		return undefined;
+	}
+	const dest = join(outDir, "json", "transcript.json");
+	try {
+		await mkdir(dirname(dest), { recursive: true });
+		await dl(item.download_url, dest);
+		log.info(`整片 transcript 已落：json/transcript.json（上字幕用 gtrk subtitle lay --transcript）`);
+		return dest;
+	} catch (e) {
+		errors.transcript = e instanceof Error ? e.message : String(e);
+		log.warn(`整片 transcript 下载失败：${errors.transcript}`);
+		return undefined;
+	}
+}
+
 export function registerLong2Short(program: Command): void {
 	program
 		.command("long2short <input>")
@@ -219,6 +261,7 @@ export function registerLong2Short(program: Command): void {
 		.option("--subtitle-file <path>", "现成单语字幕文件（.srt/.ass）作转写来源，替代云端 ASR（切点=字幕行边界；双语/多层 .ass 会被拒）")
 		.option("--subtitle-out", "逐 clip 另产单语 .srt 字幕（按目标画布档位智能拆行，落 clip{i}/srt/）")
 		.option("--keep-punctuation", "字幕保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
+		.option("--speed-factor <n>", "整体调速倍率 0.5–2.0（保音高；倍率写进逐 clip 工程、云端不渲染、不加价；缺省不调速）")
 		.option("--output-size <s>", "输出画布 9:16|16:9|1:1 或自定义 WxH（缺省服务端 9:16）")
 		.option("-f, --formats <list>", "三方格式（逗号分隔，云端逐 clip 直产）", "gtrk,jianying,xml")
 		.option("--jianying-draft-dir <dir>", "剪映草稿根目录；传路径或 auto（默认读 gtrk init 配置 / 自动探测）")
@@ -293,7 +336,7 @@ export async function runLong2Short(
 			throw new Error(`--subtitle-file 只接受单语 .srt/.ass，拿到「${subExt || "无扩展名"}」`);
 		}
 	}
-	//   ③ 必填/数值干跑（--language 必填、--max-clip-sec 有限数值）：拿假 file_id 拼一遍触发校验。
+	//   ③ 必填/数值干跑（--language 必填、--max-clip-sec 有限数值、--speed-factor 范围）：拿假 file_id 拼一遍触发校验。
 	//      subtitle_file_id 此刻尚未上传得到，传 undefined 不影响这两项校验。
 	void buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget, undefined);
 
@@ -344,7 +387,10 @@ export async function runLong2Short(
 	const output = (await pollToolTask(cfg, TASK_TYPE, taskId, {
 		timeoutMs: POLL_TIMEOUT_MS,
 		onTick: (status, progress) => log.tick(`${status}${progress != null ? ` ${Math.round(progress)}%` : ""}`),
-	})) as OralCutOutput & { clips?: CloudClip[]; report?: { split_manifest?: SplitManifestItem[] } };
+	})) as OralCutOutput & {
+		clips?: CloudClip[];
+		report?: { split_manifest?: SplitManifestItem[]; transcript_word_timing?: string };
+	};
 	log.tickEnd();
 
 	const clips = output.clips ?? [];
@@ -416,6 +462,11 @@ export async function runLong2Short(
 		}
 	}
 
+	// ⑥b 整片源时基 transcript（link-long2short-for-cli-transcript）：落 <产物根>/json/transcript.json
+	//    （与 oralcut 物化按格式分组的 json/ 同口径），供 `gtrk subtitle lay --transcript` 给入选 clip 上字幕。
+	//    失败记 errors.transcript、不中止；老服务端没给就一行说明，不报错。
+	const transcriptFile = await landTranscript(output.files ?? [], outDir, errors);
+
 	// ⑦ 剪映草稿逐 clip 拷入草稿根（目标名对齐服务端 nle_draft_dir 的 _clip{i} 后缀约定；
 	//   文件名落成剪映固定两件套，否则草稿目录建了也扫不到）。日志按实际齐全条数说话——
 	//   原实现无条件打「剪映里直接可见」，正是这枚静默失败从真机 E2E 底下溜走的直接原因。
@@ -451,6 +502,8 @@ export async function runLong2Short(
 				jumpCut: opts.jumpCut !== false,
 				splitMaterials: { landed: splitLanded, total: manifest.length },
 				taskId,
+				errors,
+				transcriptWordTiming: output.report?.transcript_word_timing,
 			}),
 		);
 		log.info(`总览已生成：clips.md（逐条见 clip{i}/clip.md）`);
@@ -471,6 +524,7 @@ export async function runLong2Short(
 		clips: clipResults,
 		splitMaterials: { landed: splitLanded, total: manifest.length },
 		reportFile: join(outDir, "report.json"),
+		...(transcriptFile ? { transcriptFile } : {}),
 		// 源片帧率账面（add-frame-rate-table-vfr-detect D4）：上传前探得的 r / avg / vfr，机读对应上传前那条 VFR WARN
 		source: sourceRateInfo(inputAbs, geo),
 		// 落地复核汇总（D5）：逐 clip 明细在 clips[i].landing_check，这里只给一眼能看的总数（不改退出码）

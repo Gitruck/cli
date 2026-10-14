@@ -190,7 +190,7 @@ GITRUCK_CRASH_REPORT=0 gtrk oralcut a.mp4   # 环境变量，临时关一次（�
 
 ### `gtrk long2short` / `gtrk pip` / `gtrk qc` — 常用补充
 
-- `gtrk long2short <input>`：按话题选段并跳剪，逐 clip 输出 gtrk / 剪映 / XML 工程；`--split-screen` 使用 720p 代理做智能分屏；`--output-size` 选择画幅；`--subtitle-out` 另产逐 clip 字幕。每次只选一种画幅，横竖屏分别运行；成片条数由内容决定。完整参数见 `gtrk long2short --help`。
+- `gtrk long2short <input>`：按话题选段并跳剪，逐 clip 输出 gtrk / 剪映 / XML 工程；`--split-screen` 使用 720p 代理做智能分屏；`--output-size` 选择画幅；`--subtitle-out` 另产逐 clip 字幕；`--speed-factor 0.5–2.0` 把整体调速（保音高）写进逐 clip 工程（云端不渲染、不加价）。产物根另落整片转写 `json/transcript.json`，可对任一 clip 上客户端字幕轨：`gtrk subtitle lay --gtrk <clip 目录>/gtrk/<工程>.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`（`--language` 为云端拆行语种，缺省 zh-CN）。每次只选一种画幅，横竖屏分别运行；成片条数由内容决定。完整参数见 `gtrk long2short --help`。
 - `gtrk pip lay`：把同步录制的屏录或第二机位按口播剪点铺成画中画。两源需有可对齐的公共声音；低置信时先在客户端校准，再按提示恢复。运行 `gtrk pip lay --help` 查看输入、形状、位置和偏移参数。
 - `gtrk qc <成片>`：检查闪帧、黑帧、冻结、音量和同步问题；用 `--gtrk` 提供工程上下文，`--fail-on` 控制管线门槛。检查结论供定位问题，不自动替你修片。
 

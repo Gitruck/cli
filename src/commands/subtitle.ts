@@ -88,6 +88,11 @@ export interface SubtitleLayOpts {
 	maxGap?: string;
 	/** 离线模式：不调云端拆行，用本地拆窗器（冻结版兜底）。缺省 false = 云端拆行。 */
 	offline?: boolean;
+	/**
+	 * 云端拆行语种（link-long2short-for-cli-transcript）：缺省沿用 `TRANSCRIPT_LANGUAGE`，请求体逐字节不变；
+	 * 长剪短等非中文源按其提交语种传入。`--offline` 下本地拆窗器不用它。
+	 */
+	language?: string;
 }
 
 export type SubtitleSplitter = "cloud" | "offline";
@@ -259,7 +264,7 @@ export async function runSubtitleLay(opts: SubtitleLayOpts, deps: SubtitleLayDep
 				splitLines({
 					lines,
 					canvas: [canvas.width, canvas.height],
-					language: TRANSCRIPT_LANGUAGE,
+					language: opts.language?.trim() || TRANSCRIPT_LANGUAGE,
 					subtitleType: presetId,
 				}),
 			maxGapSec,
@@ -382,6 +387,7 @@ export function registerSubtitle(program: Command): void {
 		.option("--color <id>", "字幕颜色（雅黑/淡绿/森林绿/湖蓝/道奇蓝/钢蓝/浅粉红/深橙/珊瑚橙/橙红/土豪金，默认 雅黑）")
 		.option("--keep-punctuation", "保留原始标点（默认清洗：中英逗号句号替换为空格，小数/千分位/缩写不误伤）")
 		.option("--offline", "离线模式：不调云端拆行，用本地拆窗器（冻结版兜底）；缺省走云端 subtitle_line_split（0 积分，按样式模板实算宽度预算）")
+		.option("--language <code>", "云端拆行语种（如 en-US / ja-JP；缺省 zh-CN；--offline 下不使用）")
 		.option("--max-units <n>", "【仅 --offline】单窗最大字宽（CJK=1/ASCII=0.5；缺省按画布档：横屏 20/竖屏 13；0=不拆窗）")
 		.option("--max-gap <s>", "相邻字幕 gap ≤ 此秒数时桥接前一条（缺省 1.5：等价剪映「自动填充文本空隙」，但更长的真实停顿不硬填；0=不桥接）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")

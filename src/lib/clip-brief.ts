@@ -15,9 +15,13 @@ export interface OverviewContext {
 	jumpCut: boolean;
 	splitMaterials?: { landed: number; total: number };
 	taskId?: string;
+	/** 根级 errors（服务端 + 落地）：只读 `clip{i}:polish:speed` 降级键（link-long2short-for-cli-speed）。 */
+	errors?: Record<string, string>;
+	/** 服务端 `report.transcript_word_timing`：`line_even` 时提示字幕词级时间为近似值（link-long2short-for-cli-transcript）。 */
+	transcriptWordTiming?: string;
 }
 
-const str = (v: unknown): string | undefined => {
+const str =(v: unknown): string | undefined => {
 	const s = typeof v === "string" ? v.trim() : "";
 	return s ? s : undefined;
 };
@@ -48,9 +52,21 @@ function jumpcutText(note: string): string {
 	return note;
 }
 
-/** 一条切片的时长与片段数（缺 segments 时退化为单段）。 */
+/**
+ * 云端调速摘要（link-long2short-for-cli-speed）：`clip.polish = {speed: {factor, keep_pitch}, track_duration_ms}`。
+ * 只在服务端确实把倍率写进了该 clip 工程时出现；缺席 ⇒ 未调速（或调速降级），按原速口径渲染。
+ */
+function speedOf(clip: ClipMeta): { factor: number; keepPitch: boolean; trackMs?: number } | undefined {
+	const polish = clip.polish as ClipMeta | undefined;
+	const speed = polish?.speed as ClipMeta | undefined;
+	const factor = num(speed?.factor);
+	if (factor == null) return undefined;
+	return { factor, keepPitch: speed?.keep_pitch !== false, trackMs: num(polish?.track_duration_ms) };
+}
+
+/** 一条切片的时长与片段数（缺 segments 时退化为单段）。调速生效时取变速后的轨上时长。 */
 function clipDurationMs(clip: ClipMeta): number | undefined {
-	return num(clip.total_duration_ms) ?? num(clip.duration_ms);
+	return speedOf(clip)?.trackMs ?? num(clip.total_duration_ms) ?? num(clip.duration_ms);
 }
 function clipSegmentCount(clip: ClipMeta): number | undefined {
 	return num(clip.segment_count) ?? (Array.isArray(clip.segments) ? clip.segments.length : undefined);
@@ -85,6 +101,8 @@ export function renderClipBrief(clip: ClipMeta, index: number, files: Record<str
 	const span = sourceSpan(clip);
 	if (span) bits.push(`源片 ${fmtTime(span[0])}–${fmtTime(span[1])}`);
 	if (bits.length) out.push(`- ${bits.join(" · ")}`, "");
+	const sp = speedOf(clip);
+	if (sp) out.push(`- 已整体 ${sp.factor}x（${sp.keepPitch ? "保音高" : "音高随速度变"}），倍率写在工程里，可在客户端改回`, "");
 
 	const score = num(clip.score);
 	const reason = str(clip.score_reason);
@@ -150,11 +168,28 @@ export function renderClipsOverview(clips: ClipMeta[], ctx: OverviewContext): st
 	for (const [i, clip] of clips.entries()) {
 		const dur = clipDurationMs(clip);
 		const score = num(clip.score);
+		const sp = speedOf(clip);
+		const durCell = dur != null ? `${fmtTime(dur)}${sp ? `（${sp.factor}x）` : ""}` : "—";
 		out.push(
-			`| clip${i} | ${cell(str(clip.title) ?? "—")} | ${dur != null ? fmtTime(dur) : "—"} | ${score ?? "—"} | ${cell(str(clip.summary) ?? "—")} |`,
+			`| clip${i} | ${cell(str(clip.title) ?? "—")} | ${durCell} | ${score ?? "—"} | ${cell(str(clip.summary) ?? "—")} |`,
 		);
 	}
 	out.push("", "> 逐条入选理由、跳剪说明、高光词见各 `clip{i}/clip.md`。");
+
+	// 调速降级如实列出（link-long2short-for-cli-speed）：这些 clip 的工程按原速产出，与变速成功的分开说
+	const unsped = Object.keys(ctx.errors ?? {})
+		.map((k) => /^clip(\d+):polish:speed$/.exec(k)?.[1])
+		.filter((x): x is string => x != null)
+		.map(Number)
+		.sort((a, b) => a - b);
+	if (unsped.length) {
+		out.push("", "## ⚠️ 未能变速的切片", "");
+		for (const i of unsped) out.push(`- clip${i}：调速写入失败，工程按原速产出（原因见 result.json errors）`);
+	}
+	// 字幕文件来源的近似字级（link-long2short-for-cli-transcript）
+	if (ctx.transcriptWordTiming === "line_even") {
+		out.push("", "> 字幕来源是字幕文件：上字幕时按行内均分，词级时间为近似值（整行起止准确）。");
+	}
 	return `${out.join("\n")}\n`;
 }
 

@@ -58,6 +58,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 | `--subtitle-file <path>` | **现成单语字幕**（.srt/.ass）作转写来源，替代云端 ASR（用户手里有片源字幕/人工校对稿时用，省一次识别）。切点精度降为**字幕行边界**；双语/多层 .ass 会被拒；与 stt 类参数互斥 |
 | `--subtitle-out` | 逐 clip 另产**单语 .srt 字幕**（按目标画布档位智能拆行：横屏约 20 字/行、竖屏约 13 字/行），落 `clip{i}/srt/` |
 | `--keep-punctuation` | 字幕保留全部标点。缺省按统一口径去标点：逗号句号→空格、`？！` 等保留 |
+| `--speed-factor <n>` | 整体调速 `0.5–2.0`（保音高）。倍率**写进逐 clip 工程**（每个片段带 `speed`），客户端 / 剪映 / PR 都按倍率播放、可在客户端改回；云端不渲染、不加价。**只在用户主动要求时加**；更高倍率请在客户端对具体片段拖边变速 |
 | `--output-size <s>` | 画布 `9:16|16:9|1:1` 或 `WxH`（缺省 9:16 竖版） |
 | `-f, --formats <list>` | 三方格式，缺省 `gtrk,jianying,xml`（云端逐 clip 直产；gtrk 恒有） |
 | `--jianying-draft-dir <dir>` | 剪映草稿根（或 `auto`）；各 clip 草稿落 `<草稿根>/<产物根名>_clip{i}` |
@@ -76,6 +77,10 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 ## 产物（跑完把这些讲给用户）
 
 - 产物根 `<毛片名>-long2short/`：`report.json`（选段报告）+ `result.json` + 逐 clip 子目录 `clip0/ clip1/ …`（各含 `gtrk/` 客户端工程、`jianying/` 草稿、`xml/` PR 工程；开了 `--subtitle-out` 另有 `srt/clip{i}.srt` 单语字幕）。
+- 产物根 `json/transcript.json`：**整片**源时基转写（一份服务全部 clip）。要给某条 clip 上客户端字幕轨（可换样式、可整轨删、不烧进画面）：
+  `gtrk subtitle lay --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`
+  （clip 工程文件名以 `clip{i}/gtrk/` 下实际文件为准）。上完字幕的是**客户端工程**；云端早先产出的剪映 / PR 工程不含这条字幕轨，要带字幕的剪映草稿请从客户端导出。老服务端没有这份文件时，CLI 会提示「无法自动上字幕」。
+- 用了 `--speed-factor` 时：`clips.md` 的时长是**变速后**的时长并标注倍率；若有 clip 未能变速，`clips.md` 会单列「未能变速的切片」，如实告诉用户。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
 - 开了 `--split-screen` 时：**分屏素材落在毛片旁的 `split_screen/` 子目录**（工程素材路径指向那里，别移动/删除，移动了工程会缺素材）——这点要提前告知用户。
 - 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`。**判据**：草稿目录里必须是 `draft_content.json` + `draft_meta_info.json` 两个精确文件名（云端产物侧的 `clip{i}_` 前缀在拷进草稿根这一跳被剥掉，产物目录 `clip{i}/jianying/` 里保留带前缀的归档原名）。CLI 日志按实际齐全条数报「N/M 条两件套齐全」，不齐的记进 `result.json` 的 `errors`、该 clip 的 `jianyingDraftPath` 为 `null`。

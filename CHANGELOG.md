@@ -11,6 +11,11 @@
 
 ## 未发布
 
+- `long2short --speed-factor 0.5–2.0`：整体调速（保音高）写进逐 clip 工程，客户端 / 剪映 / PR 都按倍率播放，云端不渲染、不加价；`clips.md` 标注倍率，未能变速的 clip 单列。需配合服务端 `add-long2short-for-cli-speed` 上线。
+- `long2short` 产物根新增整片转写 `json/transcript.json`，可用 `gtrk subtitle lay --gtrk … --transcript …` 给任一 clip 上客户端字幕轨；字幕文件来源时 `clips.md` 提示词级时间为近似值。需配合服务端 `add-long2short-for-cli-transcript` 上线，老服务端下不报错。
+- `subtitle lay --language <code>`：指定云端拆行语种（缺省仍为 zh-CN），非中文源上字幕不再按中文断句。
+- `/gtrk-live-slicing` 选题确认后对入选切片缺省字幕上轨；调速只在用户主动要求时加。
+
 ## 1.3.2（2026-10-08）
 
 - 本地视觉理解增加当前 Agent 审阅交接：`matrix describe --prepare/--review`，已完成的本地判断不调用豆包，明确无法完成的条目按需补齐。
