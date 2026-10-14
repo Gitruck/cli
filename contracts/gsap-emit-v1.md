@@ -11,7 +11,7 @@
 
 > 颗粒可以用时间线回调（`onUpdate` 等）驱动画面；保证定帧时回调可达是渲染引擎侧的义务，不是颗粒作者的义务。本节是该主题的唯一口径来源。
 
-- **引擎侧（MUST）**：定帧时必须保证 GSAP 时间线回调可达，使用 `seek(t, false)`、`time(t)`、`progress(p)` 或 `totalTime(t)` 等等价方式，不能使用默认会抑制回调的裸 `seek(t)`。
+- **引擎侧（MUST）**：定帧时必须保证 GSAP 时间线回调可达，并定位到包含 repeat / yoyo 的完整时间轴。优先使用 `seek(t, false)` 或 `totalTime(t, false)`；`time(t)` / `progress(p)` 只适用于无 repeat 的根时间线，不能视为完整时间轴定位的通用等价替代。不能使用默认会抑制回调的裸 `seek(t)`。
 - **颗粒侧（MUST NOT）**：颗粒可以用 `onUpdate` / `onStart` / `onComplete` / `onRepeat` 写 DOM 或属性；不得运行时覆写 `tl.seek`，也不得替换 `window.__timelines[…]`。新颗粒不得添加 seek 垫片；已有垫片可在重渲复验后择期清理。
 - **幂等回调**：逐帧 scrub 会反复触发回调，回调必须从当前补间状态重算画面，不得累加计数、追加数组或执行一次性 DOM 插入。
 - **lint 哨兵**：`x-callback-driven`、`x-engine-api-override`、`x-raf-interval` 均为非致命提醒；它们用于提示引擎接口风险，不要求作者绕过契约自行添加垫片。
