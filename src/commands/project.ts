@@ -61,6 +61,8 @@ import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { createOutDir, timestamp as toolTimestamp } from "../lib/tool-runner";
 import { composeProject } from "../lib/project-compose";
+import { runBackground, type BackgroundOpts } from "../lib/project-background";
+import { GtrkWritebackConflictError } from "../lib/gtrk-writeback";
 export { buildComposedProject, parseComposeList, composeProject } from "../lib/project-compose";
 
 // cli 域同步轻接口（SYNC_INLINE 家族）：cloud.ts 的 /task/${taskType} 模板天然拼出该路径
@@ -71,17 +73,21 @@ const TTS_TASK_TYPE = "audio_tts_clone";
 export const DEFAULT_CANVAS: [number, number] = [1080, 1920];
 
 /** 本地时间戳 YYMMDD-HHMMSS（与 oralcut 同式），产物目录命名用。 */
-/** positional 解析：project 族当前支持 init / export。 */
-export function parseProjectPositional(words: string[] | undefined): "init" | "export" | "compose" {
+type ProjectMode = "init" | "export" | "compose" | "background";
+
+/** positional 解析：project 族当前支持 init / export / compose / background。 */
+export function parseProjectPositional(words: string[] | undefined): ProjectMode {
 	if (!words || words.length === 0) {
 		throw new Error(
 			"缺少子命令——用法：gtrk project init --tts-task <task_id> | --audio <配音> --transcript <json>；或 gtrk project export --project <目录>",
 		);
 	}
-	if (words.length > 1 || !["init", "export", "compose"].includes(words[0]!)) {
-		throw new Error(`未知子命令「${words.join(" ")}」——当前支持：gtrk project init、gtrk project export、gtrk project compose`);
+	if (words.length > 1 || !["init", "export", "compose", "background"].includes(words[0]!)) {
+		throw new Error(
+			`未知子命令「${words.join(" ")}」——当前支持：gtrk project init、gtrk project export、gtrk project compose、gtrk project background`,
+		);
 	}
-	return words[0] as "init" | "export" | "compose";
+	return words[0] as ProjectMode;
 }
 
 /** 服务端公开工程格式；顺序也是默认提示与提交体的稳定顺序。 */
@@ -386,6 +392,60 @@ export interface ProjectInitOpts {
 	jianyingDraftDir?: string;
 	particles?: boolean;
 	particleConcurrency?: string | number;
+	// background 专属（add-project-background-command）；其它子命令收到即硬拒。
+	blur?: boolean;
+	intensity?: string;
+	color?: string;
+	clear?: boolean;
+	dryRun?: boolean;
+}
+
+/** background 专属旗标；其它子命令收到其一即报错。 */
+const BACKGROUND_ONLY_OPTIONS = [
+	["blur", "--blur"],
+	["intensity", "--intensity"],
+	["color", "--color"],
+	["clear", "--clear"],
+	["dryRun", "--dry-run"],
+] as const;
+
+function backgroundOnlyOption(opts: ProjectInitOpts): string | undefined {
+	return BACKGROUND_ONLY_OPTIONS.find(([key]) => opts[key] !== undefined)?.[1];
+}
+
+/** `gtrk project background`：只写 struct_meta.client_background（零计费、不访问云端）。 */
+function runProjectBackgroundCommand(opts: ProjectInitOpts): void {
+	if (opts.json) routeLogsToStderr();
+	for (const [key, flag] of [
+		["ttsTask", "--tts-task"], ["audio", "--audio"], ["transcript", "--transcript"], ["canvas", "--canvas"],
+		["out", "--out"], ["reupload", "--reupload"], ["keepPunctuation", "--keep-punctuation"], ["formats", "--formats"],
+		["jianyingDraftDir", "--jianying-draft-dir"], ["particleConcurrency", "--particle-concurrency"], ["list", "--list"],
+	] as const) {
+		if (opts[key] !== undefined) throw new Error(`background 不接受 ${flag}`);
+	}
+	if (opts.particles === false) throw new Error("background 不接受 --no-particles");
+	const gtrkPath = resolveProjectGtrkPath(opts, "background");
+	const bgOpts: BackgroundOpts & { dryRun?: boolean } = {
+		blur: opts.blur, intensity: opts.intensity, color: opts.color, clear: opts.clear, dryRun: opts.dryRun,
+	};
+	let result;
+	try {
+		result = runBackground(gtrkPath, bgOpts);
+	} catch (e) {
+		if (e instanceof GtrkWritebackConflictError && opts.json) {
+			console.log(JSON.stringify({
+				ok: false, mode: "project-background", gtrk: gtrkPath, written: false,
+				conflict: { expected_revision: e.expectedRevision, actual_revision: e.actualRevision },
+			}));
+		}
+		throw e;
+	}
+	const shown = result.background === null ? "已清除（客户端回到缺省黑底）"
+		: result.background.type === "blur" ? `模糊底 · 强度 ${result.background.blurIntensity}` : `纯色 ${result.background.color}`;
+	if (result.dry_run) log.info(`[dry-run] 将写入画布背景：${shown}（未写文件）`);
+	else if (!result.changed) log.ok(`画布背景已是${shown}，文件未改动`);
+	else log.ok(`画布背景：${shown}——客户端打开即见，可在设置里改回；剪映 / PR 工程与本地 gtrk render 不带它`);
+	if (opts.json) console.log(JSON.stringify(result));
 }
 
 /** 测试注入面（MUST NOT 真调云端）；缺省 = 真实现。 */
@@ -481,13 +541,13 @@ function hasInitOnlyOptions(opts: ProjectExportOpts & ProjectInitOpts): string |
 	return undefined;
 }
 
-function resolveProjectGtrkPath(opts: ProjectExportOpts): string {
+function resolveProjectGtrkPath(opts: Pick<ProjectExportOpts, "gtrk" | "project">, sub = "export"): string {
 	if (opts.gtrk) {
 		const p = resolve(opts.gtrk);
 		if (!existsSync(p)) throw new Error(`找不到 --gtrk 指定的工程文件：${p}`);
 		return p;
 	}
-	if (!opts.project) throw new Error("project export 需要 --project <工程目录> 或 --gtrk <工程文件>");
+	if (!opts.project) throw new Error(`project ${sub} 需要 --project <工程目录> 或 --gtrk <工程文件>`);
 	const dir = resolve(opts.project);
 	const candidates = [join(dir, "gtrk", "project.gtrk"), join(dir, "project.gtrk")];
 	const hit = candidates.find((p) => existsSync(p));
@@ -876,7 +936,7 @@ export function registerProject(program: Command): void {
 	program
 		.command("project [words...]")
 		.description(
-			"工程组装与交付：init 从配音起盘；compose 本地分段拼接；export 导出剪映/XML/FCPXML/OTIO 等工程（结构按次计费，未命中缓存的 MG 颗粒按分钟计费）",
+			"工程组装与交付：init 从配音起盘；compose 本地分段拼接；export 导出剪映/XML/FCPXML/OTIO 等工程（结构按次计费，未命中缓存的 MG 颗粒按分钟计费）；background 写客户端画布背景（零计费）",
 		)
 		.option("--list <json>", "compose：本地分段清单（live/image/narration；源 in/out 秒；原片不上传）")
 		.option("--tts-task <task_id>", "主路：引用已完成的 audio_tts_clone 任务（服务端取产物音频+句级 segments，零 ASR）")
@@ -886,8 +946,13 @@ export function registerProject(program: Command): void {
 		.option("-o, --out <dir>", "产物目录（init 缺省为 <基目录>/<名>-video-project-<时间>；export 为 <工程目录>/export-<时间>；compose 必填）")
 		.option("--reupload", "兜底路：强制重新上传配音音频，忽略本地上传缓存")
 		.option("--keep-punctuation", "transcript 文稿保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
-		.option("--project <dir>", "export：工程目录（自动定位 gtrk/project.gtrk 或 project.gtrk）")
-		.option("--gtrk <path>", "export：显式指定 .gtrk 工程文件")
+		.option("--project <dir>", "export / background：工程目录（自动定位 gtrk/project.gtrk 或 project.gtrk）")
+		.option("--gtrk <path>", "export / background：显式指定 .gtrk 工程文件")
+		.option("--blur", "background：模糊底（主轨视频的模糊副本垫底，横竖互转时去黑边）")
+		.option("--intensity <n>", "background：配合 --blur 的模糊强度 0–1000（缺省 200）")
+		.option("--color <#RRGGBB>", "background：纯色底")
+		.option("--clear", "background：删除画布背景设置，回到客户端缺省黑底")
+		.option("--dry-run", "background：只校验并回执将写入的值，不写文件")
 		.option("-f, --formats <list>", "export：逗号分隔格式（默认 jianying,xml；支持 xml/fcpxml/otio/jianying/capcut/gtrk）")
 		.option("--jianying-draft-dir <dir>", "export：剪映/CapCut 草稿根目录；可用 auto 自动探测")
 		.option("--no-particles", "export：跳过 MG 颗粒预渲及其费用，NLE 工程不含这些颗粒；结构导出仍按次计费")
@@ -896,6 +961,12 @@ export function registerProject(program: Command): void {
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: ProjectInitOpts) => {
 			const mode = parseProjectPositional(words);
+			if (mode === "background") {
+				runProjectBackgroundCommand(opts);
+				return;
+			}
+			const bgOnly = backgroundOnlyOption(opts);
+			if (bgOnly) throw new Error(`${bgOnly} 只属于 gtrk project background`);
 			if (mode === "compose") {
 				if (opts.json) routeLogsToStderr();
 				if (!opts.list || !opts.out) throw new Error("compose 需要 --list <清单.json> --out <新的工程目录>");

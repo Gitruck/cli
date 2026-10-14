@@ -475,6 +475,28 @@ There are two billing surfaces: structural project export is billed per task, wh
 
 Before particle rendering, the command performs HTML, path and cache preflight; a preflight failure submits no cloud task. A single particle render or download failure is recorded in `result.json` while other formats continue. With `--json`, stdout contains one result JSON line and human logs go to stderr.
 
+### `gtrk project background` — client canvas background (blur / solid color)
+
+Changes only `struct_meta.client_background` in the `.gtrk`; the client renders the canvas background from it when the project opens, and the user can change it back in the client settings. The typical use is a blurred fill instead of black bars when a landscape source sits on a portrait canvas. Zero credits, no cloud access; Jianying / Premiere projects and local `gtrk render` do not carry this setting.
+
+```bash
+gtrk project background --gtrk <project-file> --blur
+gtrk project background --project <project-dir> --blur --intensity 300
+gtrk project background --gtrk <project-file> --color "#1A1A1A"
+gtrk project background --gtrk <project-file> --clear
+```
+
+| Option | Purpose |
+|---|---|
+| `--project <dir>` / `--gtrk <path>` | Locate the project, same rules as `project export` |
+| `--blur` | Blurred fill: a blurred copy of the visible main-track picture underneath |
+| `--intensity <n>` | With `--blur`, 0–1000, default 200 |
+| `--color <#RRGGBB>` | Solid color (six-digit hex) |
+| `--clear` | Remove the setting and return to the client's default black |
+| `--dry-run` | Validate and report the value that would be written, without writing |
+
+Exactly one mode is required. Writes go through atomic replace with the content-revision guard and leave everything else intact; nothing is written when the value is unchanged. The `--json` receipt includes the revisions before and after.
+
 > **`--beat-align`**: follows the climax-anchor rule in the table above; an explicit `--climax` overrides the automatic selector. The mode calls `audio_music_analyze` and incurs its listed charge.
 
 

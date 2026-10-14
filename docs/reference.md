@@ -507,6 +507,28 @@ gtrk project export --gtrk <工程文件> --formats jianying,xml --out <产物�
 
 颗粒预渲前会先完成 HTML、路径和缓存预检；预检失败不会提交任何云任务。单颗粒渲染或下载失败会记录在 `result.json`，其余格式继续导出。`--json` 输出单行结果 JSON，人读日志走 stderr。
 
+### `gtrk project background` — 客户端画布背景（模糊底 / 纯色）
+
+只改 `.gtrk` 的 `struct_meta.client_background` 一个键：客户端打开工程即按它呈现画布背景，可在客户端设置里改回。典型用途是横屏源进竖屏画布时用模糊底替代黑边。零计费、不访问云端；剪映 / PR 工程与本地 `gtrk render` 不承接该设置。
+
+```bash
+gtrk project background --gtrk <工程文件> --blur
+gtrk project background --project <工程目录> --blur --intensity 300
+gtrk project background --gtrk <工程文件> --color "#1A1A1A"
+gtrk project background --gtrk <工程文件> --clear
+```
+
+| 参数 | 作用 |
+|---|---|
+| `--project <dir>` / `--gtrk <path>` | 定位工程，规则同 `project export` |
+| `--blur` | 模糊底：主轨可见画面的模糊副本垫底 |
+| `--intensity <n>` | 配合 `--blur`，0–1000，缺省 200 |
+| `--color <#RRGGBB>` | 纯色底（六位十六进制） |
+| `--clear` | 删除该设置，回到客户端缺省黑底 |
+| `--dry-run` | 只校验并回执将写入的值，不写文件 |
+
+三种模式恰好选一个。写回走原子替换与内容 revision 守卫，其余内容原样保留；值未变时不写盘。`--json` 回执含写前写后 revision。
+
 > **`--beat-align`**：按表格中的高潮点锚定规则工作；显式 `--climax` 会覆盖自动判据。该模式会调用 `audio_music_analyze` 并产生相应计费。
 
 
