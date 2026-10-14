@@ -37,6 +37,7 @@
  * `gtrk-patch.ts` E9 今天对 beat 轨不分家族一律判重叠 ⇒ 在含 aux 的工程上是假阳性，归 patch 侧另立 fix（本件转出项）。
  */
 import { sec2ms } from "./frame-domain";
+import { clipSpeed, isSpeedChanged, scaleBySpeed, type SpeedLike } from "./clip-speed";
 
 /** 四类违例。与 infra `gtrk_check.py` 的 kind 逐字同名（D5「两仓同一份坏 gtrk 同判」）。 */
 export type InvariantKind = "clip_identity" | "track_identity" | "overlap" | "source_overrun";
@@ -73,17 +74,23 @@ const ms = (v: number | undefined): number | undefined => (typeof v === "number"
  *
  * 只给 track 半边（无 `clip_st` / `clip_ed`：gap、beat 颗粒）时只查 track 半边——E7 / E8 禁止它们带源裁剪字段，
  * 于是「不带就不查」与 `gtrk-patch.ts` 的分流同义。
+ *
+ * 恒定变速（link-gtrk-clip-speed）：源半边是 `clip_ed − clip_st = Math.round(duration × speed)`（`clip-speed.ts`
+ * 取数单点）；`speed` 缺省时与原式逐字等价，文案也逐字不变。
  */
 export function assertTrimIdentity(
-	c: { clip_id?: string; clip_st?: number; clip_ed?: number; track_st?: number; track_ed?: number; duration: number },
+	c: { clip_id?: string; clip_st?: number; clip_ed?: number; track_st?: number; track_ed?: number; duration: number } & SpeedLike,
 	where: string,
 ): void {
 	const [cs, ce, ts, te, du] = [ms(c.clip_st), ms(c.clip_ed), ms(c.track_st), ms(c.track_ed), ms(c.duration)!];
-	if (cs !== undefined && ce !== undefined && ce - cs !== du) {
+	const src = scaleBySpeed(du, c);
+	if (cs !== undefined && ce !== undefined && ce - cs !== src) {
 		throw new GtrkInvariantError(
 			"clip_identity",
 			c.clip_id,
-			`铺轨自检失败（${where}）：clip_ed − clip_st = ${ce - cs}ms ≠ duration ${du}ms。` +
+			(isSpeedChanged(c)
+				? `铺轨自检失败（${where}）：clip_ed − clip_st = ${ce - cs}ms ≠ duration × speed ${src}ms（duration ${du}ms、speed ${clipSpeed(c)}）。`
+				: `铺轨自检失败（${where}）：clip_ed − clip_st = ${ce - cs}ms ≠ duration ${du}ms。`) +
 				"裁剪恒等式须**构造性成立**（composition-contract-v1 §3），" +
 				"两个端点 MUST NOT 各自舍入——见 slotTimes 头注。",
 		);

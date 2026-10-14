@@ -20,6 +20,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { r3, sec2ms } from "./frame-domain";
+import { clipSpeed } from "./clip-speed";
 import {
 	describeImages,
 	putCachedDescribe,
@@ -98,6 +99,8 @@ interface GtrkClip {
 	clip_ed: string | number;
 	track_st: string | number;
 	track_ed: string | number;
+	/** 恒定变速（link-gtrk-clip-speed）；缺省 ≡ 1。 */
+	speed?: unknown;
 }
 
 const num = (v: string | number): number => (typeof v === "number" ? v : Number.parseFloat(v));
@@ -150,7 +153,8 @@ export function pairSentencesWithClips(args: {
 		const role: "lead" | "follow" = args.leadIds?.has(u.id) === false ? "follow" : "lead";
 		const clip = sorted.find((c) => num(c.track_st) <= mid && mid < num(c.track_ed));
 		if (!clip) return { ...base, role, skipped: "no_clip" };
-		const srcSec = num(clip.clip_st) + (mid - num(clip.track_st));
+		// 轨上偏移 × speed = 源上偏移（link-gtrk-clip-speed；不变速时 × 1 恒等）
+		const srcSec = num(clip.clip_st) + (mid - num(clip.track_st)) * clipSpeed(clip);
 		const path = clip.material ? (args.materials[clip.material] ?? null) : null;
 		if (!path) return { ...base, role, clip_id: clip.clip_id ?? null, skipped: "no_material_path" };
 		return {

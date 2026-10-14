@@ -72,6 +72,27 @@ import {
 } from "../lib/audio-tighten";
 import { r3 } from "../lib/frame-domain";
 import { readJsonSync } from "../lib/read-json";
+import { clipSpeed, isSpeedChanged } from "../lib/clip-speed";
+
+/**
+ * `audio tighten` 会以原音轨 clip 为模板改写时码（`...proto` 复制其余字段），对变速 clip 按 1x 改写会让
+ * 源区间与速度对不上（link-gtrk-clip-speed，spec gtrk-clip-speed「修改既有 clip 源时码的命令…速度感知或明确拒绝」）。
+ * 口播 / 配音产线的音轨恒为 1x ⇒ 选择**拒绝并点名**，工程文件不动。
+ */
+export function assertNoRetimedAudioClips(gtrk: Record<string, unknown>, command: string): void {
+	const hits: string[] = [];
+	for (const t of (gtrk.audio_track as { track_timeline?: Record<string, unknown>[] }[]) ?? []) {
+		for (const c of t.track_timeline ?? []) {
+			if (isSpeedChanged(c)) hits.push(`${String(c.clip_id ?? "?")}（${clipSpeed(c)}x）`);
+		}
+	}
+	if (hits.length) {
+		throw new Error(
+			`${command} 不支持变速的音频片段：${hits.slice(0, 5).join("、")}${hits.length > 5 ? ` 等 ${hits.length} 个` : ""}。` +
+				"请先在客户端把这些片段的速度改回 1x 再执行；工程文件未改动。",
+		);
+	}
+}
 
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
 // ★ 主理人 2026-08-19 拍板:BGM 垫底口径 -20dB=线性 0.10(契约 volume 只写线性,MUST NOT 写 dB——composition-contract-v1 §4)
@@ -1121,6 +1142,7 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	// 会让「客户端自动保存了一次」直接作废整轮。见下方工程读取②。
 	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
+	assertNoRetimedAudioClips(gtrk, "gtrk audio tighten");
 	const transcript = readJsonSync(trPath, "transcript.json") as {
 		material_id?: string | number;
 		duration?: number;

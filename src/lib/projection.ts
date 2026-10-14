@@ -68,6 +68,8 @@ export interface GtrkClip {
 	track_st?: number;
 	track_ed?: number;
 	duration?: number;
+	/** 恒定变速（link-gtrk-clip-speed）；缺省 ≡ 1。投影按速度把源时间换到轨上。 */
+	speed?: unknown;
 }
 
 export interface GtrkTrack {
@@ -109,6 +111,7 @@ export interface ProjectionView {
 }
 
 import { r3 } from "./frame-domain";
+import { clipSpeed } from "./clip-speed";
 
 /**
  * 源区间 `[s, e)` 经 clip 映射到轨道时基——**起点取整一次，终点由时长导出**
@@ -128,19 +131,21 @@ import { r3 } from "./frame-domain";
  *   · 越界处置：整词 / 整句落在所有 clip 之外 ⇒ 丢词 / `dropped`，由既有 `kept_words / total_words / dropped` 报告，
  *     MUST NOT 静默吞。
  */
-function projectSpan(clipTrackSt: number, clipSt: number, s: number, e: number): { track_st: number; track_ed: number } {
-	const track_st = r3(clipTrackSt + (s - clipSt));
-	const len = r3(e - s);
+function projectSpan(clipTrackSt: number, clipSt: number, s: number, e: number, speed = 1): { track_st: number; track_ed: number } {
+	// 变速 clip（link-gtrk-clip-speed）：源上偏移 ÷ speed = 轨上偏移；speed = 1 时 ÷ 1 恒等，结果逐位不变
+	const track_st = r3(clipTrackSt + (s - clipSt) / speed);
+	const len = r3((e - s) / speed);
 	return { track_st, track_ed: r3(track_st + len) };
 }
 
-/** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + duration 推。 */
-function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: number } {
+/** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + 源跨度（duration × speed）推。 */
+function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: number; speed: number } {
 	const clip_st = c.clip_st ?? 0;
 	const track_st = c.track_st ?? 0;
-	const dur = c.duration ?? (c.clip_ed != null ? c.clip_ed - clip_st : 0);
-	const clip_ed = c.clip_ed ?? clip_st + dur;
-	return { clip_st, clip_ed, track_st };
+	const speed = clipSpeed(c);
+	const dur = c.duration ?? (c.clip_ed != null ? (c.clip_ed - clip_st) / speed : 0);
+	const clip_ed = c.clip_ed ?? clip_st + dur * speed;
+	return { clip_st, clip_ed, track_st, speed };
 }
 
 /** track_index 最小的一条（缺 track_index 视作 0）；空列表 → undefined。 */
@@ -476,7 +481,7 @@ export function projectTranscript(
 				// 与 clip 源区间夹逼后相交（严格重叠，零长不算存活）
 				const s = Math.max(word.st, clip.clip_st);
 				const e = Math.min(word.ed, clip.clip_ed);
-				if (e > s) surviving.push({ w: word.w, ...projectSpan(clip.track_st, clip.clip_st, s, e) });
+				if (e > s) surviving.push({ w: word.w, ...projectSpan(clip.track_st, clip.clip_st, s, e, clip.speed) });
 			}
 			if (surviving.length) {
 				instances.push({
@@ -491,7 +496,7 @@ export function projectTranscript(
 				// kept_words 保持 0（total_words 亦 0，语义如实：无词级明细，句级在轨）。
 				const s = Math.max(utt.st, clip.clip_st);
 				const e = Math.min(utt.ed, clip.clip_ed);
-				if (e > s) instances.push({ ...projectSpan(clip.track_st, clip.clip_st, s, e), kept_words: 0, words: [] });
+				if (e > s) instances.push({ ...projectSpan(clip.track_st, clip.clip_st, s, e, clip.speed), kept_words: 0, words: [] });
 			}
 		}
 		if (!instances.length) {

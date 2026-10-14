@@ -64,6 +64,7 @@ export interface Locator {
 // 把 `f2ms` 改为向下投影（理由与往返可逆证明见 `frame-domain.ts` 头注）。
 import { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
 import type { FrameView, DerivedMs } from "./frame-domain";
+import { clipSpeed, isSpeedChanged, scaleBySpeed } from "./clip-speed";
 export { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
 export type { FrameView, DerivedMs } from "./frame-domain";
 
@@ -287,10 +288,16 @@ export function validateAll(gtrk: Obj): Violation[] {
 		// —— 以下只对非空档 clip ——
 		const cstMs = readMs(el.clip.clip_st);
 		const cedMs = readMs(el.clip.clip_ed);
-		// E1：clip_ed − clip_st = duration（整毫秒域，零容差）
-		if (Number.isFinite(cstMs) && Number.isFinite(cedMs) && cedMs - cstMs !== durMs) {
-			out.push({ key: `${ident}/E1/${cedMs - cstMs}!=${durMs}`, code: "clip_identity_broken",
-				message: `${where}（${id}）clip_ed − clip_st = ${cedMs - cstMs}ms ≠ duration ${durMs}ms` });
+		// E1：clip_ed − clip_st = duration × speed（整毫秒域，零容差；speed 缺省 ≡ 1 时 key 与文案逐字不变，link-gtrk-clip-speed）
+		const srcMs = scaleBySpeed(durMs, el.clip);
+		if (Number.isFinite(cstMs) && Number.isFinite(cedMs) && cedMs - cstMs !== srcMs) {
+			out.push(
+				isSpeedChanged(el.clip)
+					? { key: `${ident}/E1/${cedMs - cstMs}!=${srcMs}`, code: "clip_identity_broken",
+						message: `${where}（${id}）clip_ed − clip_st = ${cedMs - cstMs}ms ≠ duration × speed ${srcMs}ms（speed ${clipSpeed(el.clip)}）` }
+					: { key: `${ident}/E1/${cedMs - cstMs}!=${durMs}`, code: "clip_identity_broken",
+						message: `${where}（${id}）clip_ed − clip_st = ${cedMs - cstMs}ms ≠ duration ${durMs}ms` },
+			);
 		}
 		// E4：material 须在 materials 中
 		const matId = typeof el.clip.material === "string" ? el.clip.material : String(el.clip.material ?? "");
@@ -461,8 +468,11 @@ export interface TrimArgs {
  *
  * ⚠️ **trim-in 有两种业界语义，猜哪一种都会错** ⇒ 由调用方显式选：
  * `--in/--set-in` = 标准 trim（源窗与轨上入点同动，时长变）；`--slip` = 只换源窗（时长与落点都不变）。
+ *
+ * @param speed 元素的恒定速度（link-gtrk-clip-speed）：轨上入点动 Δ，源窗入点动 `Math.round(Δ × speed)`；
+ *   `--slip` 本就是源侧量，不换算。缺省 1 = 改动前行为。
  */
-export function applyTrim(view: FrameView, args: TrimArgs, rate: number): ActionResult {
+export function applyTrim(view: FrameView, args: TrimArgs, rate: number, speed = 1): ActionResult {
 	let { stFrame, durFrames, clipStMs } = view;
 
 	if (args.slip !== undefined) {
@@ -482,8 +492,8 @@ export function applyTrim(view: FrameView, args: TrimArgs, rate: number): Action
 		stFrame = newSt;
 		durFrames -= deltaFrames;
 		if (clipStMs !== null) {
-			// 源侧同动。⚠️ 用两端毫秒之差算位移，MUST NOT 用 f2ms(deltaFrames)（取整不可加）。
-			clipStMs += f2ms(newSt, rate) - f2ms(newSt - deltaFrames, rate);
+			// 源侧同动。⚠️ 用两端毫秒之差算位移，MUST NOT 用 f2ms(deltaFrames)（取整不可加）。变速元素按速度换到源侧。
+			clipStMs += scaleBySpeed(f2ms(newSt, rate) - f2ms(newSt - deltaFrames, rate), { speed });
 		}
 	}
 
@@ -513,12 +523,13 @@ export interface SplitResult {
 
 /**
  * `split`：在 `at`（绝对轨上时刻）切成两段。两段各自 ≥1 帧，否则硬拒。
- * 后半的源窗入点 = 前半源窗入点 + 前半时长（毫秒域，走导出链的 duration）。
+ * 后半的源窗入点 = 前半源窗入点 + 前半源跨度（毫秒域，走导出链的 duration；变速元素为 `Math.round(时长 × speed)`）。
  */
 export function applySplit(
 	view: FrameView,
 	at: TimeArg,
 	rate: number,
+	speed = 1,
 ): { ok: true; result: SplitResult } | { ok: false; error: ActionError } {
 	const cutFrame = at.frames !== null ? at.frames : sec2frame(at.sec ?? 0, rate);
 	const firstFrames = cutFrame - view.stFrame;
@@ -538,7 +549,7 @@ export function applySplit(
 			second: {
 				stFrame: cutFrame,
 				durFrames: secondFrames,
-				clipStMs: view.clipStMs === null ? null : view.clipStMs + firstDurMs,
+				clipStMs: view.clipStMs === null ? null : view.clipStMs + scaleBySpeed(firstDurMs, { speed }),
 			},
 		},
 	};
@@ -604,7 +615,9 @@ export function writeDerived(clip: Obj, cls: "clip" | "gap" | "beat", d: Derived
 	if ("track_ed" in clip) next.track_ed = ms2sec(d.trackEdMs);
 	if (cls === "clip" && d.clipStMs !== null && d.clipEdMs !== null) {
 		next.clip_st = ms2sec(d.clipStMs);
-		if ("clip_ed" in clip) next.clip_ed = ms2sec(d.clipEdMs);
+		// 变速元素（link-gtrk-clip-speed）：源出点 = 源入点 + Math.round(时长 × speed)，speed / keep_pitch 随 `...clip` 原样保留
+		const clipEdMs = isSpeedChanged(clip) ? d.clipStMs + scaleBySpeed(d.durationMs, clip) : d.clipEdMs;
+		if ("clip_ed" in clip) next.clip_ed = ms2sec(clipEdMs);
 	}
 	return next;
 }

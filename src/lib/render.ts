@@ -32,6 +32,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { requireFfmpeg, runFfmpeg, ffprobeJson } from "./ffmpeg";
 import { videoRateOf } from "./gtrk-patch";
 import { ms2sec, sec2frame, sec2ms } from "./frame-domain";
+import { atempoFactors, clipKeepPitch, clipSpeed, formatSpeed, isSpeedAudible, isSpeedChanged, scaleBySpeed } from "./clip-speed";
 import { log } from "./log";
 import {
 	type ClipMask,
@@ -93,6 +94,9 @@ interface Clip {
 	clip_st?: number;
 	track_st: number;
 	duration: number;
+	/** 恒定变速（link-gtrk-clip-speed）：缺省 ≡ 1；`duration` 是轨上时长、源跨度 = duration × speed。 */
+	speed?: number;
+	keep_pitch?: boolean;
 	/** clip 级音量（契约双层语义：覆盖轨级；★ fix-render-audio-volume——此前渲染混音全然不消费）。 */
 	volume?: number;
 	/** clip 级静音（契约既有字段，`gtrk patch set --muted` 写的就是它；
@@ -189,6 +193,8 @@ export type OverlayLayer =
 			duration: number;
 			material: string | number;
 			clipSt: number;
+			/** 恒定变速（link-gtrk-clip-speed）：缺省 1；源窗终点 = 整毫秒 clipSt + Math.round(duration × speed)。 */
+			speed?: number;
 			/** ★ link-clip-mask-contract-render：几何三字段原样携带（纯数据，几何结论在滤镜图构造时算）。 */
 			transform?: ClipTransform;
 			borderRadius?: unknown;
@@ -245,6 +251,7 @@ export function collectOverlayLayers(
 				duration,
 				material: c.material as string | number,
 				clipSt: Number(c.clip_st) || 0,
+				...(isSpeedChanged(c) ? { speed: clipSpeed(c) } : {}),
 				...(c.clip_transform && typeof c.clip_transform === "object" ? { transform: c.clip_transform } : {}),
 				...(c.border_radius !== undefined ? { borderRadius: c.border_radius } : {}),
 				...(c.clip_mask && typeof c.clip_mask === "object" ? { mask: c.clip_mask } : {}),
@@ -279,8 +286,31 @@ export function collectOverlayLayers(
 /** 时间线元素。`duration` 是源侧秒值（`trim` / `atrim` 寻址与 afade 用，不动）；`lineMs` 是它在成片时间线上
  *  占的**整毫秒数**（接缝判据与帧数分配的累计量，unify-time-consumers-and-tolerance D1）。三位小数工程两者同值。 */
 type Element =
-	| { kind: "clip"; material: string | number; clip_st: number; duration: number; lineMs: number; volume?: number }
+	| {
+			kind: "clip";
+			material: string | number;
+			clip_st: number;
+			duration: number;
+			lineMs: number;
+			volume?: number;
+			/** 源窗终点（秒）。不变速 = `clip_st + duration`（与改动前同一表达式）；变速 = 整毫秒 `clip_st + Math.round(duration × speed)`，
+			 *  与 infra `video_timeline_render` 的 `src_end_ms` 同式（link-gtrk-clip-speed）。 */
+			src_ed: number;
+			speed: number;
+			retimed: boolean;
+			keepPitch: boolean;
+			/** speed ≤ 5 才出声（有声变速上限）。 */
+			audible: boolean;
+	  }
 	| { kind: "gap"; duration: number; lineMs: number };
+
+/** 变速 clip 的音频变速步骤（speed ≤ 5 时调用）。与 infra `_audio_speed_steps` 逐字节同形（对拍向量 A1–A4）。 */
+function audioSpeedSteps(el: Extract<Element, { kind: "clip" }>): string[] {
+	const steps = el.keepPitch
+		? atempoFactors(el.speed).map((f) => `atempo=${formatSpeed(f)}`)
+		: [`asetrate=${Math.round(AUDIO_SAMPLE_RATE * el.speed)}`, `aresample=${AUDIO_SAMPLE_RATE}`];
+	return [...steps, "apad", `atrim=end=${f6(el.duration)}`];
+}
 
 const isGap = (clip: Clip): boolean => clip.material === null || clip.material === undefined;
 
@@ -339,13 +369,20 @@ function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[]
 			// 折叠后的原始值再过存量启发式（normalizeVolume）换成可消费线性。
 			const raw = typeof clip.volume === "number" ? clip.volume : trackVolume;
 			const vol = typeof raw === "number" ? normalizeVolume(raw) : undefined;
+			const clipSt = Number(clip.clip_st);
+			const retimed = isSpeedChanged(clip);
 			elements.push({
 				kind: "clip",
 				material: clip.material as string | number,
-				clip_st: Number(clip.clip_st),
+				clip_st: clipSt,
 				duration,
 				lineMs,
 				...(typeof vol === "number" && vol !== 1 ? { volume: vol } : {}),
+				src_ed: retimed ? ms2sec(sec2ms(clipSt) + scaleBySpeed(sec2ms(duration), clip)) : clipSt + duration,
+				speed: clipSpeed(clip),
+				retimed,
+				keepPitch: clipKeepPitch(clip),
+				audible: isSpeedAudible(clip),
 			});
 		} else {
 			elements.push({ kind: "gap", duration, lineMs });
@@ -579,8 +616,10 @@ export function buildFilterGraph(
 	const chains: string[] = [];
 	let labelN = 0;
 	const label = (): string => `s${++labelN}`;
-	const sourceHead = (idx: number, st: number, ed: number, frames: number): string => {
-		const head = `[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},setpts=PTS-STARTPTS,`;
+	const sourceHead = (idx: number, st: number, ed: number, frames: number, speed = 1): string => {
+		// 变速（link-gtrk-clip-speed，对拍向量 V1–V4）：源窗截取后按速度缩放时间戳；不变速时串逐字节不变
+		const pts = speed !== 1 ? `setpts=(PTS-STARTPTS)/${formatSpeed(speed)}` : "setpts=PTS-STARTPTS";
+		const head = `[${idx}:v]trim=start=${f6(st)}:end=${f6(ed)},${pts},`;
 		if (!params.sourceChecks || frames <= 0) return head;
 		const check = `source_check_${params.sourceChecks.length}`;
 		params.sourceChecks.push(check);
@@ -627,10 +666,10 @@ export function buildFilterGraph(
 		if (el.kind === "clip") {
 			const idx = inputOf(el.material);
 			const st = el.clip_st;
-			const ed = el.clip_st + el.duration;
+			const ed = el.src_ed;
 			// 在 fps 前复制原裁窗末帧，避免单源帧被 fps 吃成零帧；end_frame 限定消费预算。
 			// 不扩源窗，不借邻镜头；正预算空窗由同次解码的 sourceChecks 显式拒绝。
-			const head = sourceHead(idx, st, ed, frames);
+			const head = sourceHead(idx, st, ed, frames, el.speed);
 			chains.push(
 				head + `tpad=stop_mode=clone:stop=-1,fps=${g(rate)},` +
 					`trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
@@ -739,9 +778,10 @@ export function buildFilterGraph(
 				// `fps` 出帧数随 trim 起点相位摆动，只截不补会少帧），只是 pad 透明且不转 yuv420p。
 				const idx = inputOf(L.material);
 				const st = L.clipSt;
-				const ed = L.clipSt + L.duration;
+				// 变速 overlay clip（link-gtrk-clip-speed）：源窗按真实源出点截取，时间戳在 sourceHead 里按速度缩放
+				const ed = L.speed !== undefined ? ms2sec(sec2ms(L.clipSt) + scaleBySpeed(sec2ms(L.duration), L)) : L.clipSt + L.duration;
 				const trimHead =
-					sourceHead(idx, st, ed, w.frames) +
+					sourceHead(idx, st, ed, w.frames, L.speed ?? 1) +
 					`tpad=stop_mode=clone:stop=-1,fps=${g(rate)},` +
 					`trim=end_frame=${w.frames},`;
 				const geo = computeOverlayGeometry({
@@ -828,14 +868,16 @@ export function buildFilterGraph(
 		const segLabels: string[] = [];
 		for (const el of els) {
 			const lab = label();
-			if (el.kind === "clip") {
+			// 有声变速上限（link-gtrk-clip-speed）：speed > 5 的 clip 该段按空档写静音、不读源音频（对拍向量 A5）
+			if (el.kind === "clip" && el.audible) {
 				const idx = inputOf(el.material);
 				const st = el.clip_st;
-				const ed = el.clip_st + el.duration;
+				const ed = el.src_ed;
 				const steps = [
 					`[${idx}:a]atrim=start=${f6(st)}:end=${f6(ed)}`,
 					"asetpts=PTS-STARTPTS",
 					`aresample=${AUDIO_SAMPLE_RATE}`,
+					...(el.retimed ? audioSpeedSteps(el) : []),
 					`aformat=sample_fmts=fltp:channel_layouts=${AUDIO_LAYOUT}`,
 				];
 				// ★ fix-render-audio-volume：消费契约双层音量（此前 amix 等权、volume 全然未消费——

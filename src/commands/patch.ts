@@ -20,6 +20,7 @@ import { requireFfmpeg, runFfmpeg } from "../lib/ffmpeg";
 import { audioCacheDir } from "../lib/paths";
 import { buildEnvelope, planSnap, median } from "../lib/cut-snap";
 import { materialsByIdOf } from "../lib/gtrk-invariants";
+import { clipSpeed } from "../lib/clip-speed";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic, GtrkWritebackConflictError } from "../lib/gtrk-writeback";
 import {
 	type ActionKind,
@@ -366,7 +367,7 @@ function applyTimecodeToElement(
 	}
 
 	if (action === "trim") {
-		const r = applyTrim(view, trimArgsOf(opts), rate);
+		const r = applyTrim(view, trimArgsOf(opts), rate, clipSpeed(el.clip));
 		if (!r.ok) fail(r.error.code, r.error.message);
 		return { next: replaceElement(gtrk, el.ref, writeDerived(el.clip, cls, derive(r.view, rate))), receiptFor: el };
 	}
@@ -376,7 +377,7 @@ function applyTimecodeToElement(
 	if (opts.cut === undefined) fail("split_no_cut", "split 需 --cut <sec|Nf> 指定切点（--at 是寻址参数，不是切点）");
 	const at = parseTimeArg(opts.cut);
 	if (!at) fail("bad_time_arg", `--cut 的时码字面非法：「${opts.cut}」`);
-	const r = applySplit(view, at, rate);
+	const r = applySplit(view, at, rate, clipSpeed(el.clip));
 	if (!r.ok) fail(r.error.code, r.error.message);
 	const taken = new Set(collectElements(gtrk).map((e) => e.clipId).filter((s) => s !== ""));
 	const newId = el.clipId === "" ? "" : nextSplitId(el.clipId, taken, () => randomBytes(2).toString("hex"));
@@ -760,15 +761,15 @@ async function runSnap(opts: PatchOpts, deps: PatchDeps = {}): Promise<Receipt> 
 		const cut = Number(b.clip.track_st ?? 0);
 		cuts.push(cut);
 		const minLen = 1 / Math.max(1, rate);
-		// 右移：前者在源里**往后**取 ⇒ 受它的源尾余量限。
-		const tailRoom = srcDurOf(a) - Number(a.clip.clip_ed ?? 0);
+		// 右移：前者在源里**往后**取 ⇒ 受它的源尾余量限。源余量换到轨上要除以速度（link-gtrk-clip-speed）。
+		const tailRoom = (srcDurOf(a) - Number(a.clip.clip_ed ?? 0)) / clipSpeed(a.clip);
 		// 左移：后者变长。
 		//   ⚠️ **MUST NOT** 用 `trim --set-in` 往前扩它的源头——AI 片段 `clip_st` 恒为 0，
 		//   源头一点余量没有，那条路 136/231 个切点全被「裁剪后源窗入点为负」挡死（真机实测）。
 		//   正解是**整体左移 + 尾部延长**：`move --to` 把它挪到新切点（源窗不动），
 		//   再 `trim --set-out` 把出点拉回原处（源窗从**尾部**补足）。
 		//   于是左移余量 = 后者的源尾余量，而不是它的源头余量。
-		const growRoom = srcDurOf(b) - Number(b.clip.clip_ed ?? 0);
+		const growRoom = (srcDurOf(b) - Number(b.clip.clip_ed ?? 0)) / clipSpeed(b.clip);
 		bounds.push({
 			lo: Math.max(Number(a.clip.track_st ?? 0) + minLen, cut - growRoom),
 			hi: Math.min(Number(b.clip.track_ed ?? 0) - minLen, cut + tailRoom),

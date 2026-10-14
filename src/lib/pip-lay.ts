@@ -17,6 +17,13 @@
  */
 import { ms2sec, r3, sec2ms } from "./frame-domain";
 import { assertGtrkWriteInvariants } from "./gtrk-invariants";
+import { clipKeepPitch, clipSpeed, isSpeedChanged, scaleBySpeed, type SpeedLike } from "./clip-speed";
+
+/** 变速主轨 clip 派生出的 clip 原样继承的变速字段（link-gtrk-clip-speed）；不变速返回空对象（零回归）。 */
+function speedFieldsOf(c: SpeedLike): { speed?: number; keep_pitch?: true } {
+	if (!isSpeedChanged(c)) return {};
+	return { speed: clipSpeed(c), ...(clipKeepPitch(c) ? { keep_pitch: true as const } : {}) };
+}
 
 export const PIP_PRODUCER_BY = "gtrk:pip@1";
 export const PIP_COMPANION_MATERIAL_ID = "pip-companion";
@@ -51,6 +58,9 @@ export interface MainClipView {
 	clip_st: number;
 	track_st: number;
 	duration: number;
+	/** 恒定变速（link-gtrk-clip-speed）：仅变速 clip 携带；镜像与副本原样继承。 */
+	speed?: number;
+	keep_pitch?: true;
 }
 
 export interface MirroredCut {
@@ -69,6 +79,9 @@ export interface MirroredCut {
 	clamped_tail_ms: number;
 	/** 整段不可用 ⇒ 留空。 */
 	empty: boolean;
+	/** 继承自主轨 clip 的变速字段（仅变速时在场）。 */
+	speed?: number;
+	keep_pitch?: true;
 }
 
 /**
@@ -82,12 +95,17 @@ export function mirrorCuts(mainClips: readonly MainClipView[], offsetSec: number
 		const durMs = sec2ms(c.duration);
 		const trackStMs = sec2ms(c.track_st);
 		const srcStMs = sec2ms(c.clip_st) - offMs; // 伴随源源钟
-		const srcEdMs = srcStMs + durMs;
+		// 源跨度 = 轨上时长 × speed（link-gtrk-clip-speed）；钳位在源钟做，再换回轨上：
+		// 头部钳位向上取整、铺出时长向下取整，保证换回源侧 Math.round(铺出 × speed) 不越过可用源窗。
+		// 不变速时三式退化为改动前逐式相同（整数的 ceil / floor 是恒等）。
+		const s = clipSpeed(c);
+		const srcEdMs = srcStMs + scaleBySpeed(durMs, c);
 		const usableSt = Math.max(srcStMs, 0);
 		const usableEd = Math.min(srcEdMs, wallMs);
-		const headClamp = usableSt - srcStMs;
-		const tailClamp = srcEdMs - usableEd;
-		const laidMs = usableEd - usableSt;
+		const laidSrcMs = usableEd - usableSt;
+		const headClamp = Math.ceil((usableSt - srcStMs) / s);
+		const laidMs = laidSrcMs <= 0 ? 0 : Math.min(durMs - headClamp, Math.floor(laidSrcMs / s));
+		const tailClamp = durMs - headClamp - laidMs;
 		if (laidMs <= 0 || durMs <= 0) {
 			out.push({
 				from: c.clip_id,
@@ -104,16 +122,18 @@ export function mirrorCuts(mainClips: readonly MainClipView[], offsetSec: number
 		}
 		// 头部被钳时轨上落位随之后移（伴随源在那一段不存在，MUST NOT 拉伸补齐）
 		const laidTrackSt = trackStMs + headClamp;
+		const laidSrcSt = srcStMs + scaleBySpeed(headClamp, c);
 		out.push({
 			from: c.clip_id,
 			track_st: ms2sec(laidTrackSt),
 			track_ed: ms2sec(laidTrackSt + laidMs),
 			duration: ms2sec(laidMs),
-			clip_st: ms2sec(usableSt),
-			clip_ed: ms2sec(usableSt + laidMs),
+			clip_st: ms2sec(laidSrcSt),
+			clip_ed: ms2sec(laidSrcSt + scaleBySpeed(laidMs, c)),
 			clamped_head_ms: headClamp,
 			clamped_tail_ms: tailClamp,
 			empty: false,
+			...speedFieldsOf(c),
 		});
 	}
 	return out;
@@ -232,7 +252,7 @@ export function mainClipViews(track: LooseTrack): MainClipView[] {
 		const trackSt = Number(c.track_st);
 		const duration = Number(c.duration);
 		if (!clipId || !Number.isFinite(clipSt) || !Number.isFinite(trackSt) || !(duration > 0)) continue;
-		out.push({ clip_id: clipId, material: String(c.material ?? ""), clip_st: clipSt, track_st: trackSt, duration });
+		out.push({ clip_id: clipId, material: String(c.material ?? ""), clip_st: clipSt, track_st: trackSt, duration, ...speedFieldsOf(c) });
 	}
 	return out;
 }
@@ -385,6 +405,7 @@ export function buildPipTracks(args: BuildPipArgs): BuildPipResult {
 			track_st: cut.track_st,
 			track_ed: cut.track_ed,
 			duration: cut.duration,
+			...speedFieldsOf(cut),
 			muted: true,
 			producer,
 		});
@@ -398,10 +419,12 @@ export function buildPipTracks(args: BuildPipArgs): BuildPipResult {
 			clip_id: uniqueId(`pip-p-${v.clip_id}`),
 			material: v.material,
 			clip_st: v.clip_st,
-			clip_ed: r3(v.clip_st + v.duration),
+			// 变速副本：源出点按速度感知恒等式构造；不变速保持改动前的 r3 写法（逐字节零回归）
+			clip_ed: isSpeedChanged(v) ? ms2sec(sec2ms(v.clip_st) + scaleBySpeed(sec2ms(v.duration), v)) : r3(v.clip_st + v.duration),
 			track_st: v.track_st,
 			track_ed: r3(v.track_st + v.duration),
 			duration: v.duration,
+			...speedFieldsOf(v),
 			muted: true,
 			clip_transform: args.geometry.clip_transform,
 			...(args.borderRadius !== undefined && args.borderRadius > 0 ? { border_radius: r3(args.borderRadius) } : {}),
