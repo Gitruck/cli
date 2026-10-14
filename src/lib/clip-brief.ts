@@ -15,7 +15,7 @@ export interface OverviewContext {
 	jumpCut: boolean;
 	splitMaterials?: { landed: number; total: number };
 	taskId?: string;
-	/** 根级 errors（服务端 + 落地）：只读 `clip{i}:polish:speed` 降级键（link-long2short-for-cli-speed）。 */
+	/** 根级 errors（服务端 + 落地）：只读 `clip{i}:polish:speed` / `clip{i}:polish:camera` 降级键（link-long2short-for-cli-speed / -camera-move）。 */
 	errors?: Record<string, string>;
 	/** 服务端 `report.transcript_word_timing`：`line_even` 时提示字幕词级时间为近似值（link-long2short-for-cli-transcript）。 */
 	transcriptWordTiming?: string;
@@ -64,6 +64,12 @@ function speedOf(clip: ClipMeta): { factor: number; keepPitch: boolean; trackMs?
 	return { factor, keepPitch: speed?.keep_pitch !== false, trackMs: num(polish?.track_duration_ms) };
 }
 
+/** 云端运镜摘要（link-long2short-for-cli-camera-move）：`clip.polish.camera_move.count`，0 也是有效值。 */
+function cameraCountOf(clip: ClipMeta): number | undefined {
+	const camera = (clip.polish as ClipMeta | undefined)?.camera_move as ClipMeta | undefined;
+	return num(camera?.count);
+}
+
 /** 一条切片的时长与片段数（缺 segments 时退化为单段）。调速生效时取变速后的轨上时长。 */
 function clipDurationMs(clip: ClipMeta): number | undefined {
 	return speedOf(clip)?.trackMs ?? num(clip.total_duration_ms) ?? num(clip.duration_ms);
@@ -103,6 +109,15 @@ export function renderClipBrief(clip: ClipMeta, index: number, files: Record<str
 	if (bits.length) out.push(`- ${bits.join(" · ")}`, "");
 	const sp = speedOf(clip);
 	if (sp) out.push(`- 已整体 ${sp.factor}x（${sp.keepPitch ? "保音高" : "音高随速度变"}），倍率写在工程里，可在客户端改回`, "");
+	const cam = cameraCountOf(clip);
+	if (cam != null) {
+		out.push(
+			cam > 0
+				? `- 运镜 ${cam} 处（推 / 拉镜头），写在工程里：客户端与剪映可见、可改；本地渲染与 PR 工程看不到`
+				: "- 运镜 0 处：按概率抽取，本条没有抽中（属正常）",
+			"",
+		);
+	}
 
 	const score = num(clip.score);
 	const reason = str(clip.score_reason);
@@ -169,7 +184,9 @@ export function renderClipsOverview(clips: ClipMeta[], ctx: OverviewContext): st
 		const dur = clipDurationMs(clip);
 		const score = num(clip.score);
 		const sp = speedOf(clip);
-		const durCell = dur != null ? `${fmtTime(dur)}${sp ? `（${sp.factor}x）` : ""}` : "—";
+		const cam = cameraCountOf(clip);
+		const durCell =
+			dur != null ? `${fmtTime(dur)}${sp ? `（${sp.factor}x）` : ""}${cam != null ? ` · 运镜 ${cam} 处` : ""}` : "—";
 		out.push(
 			`| clip${i} | ${cell(str(clip.title) ?? "—")} | ${durCell} | ${score ?? "—"} | ${cell(str(clip.summary) ?? "—")} |`,
 		);
@@ -185,6 +202,16 @@ export function renderClipsOverview(clips: ClipMeta[], ctx: OverviewContext): st
 	if (unsped.length) {
 		out.push("", "## ⚠️ 未能变速的切片", "");
 		for (const i of unsped) out.push(`- clip${i}：调速写入失败，工程按原速产出（原因见 result.json errors）`);
+	}
+	// 运镜降级如实列出（link-long2short-for-cli-camera-move）：这些 clip 的工程不带运镜（调速结果保留）
+	const noCamera = Object.keys(ctx.errors ?? {})
+		.map((k) => /^clip(\d+):polish:camera$/.exec(k)?.[1])
+		.filter((x): x is string => x != null)
+		.map(Number)
+		.sort((a, b) => a - b);
+	if (noCamera.length) {
+		out.push("", "## ⚠️ 未能加运镜的切片", "");
+		for (const i of noCamera) out.push(`- clip${i}：运镜写入失败，工程不带运镜（原因见 result.json errors）`);
 	}
 	// 字幕文件来源的近似字级（link-long2short-for-cli-transcript）
 	if (ctx.transcriptWordTiming === "line_even") {

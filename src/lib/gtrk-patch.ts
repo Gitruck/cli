@@ -65,6 +65,7 @@ export interface Locator {
 import { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
 import type { FrameView, DerivedMs } from "./frame-domain";
 import { clipSpeed, isSpeedChanged, scaleBySpeed } from "./clip-speed";
+import { validate as validateKeyframes } from "./clip-keyframes";
 export { sec2frame, f2ms, sec2ms, ms2sec, readMs, derive } from "./frame-domain";
 export type { FrameView, DerivedMs } from "./frame-domain";
 
@@ -299,6 +300,14 @@ export function validateAll(gtrk: Obj): Violation[] {
 						message: `${where}（${id}）clip_ed − clip_st = ${cedMs - cstMs}ms ≠ duration ${durMs}ms` },
 			);
 		}
+		// E10：clip_keyframes 契约合法性（link-long2short-for-cli-camera-move）——白名单 / 0 ≤ t ≤ duration / 严格递增 / 值域。
+		// beat clip 不在射程（上面已 continue）；不带关键帧的 clip 零开销、零输出。
+		if (el.clip.clip_keyframes !== undefined) {
+			for (const kv of validateKeyframes(el.clip.clip_keyframes, ms2sec(durMs), el.ref.kind === "audio" ? "audio" : "video")) {
+				out.push({ key: `${ident}/keyframe/${kv.channel}/${kv.reason}`, code: "keyframe_invalid",
+					message: `${where}（${id}）clip_keyframes.${kv.channel}：${kv.reason}` });
+			}
+		}
 		// E4：material 须在 materials 中
 		const matId = typeof el.clip.material === "string" ? el.clip.material : String(el.clip.material ?? "");
 		if (matId && !mats.has(matId)) {
@@ -366,6 +375,23 @@ export function diffViolations(before: Violation[], after: Violation[]): {
 	return {
 		violations: after.filter((v) => !beforeKeys.has(v.key)),
 		preexisting: after.filter((v) => beforeKeys.has(v.key)),
+	};
+}
+
+/**
+ * patch 的拒写判据：「本次造成」的违例照旧按集合差判，**另加**出档里所有关键帧违例——不论是不是入档既存
+ * （patch-command spec「非法 key 拒写」：存量文件带越界 key 时任何 patch 都拒写并点名，宁可报错也不在
+ * 用户不知情时写出会让剪映导出失败的文件）。其余存量违例照旧只回执、不阻断。
+ */
+export function blockingViolations(before: Violation[], after: Violation[]): {
+	violations: Violation[];
+	preexisting: Violation[];
+} {
+	const { violations, preexisting } = diffViolations(before, after);
+	const keyframe = preexisting.filter((v) => v.code === "keyframe_invalid");
+	return {
+		violations: [...violations, ...keyframe],
+		preexisting: preexisting.filter((v) => v.code !== "keyframe_invalid"),
 	};
 }
 

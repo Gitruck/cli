@@ -1146,6 +1146,22 @@ function overlayMaterialsNeedingSize(gtrk: GtrkV1): Set<string> {
 }
 
 /** 渲染 gtrk 工程为成片 mp4。返回 {outputPath, duration, audio}。 */
+/**
+ * 工程含 `clip_keyframes` 时的本地渲染提示（link-long2short-for-cli-camera-move）；不含返回 null。
+ * 契约规定 CLI 渲染**忽略**关键帧（按静态画面出片），只把这件事说出来，渲染行为不变。
+ */
+export function keyframeRenderNotice(gtrk: GtrkV1): string | null {
+	let n = 0;
+	for (const key of ["video_track", "audio_track"] as const) {
+		for (const t of ((gtrk as unknown as Record<string, unknown>)[key] as { track_timeline?: Record<string, unknown>[] }[] | undefined) ?? []) {
+			for (const c of t.track_timeline ?? []) if (c.clip_keyframes !== undefined) n += 1;
+		}
+	}
+	return n === 0
+		? null
+		: `本工程含关键帧（运镜等，${n} 个片段），本地渲染按静态画面出片；要看运镜请用客户端或剪映`;
+}
+
 export async function renderGtrk(
 	gtrk: GtrkV1,
 	outputPath: string,
@@ -1174,6 +1190,8 @@ export async function renderGtrk(
 	// 帧率门前置到任何进程 / 文件系统动作之前（D3「报错退出零副作用」）：`buildFilterGraph` 里那次是取值处的同源判据，
 	// 这里再判一次是为了不先解析 ffmpeg、不先 ffprobe 素材、不先写临时滤镜文件——非法工程在此即止。
 	videoRateOf(gtrk as unknown as Record<string, unknown>);
+	const kfNotice = keyframeRenderNotice(gtrk);
+	if (kfNotice) log.info(kfNotice);
 
 	const { ffmpeg, ffprobe } = requireFfmpeg(opts.ffmpegPath);
 	const materialPaths = materialPathsFromGtrk(gtrk, { gtrkDir: opts.gtrkDir });

@@ -94,6 +94,26 @@ export function assertNoRetimedAudioClips(gtrk: Record<string, unknown>, command
 	}
 }
 
+/**
+ * `audio tighten` 以原音轨 clip 为模板重建配音轨与 BGM 轨（`...rest` / `...proto` 复制其余字段），模板上的
+ * `clip_keyframes`（音量曲线）会被原样带到新时长下、越界或错位（link-long2short-for-cli-camera-move design D4，
+ * 契约「改时序时维持合法」）。口播 / 配音产线的音轨不带关键帧 ⇒ 选择**拒绝并点名**，工程文件不动。
+ */
+export function assertNoKeyframedAudioClips(gtrk: Record<string, unknown>, command: string): void {
+	const hits: string[] = [];
+	for (const t of (gtrk.audio_track as { track_timeline?: Record<string, unknown>[] }[]) ?? []) {
+		for (const c of t.track_timeline ?? []) {
+			if (c.clip_keyframes !== undefined) hits.push(String(c.clip_id ?? "?"));
+		}
+	}
+	if (hits.length) {
+		throw new Error(
+			`${command} 不支持带关键帧（音量曲线）的音频片段：${hits.slice(0, 5).join("、")}${hits.length > 5 ? ` 等 ${hits.length} 个` : ""}。` +
+				"请先在客户端删除这些片段的音量关键帧再执行；工程文件未改动。",
+		);
+	}
+}
+
 /** BGM 垫底音量默认值（clip 级 volume，客户端契约：clip 级优先于轨级）。 */
 // ★ 主理人 2026-08-19 拍板:BGM 垫底口径 -20dB=线性 0.10(契约 volume 只写线性,MUST NOT 写 dB——composition-contract-v1 §4)
 export const AUDIO_LAY_VOLUME_DEFAULT = 0.1;
@@ -1143,6 +1163,7 @@ export async function runAudioTighten(opts: AudioTightenOpts): Promise<AudioTigh
 	const { gtrk, revision: planningRevision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
 	assertNoRetimedAudioClips(gtrk, "gtrk audio tighten");
+	assertNoKeyframedAudioClips(gtrk, "gtrk audio tighten");
 	const transcript = readJsonSync(trPath, "transcript.json") as {
 		material_id?: string | number;
 		duration?: number;

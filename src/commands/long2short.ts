@@ -57,6 +57,8 @@ export interface Long2ShortOpts {
 	keepPunctuation?: boolean;
 	/** 整体调速倍率（link-long2short-for-cli-speed）：0.5–2.0、保音高，云端写进逐 clip 工程、不渲染。 */
 	speedFactor?: string;
+	/** 运镜（link-long2short-for-cli-camera-move）：云端把推 / 拉镜头写成主轨片段的缩放关键帧；细项走 --params-json。 */
+	cameraMove?: boolean;
 	out?: string;
 	ffmpegPath?: string;
 	param: string[];
@@ -162,6 +164,8 @@ export function buildLong2ShortPayload(
 		}
 		if (n !== 1) p.speed = { factor: n };
 	}
+	// 运镜：只传开关，不传即零注入（payload 不含 camera_move 键）；细项（概率 / 幅度 …）经 --params-json 覆盖
+	if (opts.cameraMove) p.camera_move = { enable: true };
 	const duration: Record<string, unknown> = {};
 	if (opts.durationPref) duration.pref = opts.durationPref;
 	if (opts.maxClipSec != null) {
@@ -262,6 +266,7 @@ export function registerLong2Short(program: Command): void {
 		.option("--subtitle-out", "逐 clip 另产单语 .srt 字幕（按目标画布档位智能拆行，落 clip{i}/srt/）")
 		.option("--keep-punctuation", "字幕保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
 		.option("--speed-factor <n>", "整体调速倍率 0.5–2.0（保音高；倍率写进逐 clip 工程、云端不渲染、不加价；缺省不调速）")
+		.option("--camera-move", "运镜：云端按概率给主轨片段写推 / 拉镜头关键帧（客户端 / 剪映可见可改，本地渲染与 PR 不呈现；缺省不加）")
 		.option("--output-size <s>", "输出画布 9:16|16:9|1:1 或自定义 WxH（缺省服务端 9:16）")
 		.option("-f, --formats <list>", "三方格式（逗号分隔，云端逐 clip 直产）", "gtrk,jianying,xml")
 		.option("--jianying-draft-dir <dir>", "剪映草稿根目录；传路径或 auto（默认读 gtrk init 配置 / 自动探测）")

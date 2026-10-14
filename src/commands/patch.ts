@@ -21,6 +21,8 @@ import { audioCacheDir } from "../lib/paths";
 import { buildEnvelope, planSnap, median } from "../lib/cut-snap";
 import { materialsByIdOf } from "../lib/gtrk-invariants";
 import { clipSpeed } from "../lib/clip-speed";
+import { retime as retimeKeyframes, retimeClipKeyframes, type ClipKeyframes } from "../lib/clip-keyframes";
+import { readMs } from "../lib/frame-domain";
 import { readGtrk, assertGtrkV1, writeGtrkAtomic, GtrkWritebackConflictError } from "../lib/gtrk-writeback";
 import {
 	type ActionKind,
@@ -34,7 +36,7 @@ import {
 	collectElements,
 	decideSetForm,
 	derive,
-	diffViolations,
+	blockingViolations,
 	insertElement,
 	isTimecodeAction,
 	locatorOf,
@@ -367,9 +369,17 @@ function applyTimecodeToElement(
 	}
 
 	if (action === "trim") {
-		const r = applyTrim(view, trimArgsOf(opts), rate, clipSpeed(el.clip));
+		const args = trimArgsOf(opts);
+		const r = applyTrim(view, args, rate, clipSpeed(el.clip));
 		if (!r.ok) fail(r.error.code, r.error.message);
-		return { next: replaceElement(gtrk, el.ref, writeDerived(el.clip, cls, derive(r.view, rate))), receiptFor: el };
+		const derived = derive(r.view, rate);
+		const nextClip = writeDerived(el.clip, cls, derived);
+		// 关键帧随轨上时序维护（link-long2short-for-cli-camera-move design D2）：入点后移 Δ ⇒ 全体 t − Δ；
+		// 越出新时长的 key 截掉并补插值端点；--slip 只换源窗、轨上不动 ⇒ 关键帧不动。
+		if (args.slip === undefined) {
+			retimeClipKeyframes(nextClip, ms2sec(derived.trackStMs - readMs(el.clip.track_st)), ms2sec(derived.durationMs));
+		}
+		return { next: replaceElement(gtrk, el.ref, nextClip), receiptFor: el };
 	}
 
 	// split。⚠️ 切点用 `--cut` 不是 `--at`（design D10）：`--at` 恒为寻址参数，
@@ -381,8 +391,24 @@ function applyTimecodeToElement(
 	if (!r.ok) fail(r.error.code, r.error.message);
 	const taken = new Set(collectElements(gtrk).map((e) => e.clipId).filter((s) => s !== ""));
 	const newId = el.clipId === "" ? "" : nextSplitId(el.clipId, taken, () => randomBytes(2).toString("hex"));
-	const firstClip = writeDerived(el.clip, cls, derive(r.result.first, rate));
-	const secondClip = { ...writeDerived(el.clip, cls, derive(r.result.second, rate)), clip_id: newId };
+	const firstD = derive(r.result.first, rate);
+	const secondD = derive(r.result.second, rate);
+	const firstClip = writeDerived(el.clip, cls, firstD);
+	const secondClip = { ...writeDerived(el.clip, cls, secondD), clip_id: newId };
+	// 切分：两段各自继承本段的关键帧、切点补插值 key、后段平移到自身起点（design D2）。
+	// 两段时长取帧对齐后的导出值（MUST NOT 用「原时长 − 切点」：取整不可加，差 1ms 就会让末 key 越界）。
+	if (el.clip.clip_keyframes !== undefined) {
+		const kf0 = el.clip.clip_keyframes as ClipKeyframes;
+		const front = retimeKeyframes(kf0, { shift: 0, duration: ms2sec(firstD.durationMs) });
+		const back = retimeKeyframes(kf0, {
+			shift: ms2sec(secondD.trackStMs - readMs(el.clip.track_st)),
+			duration: ms2sec(secondD.durationMs),
+		});
+		for (const [clip, kf] of [[firstClip, front], [secondClip, back]] as const) {
+			if (Object.keys(kf).length > 0) (clip as Record<string, unknown>).clip_keyframes = kf;
+			else delete (clip as Record<string, unknown>).clip_keyframes;
+		}
+	}
 	let next = replaceElement(gtrk, el.ref, firstClip);
 	next = insertElement(next, el.ref, el.ref.clipArrayIndex + 1, secondClip);
 	return { next, receiptFor: el };
@@ -954,7 +980,7 @@ async function runOps(
 		}
 	}
 
-	const { violations, preexisting } = diffViolations(validateAll(before), validateAll(next));
+	const { violations, preexisting } = blockingViolations(validateAll(before), validateAll(next));
 	if (violations.length > 0) {
 		const lines = violations.map((v) => `  · [${v.code}] ${v.message}`).join("\n");
 		fail("invariant_violated", `批量改动会破坏时码不变量，已拒绝写入（文件逐字节未变）：\n${lines}`);
@@ -1085,7 +1111,7 @@ export async function runPatchCommand(words: string[], opts: PatchOpts, deps: Pa
 	}
 
 	// 全档校验：出档集合 \ 入档集合
-	const { violations, preexisting } = diffViolations(validateAll(before), validateAll(next));
+	const { violations, preexisting } = blockingViolations(validateAll(before), validateAll(next));
 	if (violations.length > 0) {
 		const lines = violations.map((v) => `  · [${v.code}] ${v.message}`).join("\n");
 		fail("invariant_violated", `本次改动会破坏时码不变量，已拒绝写入（文件逐字节未变）：\n${lines}`);

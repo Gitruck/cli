@@ -11,6 +11,8 @@
 
 ## 未发布
 
+- `long2short --camera-move`：云端按与精剪同一套调度把推 / 拉镜头写成主轨片段的 `clip_keyframes.scale_x / scale_y`，客户端与剪映可见可改；`clips.md` 标「运镜 N 处」，未能加运镜的切片单列；`/gtrk-live-slicing` 开工问询变五问（⑤ 运镜，缺省不加）。需配合服务端 `add-long2short-for-cli-camera-move` 与客户端承接 `clip_keyframes` 的版本。
+- `gtrk patch` 的 trim / split / seal / snap 同步维护 `clip_keyframes`（入点平移、越界截断补插值端点、切分两段各自合法），写前校验拒绝任何非法关键帧并点名 clip 与通道；`audio tighten` 遇带音量关键帧的音频片段拒绝；本地 `gtrk render` 读到关键帧时提示按静态画面出片。
 - `gtrk project background --blur [--intensity n] | --color #RRGGBB | --clear`：写客户端画布背景 `struct_meta.client_background`（零计费、不访问云端），横屏源进竖屏画布时用模糊底替代黑边；`/gtrk-live-slicing` 对横竖互转的入选切片缺省加模糊底。剪映 / PR 与本地 `gtrk render` 不带该设置。
 - `long2short --speed-factor 0.5–2.0`：整体调速（保音高）写进逐 clip 工程，客户端 / 剪映 / PR 都按倍率播放，云端不渲染、不加价；`clips.md` 标注倍率，未能变速的 clip 单列。需配合服务端 `add-long2short-for-cli-speed` 上线。
 - `long2short` 产物根新增整片转写 `json/transcript.json`，可用 `gtrk subtitle lay --gtrk … --transcript …` 给任一 clip 上客户端字幕轨；字幕文件来源时 `clips.md` 提示词级时间为近似值。需配合服务端 `add-long2short-for-cli-transcript` 上线，老服务端下不报错。

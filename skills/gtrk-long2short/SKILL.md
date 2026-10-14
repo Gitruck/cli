@@ -59,6 +59,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 | `--subtitle-out` | 逐 clip 另产**单语 .srt 字幕**（按目标画布档位智能拆行：横屏约 20 字/行、竖屏约 13 字/行），落 `clip{i}/srt/` |
 | `--keep-punctuation` | 字幕保留全部标点。缺省按统一口径去标点：逗号句号→空格、`？！` 等保留 |
 | `--speed-factor <n>` | 整体调速 `0.5–2.0`（保音高）。倍率**写进逐 clip 工程**（每个片段带 `speed`），客户端 / 剪映 / PR 都按倍率播放、可在客户端改回；云端不渲染、不加价。**只在用户主动要求时加**；更高倍率请在客户端对具体片段拖边变速 |
+| `--camera-move` | 运镜：云端按与精剪同一套调度给主轨片段写推 / 拉镜头关键帧（概率抽取、推拉交替、幅度克制），零渲染、不加价。客户端与剪映可见可改；本地 `gtrk render` 与 PR 工程不呈现。**缺省不加**，直播切片图纸开工会问；细项走 `--params-json` |
 | `--output-size <s>` | 画布 `9:16|16:9|1:1` 或 `WxH`（缺省 9:16 竖版） |
 | `-f, --formats <list>` | 三方格式，缺省 `gtrk,jianying,xml`（云端逐 clip 直产；gtrk 恒有） |
 | `--jianying-draft-dir <dir>` | 剪映草稿根（或 `auto`）；各 clip 草稿落 `<草稿根>/<产物根名>_clip{i}` |
@@ -81,6 +82,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
   `gtrk subtitle lay --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`
   （clip 工程文件名以 `clip{i}/gtrk/` 下实际文件为准）。上完字幕的是**客户端工程**；云端早先产出的剪映 / PR 工程不含这条字幕轨，要带字幕的剪映草稿请从客户端导出。老服务端没有这份文件时，CLI 会提示「无法自动上字幕」。
 - 横屏源进竖屏画布（缺省 9:16）时工程上下是黑边；要模糊底：`gtrk project background --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --blur`（客户端画布设置，可在设置里改回黑底；剪映 / PR 与本地渲染不带；零计费）。
+- 用了 `--camera-move` 时：`clips.md` 每条时长后标「运镜 N 处」（0 处属正常）；若有 clip 未能加运镜，`clips.md` 会单列「未能加运镜的切片」；告诉用户运镜在客户端 / 剪映里看，本地渲染与 PR 看不到。之后用 `gtrk patch` 裁剪 / 切分带运镜的片段，关键帧会跟着调整。
 - 用了 `--speed-factor` 时：`clips.md` 的时长是**变速后**的时长并标注倍率；若有 clip 未能变速，`clips.md` 会单列「未能变速的切片」，如实告诉用户。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
 - 开了 `--split-screen` 时：**分屏素材落在毛片旁的 `split_screen/` 子目录**（工程素材路径指向那里，别移动/删除，移动了工程会缺素材）——这点要提前告知用户。
