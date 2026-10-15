@@ -13,7 +13,7 @@
  *
  * 纯函数、零 I/O：读文件、写文件、取工具箱都在命令层。
  */
-import { f2ms, sec2frame } from "./frame-domain";
+import { f2ms, sec2frame, sec2ms } from "./frame-domain";
 import { collectProjectionClips, normClip, type GtrkProject, type Transcript } from "./projection";
 import type { CompositeBlock } from "./composite-particle";
 import {
@@ -157,7 +157,7 @@ export function resolveScene(
 	if (!Array.isArray(spec.window) || spec.window.length !== 2) throw new CompositeSceneError(id, ["规格缺 window: [起, 止]（时间线秒）"]);
 	const rate = Number(gtrk.video_rate);
 	const [st, ed] = spec.window.map((x) => snapSec(Number(x), rate));
-	const shift: [number, number] = [Math.round((st - spec.window[0]) * 1000), Math.round((ed - spec.window[1]) * 1000)];
+	const shift: [number, number] = [sec2ms(st - spec.window[0]), sec2ms(ed - spec.window[1])];
 	if (!(ed > st)) throw new CompositeSceneError(id, [`窗口为空或倒置：${spec.window.join("–")}`]);
 	const beat = { clip_id: id, track_st: st, track_ed: ed };
 	const win = windowFrames(beat, rate);

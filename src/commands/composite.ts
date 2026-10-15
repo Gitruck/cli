@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requireFfmpeg } from "../lib/ffmpeg";
+import { r3 } from "../lib/frame-domain";
 import { probeGeometry } from "../lib/media";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic, writeStructMetaKey } from "../lib/gtrk-writeback";
 import { assertGtrkWriteInvariants } from "../lib/gtrk-invariants";
@@ -683,7 +684,7 @@ export function runCompositeShots(opts: ShotsCmdOpts) {
 	const geo = probeGeometry(path, opts.ffmpegPath);
 	const duration = geo.duration;
 	const range = shotsRange(duration, { from: num(opts.from, "--from"), to: num(opts.to, "--to"), around: num(opts.around, "--around"), span: num(opts.span, "--span") });
-	const dur = Math.round((range.to - range.from) * 1000) / 1000;
+	const dur = r3(range.to - range.from);
 	const every = num(opts.every, "--every") ?? Math.max(0.5, Math.round((dur / 60) * 10) / 10);
 	const outDir = opts.out ? resolve(opts.out) : join(ctx ? ctx.projectDir : dirname(path), "composite", "shots");
 	mkdirSync(outDir, { recursive: true });
@@ -696,7 +697,7 @@ export function runCompositeShots(opts: ShotsCmdOpts) {
 	const sheets = readdirSync(outDir).filter((f) => f.startsWith(`${stem}-p`) && f.endsWith(".png")).sort().map((f) => join(outDir, f));
 	// 镜头 = 相邻切点之间（含范围两端）
 	const bounds = [range.from, ...cuts.filter((c) => c > range.from && c < range.to), range.to];
-	const shots = bounds.slice(0, -1).map((st, i) => ({ st, ed: bounds[i + 1], dur: Math.round((bounds[i + 1] - st) * 1000) / 1000 }));
+	const shots = bounds.slice(0, -1).map((st, i) => ({ st, ed: bounds[i + 1], dur: r3(bounds[i + 1] - st) }));
 	log.info(`切点 ${cuts.length} 个：${cuts.join(" / ") || "（无）"}`);
 	log.info(crop.bars ? `黑边：data-crop="${crop.crop.join(",")}"（上右下左；ffmpeg ${crop.raw}）` : "黑边：无");
 	for (const s of sheets) log.ok(`联系表 ${s}（每格左上是源时间码，间隔 ${every} 秒）`);

@@ -10,7 +10,7 @@
  * - ranges：用户给区间（时间或句 id），吸附到句界、投影到帧格，吸附量逐条写明；直接记为 `approved`。
  * - 重跑：`built` 原样保留、`rejected` 保留且该区间不再提；其余整键替换。
  */
-import { r3 } from "./frame-domain";
+import { r3, sec2ms } from "./frame-domain";
 import { snapSec } from "./composite-scene";
 
 export const COMPOSITE_PLAN_CONTRACT = "v1";
@@ -382,7 +382,7 @@ export function snapRange(inp: PlanInput, r: RangeSpec): RangeSnap {
 	for (let i = 0; i < U.length; i++) if (Math.abs(U[i].ed - ed) < Math.abs(U[b].ed - ed)) b = i;
 	if (b < a) b = a;
 	const w = windowFromUtterances(inp, a, b);
-	return { window: w, shiftMs: [Math.round((w.track_st - st) * 1000), Math.round((w.track_ed - ed) * 1000)] };
+	return { window: w, shiftMs: [sec2ms(w.track_st - st), sec2ms(w.track_ed - ed)] };
 }
 
 export function planRanges(inp: PlanInput, ranges: RangeSpec[]): { plan: CompositePlanMeta; shifts: Array<{ raw: string; id: string; shiftMs: [number, number] }> } {

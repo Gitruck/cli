@@ -125,13 +125,28 @@ export class HeadlessBrowser {
 		}
 	}
 
-	send(method: string, params: Record<string, unknown> = {}, onPage = true): Promise<Record<string, unknown>> {
+	/** 单条 CDP 指令的超时：浏览器卡住时报错而不是让调用方永远等下去（并行跑满 CPU 时也够用）。 */
+	static COMMAND_TIMEOUT_MS = 60_000;
+
+	send(method: string, params: Record<string, unknown> = {}, onPage = true, timeoutMs = HeadlessBrowser.COMMAND_TIMEOUT_MS): Promise<Record<string, unknown>> {
 		if (this.exited) return Promise.reject(new Error("浏览器进程已退出"));
 		const id = ++this.id;
 		const msg: Record<string, unknown> = { id, method, params };
 		if (onPage && this.sessionId) msg.sessionId = this.sessionId;
 		return new Promise((res, rej) => {
-			this.pending.set(id, { res, rej });
+			const timer = setTimeout(() => {
+				if (this.pending.delete(id)) rej(new Error(`浏览器 ${timeoutMs / 1000} 秒没回应：${method}`));
+			}, timeoutMs);
+			this.pending.set(id, {
+				res: (v) => {
+					clearTimeout(timer);
+					res(v);
+				},
+				rej: (e) => {
+					clearTimeout(timer);
+					rej(e);
+				},
+			});
 			(this.proc.stdio[3] as Writable).write(`${JSON.stringify(msg)}\0`);
 		});
 	}
@@ -153,11 +168,35 @@ export class HeadlessBrowser {
 		});
 	}
 
-	/** 打开一个 URL 并等到 load。 */
-	async open(url: string, timeoutMs = 30000): Promise<void> {
-		const loaded = this.waitEvent("Page.loadEventFired", timeoutMs);
-		await this.send("Page.navigate", { url });
-		await loaded;
+	/**
+	 * 打开一个 URL 并等到 load。
+	 *
+	 * ⚠️ 偶发（机器忙时实测）：新开的页面第一次导航，`Page.navigate` 迟迟不回、load 事件也不来，原样等会卡死整轮
+	 * （原型 render.mjs 同一现象，靠定时补导航解决）。所以：不阻塞在导航的回包上；每轮等 load 至多 8 秒，
+	 * 没等到就看页面是否其实已经到了（事件丢了），还没到就再导航一次，整体限时。
+	 */
+	async open(url: string, timeoutMs = 60000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		const same = (a: string) => {
+			try {
+				return decodeURI(a) === decodeURI(url);
+			} catch {
+				return a === url;
+			}
+		};
+		while (Date.now() < deadline) {
+			const loaded = this.waitEvent("Page.loadEventFired", 8000).then(
+				() => true,
+				() => false,
+			);
+			this.send("Page.navigate", { url }, true, 8000).catch(() => {});
+			if (await loaded) return;
+			const href = await this.send("Runtime.evaluate", { expression: "document.readyState === 'complete' ? location.href : ''", returnByValue: true }, true, 5000)
+				.then((r) => String((r as { result?: { value?: unknown } }).result?.value ?? ""))
+				.catch(() => "");
+			if (href && same(href)) return;
+		}
+		throw new Error(`打开页面超时：${url}`);
 	}
 
 	/** 在页面里求值（可 await），返回 JSON 值；页面抛错时带回错误文本。 */

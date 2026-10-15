@@ -7,6 +7,8 @@
  * 不裁就在画框里留一道黑带（测试工程 cp05 第一版）。
  */
 
+import { r3 } from "./frame-domain";
+
 /** ffmpeg 场景分阈值（原型实测：综艺 / 电影混剪源 0.25 能分出硬切，又不把运动镜头误判成切点）。 */
 export const SCENE_THRESHOLD = 0.25;
 
@@ -17,7 +19,7 @@ export function sceneCutArgs(file: string, from: number, dur: number, threshold 
 /** showinfo 行里的 `pts_time:` → 源时间（加回 `-ss` 起点，三位小数，去重升序）。 */
 export function parseSceneCuts(stderr: string, from: number): number[] {
 	const out = new Set<number>();
-	for (const m of stderr.matchAll(/pts_time:\s*([0-9.]+)/g)) out.add(Math.round((from + Number(m[1])) * 1000) / 1000);
+	for (const m of stderr.matchAll(/pts_time:\s*([0-9.]+)/g)) out.add(r3(from + Number(m[1])));
 	return [...out].sort((a, b) => a - b);
 }
 
@@ -41,7 +43,7 @@ export function parseCropDetect(stderr: string, width: number, height: number): 
 	if (!counts.size || !(width > 0 && height > 0)) return { crop: [0, 0, 0, 0], raw: "", bars: false };
 	const raw = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
 	const [w, h, x, y] = raw.split(":").map(Number);
-	const r = (v: number) => Math.max(0, Math.round(v * 1000) / 1000);
+	const r = (v: number) => Math.max(0, r3(v));
 	const crop: [number, number, number, number] = [r(y / height), r((width - x - w) / width), r((height - y - h) / height), r(x / width)];
 	return { crop, raw, bars: crop.some((v) => v >= 0.01) };
 }
