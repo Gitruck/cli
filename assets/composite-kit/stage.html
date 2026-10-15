@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>合成颗粒出片台</title>
+<style>
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #000; }
+  .layer { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; border: 0; }
+</style>
+</head>
+<body>
+<iframe id="back" class="layer" title="back"></iframe>
+<canvas id="slots" class="layer" width="1920" height="1080"></canvas>
+<iframe id="front" class="layer" title="front"></iframe>
+<script>
+/* 合成颗粒出片台（composite-kit@1，`gtrk composite lint --stills` 用）：与客户端预览同一套规则——
+ * 两层图形 iframe（back / front）夹一块槽位画布。颗粒走宿主协议（init / apply → frame）；槽位取帧：
+ *   ref = 片段在时间线该时刻的画面（之前首帧、之后末帧）；ref-lane = 按 lane_clip_id 找轨、空档定格前一段末帧；
+ *   own = 入点 + (f − starts_at_f) 帧。每个槽位一个 <video>（同源取帧不共用解码，见客户端 R15）。
+ * 用法：stageInit({ fps, entries, materials, tracks }) → renderAt(时间线秒)。全部经 file:// 读本地文件。 */
+let FPS = 60, entries = [], matUrl = new Map(), byClip = new Map();
+const back = document.getElementById("back"), front = document.getElementById("front");
+const canvas = document.getElementById("slots"), ctx = canvas.getContext("2d");
+
+window.stageInit = (data) => {
+  FPS = data.fps; entries = data.entries;
+  matUrl = new Map(Object.entries(data.materials));
+  byClip = new Map();
+  for (const t of data.tracks) {
+    const clips = t.clips.filter((c) => c.material).sort((a, b) => a.track_st - b.track_st);
+    for (const c of clips) byClip.set(c.clip_id, { clip: c, clips });
+  }
+  return true;
+};
+
+let current = null;
+const waiters = new Map();
+addEventListener("message", (ev) => {
+  const m = ev.data;
+  if (!m || m.ch !== "gtrk-composite") return;
+  const layer = ev.source === back.contentWindow ? "back" : ev.source === front.contentWindow ? "front" : null;
+  if (!layer) return;
+  if (m.type === "error") console.error("[composite]", layer, m.message);
+  const key = layer + ":" + (m.type === "frame" ? "frame:" + m.seq : m.type);
+  const w = waiters.get(key);
+  if (w) { waiters.delete(key); w(m); }
+});
+const waitFor = (key, ms = 15000) => new Promise((res, rej) => {
+  waiters.set(key, res);
+  setTimeout(() => { if (waiters.delete(key)) rej(new Error("超时：" + key)); }, ms);
+});
+const load = (frame, src) => new Promise((res) => { frame.onload = () => res(); frame.src = src; });
+async function mount(entry) {
+  if (current && current.entry.id === entry.id) return current.ready;
+  const ready = (async () => {
+    await Promise.all([load(back, entry.url), load(front, entry.url)]);
+    for (const [frame, layer] of [[back, "back"], [front, "front"]]) {
+      const p = waitFor(layer + ":ready");
+      frame.contentWindow.postMessage({ ch: "gtrk-composite", type: "init", layer, fps: FPS, anchors: entry.anchors_f, texts: entry.texts }, "*");
+      await p;
+    }
+  })();
+  current = { entry, ready };
+  return ready;
+}
+
+const pool = new Map();
+function videoFor(key, url) {
+  let v = pool.get(key);
+  if (!v || v.dataset.url !== url) {
+    v = document.createElement("video");
+    v.muted = true; v.preload = "auto"; v.dataset.url = url; v.src = url;
+    pool.set(key, v);
+  }
+  return v;
+}
+const once = (el, ev) => new Promise((res) => el.addEventListener(ev, res, { once: true }));
+async function seek(v, sec) {
+  if (v.readyState < 1) await once(v, "loadedmetadata");
+  const target = Math.min(Math.max(sec, 0), Math.max(v.duration - 0.001, 0));
+  if (Math.abs(v.currentTime - target) > 0.25 / FPS || v.readyState < 2) {
+    const done = once(v, "seeked");
+    v.currentTime = target;
+    await done;
+  }
+  if (v.readyState < 2) await once(v, "loadeddata");
+  return v;
+}
+const lastFrameSec = (c) => c.clip_st + (c.track_ed - c.track_st) - 1 / FPS;
+function sourceFor(b, T, f) {
+  if (b.kind === "ref") {
+    const hit = byClip.get(b.clip_id); if (!hit) return null;
+    const c = hit.clip;
+    const tt = Math.min(Math.max(T, c.track_st), c.track_ed - 1 / FPS);
+    return { url: matUrl.get(c.material), sec: c.clip_st + (tt - c.track_st) };
+  }
+  if (b.kind === "ref-lane") {
+    const hit = byClip.get(b.lane_clip_id); if (!hit) return null;
+    const act = hit.clips.find((c) => T >= c.track_st && T < c.track_ed);
+    if (act) return { url: matUrl.get(act.material), sec: act.clip_st + (T - act.track_st) };
+    const prev = hit.clips.filter((c) => c.track_ed <= T).pop();
+    if (prev) return { url: matUrl.get(prev.material), sec: lastFrameSec(prev) };
+    const next = hit.clips.find((c) => c.track_st > T);
+    return next ? { url: matUrl.get(next.material), sec: next.clip_st } : null;
+  }
+  if (b.kind === "own") {
+    const k = Math.min(Math.max(f - b.starts_at_f, 0), b.dur_f - 1);
+    return { url: matUrl.get(b.material), sec: b.src_in_ms / 1000 + k / FPS };
+  }
+  return null;
+}
+function drawRect(g, sw0, sh0, fit, framing) {
+  const [top, right, bottom, left] = g.crop;
+  const sx = sw0 * left, sy = sh0 * top, sw = sw0 * (1 - left - right), sh = sh0 * (1 - top - bottom);
+  const base = fit === "contain" ? Math.min(g.w / sw, g.h / sh) : Math.max(g.w / sw, g.h / sh);
+  const scale = base * Math.max((framing && framing.scale_pm) || 1000, 1000) / 1000;
+  const dw = sw * scale, dh = sh * scale;
+  const cx = g.x + g.w / 2 + ((framing && framing.x_pm) || 0) / 1000 * g.w;
+  const cy = g.y + g.h / 2 + ((framing && framing.y_pm) || 0) / 1000 * g.h;
+  return [sx, sy, sw, sh, cx - dw / 2, cy - dh / 2, dw, dh];
+}
+function shape(g) {
+  ctx.beginPath();
+  if (g.shape === "circle") ctx.ellipse(g.x + g.w / 2, g.y + g.h / 2, g.w / 2, g.h / 2, 0, 0, Math.PI * 2);
+  else if (g.shape === "roundrect" && g.radius > 0) ctx.roundRect(g.x, g.y, g.w, g.h, Math.min(g.radius, g.w / 2, g.h / 2));
+  else ctx.rect(g.x, g.y, g.w, g.h);
+}
+
+let seq = 0;
+window.renderAt = async (T) => {
+  const F = Math.round(T * FPS);
+  const entry = entries.find((p) => F >= p.window_f[0] && F < p.window_f[1]);
+  if (!entry) throw new Error("该时刻没有合成颗粒：" + T);
+  await mount(entry);
+  const f = Math.min(Math.max(F - entry.window_f[0], 0), entry.window_f[1] - entry.window_f[0] - 1);
+  const s = ++seq;
+  const pf = waitFor("front:frame:" + s), pb = waitFor("back:frame:" + s);
+  for (const fr of [back, front]) fr.contentWindow.postMessage({ ch: "gtrk-composite", type: "apply", seq: s, frame: f }, "*");
+  const [geo] = await Promise.all([pf, pb]);
+  const Tf = (entry.window_f[0] + f) / FPS;
+  const jobs = geo.slots.filter((g) => g.visible).map(async (g) => {
+    const b = entry.bindings[g.id];
+    if (!b || b.kind === "text") return null;
+    const src = sourceFor(b, Tf, f);
+    if (!src || !src.url) return null;
+    const v = await seek(videoFor(g.id + "|" + src.url, src.url), src.sec);
+    return { g, b, v };
+  });
+  const ready = (await Promise.all(jobs)).filter(Boolean);
+  ctx.clearRect(0, 0, 1920, 1080);
+  for (const { g, b, v } of ready) {
+    ctx.save();
+    shape(g); ctx.clip();
+    ctx.globalAlpha = g.opacity;
+    if (g.filter) ctx.filter = g.filter;
+    ctx.drawImage(v, ...drawRect(g, v.videoWidth, v.videoHeight, b.fit || g.fit, b.framing));
+    ctx.restore();
+  }
+  await new Promise((r) => setTimeout(r, 60));
+  return { id: entry.id, f };
+};
+</script>
+</body>
+</html>

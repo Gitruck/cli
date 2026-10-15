@@ -15,6 +15,7 @@ import type { Command } from "commander";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { requireFfmpeg } from "../lib/ffmpeg";
 import { probeGeometry } from "../lib/media";
 import { assertGtrkV1, readGtrk, writeStructMetaKey } from "../lib/gtrk-writeback";
@@ -24,6 +25,8 @@ import { transcriptCandidates } from "../lib/reproject";
 import { collectProjectionClips, projectTranscript, type GtrkProject, type Transcript } from "../lib/projection";
 import { evaluateComposite, type ResolveGtrk } from "../lib/composite-resolve";
 import { buildParticle, COMPOSITE_PRODUCER, CompositeSceneError, parseScene, type CompositeKit } from "../lib/composite-scene";
+import { findBrowser, HeadlessBrowser, layoutLintScript } from "../lib/composite-browser";
+import { mergeFrameIssues, sampleFrames, staticLint, type FrameIssue, type LintIssue } from "../lib/composite-lint";
 import { contactSheetArgs, cropDetectArgs, parseCropDetect, parseSceneCuts, sceneCutArgs, shotsRange } from "../lib/composite-shots";
 import {
 	COMPOSITE_DENSITY_DEFAULT,
@@ -82,7 +85,9 @@ export function loadCompositeContext(opts: CompositeOpts): CompositeContext {
 	}
 	const { gtrk, revision } = readGtrk(gtrkPath);
 	assertGtrkV1(gtrk);
-	const tPath = opts.transcript ? resolve(opts.transcript) : (transcriptCandidates(projectDir).find((p) => existsSync(p)) ?? null);
+	// transcript：工程目录下找；--gtrk 与 --project 分开给时，再到 .gtrk 所属的工程目录找
+	const tDirs = [...new Set([projectDir, dirname(dirname(gtrkPath))])];
+	const tPath = opts.transcript ? resolve(opts.transcript) : (tDirs.flatMap(transcriptCandidates).find((p) => existsSync(p)) ?? null);
 	let transcript: Transcript | null = null;
 	if (tPath) {
 		if (!existsSync(tPath)) throw new Error(`transcript 不存在：${tPath}`);
@@ -455,6 +460,115 @@ export function runCompositeScaffold(opts: ScaffoldCmdOpts) {
 	return result;
 }
 
+// ------------------------------------------------------------------ lint
+
+export interface LintCmdOpts extends CompositeOpts {
+	stills?: string[];
+	browser?: boolean;
+}
+
+/** 退出码：0 通过；1 有问题；3 静态通过但排版未机检（找不到浏览器 / --no-browser）。 */
+export const LINT_EXIT_UNCHECKED = 3;
+
+function readManifest(ctx: CompositeContext): BuildManifestEntry[] {
+	const p = join(ctx.projectDir, "composite", "build.json");
+	if (!existsSync(p)) throw new Error(`找不到构建清单 ${p}：先跑 gtrk composite build`);
+	return JSON.parse(readFileSync(p, "utf8")) as BuildManifestEntry[];
+}
+
+function stageData(ctx: CompositeContext, entries: BuildManifestEntry[], extra: Array<Record<string, unknown>>) {
+	const g = ctx.gtrk as Record<string, unknown> & { video_rate: number; materials?: Array<Record<string, unknown>>; video_track?: Array<{ track_index?: number; track_timeline?: Array<Record<string, unknown>> }> };
+	const materials: Record<string, string> = {};
+	for (const m of [...(g.materials ?? []), ...extra]) {
+		if (typeof m.path !== "string" || typeof m.id !== "string") continue;
+		const abs = isAbsolute(m.path) ? m.path : resolve(ctx.gtrkDir, m.path);
+		materials[m.id] = pathToFileURL(abs).href;
+	}
+	return {
+		fps: Number(g.video_rate),
+		materials,
+		tracks: (g.video_track ?? []).map((t) => ({
+			index: t.track_index,
+			clips: (t.track_timeline ?? []).map((c) => ({ clip_id: c.clip_id, material: c.material, clip_st: Number(c.clip_st ?? 0), track_st: Number(c.track_st), track_ed: Number(c.track_ed) })),
+		})),
+		entries: entries.map((e) => ({ ...e, url: pathToFileURL(resolve(ctx.gtrkDir, e.html)).href })),
+	};
+}
+
+export async function runCompositeLint(opts: LintCmdOpts) {
+	if (opts.json) routeLogsToStderr();
+	const ctx = loadCompositeContext(opts);
+	const extra = loadExtraMaterials(ctx, opts.materials);
+	const extraIds = extra.map((m) => String(m.id));
+	const only = onlyList(opts.only);
+	const entries = readManifest(ctx).filter((e) => !only.length || only.some((o) => e.id.includes(o)));
+	if (!entries.length) throw new Error("构建清单里没有要检查的颗粒");
+	const gtrk = ctx.gtrk as unknown as ResolveGtrk;
+	const rate = Number(gtrk.video_rate);
+	const report = new Map<string, LintIssue[]>(entries.map((e) => [e.id, []]));
+	log.step(`① 静态校验 ${entries.length} 颗`);
+	for (const e of entries) {
+		const p = resolve(ctx.gtrkDir, e.html);
+		if (!existsSync(p)) {
+			report.get(e.id)?.push({ kind: "static", rule: "profile", message: `颗粒文件不存在：${p}（重跑 build）` });
+			continue;
+		}
+		report.get(e.id)?.push(...staticLint(readFileSync(p, "utf8"), e.window, gtrk, { extraMaterialIds: extraIds }));
+	}
+	const stills = (opts.stills ?? []).flatMap((s) => s.split(",")).map((s) => s.trim()).filter(Boolean).map(Number);
+	if (stills.some((t) => !Number.isFinite(t))) throw new Error("--stills 需要时间线秒（如 --stills 12.5,48）");
+	const exe = opts.browser === false ? null : findBrowser();
+	let layoutChecked = false;
+	const stillFiles: string[] = [];
+	if (!exe) {
+		log.warn(opts.browser === false ? "排版未机检（--no-browser）" : "排版未机检：本机找不到 Chrome / Edge（可设环境变量 GTRK_CHROME 指定浏览器路径）");
+	} else {
+		log.step(`② 逐帧排版机检（${basename(exe)}，每 10 帧一采样）`);
+		const b = await HeadlessBrowser.launch(exe);
+		try {
+			for (const e of entries) {
+				await b.open(pathToFileURL(resolve(ctx.gtrkDir, e.html)).href);
+				const span = e.window_f[1] - e.window_f[0];
+				const r = await b.evaluate<{ samples: Array<{ f: number; issues: FrameIssue[] }>; errors: string[] }>(
+					layoutLintScript({ fps: rate, anchors: e.anchors_f, texts: e.texts }, sampleFrames(span)),
+				);
+				report.get(e.id)?.push(...mergeFrameIssues(r.samples));
+				for (const msg of [...new Set(r.errors)]) report.get(e.id)?.push({ kind: "layout", rule: "script-error", message: `场景脚本报错：${msg}` });
+			}
+			layoutChecked = true;
+			if (stills.length) {
+				const outDir = opts.out ? resolve(opts.out) : join(ctx.projectDir, "composite", "stills");
+				mkdirSync(outDir, { recursive: true });
+				log.step(`③ 出静帧 ${stills.length} 张 → ${outDir}`);
+				await b.open(pathToFileURL(join(packageRoot(), "assets", "composite-kit", "stage.html")).href);
+				await b.evaluate(`stageInit(${JSON.stringify(stageData(ctx, readManifest(ctx), extra))})`);
+				for (const t of stills) {
+					const r = await b.evaluate<{ id: string; f: number }>(`renderAt(${t})`);
+					const file = join(outDir, `${r.id}-${t.toFixed(2)}.jpg`);
+					writeFileSync(file, await b.screenshot("jpeg"));
+					stillFiles.push(file);
+					log.ok(`${file}（${r.id} 第 ${r.f} 帧）`);
+				}
+			}
+		} finally {
+			b.close();
+		}
+	}
+	let bad = 0;
+	const particles = entries.map((e) => {
+		const issues = report.get(e.id) ?? [];
+		if (issues.length) bad++;
+		if (!issues.length) log.ok(`${e.id}：通过${layoutChecked ? "" : "（只做了静态校验）"}`);
+		for (const it of issues) log.err(`${e.id}：${it.message}${it.frames ? `（帧 ${it.frames[0]}–${it.frames[1]}，${it.samples} 次采样）` : ""}`);
+		return { id: e.id, issues };
+	});
+	const ok = bad === 0;
+	process.exitCode = !ok ? 1 : layoutChecked ? 0 : LINT_EXIT_UNCHECKED;
+	const result = { ok, layout_checked: layoutChecked, browser: exe, particles, stills: stillFiles };
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
+}
+
 // ------------------------------------------------------------------ shots
 
 export interface ShotsCmdOpts extends CompositeOpts {
@@ -545,7 +659,7 @@ export function registerComposite(program: Command): void {
 		.option("--scenes <dir>", "[build] 场景目录（缺省 <工程>/composite/scenes）")
 		.option("--theme <css>", "[build] 栏目 / 工程风格（缺省 <工程>/composite/theme.css，没有就用工具箱中性样式）")
 		.option("--materials <json>", "[build|lay] 同批素材清单（缺省 <工程>/composite/materials.json）：own 槽位用到、工程里还没登记的素材")
-		.option("--out <dir>", "[build] 颗粒输出目录（缺省 <.gtrk 所在目录>/assets/composite）")
+		.option("--out <dir>", "输出目录：[build] 颗粒（缺省 <.gtrk 所在目录>/assets/composite）/ [lint] 静帧（缺省 <工程>/composite/stills）/ [shots] 联系表（缺省 <工程>/composite/shots）")
 		.option("--only <ids>", "只处理这些颗粒 / 窗口（逗号分隔，按 id 片段匹配）")
 		.option("--mode <m>", "[plan] full（整片铺满）| auto（AI 判定，缺省）| ranges（用户指定区间；给了 --range 时缺省即它）")
 		.option("--range <r>", "[plan] 区间：起秒,止秒（如 11.2,32）或句 id 区间（如 u0004-u0009）；可重复", collect, [])
@@ -556,6 +670,8 @@ export function registerComposite(program: Command): void {
 		.option("--adjust <id=范围>", "[review] 调起止（如 W02=80,90.9 或 W02=u0012-u0015），调完即采纳；可重复", collect, [])
 		.option("--add <范围>", "[review] 补一个窗口（直接采纳）；可重复", collect, [])
 		.option("--force", "[scaffold] 覆盖已有场景文件")
+		.option("--stills <秒>", "[lint] 顺带出静帧（时间线秒，逗号分隔或重复给），供检查点② 人看", collect, [])
+		.option("--no-browser", "[lint] 只做静态校验，不起浏览器（退出码 3 = 排版未机检）")
 		.option("--material <id|path>", "[shots] 素材 id（工程素材表）或文件路径")
 		.option("--from <sec>", "[shots] 观察起点（源时间秒）")
 		.option("--to <sec>", "[shots] 观察终点（源时间秒）")
@@ -571,6 +687,7 @@ export function registerComposite(program: Command): void {
 			if (sub === "scaffold") return void runCompositeScaffold(opts as ScaffoldCmdOpts);
 			if (sub === "build") return void runCompositeBuild(opts);
 			if (sub === "shots") return void runCompositeShots(opts as ShotsCmdOpts);
+			if (sub === "lint") return void (await runCompositeLint(opts as LintCmdOpts));
 			throw new Error(USAGE);
 		});
 }

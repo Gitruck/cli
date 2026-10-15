@@ -238,7 +238,8 @@
         CP.render(m.frame / FPS);
         reply({ type: "frame", seq: m.seq, frame: m.frame, slots: measure(), layer: LAYER });
       } else if (m.type === "lint") {
-        reply({ type: "lint", seq: m.seq, issues: lint() });
+        // 回包类型不能也叫 lint：颗粒作为顶层页面跑（gtrk composite lint）时回包会回到自己的监听里，同名就会无限往返
+        reply({ type: "lint-result", seq: m.seq, issues: lint() });
       }
     } catch (e) { reply({ type: "error", seq: m.seq, message: String((e && e.message) || e) }); }
   });
