@@ -62,6 +62,8 @@ export const SKILL_NAMES = [
 	"gtrk-food-recap",
 	// Vlog 纪实类组合图纸（add-vlog-docu-skill）：现场同期声 × 后期旁白双声道交替 → 纪实成片工程；主理人 2026-09-10 拍板入清单
 	"gtrk-vlog-docu",
+	// 合成层（add-composite-layer）：粗剪之上把选定时间窗做成合成颗粒，候选显示在客户端大纲 CP 行
+	"gtrk-composite",
 ] as const;
 
 export interface InstallSkillOptions {

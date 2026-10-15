@@ -398,6 +398,28 @@ gtrk pip lay --project <口播工程目录> --companion <屏录.mp4> [--shape el
 
 ---
 
+## 2.6 合成层：`gtrk composite`（粗剪之上的整段包装 · 纯本地零计费）
+
+字幕之后、出片之前：把选定时间窗做成**合成颗粒**——一段时间内的整个画面由一颗代码颗粒接管（逐句换画面、对照并排、并列卡片、字幕排版），讲者与 B-roll 作为槽位由客户端画进去。由 `/gtrk-composite` 驱动，**编排规则与两个检查点在 skill 里**，本节只列命令面。
+
+```bash
+gtrk composite plan --project <工程> [--mode full|auto|ranges] [--range 11,32 | --range u0004-u0009]... [--density 0.25]
+gtrk composite review --project <工程> [--approve W01,W03] [--reject W02] [--adjust W04=80,90.9] [--add 140,150] [--approve-all]
+gtrk composite scaffold --project <工程> [--only W03] [--force]
+gtrk composite shots --project <工程> --material <素材 id 或文件> [--around <秒> --span <秒>]
+gtrk composite build --project <工程> [--only cp-w03] [--theme <css>] [--materials <json>]
+gtrk composite lint --project <工程> [--stills 26,86.6] [--no-browser]
+gtrk composite lay --project <工程> [--only cp-w03] [--dry-run]
+```
+
+- **候选写 `struct_meta.composite`**（只动这一个键、原子写回），客户端大纲 CP 行画提案块——与 `gtrk split` 写 `struct_meta.split`、beat 色带呈现同一套做法。要用户看提案块，先请他在客户端**重新载入工程**。
+- **解析规则不自造**：`build` 按 infra `composite-particle-profile` 解析（帧格窗口、`lane_clip_id`、锚点局部帧、字幕输入、`inputs_hash`），对拍 infra 金样逐字节一致；窗口不在帧格上会被吸附并报挪动量。
+- **机检**：`lint` 退出码 0 通过 / 1 有问题 / 3 排版未机检（本机找不到 Chrome / Edge，可设 `GTRK_CHROME`）。**3 不是通过**：照实告诉用户，用静帧人眼查。
+- **铺轨**：按 `producer=gtrk:composite@1` 认领自产轨（不按轨号）；过期颗粒（上游改过）拒铺；用户在客户端改过的同 id 颗粒不覆盖。
+- ⚠️ **导出口径**：本版本导出（原生 / 剪映 / Pr）时合成颗粒所在时段仍按粗剪出画——用户要交付成片时开工就说。
+
+---
+
 ## 3. 产物结构 + 三端打开
 
 ```

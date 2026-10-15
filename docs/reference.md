@@ -23,7 +23,7 @@
 | ![在 Agent 中调用 gtrk 示例 1](../assets/agent-example-1.png) | ![在 Agent 中调用 gtrk 示例 2](../assets/agent-example-2.png) |
 | ![在 Agent 中调用 gtrk 示例 3](../assets/agent-example-3.png) | ![在 Agent 中调用 gtrk 示例 4](../assets/agent-example-4.png) |
 
-`gtrk install` 会把 18 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`·`gtrk-talking-head`·`gtrk-narration`·`gtrk-voiceover`·`gtrk-food-recap`·`gtrk-vlog-docu`）装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
+`gtrk install` 会把 19 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-composite`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`·`gtrk-talking-head`·`gtrk-narration`·`gtrk-voiceover`·`gtrk-food-recap`·`gtrk-vlog-docu`）装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
 
 默认使用 `~/.agents/skills` 作为统一正本，再链接到各 Agent 的兼容目录（Windows 使用 junction）；链接不可用时适配器会回退复制。这样更新只有一份正本，不会让多份副本逐渐漂移。常用命令：
 
@@ -70,6 +70,7 @@ gtrk skills install --copy
 | ③ | `/gtrk-ai-drama` | （无命令，纯创作） | **B-roll 底轨·AI 情景片段腿（与 matrix 同阶段，不是最后）**：产四段描述稿（故事背景/角色/分镜/原文，中英分块）→ 任意外部平台出片、手动回铺（产物即描述文本、无机械尾巴，同 `/gtrk-style-maker` 只 skill 无命令） |
 | ④ | （无 skill） | （无命令） | **全局抽帧检查画面构图**：对三源合并后的最终底轨抽帧，用户确认构图——这是 agent 纪律硬门，供 ⑤ 的排版避让决策使用 |
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG（含 ov）最后叠上**（叠在已定稿、构图已核的底轨之上） |
+| ⑥ | `/gtrk-composite` | `gtrk composite` | **合成层**（字幕之后、出片之前）：把选定时间窗做成合成颗粒——一段时间内的整个画面由一颗代码颗粒接管（逐句换画面、对照并排、并列卡片、字幕排版），讲者与 B-roll 作为槽位画进去；入口三选一（整片铺满 / AI 判定 / 指定区间），候选显示在客户端大纲 CP 行；纯本地零计费。本版本导出时该段仍按粗剪出画 |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
 | ③′ | 「**屏录画中画**」 | `gtrk pip lay` | 把口播粗剪的切点镜像到同步录的屏录 / 第二机位，铺屏录满幅轨 + 人像画中画副本轨（圆 / 圆角方 / 爱心 / 菱形 / 星形蒙版，可圆角）；纯本地零计费；低置信时产对齐工程让客户端拖齐后 `--resume` |
 | — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4（含 overlay 与 MG 颗粒；颗粒未命中缓存时云渲计费，`--no-particles` 可跳过） |
@@ -87,7 +88,7 @@ gtrk skills install --copy
 | 🧭 | `/gtrk-vlog-docu` | 编排 `gtrk transcript` → `tool audio_tts_clone` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **Vlog 纪实图纸**：一批现场素材 → 素材理解、选档写稿、一次拍板 → 同期声骨架 + 旁白配音 + B-roll + 字幕层 + BGM 全自动 → 客户端可出片工程；「现场同期声 × 后期旁白」双声道交替，区别于纯口播链与纯配音链 |
 
 > **skill 与命令的区别**：`/gtrk-mg` 是**脑**——懂它在 SOP 第 ⑤ 步（B-roll 三源全齐、构图核过才铺 MG）、带用户确认、按栏目配置解析该产哪种颗粒；`gtrk mg` 是**手**——纯确定性 lint + 铺轨。你对话触发 skill，skill 替你跑命令。
-> 上面 18 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装；名单与「给 AI Agent 用」一节、「结构」一节完全一致）——其中 🧭 标记的 7 张是**组合图纸**（一句话跑全链，只编排上面的单命令 skill、本身不新增命令）；`/gtrk-long2short` 独立驱动长剪短，`/gtrk-transcript` 独立驱动视频/音频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，四者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
+> 上面 19 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装；名单与「给 AI Agent 用」一节、「结构」一节完全一致）——其中 🧭 标记的 7 张是**组合图纸**（一句话跑全链，只编排上面的单命令 skill、本身不新增命令）；`/gtrk-long2short` 独立驱动长剪短，`/gtrk-transcript` 独立驱动视频/音频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，四者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
 
 **各车道的具体视觉/内容怎么产**——MG 动态图长什么样、AI 情景动画什么调性——不写死在 CLI 里，而由**你自己栏目的生产 skill** 提供（用 `/gtrk-style-maker` 访谈式产出、留本地）。它们经**栏目配置 `style.skills[].produces`**（值 = 车道名）绑定，`gtrk mg` / `gtrk matrix` 等**通用驱动器**据此消费。**驱动方向 = CLI 驱动栏目 skill**：栏目 skill 只供风格/内容、不含任何「跑哪条命令」的编排职责；框架只认车道与管线接口，画面风格永远归你的栏目。不建栏目就用内置默认，端到端照常跑。
 
@@ -469,6 +470,29 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 
 > **aux 叠层颗粒**：`gtrk split` 若在某 beat 的 `aux_layers` 派了 `overlay` 颗粒，会派生 `<beat>-aux<n>` 合成条目进 `dispatch.mg`——`gtrk mg` 一并铺，实现「同段既有底轨主视觉、又叠透明概念图解」。
 > **双读兼容**：`dispatch.mg`（读旧 `rrv_mg`）、源目录 `mg/`（读旧 `rrv/`）、素材前缀 `mg-`（读旧 `rrv-`）——去品牌化前的既有工程零迁移。
+
+### `gtrk composite` — 合成层（plan / review / scaffold / build / lint / lay / shots）
+
+粗剪、B-roll、字幕都定了之后，把选定时间窗做成**合成颗粒**：一段时间内的整个画面由一颗代码颗粒接管，讲者与 B-roll 作为槽位由客户端画进去。由 `/gtrk-composite` 驱动（含编排规则与两个检查点）；纯本地、零计费。
+
+```bash
+gtrk composite plan --project <工程> [--mode full|auto|ranges] [--range 11,32 | --range u0004-u0009]... [--density 0.25]
+gtrk composite review --project <工程> [--approve W01,W03] [--reject W02] [--adjust W04=80,90.9] [--add 140,150] [--approve-all]
+gtrk composite scaffold --project <工程> [--only W03] [--force]
+gtrk composite shots --project <工程> --material <素材 id 或文件> [--around <秒> --span <秒> | --from <秒> --to <秒>] [--every <秒>]
+gtrk composite build --project <工程> [--only cp-w03] [--theme <css>] [--materials <json>]
+gtrk composite lint --project <工程> [--only cp-w03] [--stills 26,86.6] [--no-browser]
+gtrk composite lay --project <工程> [--only cp-w03] [--dry-run]
+```
+
+- `plan`：候选窗口写进 `.gtrk` 的 `struct_meta.composite`（只动这一个键、原子写回；与 `gtrk split` 写 `struct_meta.split` 同一套做法），客户端大纲 CP 行据此画提案块；另出审稿稿 `composite/plan.md`。重跑保留已做的、不再提用户不要的。
+- `review`：采纳 / 不要 / 调起止 / 补窗口，写回同一个键；后续步骤只处理已采纳的窗口。
+- `scaffold`：为已采纳窗口落场景骨架 `composite/scenes/cp-wNN.html` 与上下文 `cp-wNN.context.md`；已有场景不覆盖。
+- `shots`：给选片用——带源时间码的联系表、镜头切点、黑边实测（`data-crop` 取值）；不替你选、不改工程。
+- `build`：场景 → 自包含颗粒 `gtrk/assets/composite/<id>.html`。解析规则与 infra `composite-particle-profile` 逐字节一致（帧格窗口、轨身份、锚点、字幕输入、`inputs_hash`）；风格取 `composite/theme.css`。
+- `lint`：静态校验 + 本机 Chrome / Edge 逐帧排版机检（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台），可出静帧。退出码 0 通过 / 1 有问题 / 3 排版未机检（找不到浏览器，可设 `GTRK_CHROME`）。
+- `lay`：按自产身份幂等铺进 beat 轨最上层、补登记素材、窗口记为已做；过期颗粒拒铺；用户在客户端改过的同 id 颗粒不覆盖。
+- ⚠️ 本版本导出（原生 / 剪映 / Pr）时合成颗粒所在时段仍按粗剪出画，合成颗粒出片在后续版本。
 
 ### `gtrk project init` / `gtrk audio lay` / `gtrk audio tighten` — 音频驱动工程零件（配音先行）
 
