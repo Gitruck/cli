@@ -29,6 +29,8 @@ import {
 import { validateCompositeBlock } from "./composite-profile";
 
 export const COMPOSITE_KIT_VERSION = "composite-kit@1";
+/** 自产合成轨 / 片段的身份（`producer.by`），铺轨按它认领，不按轨号。 */
+export const COMPOSITE_PRODUCER = "gtrk:composite@1";
 /** 颗粒 HTML 体积上限（与 mg lint `4-html-size` 同源：客户端颗粒运行时的加载上限）。 */
 export const COMPOSITE_HTML_MAX_CHARS = 2_000_000;
 

@@ -157,6 +157,24 @@ export function writeStructMetaSplit(
 }
 
 /**
+ * 原子写回 `struct_meta` 的某一个键（add-composite-layer：`struct_meta.composite`）：只替换该键、其余键原样保留；
+ * 写前后双重校验内容 revision。与 `writeStructMetaSplit` 同形，`operation` 只进冲突文案。
+ */
+export function writeStructMetaKey(
+	path: string,
+	gtrk: Record<string, unknown>,
+	key: string,
+	value: unknown,
+	expectedRevision: string,
+	operation: string,
+): string {
+	assertRevision(path, expectedRevision, operation, "guard");
+	const nextStructMeta = { ...((gtrk.struct_meta as Record<string, unknown> | undefined) ?? {}), [key]: value };
+	const next = { ...gtrk, struct_meta: nextStructMeta };
+	return commitAtomic(path, JSON.stringify(next, null, 2), expectedRevision, operation);
+}
+
+/**
  * 原子整文件写回（matrix 铺轨等，add-matrix-lay-tracks）：与 `writeStructMetaSplit` 并存不混用。
  * 调用方自行保证「只动自产物」（broll- 素材 + struct_meta.broll.lay_tracks 登记的轨）；
  * 本函数只负责原子性（临时文件+rename）与内容 revision 双重校验。
