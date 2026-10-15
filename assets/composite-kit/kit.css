@@ -1,0 +1,57 @@
+/* 合成颗粒工具箱 composite-kit@1 的公共样式（构建时内联）。
+ * 中性：配色、字体、纹理一律走变量，由栏目 / 工程风格（composite/theme.css，构建时接在本文件之后）覆盖。
+ * 变量：--bg 底色 / --bg2 次底色 / --ink 正文 / --muted 次要文字 / --line 分隔线 /
+ *       --accent 强调 / --accent2 / --accent3 辅助色 / --alert 警示 / --font 正文字体 / --font-serif 标题字体。 */
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+#stage {
+  position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden;
+  --bg: #F4F4F2; --bg2: #E6E6E2; --ink: #1D1D1F; --muted: #6B6B70; --line: #CFCFCB;
+  --accent: #2F6FDE; --accent2: #2E8B57; --accent3: #4A5568; --alert: #D14343;
+  --font: "Noto Sans SC", "Source Han Sans CN", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --font-serif: "Noto Serif SC", "Source Han Serif SC", "Source Han Serif", "SimSun", serif;
+  font-family: var(--font); color: var(--ink);
+}
+#stage > *, #stage .abs { position: absolute; box-sizing: border-box; }
+[data-slot] { visibility: hidden !important; }
+.serif { font-family: var(--font-serif); }
+.bed { left: 0; top: 0; width: 1920px; height: 1080px; background: var(--bg); }
+.bed.dark { background: radial-gradient(ellipse at 30% 35%, #2A2A2E 0%, #141416 70%); }
+/* 槽位装饰：阴影在下（back），描边在上（front）。描边只给最上层的画面——下层画面的 front 描边会压到上层画面上 */
+.shadow { border-radius: 18px; box-shadow: 0 18px 50px rgba(0, 0, 0, .22), 0 3px 10px rgba(0, 0, 0, .12); background: #000; }
+.shadow.round { border-radius: 50%; }
+.frame { border: 3px solid var(--ink); border-radius: 18px; }
+.frame.round { border-radius: 50%; }
+.frame.thin { border-width: 2px; }
+.frame.light { border-color: rgba(255, 255, 255, .85); }
+.ring { border: 4px solid var(--ink); border-radius: 50%; }
+.ring.light { border-color: rgba(255, 255, 255, .9); }
+/* 字幕：颗粒接管字幕后自己排 */
+.cap {
+  left: 160px; width: 1600px; top: 958px; height: 70px; text-align: center; white-space: nowrap;
+  font-size: 44px; font-weight: 600; letter-spacing: .02em; color: var(--ink); line-height: 70px;
+}
+.cap b { color: var(--accent); font-weight: 800; }
+.cap.dark { color: #fff; text-shadow: 0 2px 12px rgba(0, 0, 0, .55); }
+.cap.dark b { color: var(--accent); }
+/* 文字 */
+.tag { font-size: 26px; letter-spacing: .2em; color: var(--muted); white-space: nowrap; }
+.kicker { font-size: 28px; font-weight: 700; letter-spacing: .28em; color: var(--accent); white-space: nowrap; }
+.h1 { font-size: 96px; font-weight: 900; line-height: 1.12; white-space: nowrap; }
+.h2 { font-size: 64px; font-weight: 900; line-height: 1.2; white-space: nowrap; }
+.h3 { font-size: 44px; font-weight: 700; line-height: 1.3; white-space: nowrap; }
+.body { font-size: 34px; line-height: 1.5; color: var(--ink); }
+.num { font-size: 30px; font-weight: 800; color: var(--accent); letter-spacing: .1em; }
+.pill { height: 54px; padding: 0 26px; border-radius: 27px; font-size: 28px; font-weight: 700; line-height: 54px; white-space: nowrap; }
+.rule { height: 3px; background: var(--ink); }
+.card { background: #FFFFFF; border-radius: 22px; box-shadow: 0 10px 30px rgba(0, 0, 0, .08); }
+.stamp { font-size: 72px; font-weight: 900; color: var(--alert); border: 6px solid var(--alert); border-radius: 14px; padding: 6px 26px; white-space: nowrap; }
+/* 对话气泡（字幕变成一串对话时用） */
+.bubble {
+  height: 76px; padding: 0 30px; border-radius: 38px 38px 10px 38px; background: #FFFFFF; font-size: 32px; line-height: 76px;
+  white-space: nowrap; color: var(--ink); box-shadow: 0 6px 18px rgba(0, 0, 0, .08); border: 2px solid transparent;
+}
+.bubble b { color: var(--accent); font-weight: 700; }
+.bubble.now { border-color: var(--accent); }
+/* 画面标签：贴在画面左上角，说明这张画面对应台词里的哪个词 */
+.ptag { height: 46px; padding: 0 20px; border-radius: 23px; background: rgba(20, 20, 22, .74); color: #fff; font-size: 26px; font-weight: 700; line-height: 46px; letter-spacing: .06em; white-space: nowrap; }
+.ptag.warm { background: var(--accent); }

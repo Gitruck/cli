@@ -138,8 +138,8 @@ function projectSpan(clipTrackSt: number, clipSt: number, s: number, e: number, 
 	return { track_st, track_ed: r3(track_st + len) };
 }
 
-/** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + 源跨度（duration × speed）推。 */
-function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: number; speed: number } {
+/** 归一化 clip 时码：缺 clip_ed/track_ed 时由 clip_st/track_st + 源跨度（duration × speed）推。（合成颗粒的锚点映射也用它） */
+export function normClip(c: GtrkClip): { clip_st: number; clip_ed: number; track_st: number; speed: number } {
 	const clip_st = c.clip_st ?? 0;
 	const track_st = c.track_st ?? 0;
 	const speed = clipSpeed(c);
