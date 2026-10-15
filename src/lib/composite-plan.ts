@@ -496,6 +496,72 @@ export function reviewPlan(inp: PlanInput, plan: CompositePlanMeta, ops: ReviewO
 	return { plan: { ...plan, windows }, changes };
 }
 
+// ------------------------------------------------------------------ 铺轨后登记
+
+/** 窗口 → 合成颗粒 id（同一工程内唯一、ASCII）。scaffold 用它起场景名，lay 用它认窗口。 */
+export const compositionIdOf = (windowId: string): string => `cp-${windowId.toLowerCase()}`;
+
+/** 一段时间线区间里的句（有交集的）→ 句 id 区间与源包络；没有句时返回 null。 */
+function spanOf(inp: PlanInput, st: number, ed: number): Pick<PlanWindow, "span" | "source_ranges"> | null {
+	const hit = inp.utterances.filter((u) => u.ed > st && u.st < ed);
+	if (!hit.length) return null;
+	const a = hit[0];
+	const b = hit[hit.length - 1];
+	return { span: { from: a.id, to: b.id }, source_ranges: [{ st: r3(a.src_st), ed: r3(b.src_ed) }] };
+}
+
+/**
+ * 铺轨后的登记：铺上的颗粒对应的窗口记 `built` 并挂 `composition_id`（起止以颗粒为准）；
+ * 不经 plan 直接构建的颗粒补一个 `built` 窗口；之前 `built`、这次已不在轨上的窗口退回 `approved`。
+ * 没有现成候选、也没有转写（算不出句区间）时返回 null（调用方不写这个键）。
+ */
+export function markBuilt(
+	inp: PlanInput | null,
+	plan: CompositePlanMeta | null,
+	laid: Array<{ id: string; track_st: number; track_ed: number }>,
+	live: Set<string>,
+	meta: { transcriptHash: string; materialId?: string; now: string },
+): CompositePlanMeta | null {
+	if (!plan && !inp) return null;
+	const base: CompositePlanMeta = plan ?? {
+		contract_version: COMPOSITE_PLAN_CONTRACT,
+		transcript_hash: meta.transcriptHash,
+		projected_at: meta.now,
+		...(meta.materialId ? { material_id: meta.materialId } : {}),
+		mode: "ranges",
+		windows: [],
+	};
+	const windows = base.windows.map((w) => ({ ...w }));
+	for (const it of laid) {
+		const w = windows.find((x) => x.composition_id === it.id) ?? windows.find((x) => compositionIdOf(x.id) === it.id);
+		if (w) {
+			w.state = "built";
+			w.composition_id = it.id;
+			if (Math.abs(w.track_st - it.track_st) > 5e-4 || Math.abs(w.track_ed - it.track_ed) > 5e-4) {
+				w.track_st = it.track_st;
+				w.track_ed = it.track_ed;
+				const s = inp ? spanOf(inp, it.track_st, it.track_ed) : null;
+				if (s) Object.assign(w, s);
+			}
+			continue;
+		}
+		const s = inp ? spanOf(inp, it.track_st, it.track_ed) : null;
+		if (!s) continue;
+		const used = new Set(windows.map((x) => x.id));
+		let n = windows.length + 1;
+		while (used.has(`W${String(n).padStart(2, "0")}`)) n++;
+		windows.push({ id: `W${String(n).padStart(2, "0")}`, state: "built", track_st: it.track_st, track_ed: it.track_ed, ...s, reason: "直接构建（不经 plan）", composition_id: it.id });
+	}
+	for (const w of windows) {
+		if (w.state === "built" && !(w.composition_id && live.has(w.composition_id))) {
+			w.state = "approved";
+			delete w.composition_id;
+		}
+	}
+	windows.sort((a, b) => a.track_st - b.track_st || a.id.localeCompare(b.id));
+	return { ...base, windows };
+}
+
 // ------------------------------------------------------------------ 写方契约自检
 
 const STATES: readonly string[] = ["proposed", "approved", "rejected", "built", "trimmed"];

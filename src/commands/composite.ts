@@ -18,7 +18,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { pathToFileURL } from "node:url";
 import { requireFfmpeg } from "../lib/ffmpeg";
 import { probeGeometry } from "../lib/media";
-import { assertGtrkV1, readGtrk, writeStructMetaKey } from "../lib/gtrk-writeback";
+import { assertGtrkV1, readGtrk, writeGtrkAtomic, writeStructMetaKey } from "../lib/gtrk-writeback";
+import { assertGtrkWriteInvariants } from "../lib/gtrk-invariants";
+import { layComposites } from "../lib/composite-lay";
 import { log, routeLogsToStderr } from "../lib/log";
 import { packageRoot } from "../lib/paths";
 import { transcriptCandidates } from "../lib/reproject";
@@ -30,6 +32,8 @@ import { mergeFrameIssues, sampleFrames, staticLint, type FrameIssue, type LintI
 import { contactSheetArgs, cropDetectArgs, parseCropDetect, parseSceneCuts, sceneCutArgs, shotsRange } from "../lib/composite-shots";
 import {
 	COMPOSITE_DENSITY_DEFAULT,
+	compositionIdOf,
+	markBuilt,
 	parseRange,
 	planAuto,
 	planFull,
@@ -348,8 +352,6 @@ export interface ScaffoldCmdOpts extends CompositeOpts {
 	force?: boolean;
 }
 
-/** 窗口 → 合成颗粒 id（同一工程内唯一、ASCII）。 */
-export const compositionIdOf = (windowId: string) => `cp-${windowId.toLowerCase()}`;
 
 function scaffoldScene(id: string, w: PlanWindow, presenterTrack: number | null): string {
 	const slots: Record<string, unknown> = {};
@@ -569,6 +571,70 @@ export async function runCompositeLint(opts: LintCmdOpts) {
 	return result;
 }
 
+// ------------------------------------------------------------------ lay
+
+export interface LayCmdOpts extends CompositeOpts {
+	dryRun?: boolean;
+}
+
+export function runCompositeLay(opts: LayCmdOpts) {
+	if (opts.json) routeLogsToStderr();
+	const ctx = loadCompositeContext(opts);
+	const extra = loadExtraMaterials(ctx, opts.materials);
+	const extraIds = extra.map((m) => String(m.id));
+	const only = onlyList(opts.only);
+	const manifest = readManifest(ctx);
+	const pick = only.length ? manifest.filter((e) => only.some((o) => e.id.includes(o))) : manifest;
+	if (!pick.length) throw new Error(only.length ? `构建清单里没有匹配 ${only.join(", ")} 的颗粒` : "构建清单为空：先跑 gtrk composite build");
+	const gtrk = ctx.gtrk as unknown as ResolveGtrk;
+	// 铺之前再确认一遍：颗粒在工程目录内、静态校验过、按当前工程仍新鲜（铺一颗过期的颗粒，客户端一打开就是「需重渲」）
+	const problems: string[] = [];
+	for (const e of pick) {
+		if (isAbsolute(e.html) || e.html.startsWith("..")) {
+			problems.push(`${e.id}：颗粒文件 ${e.html} 不在 .gtrk 所在目录内，铺不进工程（build 时别用 --out 指到工程外）`);
+			continue;
+		}
+		const p = resolve(ctx.gtrkDir, e.html);
+		if (!existsSync(p)) {
+			problems.push(`${e.id}：颗粒文件不存在 ${p}（重跑 build）`);
+			continue;
+		}
+		for (const it of staticLint(readFileSync(p, "utf8"), e.window, gtrk, { extraMaterialIds: extraIds })) problems.push(`${e.id}：${it.message}`);
+	}
+	if (problems.length) throw new Error(`以下颗粒不能铺（先修再 build / lint）：\n  ${problems.join("\n  ")}`);
+	const run = new Date().toISOString();
+	const r = layComposites(ctx.gtrk, pick.map((e) => ({ id: e.id, html_rel: e.html, track_st: e.window[0], track_ed: e.window[1] })), {
+		only: only.length ? pick.map((e) => e.id) : [],
+		extraMaterials: extra,
+		run,
+	});
+	const live = new Set([...r.laid, ...r.kept]);
+	const sm = (ctx.gtrk.struct_meta ?? {}) as Record<string, unknown>;
+	const prevPlan = (sm.composite as CompositePlanMeta | undefined) ?? null;
+	const inp = ctx.transcript ? planInputOf(ctx, run) : null;
+	const plan = markBuilt(inp, prevPlan && Array.isArray(prevPlan.windows) ? prevPlan : null, r.laid.map((id) => ({ id, ...r.timings[id] })), live, {
+		transcriptHash: String(ctx.transcript?.text_hash ?? ""),
+		materialId: ctx.transcript ? String(ctx.transcript.material_id) : undefined,
+		now: run,
+	});
+	if (plan) r.next.struct_meta = { ...((r.next.struct_meta as Record<string, unknown>) ?? {}), composite: plan };
+	assertGtrkWriteInvariants(r.next, "composite lay", { ownClipIds: new Set(r.laid), warn: (m) => log.warn(m) });
+	log.step(`① 铺合成颗粒：本次 ${r.laid.length} 颗${r.kept.length ? `，保留上一轮 ${r.kept.length} 颗` : ""}${r.removed.length ? `，剥掉 ${r.removed.length} 颗` : ""} → beat 轨 ${r.trackIndex}`);
+	for (const k of r.skipped) log.warn(`${k.id} 没铺：${k.why}`);
+	for (const f of r.foreign) log.info(`轨 ${f.track_index} 的 ${f.clip_id} 已被客户端改动过（不再带自产身份），按你的东西保留、不碰`);
+	if (r.materialsAdded.length) log.info(`登记素材 ${r.materialsAdded.length} 条：${r.materialsAdded.join(", ")}`);
+	if (r.materialsRemoved.length) log.info(`剥掉无人引用的旧颗粒素材 ${r.materialsRemoved.length} 条：${r.materialsRemoved.join(", ")}`);
+	let revision = ctx.revision;
+	if (!opts.dryRun) {
+		revision = writeGtrkAtomic(ctx.gtrkPath, r.next, ctx.revision, "composite lay");
+		if (plan && inp) writeFileSync(join(ctx.projectDir, "composite", "plan.md"), renderPlanMd(plan, inp), "utf8");
+		log.ok(`已写回 ${ctx.gtrkPath}；客户端外部重载后大纲 CP 行出现实色合成块。导出（原生 / 剪映 / Pr）暂按粗剪出画，合成颗粒出片在后续版本`);
+	} else log.info("--dry-run：只算不写");
+	const result = { ok: true, dry_run: Boolean(opts.dryRun), laid: r.laid, kept: r.kept, removed: r.removed, skipped: r.skipped, track_index: r.trackIndex, materials_added: r.materialsAdded, materials_removed: r.materialsRemoved, foreign: r.foreign, revision };
+	if (opts.json) console.log(JSON.stringify(result));
+	return result;
+}
+
 // ------------------------------------------------------------------ shots
 
 export interface ShotsCmdOpts extends CompositeOpts {
@@ -672,6 +738,7 @@ export function registerComposite(program: Command): void {
 		.option("--force", "[scaffold] 覆盖已有场景文件")
 		.option("--stills <秒>", "[lint] 顺带出静帧（时间线秒，逗号分隔或重复给），供检查点② 人看", collect, [])
 		.option("--no-browser", "[lint] 只做静态校验，不起浏览器（退出码 3 = 排版未机检）")
+		.option("--dry-run", "[lay] 只算与自检、不写文件")
 		.option("--material <id|path>", "[shots] 素材 id（工程素材表）或文件路径")
 		.option("--from <sec>", "[shots] 观察起点（源时间秒）")
 		.option("--to <sec>", "[shots] 观察终点（源时间秒）")
@@ -688,6 +755,7 @@ export function registerComposite(program: Command): void {
 			if (sub === "build") return void runCompositeBuild(opts);
 			if (sub === "shots") return void runCompositeShots(opts as ShotsCmdOpts);
 			if (sub === "lint") return void (await runCompositeLint(opts as LintCmdOpts));
+			if (sub === "lay") return void runCompositeLay(opts as LayCmdOpts);
 			throw new Error(USAGE);
 		});
 }
