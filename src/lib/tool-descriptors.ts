@@ -1040,14 +1040,18 @@ const audioSilenceRemove: ToolDescriptor = {
 const highlightPrepared = new WeakMap<ToolContext, HighlightInput>();
 const videoHighlight: ToolDescriptor = {
     name: "video_highlight", title: "视频高光发现", kind: "cloud", enabled: true,
-    description: "泛高光探索：本地生成224p/4fps无声代理，返回按请求分组的三秒候选；当前仅内部验收。",
+    description: "泛高光探索：本地生成448p/4fps分析代理（缺省附单声道低码率原声，可 --no-audio），返回按请求分组的三秒候选；当前仅内部验收。",
     input: { kind: "video", exts: PUBLIC_VIDEO_EXTS, maxDurationSec: 1800 },
     priceKey: "video_highlight", pricingContext: "当前仅内部成员验收；未开放外部收费",
     taskType: "cli/video_highlight", outputHint: "分请求高光候选（result-output.json）", pollTimeoutMs: 12 * 60_000,
+    options: [{ flag: "--no-audio", desc: "不上传原声：高光分析代理不带音轨（默认带单声道低码率原声）" }],
     async preprocess(ctx) {
         if (!ctx.inputAbs || !ctx.outDir) throw new Error("高光分析缺少素材或工程目录");
-        ctx.warn("在本地生成低清无声分析代理，原片不上传；该步骤不替代画面与原声理解。");
-        const prepared = await prepareHighlightInput(ctx.inputAbs, ctx.outDir, ctx.ffmpegPath);
+        // commander 的取反式缺省是 true：只有显式 --no-audio（=== false）才去声
+        const audio = ctx.opts.audio !== false;
+        ctx.warn(audio ? "在本地生成448p分析代理（含单声道低码率原声，--no-audio 可去声），原片不上传；该步骤不替代画面与原声理解。"
+            : "在本地生成448p无声分析代理，原片不上传；该步骤不替代画面与原声理解。");
+        const prepared = await prepareHighlightInput(ctx.inputAbs, ctx.outDir, ctx.ffmpegPath, { audio });
         highlightPrepared.set(ctx, prepared);
         return prepared.artifact;
     },

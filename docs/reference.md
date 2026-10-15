@@ -723,4 +723,4 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
 
 ### 视频高光发现（内部验收）
 
-`gtrk tool video_highlight <视频> --out <工程目录> --json`：本地224p/4fps无声代理，只上传代理；返回分请求三秒候选。3秒以上、30分钟以内。候选须按制片语义复核；不可跨请求比较分数。服务失败不冒充成功，Vlog可继续Agent素材理解。尚未开放外部收费。
+`gtrk tool video_highlight <视频> --out <工程目录> [--no-audio] --json`：本地生成448p/4fps分析代理（缺省附单声道低码率原声，`--no-audio` 去声），只上传代理、原片不上传；返回分请求三秒候选。3秒以上、30分钟以内。候选须按制片语义复核；不可跨请求比较分数。服务失败不冒充成功，Vlog可继续Agent素材理解。尚未开放外部收费。

@@ -11,6 +11,7 @@
 
 ## 未发布
 
+- `tool video_highlight` 分析代理升至 448p/4fps（libx264 CRF 22），缺省附单声道低码率原声，新增 `--no-audio`；上传前本地自检，旧版 224 代理不再复用。**需云端先升级，旧云端会以「短边必须224」拒绝新代理。**
 - `long2short --camera-move`：云端按与精剪同一套调度把推 / 拉镜头写成主轨片段的 `clip_keyframes.scale_x / scale_y`，客户端与剪映可见可改；`clips.md` 标「运镜 N 处」，未能加运镜的切片单列；`/gtrk-live-slicing` 开工问询变五问（⑤ 运镜，缺省不加）。需配合服务端 `add-long2short-for-cli-camera-move` 与客户端承接 `clip_keyframes` 的版本。
 - `gtrk patch` 的 trim / split / seal / snap 同步维护 `clip_keyframes`（入点平移、越界截断补插值端点、切分两段各自合法），写前校验拒绝任何非法关键帧并点名 clip 与通道；`audio tighten` 遇带音量关键帧的音频片段拒绝；本地 `gtrk render` 读到关键帧时提示按静态画面出片。
 - `gtrk project background --blur [--intensity n] | --color #RRGGBB | --clear`：写客户端画布背景 `struct_meta.client_background`（零计费、不访问云端），横屏源进竖屏画布时用模糊底替代黑边；`/gtrk-live-slicing` 对横竖互转的入选切片缺省加模糊底。剪映 / PR 与本地 `gtrk render` 不带该设置。

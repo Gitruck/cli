@@ -7,17 +7,62 @@ import { requireFfmpeg, ffprobeJson, runFfmpeg } from "./ffmpeg";
 import { probeGeometry } from "./media";
 
 const sha = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
-export interface HighlightInput { artifact: string; duration: number; sourceFingerprint: string; proxySha256: string }
+export interface HighlightInput {
+	artifact: string; duration: number; sourceFingerprint: string; proxySha256: string; proxySpec: string; audio: boolean;
+}
 
-export async function prepareHighlightInput(input: string, out: string, ffmpegPath?: string): Promise<HighlightInput> {
+/**
+ * v2 分析代理（link-video-highlight-analysis-proxy-cli）：短边 448、4fps、libx264 veryfast CRF 22，
+ * 可带一路单声道 AAC。编码器与 CRF 同属规格——自研打分对有损压缩敏感（主件 design §3），
+ * 调整须先按主件实验重测。下列判定条件与服务端 `classify_proxy` 逐项对表。
+ */
+export const HIGHLIGHT_PROXY_SPEC = "v2";
+const SHORT_SIDE = 448, LONG_SIDE_MAX = 4096, FPS = 4, CRF = "22";
+const AUDIO_RATE = 16000, AUDIO_RATE_RANGE = [16000, 48000], AUDIO_MAX_BIT_RATE = 64000, DURATION_TOLERANCE = .26;
+
+interface ProbeStream { codec_type?: string; codec_name?: string; width?: number; height?: number; avg_frame_rate?: string;
+	channels?: number; sample_rate?: string; bit_rate?: string }
+export interface ProxyProbe { streams?: ProbeStream[]; format?: { duration?: string; start_time?: string } }
+
+const ratio = (text?: string) => {
+	const [num, den = "1"] = String(text ?? "").split("/");
+	return Number(num) / Number(den);
+};
+
+/** 返回不合规原因，合规返回 null；上传前自检，不合规就不传。 */
+export function checkHighlightProxy(probe: ProxyProbe, duration: number): string | null {
+	const streams = probe.streams ?? [];
+	const videos = streams.filter(s => s.codec_type === "video"), audios = streams.filter(s => s.codec_type === "audio");
+	if (videos.length !== 1) return "须恰有一路视频";
+	const [video] = videos, width = video!.width ?? 0, height = video!.height ?? 0;
+	if (Math.min(width, height) !== SHORT_SIDE || Math.max(width, height) > LONG_SIDE_MAX) return `短边须为${SHORT_SIDE}像素`;
+	if (video!.codec_name !== "h264") return "须为 H.264";
+	if (!(Math.abs(ratio(video!.avg_frame_rate) - FPS) <= .001)) return `须为${FPS}fps`;
+	if (!(Math.abs(Number(probe.format?.start_time ?? 0)) <= .001)) return "时间须从零开始";
+	if (!(Math.abs(Number(probe.format?.duration) - duration) <= DURATION_TOLERANCE)) return "时长与源片不符";
+	if (audios.length > 1) return "最多一路音频";
+	const audio = audios[0];
+	if (audio) {
+		const rate = Number(audio.sample_rate), bitRate = Number(audio.bit_rate);
+		if (audio.codec_name !== "aac" || audio.channels !== 1) return "音频须为单声道 AAC";
+		if (!(rate >= AUDIO_RATE_RANGE[0]! && rate <= AUDIO_RATE_RANGE[1]!) || !(bitRate > 0 && bitRate <= AUDIO_MAX_BIT_RATE)) {
+			return "音频须为16–48 kHz、码率不超过64 kbps";
+		}
+	}
+	return null;
+}
+
+export async function prepareHighlightInput(input: string, out: string, ffmpegPath?: string,
+	{ audio = true }: { audio?: boolean } = {}): Promise<HighlightInput> {
 	const source = resolve(input), stat = statSync(source);
-	const sourceFingerprint = sha(JSON.stringify([source, stat.size, stat.mtimeMs, "highlight-proxy-v1"]));
+	const sourceFingerprint = sha(JSON.stringify([source, stat.size, stat.mtimeMs, `highlight-proxy-${HIGHLIGHT_PROXY_SPEC}`, audio]));
 	const dir = join(out, ".highlight-analysis");
 	await mkdir(dir, { recursive: true });
 	const artifact = join(dir, `${sourceFingerprint}.mp4`), manifest = join(dir, `${sourceFingerprint}.json`);
 	if (existsSync(artifact) && existsSync(manifest)) {
 		const old = JSON.parse(readFileSync(manifest, "utf8")) as HighlightInput;
-		if (old.sourceFingerprint === sourceFingerprint && old.proxySha256 === sha(readFileSync(artifact))) return { ...old, artifact };
+		if (old.sourceFingerprint === sourceFingerprint && old.proxySpec === HIGHLIGHT_PROXY_SPEC
+			&& old.proxySha256 === sha(readFileSync(artifact))) return { ...old, artifact };
 	}
 	const ff = requireFfmpeg(ffmpegPath), geo = probeGeometry(source, ffmpegPath);
 	if (!Number.isFinite(geo.duration) || geo.duration <= 3 || geo.duration > 1800) throw new Error("高光分析视频须大于三秒且不超过三十分钟");
@@ -26,16 +71,29 @@ export async function prepareHighlightInput(input: string, out: string, ffmpegPa
 	if (!Number.isFinite(origin) || Math.abs(origin) > .001) throw new Error("高光分析暂不接受非零时间原点素材；请沿用语义理解路径");
 	const temporary = `${artifact}.${randomUUID()}.tmp.mp4`;
 	try {
-		await runFfmpeg(ff.ffmpeg, ["-v", "error", "-y", "-i", source, "-map", "0:v:0", "-an",
-			"-vf", "setpts=PTS-STARTPTS,fps=4:round=up,scale='if(gt(iw,ih),-2,224)':'if(gt(iw,ih),224,-2)'",
-			"-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-map_metadata", "-1", "-movflags", "+faststart", temporary]);
+		// 固定 libx264：本仓没有硬件编码路径，日后加也不得用于此代理（同名参数下画质不可比）。
+		// `0:a:0?` 让无音轨源片自然产出无声代理，不必先探测。
+		await runFfmpeg(ff.ffmpeg, highlightProxyArgs(source, temporary, audio));
 		const after = statSync(source);
 		if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error("生成高光代理时源素材改变，请重试");
-		const prepared = { artifact, duration: geo.duration, sourceFingerprint, proxySha256: sha(readFileSync(temporary)) };
+		const probe = ffprobeJson(ff.ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", temporary]) as ProxyProbe;
+		const problem = checkHighlightProxy(probe, geo.duration);
+		if (problem) throw new Error(`本地生成的高光分析代理不合规（${problem}），未上传`);
+		const prepared = { artifact, duration: geo.duration, sourceFingerprint, proxySha256: sha(readFileSync(temporary)),
+			proxySpec: HIGHLIGHT_PROXY_SPEC, audio: (probe.streams ?? []).some(s => s.codec_type === "audio") };
 		await rename(temporary, artifact);
 		await writeFile(manifest, JSON.stringify(prepared, null, 2));
 		return prepared;
 	} finally { await rm(temporary, { force: true }); }
+}
+
+/** v2 代理的 ffmpeg 参数（导出供测试断言编码器与 CRF）。 */
+export function highlightProxyArgs(source: string, output: string, audio: boolean): string[] {
+	return ["-v", "error", "-y", "-i", source, "-map", "0:v:0",
+		"-vf", `setpts=PTS-STARTPTS,fps=${FPS}:round=up,scale='if(gt(iw,ih),-2,${SHORT_SIDE})':'if(gt(iw,ih),${SHORT_SIDE},-2)':flags=lanczos`,
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", CRF, "-pix_fmt", "yuv420p",
+		...(audio ? ["-map", "0:a:0?", "-c:a", "aac", "-ac", "1", "-ar", String(AUDIO_RATE), "-b:a", "32k"] : ["-an"]),
+		"-map_metadata", "-1", "-movflags", "+faststart", output];
 }
 
 export function highlightRequestId(prepared: HighlightInput, fileId: string): string {

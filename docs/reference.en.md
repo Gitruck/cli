@@ -680,4 +680,4 @@ A QC pass runs automatically afterwards and writes `.qc.json` (`--no-qc` skips i
 
 ### Highlight discovery (internal preview)
 
-`gtrk tool video_highlight <video> --out <project> --json` uploads a locally generated silent 224p/4fps proxy. Inputs must be longer than 3 seconds and at most 30 minutes. Results contain three-second candidates grouped by request; scores cannot be compared across requests. Review candidates against the story and actual footage. Provider failure stays explicit; Vlog planning can continue with Agent material review. External billing is not enabled.
+`gtrk tool video_highlight <video> --out <project> [--no-audio] --json` uploads a locally generated 448p/4fps analysis proxy with a low-bitrate mono audio track by default (`--no-audio` to omit it); the original file is never uploaded. Inputs must be longer than 3 seconds and at most 30 minutes. Results contain three-second candidates grouped by request; scores cannot be compared across requests. Review candidates against the story and actual footage. Provider failure stays explicit; Vlog planning can continue with Agent material review. External billing is not enabled.
