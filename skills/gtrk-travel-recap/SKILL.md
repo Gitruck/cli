@@ -315,7 +315,7 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 - 句界吸附（`--cut-align`）默认 0.7，约七成字幕句起点贴近镜头切点，其余有意错开；
 - **BGM 音量口径 = -20dB（线性 0.10）**：BGM 作为垫底，`volume` 字段只写线性增益；客户端需要更响时再调整。
 - 时间窗（`--source-window`）：二创场景解说序≈素材序时按 beat 对应的原片区间约束检索（可选增强，全库检索在几百场景规模下命中率已够）；
-- 素材不二用、黑片叠底、层序（黑底最低号<common<concept<local，契约=大号在上）均由 lay 内建，MUST NOT 绕过。
+- 素材不二用、候选片段自带纯黑底与空档补黑、层序（common<concept<local，契约=大号在上；旧工程的黑底垫轨在最低号）均由 lay 内建，MUST NOT 绕过。
 
 ## 六、MG 轻量字卡规约（旅拍向最小集，不建栏目 skill）
 

@@ -1,5 +1,13 @@
 /**
- * `gtrk project background` —— 写客户端画布背景 `struct_meta.client_background`（change add-project-background-command）。
+ * `gtrk project background` —— 写工程背景（底板）。
+ *
+ * **缺省 = 逐片段**（change link-clip-background-fill design D6，主理人 2026-10-16）：给**主轨**每个视频 / 图片片段写
+ * gtrk 契约字段 `background_fill`（`{type:"blur", intensity:<0–1000 整数>}` / `{type:"color", color:"#RRGGBB"}`），
+ * 片段自己带一块铺满画布的底，客户端可逐片段（或多选批量）改；剪映底层轨原生承接，本地渲染承接，Pr 模糊降级纯黑。
+ * 叠加轨（B-roll / AI 片段已由各自写方带纯黑底）与空档不写不改；`client_background` 不动。
+ *
+ * **`--scope canvas`** = 旧的画布级写法（change add-project-background-command）：写客户端画布背景
+ * `struct_meta.client_background`，下面这段说明适用于它。
  *
  * 形状唯一依据是客户端读写同一个键的实现（`gitruck-opencut-rewrite/apps/web/src/tonghe/client-project-state.ts`
  * 的 `pickBackground`）：`{type:"blur", blurIntensity:<有限非负数>}` / `{type:"color", color:<非空字符串>}`；
@@ -9,6 +17,7 @@
  * 写回走 `writeGtrkAtomic`（临时文件 + rename + 内容 revision 双重校验）；值未变时不写盘。
  */
 import { readGtrk, writeGtrkAtomic } from "./gtrk-writeback";
+import { pickMainTrack } from "./pip-lay";
 
 /** 缺省模糊强度 = 客户端「Medium」档；客户端按画布短边各向同性换算（`fix-blur-sigma-isotropic`），1080×1920 竖屏下 σ = 40，与精剪模糊底同值（以真机目视为准）。 */
 export const DEFAULT_BLUR_INTENSITY = 200;
@@ -17,12 +26,69 @@ export const MAX_BLUR_INTENSITY = 1000;
 export const CLIENT_BACKGROUND_KEY = "client_background";
 
 export type ClientBackground = { type: "blur"; blurIntensity: number } | { type: "color"; color: string };
+/** 片段级底板（gtrk 契约 `background_fill`；刻度键是 `intensity`，与画布级的 `blurIntensity` 同刻度）。 */
+export type ClipFill = { type: "blur"; intensity: number } | { type: "color"; color: string };
+export const CLIP_FILL_KEY = "background_fill";
+
+/** 作用面：`clips` = 主轨逐片段（缺省），`canvas` = 画布级 `client_background`。 */
+export type BackgroundScope = "clips" | "canvas";
 
 export interface BackgroundOpts {
 	blur?: boolean;
 	intensity?: string | number;
 	color?: string;
 	clear?: boolean;
+	scope?: string;
+}
+
+export function parseScope(raw: string | undefined): BackgroundScope {
+	if (raw === undefined || raw === "clips") return "clips";
+	if (raw === "canvas") return "canvas";
+	throw new Error(`--scope 只收 clips（缺省，主轨逐片段）或 canvas（画布级），收到「${raw}」`);
+}
+
+/** 画布级动作 → 片段级底板（`--clear` 为 null）。逐片段模糊强度 MUST 为整数（契约刻度）。 */
+export function clipFillOf(action: BackgroundAction): ClipFill | null {
+	if (action.mode === "clear") return null;
+	if (action.value.type === "color") return { type: "color", color: action.value.color.toUpperCase() };
+	const n = action.value.blurIntensity;
+	if (!Number.isInteger(n)) throw new Error(`逐片段模糊强度须为 0–${MAX_BLUR_INTENSITY} 的整数，收到「${n}」`);
+	return { type: "blur", intensity: n };
+}
+
+/** 主轨上可带底板的片段：有素材（非空档）的 clip。 */
+const isFillableClip = (c: Record<string, unknown>): boolean => typeof c.material === "string" && c.material !== "";
+
+/**
+ * 由旧工程生成新工程：只改主轨片段的 `background_fill`（`fill = null` 即去掉），其余内容与键序原样保留。
+ * 主轨 = `track_index` 最小的非黑底垫轨（与 render / matrix / pip 同口径）。
+ */
+export function applyClipFills(
+	gtrk: Record<string, unknown>,
+	fill: ClipFill | null,
+): { next: Record<string, unknown>; clips: number; changed: number; mainTrackIndex: number; canvasBackground: unknown } {
+	const main = pickMainTrack(gtrk);
+	const timeline = Array.isArray(main?.track_timeline) ? (main!.track_timeline as Record<string, unknown>[]) : [];
+	const targets = timeline.filter(isFillableClip);
+	if (!main || !targets.length) throw new Error("主轨上没有视频 / 图片片段，无处写片段底板（要写画布级背景用 --scope canvas）");
+	let changed = 0;
+	const nextTimeline = timeline.map((c) => {
+		if (!isFillableClip(c)) return c;
+		const before = c[CLIP_FILL_KEY];
+		if (fill === null) {
+			if (before === undefined) return c;
+			changed++;
+			const { [CLIP_FILL_KEY]: _drop, ...rest } = c;
+			return rest;
+		}
+		if (JSON.stringify(before) === JSON.stringify(fill)) return c;
+		changed++;
+		return { ...c, [CLIP_FILL_KEY]: { ...fill } };
+	});
+	const tracks = gtrk.video_track as Record<string, unknown>[];
+	const next = changed ? { ...gtrk, video_track: tracks.map((t) => (t === main ? { ...t, track_timeline: nextTimeline } : t)) } : gtrk;
+	const canvasBackground = (gtrk.struct_meta as Record<string, unknown> | undefined)?.[CLIENT_BACKGROUND_KEY];
+	return { next, clips: targets.length, changed, mainTrackIndex: main.track_index as number, canvasBackground: canvasBackground ?? null };
 }
 
 export type BackgroundAction = { mode: "blur" | "color"; value: ClientBackground } | { mode: "clear" };
@@ -75,10 +141,19 @@ export interface BackgroundResult {
 	ok: true;
 	mode: "project-background";
 	gtrk: string;
+	/** 作用面（缺省 clips）。 */
+	scope: BackgroundScope;
 	action: BackgroundAction["mode"];
-	/** 写入后的值；`--clear` 为 null。 */
-	background: ClientBackground | null;
+	/** 写入后的值；`--clear` 为 null。scope=clips 时是片段底板（契约形状），scope=canvas 时是画布背景。 */
+	background: ClientBackground | ClipFill | null;
+	/** scope=canvas：写入前的画布背景。scope=clips：恒 null（片段各自的旧值不汇总）。 */
 	previous: unknown;
+	/** scope=clips：主轨可带底板的片段数 / 本次实际改动的片段数 / 主轨号。 */
+	clips?: number;
+	changed_clips?: number;
+	main_track?: number;
+	/** scope=clips：工程里仍在的画布级背景（不动它；有片段的时段被片段底盖住看不见）。 */
+	canvas_background?: unknown;
 	changed: boolean;
 	dry_run: boolean;
 	written: boolean;
@@ -93,20 +168,46 @@ export function runBackground(
 	/** 测试注入：读盘之后、写回之前调用（模拟外部改动以验 revision 守卫）；生产不传。 */
 	deps: { afterRead?: () => void } = {},
 ): BackgroundResult {
+	const scope = parseScope(opts.scope);
 	const action = parseBackgroundOpts(opts);
+	const fill = scope === "clips" ? clipFillOf(action) : null;
 	const { gtrk, revision } = readGtrk(gtrkPath);
 	deps.afterRead?.();
 	if (gtrk.version !== "v1") {
-		throw new Error(`工程文件不是 v1（version=${JSON.stringify(gtrk.version)}）：客户端只按 v1 读画布背景`);
+		throw new Error(`工程文件不是 v1（version=${JSON.stringify(gtrk.version)}）：客户端只按 v1 读背景`);
+	}
+	const dryRun = Boolean(opts.dryRun);
+	if (scope === "clips") {
+		const r = applyClipFills(gtrk, fill);
+		const write = r.changed > 0 && !dryRun;
+		const revisionAfter = write ? writeGtrkAtomic(gtrkPath, r.next, revision, "project background") : revision;
+		return {
+			ok: true,
+			mode: "project-background",
+			gtrk: gtrkPath,
+			scope,
+			action: action.mode,
+			background: fill,
+			previous: null,
+			clips: r.clips,
+			changed_clips: r.changed,
+			main_track: r.mainTrackIndex,
+			canvas_background: r.canvasBackground,
+			changed: r.changed > 0,
+			dry_run: dryRun,
+			written: write,
+			revision_before: revision,
+			revision_after: revisionAfter,
+		};
 	}
 	const { next, previous, changed } = applyBackground(gtrk, action);
-	const dryRun = Boolean(opts.dryRun);
 	const write = changed && !dryRun;
 	const revisionAfter = write ? writeGtrkAtomic(gtrkPath, next, revision, "project background") : revision;
 	return {
 		ok: true,
 		mode: "project-background",
 		gtrk: gtrkPath,
+		scope,
 		action: action.mode,
 		background: action.mode === "clear" ? null : action.value,
 		previous,

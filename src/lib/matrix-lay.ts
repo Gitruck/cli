@@ -372,7 +372,20 @@ export interface FillSlot {
 	 * 随 laid[].slots 入 struct_meta.broll（消费方白名单解析防线覆盖）；应用段据此在填充
 	 * 不适用（口播/他层主轨）时把规划槽位滤出落轨。常规槽位无此键（旧产物逐字节不变）。 */
 	gap_fill?: true;
+	/** 候选轨自补空档的纯黑补片（link-clip-background-fill D1）：随 laid[].slots 入登记（轨上 clip 数 === 登记 slots 数，
+	 * L2 指纹闭环）；空洞统计按「素材槽位并集」口径排除它。常规槽位无此键。 */
+	bed_fill?: true;
 }
+
+/**
+ * 候选片段的底板形态（link-clip-background-fill）：
+ * - `fill`：片段自带纯黑 `background_fill`，每条候选轨在已落成 beat 的包络内自补纯黑补片（`gtrk matrix` 缺省）；
+ * - `track`：旧形态，铺一条纯黑底垫轨、片段不带填充（`--black-bed`）；
+ * - `none`：都不做，空档露下层（旧 `--no-black-bed`；现仅老调用方用）。
+ */
+export type BedMode = "fill" | "track" | "none";
+/** 候选片段默认带的底板（契约 `background_fill`）。 */
+export const BED_FILL = { type: "color", color: "#000000" } as const;
 
 export interface BrollMetaCandidate {
 	eligibility?: "eligible" | "review_only";
@@ -2994,6 +3007,10 @@ export interface LayResult {
 		 * 其余（照铺 / --no-black-bed / 拒铺 / 零内容轨）恒 null。跳铺 MUST NOT 静默——
 		 * 命令层人读完成行与 lay JSON（仅跳铺时出现该键）同口径明示。 */
 		blackBedSkipped: "audio_driven" | null;
+		/** 本轮底板形态（link-clip-background-fill）。拒铺时缺席。 */
+		bed?: BedMode;
+		/** `fill` 形态的空档补片：条数与总秒数（音频驱动工程不补、为 0）。 */
+		bedFill?: { patches: number; sec: number };
 		/** 全片累计黑底空洞秒数（= blackBedHoles 各段 sec 之和；未铺黑底时恒 0）。 */
 		blackBedHoleSec: number;
 		/**
@@ -3417,8 +3434,13 @@ export function layBrollTracks(opts: {
 	downloads: Map<string, DownloadedProxy>;
 	generatedAt: string;
 	planPath: string;
-	/** 是否铺纯黑底垫轨（默认 true，`--no-black-bed` 关）。 */
+	/** 是否铺纯黑底垫轨（旧开关：缺省 true，false = 不铺）。给了 `bed` 时以 `bed` 为准。 */
 	blackBed?: boolean;
+	/** 底板形态（link-clip-background-fill）。缺省按 `blackBed` 推导（true → track，false → none），老调用方零变化；
+	 * `gtrk matrix` 命令层缺省传 `fill`。 */
+	bed?: BedMode;
+	/** `fill` 形态是否补空档（缺省 true；黑 PNG 落盘失败的回退传 false：片段照带底、空档露下层）。 */
+	bedFillPatches?: boolean;
 	/** `--force-relay`：把「自产内容但已被编辑」的轨并入剥离集**并解除拒铺**（②-B 的逃生门）。 */
 	forceRelay?: boolean;
 	/** 本地候选封面登记（clip_id → 工程内相对路径）；命令层现抽后传入，纯函数只登记不做 IO。 */
@@ -3445,7 +3467,9 @@ export function layBrollTracks(opts: {
 	/** 时钟账面（D2）；探测失败样本只进一条汇总 WARN。 */
 	const clock: ClockSummary = { proxy_probed: 0, unverified: 0, local_source_container: 0, proxy_mismatch: [], proxy_fps_mismatch: [] };
 	const unverifiedSamples: string[] = [];
-	const blackBedOn = opts.blackBed !== false;
+	const bed: BedMode = opts.bed ?? (opts.blackBed === false ? "none" : "track");
+	const blackBedOn = bed === "track";
+	const fillOn = bed === "fill";
 	const forceRelay = opts.forceRelay === true;
 	const targetLayer: SourceLayer = opts.sourceLayer ?? (plan.member_type === "local" ? "local" : plan.member_type === "online" ? "online" : "common");
 	const warnings: string[] = [];
@@ -3617,7 +3641,7 @@ export function layBrollTracks(opts: {
 	// 手工黑底轨检测（★ fix-broll-zorder-contract-drift 文案随契约口径修正）：用户手加的纯色轨
 	// 会被当用户轨保留——契约下（大号=上层）新候选轨号更大、恒在其上不被遮，但会与自动黑底
 	// 重复垫底、且占着 keptOther 位顶高整段带区号。宁可告警不猜删（登记缺失宁留勿删铁律）。
-	for (const t of keptTracks) {
+	for (const t of blackBedOn ? keptTracks : []) {
 		const clips = t.track_timeline ?? [];
 		if (!clips.length) continue;
 		if (clips.every((c) => typeof c.material === "string" && c.material.startsWith(SOLID_MATERIAL_PREFIX))) {
@@ -3802,6 +3826,8 @@ export function layBrollTracks(opts: {
 					// material 的 broll- 前缀反推——而用户在客户端**复制粘贴**出来的副本前缀一样，
 					// 会被当成自产物剥掉。见 classifyTrack 的身份闸。
 					producer: producerTag(opts.generatedAt),
+					// 片段自带纯黑底（link-clip-background-fill D1）：窄画幅 / 缩小时不露下层口播，代替黑底垫轨
+					...(fillOn ? { background_fill: { ...BED_FILL } } : {}),
 				};
 				assertTrimIdentity(gclip, `${beat.beat} 轨${trackIndex} 槽${i}`);
 				bucket.push(gclip);
@@ -3991,6 +4017,63 @@ export function layBrollTracks(opts: {
 		}
 	}
 
+	// ── 候选轨自补空档（link-clip-background-fill D1）：每条本轮目标层候选轨，在每个已落成 beat 的包络内用纯黑补片
+	// 补齐自己的未覆盖段——`--lay 2` 时只留任一条轨可见也不漏口播（原黑底轨的保证）。音频驱动工程（无保留轨）不补
+	// （空档露的本就是画布底色，同 2026-08-21 拍板）。补片登记进该轨该 beat 的 slots（bed_fill），L2 指纹闭环。
+	let bedFillPatches = 0;
+	let bedFillSec = 0;
+	const patchesOn = fillOn && hasShieldTargetTrack && opts.bedFillPatches !== false && Math.max(0, lay) > 0;
+	if (patchesOn) {
+		const lo = bandStart[targetLayer];
+		const targetTrackIdx = [...trackClips.keys()].filter((i) => i >= lo && i < lo + Math.max(0, lay)).sort((a, b) => a - b);
+		if (targetTrackIdx.length && !isLayoutableCanvas([canvas[0], canvas[1]])) {
+			warnings.push(`画布尺寸非法（${canvas[0]}x${canvas[1]}），候选轨空档不补黑（片段照带纯黑底）。`);
+		} else if (targetTrackIdx.length) {
+			const width = canvas[0]!;
+			const height = canvas[1]!;
+			const solidId = solidMaterialId({ hex: BLACK_BED_HEX, width, height });
+			for (const mb of metaBeats) {
+				if (!mb.laid.length) continue;
+				const st = gridSec(mb.track_st);
+				const ed = gridSec(mb.track_ed);
+				for (const ti of targetTrackIdx) {
+					let entry = mb.laid.find((l) => l.track_index === ti);
+					const { holes } = computeBlackBedHoles({ beats: [{ beat: mb.beat, track_st: st, track_ed: ed, slots: entry?.slots ?? [] }] });
+					if (!holes.length) continue;
+					if (!newMaterialsById.has(solidId)) {
+						// 补片 material MUST NOT 带 duration（客户端 resolveTrim 铁律，与黑底垫轨同条）
+						newMaterialsById.set(solidId, { id: solidId, path: solidRelPath({ hex: BLACK_BED_HEX, width, height }), video_size: [width, height] });
+					}
+					if (!entry) {
+						entry = { order: ti - lo, clip_id: solidId, track_index: ti, slots: [], source_layer: targetLayer };
+						mb.laid.push(entry);
+						mb.laid.sort((a, b) => a.order - b.order);
+					}
+					const bucket = trackClips.get(ti)!;
+					holes.forEach((h, i) => {
+						const len = r3(h.track_ed - h.track_st);
+						bucket.push({
+							clip_id: `${mb.beat}-bedfill-${ti - lo}-${i}`,
+							material: solidId,
+							clip_st: 0,
+							clip_ed: len,
+							track_st: h.track_st,
+							track_ed: h.track_ed,
+							duration: len,
+							producer: producerTag(opts.generatedAt),
+							background_fill: { ...BED_FILL },
+						});
+						entry!.slots.push({ clip_id: solidId, query: "bed_fill", score: 0, clip_st: 0, clip_ed: len, track_st: h.track_st, track_ed: h.track_ed, bed_fill: true });
+						bedFillPatches++;
+						bedFillSec += h.sec;
+					});
+					entry.slots.sort((a, b) => a.track_st - b.track_st);
+					assertTrackContinuity([...bucket].sort((a, b) => (a.track_st as number) - (b.track_st as number)), `${mb.beat} 轨${ti}（补片后）`);
+				}
+			}
+		}
+	}
+
 	const createdTracks = [...trackClips.entries()]
 		.filter(([, clips]) => clips.length > 0)
 		.sort((a, b) => a[0] - b[0])
@@ -4161,13 +4244,31 @@ export function layBrollTracks(opts: {
 		);
 	}
 
+	// ★ link-clip-background-fill D5：fill 形态不再铺黑底轨（上轮的黑底轨已被恒剥）；保留下来的他层 / 过渡自产轨若是
+	// 老版本按黑底垫轨铺的（片段不带底、空档没补），它们的黑边与空档会露出口播——MUST 说出来。
+	if (fillOn && hasShieldTargetTrack) {
+		const keptSelf = [
+			...rebasedBandTracks,
+			...keptOtherTracks.filter((t) => typeof t.track_index === "number" && transitionKeptIndices.includes(t.track_index as number)),
+		];
+		const bare = keptSelf.flatMap((t) =>
+			(t.track_timeline ?? []).filter((c) => typeof c.material === "string" && c.material.startsWith(BROLL_MATERIAL_PREFIX) && !(c as { background_fill?: unknown }).background_fill),
+		).length;
+		if (bare > 0) {
+			warnings.push(
+				`保留的他层 / 老版 B-roll 轨里有 ${bare} 个片段不带底板（之前按黑底垫轨铺的），本轮不再铺黑底轨——` +
+					`它们的黑边与空档会露出口播。重跑那一层的铺轨即可补上，或本轮加 --black-bed 回到旧形态。`,
+			);
+		}
+	}
+
 	// ── 黑底空洞检测与告警（fix-black-bed-holes-and-gating）──
 	// 只读统计，写在产物构建之后：它 MUST NOT 参与任何铺轨决策，开检测/关检测写出的 .gtrk 逐字节一致。
 	// 未铺黑底（--no-black-bed / --lay 0 / 零候选轨落成 / 画布非法 / 上游 PNG 落盘失败后的降级重跑）
 	// 一律静默：那些情形下留空处露的是主轨 A-roll，属既有有意留空语义，不是空洞。
 	let blackBedHoles: BlackBedHole[] = [];
 	let blackBedHoleSec = 0;
-	if (blackTrack !== null) {
+	if (blackTrack !== null || (patchesOn && hasSelfProducedContentInPlace)) {
 		const holeBeats = metaBeats
 			.filter((b) => b.laid.length > 0) // 与黑底时窗同一批 beat（laid 为空者本就不铺黑底）
 			.map((b) => ({
@@ -4176,7 +4277,8 @@ export function layBrollTracks(opts: {
 				// **写出后**的值——槽位已在网格上，包络若仍读毫秒会把 ≤ 半帧的相位差误报成洞。登记 track_st/track_ed 本身不动。
 				track_st: gridSec(b.track_st),
 				track_ed: gridSec(b.track_ed),
-				slots: b.laid.flatMap((l) => l.slots), // 跨轨取并：轨 1 空、轨 2 有的段落不算空洞
+				// 跨轨取并：轨 1 空、轨 2 有的段落不算空洞；补片不是素材，不算（fill 形态的黑来自它们）
+				slots: b.laid.flatMap((l) => l.slots.filter((s) => !s.bed_fill)),
 			}));
 		({ holes: blackBedHoles, totalSec: blackBedHoleSec } = computeBlackBedHoles({ beats: holeBeats }));
 
@@ -4206,9 +4308,12 @@ export function layBrollTracks(opts: {
 			// 语气 = 告知，不拦阻：纯黑段是粗剪期预期内的产物（主理人 2026-07-26 拍板），
 			// 本条既不改退出码也不阻断铺轨，只把「哪几段是纯黑、多长、在哪」摆出来供手动调整。
 			warnings.push(
-				`黑底空洞：${offenders.length} 个 beat 的黑底之上没有任何 B-roll，这几段现在是纯黑压住口播——${detail}；` +
-					`全片累计纯黑 ${blackBedHoleSec}s。铺轨已照常完成（黑底按 beat 包络整条铺，槽位没填满处就是纯黑，属粗剪期预期内）；` +
-					`想调整可：调低 --score-floor 放宽取材、或改用 --no-black-bed 让这些地方露出主轨口播、或到客户端手动往这几段补片。`,
+				blackBedOn
+					? `黑底空洞：${offenders.length} 个 beat 的黑底之上没有任何 B-roll，这几段现在是纯黑压住口播——${detail}；` +
+							`全片累计纯黑 ${blackBedHoleSec}s。铺轨已照常完成（黑底按 beat 包络整条铺，槽位没填满处就是纯黑，属粗剪期预期内）；` +
+							`想调整可：调低 --score-floor 放宽取材、或到客户端手动往这几段补片。`
+					: `空档补黑：${offenders.length} 个 beat 里有段落没有任何 B-roll，候选轨在这些地方补了纯黑片、压住口播——${detail}；` +
+							`全片累计纯黑 ${blackBedHoleSec}s。铺轨已照常完成（属粗剪期预期内）；想调整可：调低 --score-floor 放宽取材、或到客户端手动往这几段补片。`,
 			);
 		}
 	}
@@ -4324,6 +4429,8 @@ export function layBrollTracks(opts: {
 			keptEditedTracks: forceRelay ? [] : keptEditedTracks,
 			refused: false,
 			blackBedSkipped,
+			bed,
+			...(fillOn ? { bedFill: { patches: bedFillPatches, sec: r3(bedFillSec) } } : {}),
 			blackBedHoleSec,
 			blackBedHoles,
 			...(gapFillSummary ? { gapFill: gapFillSummary } : {}),

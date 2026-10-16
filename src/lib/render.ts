@@ -89,6 +89,30 @@ const g = (n: number): string => String(Number(n.toPrecision(6)));
 const f6 = (n: number): string => n.toFixed(6);
 const f3 = (n: number): string => n.toFixed(3);
 
+/**
+ * 片段背景填充（gtrk 契约 `background_fill`，change link-clip-background-fill）：在该片段之下、仅在其时长内铺满画布的底。
+ * 纯色 = 该色；模糊 = 该片段同一时刻画面铺满（cover）后高斯模糊。形状不合法整键忽略（与客户端读侧同口径）。
+ */
+export type ClipFill = { type: "color"; color: string } | { type: "blur"; intensity: number };
+
+export function parseClipFill(raw: unknown): ClipFill | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const v = raw as Record<string, unknown>;
+	if (v.type === "color" && typeof v.color === "string" && /^#[0-9a-f]{6}$/i.test(v.color)) return { type: "color", color: v.color.toUpperCase() };
+	if (v.type === "blur" && Number.isInteger(v.intensity) && (v.intensity as number) >= 0 && (v.intensity as number) <= 1000) {
+		return { type: "blur", intensity: v.intensity as number };
+	}
+	return undefined;
+}
+
+/** 模糊强度 → 高斯 σ：与客户端 `blurSigmaFor` 同式（各向同性，fix-blur-sigma-isotropic）：强度 ÷ 5 × 画布短边 ÷ 1080。 */
+export function fillBlurSigma(intensity: number, width: number, height: number): number {
+	return (intensity / 5) * (Math.min(width, height) / 1080);
+}
+
+/** ffmpeg 颜色写法（`0xRRGGBB`）。 */
+const ffColor = (hex: string): string => `0x${hex.slice(1).toUpperCase()}`;
+
 interface Clip {
 	material?: string | number | null;
 	clip_st?: number;
@@ -105,6 +129,8 @@ interface Clip {
 	/** 客户端元素状态。`isSourceAudioEnabled === false` = 用户在客户端关掉了这条 clip 的**源声**
 	 *  （与 `muted` 是两个开关，任一为关即不发声）。缺省（缺键/undefined）视为「开」。 */
 	element_state?: { isSourceAudioEnabled?: boolean };
+	/** 片段背景填充（link-clip-background-fill）；解析见 `parseClipFill`。 */
+	background_fill?: unknown;
 	/** 契约既有字段（`docs/composition-contract-v1.md` §3）：静态变换。★ link-clip-mask-contract-render——
 	 *  CLI 渲染器首次消费（此前叠加层恒满幅平铺）。只作用于 overlay `video_track` clip；主轨不读。 */
 	clip_transform?: ClipTransform;
@@ -199,6 +225,8 @@ export type OverlayLayer =
 			transform?: ClipTransform;
 			borderRadius?: unknown;
 			mask?: ClipMask;
+			/** 片段背景填充（link-clip-background-fill）：在本层正下方、仅在本片段时段内铺满画布，不随变换 / 蒙版 / 圆角走。 */
+			fill?: ClipFill;
 	  }
 	| {
 			kind: "particle";
@@ -255,6 +283,7 @@ export function collectOverlayLayers(
 				...(c.clip_transform && typeof c.clip_transform === "object" ? { transform: c.clip_transform } : {}),
 				...(c.border_radius !== undefined ? { borderRadius: c.border_radius } : {}),
 				...(c.clip_mask && typeof c.clip_mask === "object" ? { mask: c.clip_mask } : {}),
+				...(parseClipFill(c.background_fill) ? { fill: parseClipFill(c.background_fill) } : {}),
 			});
 		}
 	}
@@ -301,6 +330,8 @@ type Element =
 			keepPitch: boolean;
 			/** speed ≤ 5 才出声（有声变速上限）。 */
 			audible: boolean;
+			/** 片段背景填充（主轨片段：缩放后的空白处用它填）。 */
+			fill?: ClipFill;
 	  }
 	| { kind: "gap"; duration: number; lineMs: number };
 
@@ -383,6 +414,7 @@ function normalizeTrack(trackTimeline: Clip[], trackVolume?: number): [Element[]
 				retimed,
 				keepPitch: clipKeepPitch(clip),
 				audible: isSpeedAudible(clip),
+				...(parseClipFill(clip.background_fill) ? { fill: parseClipFill(clip.background_fill) } : {}),
 			});
 		} else {
 			elements.push({ kind: "gap", duration, lineMs });
@@ -670,12 +702,31 @@ export function buildFilterGraph(
 			// 在 fps 前复制原裁窗末帧，避免单源帧被 fps 吃成零帧；end_frame 限定消费预算。
 			// 不扩源窗，不借邻镜头；正预算空窗由同次解码的 sourceChecks 显式拒绝。
 			const head = sourceHead(idx, st, ed, frames, el.speed);
-			chains.push(
-				head + `tpad=stop_mode=clone:stop=-1,fps=${g(rate)},` +
-					`trim=end_frame=${frames},setpts=PTS-STARTPTS,` +
-					`scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
-					`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[${lab}]`,
-			);
+			const timed = head + `tpad=stop_mode=clone:stop=-1,fps=${g(rate)},` + `trim=end_frame=${frames},setpts=PTS-STARTPTS,`;
+			if (el.fill?.type === "blur") {
+				// 片段模糊底（link-clip-background-fill）：一路铺满裁切 + 高斯作底，一路照常缩放居中叠上
+				const a = label();
+				const b = label();
+				const bg = label();
+				const fg = label();
+				const sigma = fillBlurSigma(el.fill.intensity, width, height);
+				chains.push(`${timed}split=2[${a}][${b}]`);
+				chains.push(
+					`[${a}]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}` +
+						(sigma > 0 ? `,gblur=sigma=${f6(sigma)}` : "") +
+						`,setsar=1[${bg}]`,
+				);
+				chains.push(`[${b}]scale=${width}:${height}:force_original_aspect_ratio=decrease,setsar=1[${fg}]`);
+				chains.push(`[${bg}][${fg}]overlay=(W-w)/2:(H-h)/2,format=yuv420p[${lab}]`);
+			} else {
+				// 无填充逐字节同前（黑边）；纯色填充只换 pad 的颜色
+				const padColor = el.fill?.type === "color" ? ffColor(el.fill.color) : "black";
+				chains.push(
+					timed +
+						`scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
+						`pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:${padColor},setsar=1,format=yuv420p[${lab}]`,
+				);
+			}
 		} else {
 			// gap 是合成黑场，给足 d（裁定帧数 + 余量）再按帧截即可，无需 tpad
 			chains.push(
@@ -767,6 +818,32 @@ export function buildFilterGraph(
 					`color=black:s=${width}x${height}:r=${g(rate)}:d=${f6(w.frames / rate)},` +
 						`trim=end_frame=${w.frames},setpts=PTS-STARTPTS+${f6(w.st)}/TB,format=rgba[${bg}]`,
 				);
+				const mid = label();
+				chains.push(`[${videoLabel}][${bg}]overlay=x=0:y=0:eof_action=pass:format=auto:${enable}[${mid}]`);
+				videoLabel = mid;
+			}
+
+			// 片段背景填充（link-clip-background-fill）：在该层正下方、仅在本片段时段内铺满画布的底，
+			// 不随片段的变换 / 蒙版 / 圆角走（契约语义）。纯色 = 色板；模糊 = 同源同窗铺满裁切后高斯。
+			if (L.kind === "clip" && L.fill) {
+				const bg = label();
+				if (L.fill.type === "color") {
+					chains.push(
+						`color=c=${ffColor(L.fill.color)}:s=${width}x${height}:r=${g(rate)}:d=${f6((w.frames + PAD_FRAMES) / rate)},` +
+							`trim=end_frame=${w.frames},setpts=PTS-STARTPTS+${f6(w.st)}/TB,format=rgba[${bg}]`,
+					);
+				} else {
+					const idx = inputOf(L.material);
+					const ed = L.speed !== undefined ? ms2sec(sec2ms(L.clipSt) + scaleBySpeed(sec2ms(L.duration), L)) : L.clipSt + L.duration;
+					const sigma = fillBlurSigma(L.fill.intensity, width, height);
+					chains.push(
+						sourceHead(idx, L.clipSt, ed, w.frames, L.speed ?? 1) +
+							`tpad=stop_mode=clone:stop=-1,fps=${g(rate)},trim=end_frame=${w.frames},` +
+							`scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}` +
+							(sigma > 0 ? `,gblur=sigma=${f6(sigma)}` : "") +
+							`,setsar=1,format=rgba,setpts=PTS-STARTPTS+${f6(w.st)}/TB[${bg}]`,
+					);
+				}
 				const mid = label();
 				chains.push(`[${videoLabel}][${bg}]overlay=x=0:y=0:eof_action=pass:format=auto:${enable}[${mid}]`);
 				videoLabel = mid;

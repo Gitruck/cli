@@ -44,6 +44,7 @@ import {
 	projectHasShieldTrack,
 	r3,
 	type AnchorOutcome,
+	type BedMode,
 	type DedupScope,
 	type DownloadedProxy,
 	type FillSlot,
@@ -215,7 +216,8 @@ interface MatrixOpts {
 	scoreFloor?: string;
 	out?: string;
 	json?: boolean;
-	/** commander `--no-black-bed` → 缺省 true，传参即 false。 */
+	/** `--black-bed` → true（旧形态：铺黑底垫轨）；`--no-black-bed` → false（已是缺省，无操作）；缺省 undefined
+	 * ＝ 候选片段自带纯黑底、空档在候选轨内补黑（link-clip-background-fill）。 */
 	blackBed?: boolean;
 	/** `--force-relay`：候选轨已被用户编辑时仍强制剥离重铺（②-B 拒铺的逃生门）。 */
 	forceRelay?: boolean;
@@ -470,10 +472,15 @@ export function registerMatrix(program: Command): void {
 		.option("--lay <n>", "候选铺轨数：下载 preview 代理并在工程里平铺 N 条 B-roll 候选轨（默认 1；0=只出 plan 不铺轨）", "1")
 		.option(
 			"--score-floor <f>",
-			"填充置信度地板：segment score 低于此值不采纳，槽位留空——黑底垫轨默认开，留空处露的是黑底（要露主轨口播画面得配 --no-black-bed）。" +
+			"填充置信度地板：segment score 低于此值不采纳，槽位留空——口播工程里留空处由候选轨补纯黑片，不露口播。" +
 				"调高会收缩取材池、可能整段无槽位铺成纯黑，调完先看铺轨输出的空洞告警（默认 0.2；--local 模式同为该段的候选池准入地板）",
 		)
-		.option("--no-black-bed", "不铺纯黑底垫轨（默认铺一条，垫在候选轨之下、口播主轨之上，用于 B-roll 期间遮住口播画面）")
+		.option(
+			"--black-bed",
+			"旧形态：铺一条纯黑底垫轨（垫在候选轨之下、口播主轨之上），候选片段不带底板——给仍在用不认片段底板的老版客户端过渡用。" +
+				"缺省是候选片段自带纯黑底（background_fill）、空档在候选轨内补黑",
+		)
+		.option("--no-black-bed", "已是缺省（不铺黑底垫轨），保留为无操作")
 		.option(
 			"--force-relay",
 			"候选轨已被你在客户端编辑过（改过 clip / 确认过原片）时仍强制剥离重铺：缺省会拒铺并保留那条轨，本开关是逃生门——" +
@@ -2077,7 +2084,7 @@ async function runLayMode(opts: MatrixOpts, deps: MatrixRunDeps): Promise<Matrix
 
 	let laid: Awaited<ReturnType<typeof layIntoProject>>;
 	try {
-		laid = await layIntoProject(baseDir, effPlan, layN, parseScoreFloor(opts.scoreFloor), opts.blackBed ?? true, opts.forceRelay === true, reproj, {
+		laid = await layIntoProject(baseDir, effPlan, layN, parseScoreFloor(opts.scoreFloor), bedModeOf(opts.blackBed), opts.forceRelay === true, reproj, {
 			imageBroll: opts.imageBroll !== false,
 			yes: opts.yes === true,
 			deps,
@@ -2421,7 +2428,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 			plan,
 			layN,
 			parseScoreFloor(opts.scoreFloor),
-			opts.blackBed ?? true,
+			bedModeOf(opts.blackBed),
 			opts.forceRelay === true,
 			reproj,
 			{
@@ -3185,6 +3192,12 @@ export function summarizeArrangeRun(
 	};
 }
 
+/** `--black-bed` → 旧形态（铺黑底垫轨）；缺省 / `--no-black-bed`（已是缺省，无操作）→ 候选片段自带纯黑底、空档补黑（link-clip-background-fill）。 */
+function bedModeOf(blackBed: boolean | undefined): BedMode {
+	if (blackBed === false) log.info("--no-black-bed 已是缺省（不铺黑底垫轨；候选片段自带纯黑底），无需再传");
+	return blackBed === true ? "track" : "fill";
+}
+
 /**
  * 候选铺轨：先平铺定颗粒（planBeatFills）→ 对全部槽位 clip 备好素材引用（云端候选下载代理：
  * preview 优先 → 推导 → 404 回落 raw；本地候选免下载，downloads 注入 rel=素材绝对路径）
@@ -3197,7 +3210,7 @@ async function layIntoProject(
 	plan: BrollPlan,
 	layN: number,
 	scoreFloor: number,
-	blackBed: boolean,
+	bed: BedMode,
 	forceRelay: boolean,
 	reproj: ReprojectResult,
 	layOpts: {
@@ -3833,7 +3846,7 @@ async function layIntoProject(
 		sourceLayer: layOpts.sourceLayer,
 		generatedAt: new Date().toISOString(),
 		planPath: "split/broll-plan.json",
-		blackBed,
+		bed,
 		forceRelay,
 		compositeRefs,
 		...(gapModeEff !== "none" ? { gapFill: { mode: gapModeEff, planned: gapFills ?? [] } } : {}),
@@ -3869,7 +3882,8 @@ async function layIntoProject(
 	// 落盘失败 → 撤掉黑轨与主轨黑片填充重铺（宁可无黑底/留 gap，也不留「.gtrk 说有、盘上没有」）。
 	// gap 填充的 solid 兜底与黑底垫轨共用同一确定性 ex-solid 素材（adjust-main-track-gap-fill）。
 	const gapSolidUsed = (summary.gapFill?.fills ?? []).some((f) => f.kind === "solid");
-	if (summary.blackTrack !== null || gapSolidUsed) {
+	const bedPatchesUsed = (summary.bedFill?.patches ?? 0) > 0;
+	if (summary.blackTrack !== null || gapSolidUsed || bedPatchesUsed) {
 		const canvas = freshGtrk.video_size as number[];
 		const spec = { hex: BLACK_BED_HEX, width: canvas[0]!, height: canvas[1]! };
 		const rel = solidRelPath(spec);
@@ -3884,7 +3898,7 @@ async function layIntoProject(
 			}
 		} catch (e) {
 			log.warn(
-				`纯黑 PNG 落盘失败（${rel}）：${(e as Error).message} —— 本次不铺黑底垫轨${
+				`纯黑 PNG 落盘失败（${rel}）：${(e as Error).message} —— 本次${bed === "fill" ? "候选轨空档不补黑（片段照带纯黑底，空档会露出口播）" : "不铺黑底垫轨"}${
 					gapSolidUsed ? "、主轨黑片填充一并回退（留 gap——客户端若开主轨磁吸请注意与配音错位的风险）" : ""
 				}，候选轨照常。`,
 			);
@@ -3900,7 +3914,9 @@ async function layIntoProject(
 				sourceLayer: layOpts.sourceLayer,
 				generatedAt: new Date().toISOString(),
 				planPath: "split/broll-plan.json",
-				blackBed: false,
+				// fill 形态：片段照带底、只是空档不补；旧形态：不铺黑底轨（PNG 无字节，两种都不能引用它）
+				bed: bed === "fill" ? "fill" : "none",
+				bedFillPatches: false,
 				// 重跑必须原样带上 forceRelay：漏传会让「已授权强剥」的这次退回拒铺态（半截行为）
 				forceRelay,
 				// 同理：合成颗粒引用保护 MUST 原样带上，漏传 = 回退路径把补充画面剥掉
@@ -3918,13 +3934,21 @@ async function layIntoProject(
 	// 只读、非致命——查出悬空 MUST NOT 改 ok / 退出码 / 写回结果。人读输出压在铺轨完成行之后（见下）。
 	const integrity = safeCheckMaterialIntegrity({ gtrk: written, gtrkDir, log });
 	const bedNote =
-		summary.blackTrack !== null
-			? ` · 纯黑底垫轨 track_index ${summary.blackTrack}`
-			: summary.blackBedSkipped === "audio_driven"
-				? " · 黑底垫轨跳过（音频驱动工程无口播保留轨，无遮挡对象——2026-08-21 拍板）"
-				: blackBed
-					? " · 未铺纯黑底垫轨"
-					: " · 纯黑底垫轨已关闭（--no-black-bed）";
+		summary.bed === "fill"
+			? ` · 候选片段自带纯黑底${
+					summary.bedFill && summary.bedFill.patches > 0
+						? `、空档补黑 ${summary.bedFill.patches} 段（${summary.bedFill.sec}s）`
+						: summary.laidTracks.length && !summary.bedFill?.patches
+							? "（空档无需补黑）"
+							: ""
+				}`
+			: summary.blackTrack !== null
+				? ` · 纯黑底垫轨 track_index ${summary.blackTrack}（--black-bed 旧形态）`
+				: summary.blackBedSkipped === "audio_driven"
+					? " · 黑底垫轨跳过（音频驱动工程无口播保留轨，无遮挡对象——2026-08-21 拍板）"
+					: bed === "track"
+						? " · 未铺纯黑底垫轨"
+						: " · 不铺底（片段不带底、空档露下层）";
 	// 剥离/保留如实呈现（ADDED「剥离与保留必须如实呈现」）：今天的完成日志对删除只字不提，是静默铲轨的帮凶
 	const stripNote =
 		`剥离 ${summary.removedTracks.length} 条旧自产轨` +
@@ -4192,6 +4216,9 @@ async function layIntoProject(
 			removedTracks: summary.removedTracks,
 			keptEditedTracks: summary.keptEditedTracks,
 			blackTrack: summary.blackTrack,
+			// 底板形态（link-clip-background-fill）：fill = 候选片段自带纯黑底 + 空档补片；track = --black-bed 旧形态
+			...(summary.bed ? { bed: summary.bed } : {}),
+			...(summary.bedFill ? { bed_fill: summary.bedFill } : {}),
 			// 合成颗粒引用账面（link-composite-particle-profile D2）：条件键，无合成颗粒 / 无读失败时整键缺席。
 			// ⚠️ 逐键重投影：决策层 summary.compositeRefs 不在这里补一行就到不了产物。
 			...(summary.compositeRefs

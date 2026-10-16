@@ -331,8 +331,8 @@ gtrk matrix source-import --project <工程目录> --beat B07 --urls links.txt -
 | `--lay <n>` | 候选铺轨数：平铺 N 条 B-roll 候选轨（`0` = 只出 plan 不铺轨） | `1` |
 | `--top-k <n>` | 每 query 候选数上限（覆盖派单 shots；服务端上限 50） | 派单值 |
 | `--material-class <c>` | 素材类型 `real_shot` \| `concept`（仅矩阵成员口；覆盖栏目策略） | 栏目策略 |
-| `--score-floor <f>` | 填充置信度地板：segment score 低于此值不采纳、槽位留空——留空处**露黑底垫轨**（默认铺；除非 `--no-black-bed` 才露主轨）。调高会收缩取材池，整段铺不满即纯黑压口播，调完先看空洞告警 | `0.2` |
-| `--no-black-bed` | 不铺纯黑底垫轨（默认铺一条） | 默认铺 |
+| `--score-floor <f>` | 填充置信度地板：segment score 低于此值不采纳、槽位留空——口播工程里留空处由候选轨**补纯黑片**。调高会收缩取材池，整段铺不满即纯黑压口播，调完先看空洞告警 | `0.2` |
+| `--black-bed` | 旧形态：铺一条纯黑底垫轨、候选片段不带底板（给不认片段底板的老版客户端过渡用）；`--no-black-bed` 已是缺省（无操作） | 关 |
 | `--force-relay` | 候选轨已被你在客户端编辑过时仍强剥重铺（缺省会拒铺并保留那条轨）——**会删掉已确认原片的 `broll-raw-*` 素材登记、盘上原片成孤儿** | 关 |
 | `--arrange <m>` | **B-roll 编排取数路**，**按素材来源自动定档、一般不用传**：铺你自己电脑里的素材 → `cloud`（编排在云端做，按「编排量」计费，跑前报预估并征求确认，`--yes` 跳过）；铺素材矩阵的素材 → `local`（编排仍在本机、不计费，逐字不动）。`shadow` 是观测档：本机照跑照铺轨、云端只对拍不采纳。⚠️ 本地素材路上 `--arrange local` 不受理（传了报参数错）；云端拿不到产物时**直接报错**，不会悄悄换算法把活干完 | 按素材来源自动 |
 | `--arrange-qc` | **编排期质检**（缺省关）：落轨**之前**就查每个 beat 的卡点句「画面有没有给到稿子说的东西」，没给到就换候选重排，最多 2 轮，到限即交付并如实登记还差哪几句。全程零渲染——替代「铺完 → 渲 → 看 → 重铺 → 再渲」那两轮。⚠️ 判定走素材理解口、**按帧计费**（每个卡点句 1 帧/轮，命中判定缓存的不重复计费），跑前报预估并征求确认（`--yes` 跳过）。与 `--arrange` 正交：本机档与云端档都能开 | 关 |
@@ -396,7 +396,9 @@ gtrk matrix source-import --project <工程目录> --beat B07 --urls links.txt -
 >
 > **素材落盘自检**：写回工程之后只读检查 `materials[].path` 是否落盘。相对路径以 `.gtrk` 文件所在目录（`<产物目录>/gtrk/`）为基准解析。`--json` 出 `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`；`dangling` 是登记存在但文件缺失的素材，并标出是否被时间线引用，绝对路径缺失另计 `external`，http(s) 素材只计数且不发网络请求。检查只告知，不改 `ok`、退出码、素材条目或文件；修复悬空引用请在客户端重新确认原片或删除对应 clip。未写回的运行（`--lay 0` / 拒铺 / 工程缺失）不出 `integrity` 字段。
 >
-> **纯黑底垫轨**：默认在候选轨之下、口播主轨之上铺满已落成的 beat 包络，避免 B-roll 留空处露出底下画面。候选轨未填满的部分会形成「黑底空洞」；`--json` 恒出 `lay.blackBedHoleSec` 与 `lay.blackBedHoles`，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时给非致命告警。可调 `--score-floor`、改用 `--no-black-bed` 或在客户端补片。素材落在 `assets/builtin/solid-000000-<W>x<H>.png` 并幂等复用；换片请拖到候选轨，不要拖到黑底条。客户端 0.2.10+ 拖到黑底条会直接拒绝，旧客户端先升级；不需要黑底时用 `--no-black-bed` 重跑。
+> **片段底板（缺省）**：每个候选片段自带纯黑底（gtrk 契约 `background_fill`，窄画幅 / 缩小时不露下层口播），每条候选轨在已落成的 beat 包络内把自己的空档补成纯黑片——`--lay 2` 时只留任一条可见也不露口播；音频驱动工程（无口播）不补。`--json` 出 `lay.bed`（`fill`）与 `lay.bed_fill`（补了几段、几秒）。没有任何 B-roll 的纯黑时段记作空洞：`lay.blackBedHoleSec` / `lay.blackBedHoles` 恒出，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时给非致命告警，可调 `--score-floor` 或在客户端补片。补片素材落在 `assets/builtin/solid-000000-<W>x<H>.png` 并幂等复用。
+>
+> **纯黑底垫轨（`--black-bed`，旧形态）**：在候选轨之下、口播主轨之上铺满已落成的 beat 包络，候选片段不带底板；空洞口径与数值同上。老工程里已有的黑底轨在下次缺省重铺时被换成片段底板。
 
 **本地素材模式（`matrix index` / `--local`）**：素材不必入云端素材库，用你本地的素材文件夹（视频+图片混合）直接检索铺轨：
 
@@ -541,9 +543,11 @@ gtrk project export --gtrk <工程文件> --formats jianying,xml --out <产物�
 
 颗粒预渲前会先完成 HTML、路径和缓存预检；预检失败不会提交任何云任务。单颗粒渲染或下载失败会记录在 `result.json`，其余格式继续导出。`--json` 输出单行结果 JSON，人读日志走 stderr。
 
-### `gtrk project background` — 客户端画布背景（模糊底 / 纯色）
+### `gtrk project background` — 片段底板（模糊底 / 纯色）
 
-只改 `.gtrk` 的 `struct_meta.client_background` 一个键：客户端打开工程即按它呈现画布背景，可在客户端设置里改回。典型用途是横屏源进竖屏画布时用模糊底替代黑边。零计费、不访问云端；剪映 / PR 工程与本地 `gtrk render` 不承接该设置。
+缺省给**主轨每个视频 / 图片片段**写片段级底板 `background_fill`（gtrk 契约字段）：片段之下、仅在其时长内铺满画布，模糊 = 片段自己画面铺满后的模糊。典型用途是横屏源进竖屏画布时用模糊底替代黑边。客户端可逐片段或多选批量改；从客户端导出的剪映草稿原生承接（主轨是最底层轨），Pr 工程降级为纯黑并提示，本地 `gtrk render` 承接。叠加轨片段与空档不写不改，`struct_meta.client_background` 不动（回执点名它是否仍在）。零计费、不访问云端。
+
+`--scope canvas` 走旧的画布级写法：只改 `struct_meta.client_background` 一个键（客户端打开即按它呈现画布背景；剪映 / PR 工程与本地渲染不承接）。
 
 ```bash
 gtrk project background --gtrk <工程文件> --blur
@@ -555,10 +559,11 @@ gtrk project background --gtrk <工程文件> --clear
 | 参数 | 作用 |
 |---|---|
 | `--project <dir>` / `--gtrk <path>` | 定位工程，规则同 `project export` |
-| `--blur` | 模糊底：主轨可见画面的模糊副本垫底 |
-| `--intensity <n>` | 配合 `--blur`，0–1000，缺省 200 |
+| `--blur` | 模糊底：片段自己画面铺满后的模糊（画布级 = 主轨画面的模糊副本） |
+| `--intensity <n>` | 配合 `--blur`，0–1000，缺省 200（逐片段须为整数） |
 | `--color <#RRGGBB>` | 纯色底（六位十六进制） |
-| `--clear` | 删除该设置，回到客户端缺省黑底 |
+| `--clear` | 去掉底板（逐片段 = 去掉主轨片段的 `background_fill`；画布级 = 删 `client_background`，回到客户端缺省黑底） |
+| `--scope <clips\|canvas>` | 作用面：`clips`（缺省）主轨逐片段；`canvas` 画布级（旧写法） |
 | `--dry-run` | 只校验并回执将写入的值，不写文件 |
 
 三种模式恰好选一个。写回走原子替换与内容 revision 守卫，其余内容原样保留；值未变时不写盘。`--json` 回执含写前写后 revision。

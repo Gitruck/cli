@@ -154,7 +154,7 @@ gtrk matrix describe --materials <同一素材> --review <工程目录/visual-ov
 | 多铺几条候选对比 | `--lay <n>` | 非负整数 · `1`（`0`=只出 plan 不铺轨） | opencut 小眼睛切换对比挑选 |
 | 每段多给几个候选 | `--top-k <n>` | 整数 · 派单 `shots` 值（服务端上限 50） | 每 query 候选数上限 |
 | 指定素材类型 | `--material-class <c>` | `real_shot` \| `concept` · 栏目策略 | 仅 internal 矩阵成员口 |
-| 填充门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | 低于不采纳、槽位留空露黑底；调完必看空洞告警 |
+| 填充门槛 | `--score-floor <f>` | 浮点 0–1 · `0.2` | 低于不采纳、槽位留空——口播工程里留空处由候选轨补纯黑片；调完必看空洞告警 |
 | 切点对齐字幕句 | `--cut-align <r>` | 浮点 0–1 · `0.7`（`0`=关闭） | 三七开拍板：约七成字幕句起点恰逢镜头切点、三成有意错开；句级时码取 transcript 重投影（降级自动回旧节奏并告警）；开启时结果 JSON `lay.cut_align` 报实测比例 |
 | 主轨空洞填充 | `--gap-fill <m>` | `fast` \| `solid`（默认）\| `none` | **仅音频驱动工程主轨**（口播工程不适用零回归）：fast=放宽地板随便填候选→延长相邻颗粒→**跨 beat 借候选**→**次地板补真画面**→仍不够才黑片；借来的画面与本段稿子相关性弱、次地板槽是不到 1.2s 的快切，两者都会在日志里**指名报出**（`kind` 为 `borrowed` / `subfloor`）——那是如实告知，**不是缺陷，别当 bug 上报**；solid=黑片垫齐（精修一眼看出没匹配到）；none=留 gap（客户端主轨磁吸会吸除 gap 致画面与配音错位，慎用）；生效时结果 JSON `lay.gap_fill` 报明细 |
 | 编排交给云端跑 | `--arrange <m>` | **按素材来源自动定档，一般不用传** | 铺**自己电脑里的素材**→`cloud`（编排在服务端，按编排量计费）；铺**素材矩阵的素材**→`local`（编排仍在本机、不计费，逐字不动）。`shadow`=本机照跑照铺轨、云端只对拍不采纳。⚠️ 本地素材路上 `--arrange local` **不受理**；云端拿不到产物时**直接报错**，不会换算法把活干完。⚠️ **它不是省钱开关**——矩阵素材要付检索费，两条路都花钱、只是花在不同环节，MUST NOT 对用户说「用本地就不花钱」 |
@@ -163,7 +163,7 @@ gtrk matrix describe --materials <同一素材> --review <工程目录/visual-ov
 | 先估价再决定跑不跑 | `--arrange-estimate-only` | 开关 · 缺省关 | 走到云端编排的计价确认那一步就停：报出编排量后**成功**返回（`ok:true` + `estimateOnly:true`，不是「被拒绝」），零云端调用、工程零改动。机读值在 `lay.arrange.units` 与 `lay.arrange.scale`。⚠️ 它省的是**云端那一次调用与其计费**（及其后的下载落轨），不是整条链——工程/plan/重投影照样要走。素材矩阵路会报 `applicable:false` 而**不是 0**。与 `--yes` 同给时以它为准 |
 | 云端编排请求体存证 | `--dump-request <file>` | 路径 · 缺省不写 | **排障专用，用户没提就别带。** 把**实际上行的**云端编排请求体逐字节落到该文件——服务端**不保存 plan 全文**，所以复现一次调用只能靠它。⚠️ **不能指向工程目录内**（工程会被打包拷走，而它含 beat 名与检索词），传了会报参数错；开 `--arrange-qc` 时每轮各一份（第 N 轮加 `.roundN`）。回执在 `lay.arrange_run.dump_request`。⚠️ 转交这份文件前 MUST 先告诉用户里面有什么，别替他做决定 |
 | 外发调参仪表 | `--explain` | 开关 · 缺省关 | 缺省 `lay.dedup` 只出 `emptySlots`（判素材池够不够用，upsell 判据就是它）；本开关再补 `emptySlotsByRefine` / `adjacentWaived` / `hotSlotsPlaced` / `blurrySlotsPlaced` 四个**调参仪表**，人读日志同口径。**不改任何决策**，工程产物逐字节不变。⚠️ 用户问「为什么这颗抖/糊/空」时才带，别缺省开着刷噪音 |
-| 不要黑底垫轨 | `--no-black-bed` | 开关 · 默认铺 | 黑底按 beat 包络整条铺，B-roll 期间遮口播 |
+| 用户的客户端太旧（不认片段底板） | `--black-bed` | 开关 · 默认关 | 旧形态：铺一条纯黑底垫轨、候选片段不带底板。缺省是**候选片段自带纯黑底**（`background_fill`）、空档在候选轨内补纯黑片，不铺黑底轨；`--no-black-bed` 已是缺省（无操作） |
 | 已编辑轨强铺逃生门 | `--force-relay` | 开关 · 关 | 用户明确点头才带；raw 登记删除不可恢复 |
 | 同素材彻底不二用 | `--dedup-scope material` | `scene`（默认）\| `material` | 收严会加剧空洞，先看 `lay.dedup.emptySlots` |
 | 机读（你必带） | `--json` | 开关 · 关 | 人读日志转 stderr，stdout 只出结果 JSON |
@@ -279,7 +279,7 @@ gtrk matrix describe --materials <同一素材> --review <工程目录/visual-ov
 | 消费（编辑后的）plan 铺轨 | `gtrk matrix lay --project <目录>` | 目录 · — | 读 `<目录>/split/broll-plan.json`，白名单校验后按 **plan 现值**铺轨（不重新检索、零检索开销） |
 | 显式指定 plan 文件 | `--plan <path>` | 路径 · 上述默认 | 配方 C 自己组的 plan 从这进。⚠️ 组的时候把检索返回的 `results` 条目**原样搬**——`cuts` / `motion` 住在 `segments[]` 里面，自己重写 segments 就把它们丢了（后果：端点残片收缩空转、高运动降权失效，见配方 C 要点） |
 | 美观度参与排序 | `--mark-weight <w>` | 浮点 0–1 · `0`（关闭） | 仅 `matrix lay`：候选融合分 = `sim×(1-w)+(mark/100)×w`，mark 取 describe 理解缓存（素材内**就近帧**命中）；无缓存候选**中性**（融合分=sim，不惩罚不加分、绝不变相剔除）；score 地板仍只看原始 sim。**零件不裁定：默认关（0 时排序与产物逐字节零回归），开不开、开多大由配方/你裁定**——先 describe 过一轮才有 mark 可用（配方 B ② 之后开才有意义），开启时结果 JSON `lay` 含 `mark_weight/mark_hit/mark_neutral` |
-| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--dump-request/--explain/--no-black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
+| 其余铺轨参数 | `--lay/--score-floor/--cut-align/--gap-fill/--arrange/--arrange-cost-cap/--arrange-estimate-only/--arrange-qc/--dump-request/--explain/--black-bed/--force-relay/--dedup-scope/--yes/--no-image-broll` | 同主命令 | 语义一致 |
 
 ## plan 编辑口径（法定通道的边界）
 
@@ -398,9 +398,10 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 
 - `counts`：几个 beat、几条检索（几条失败）、几条候选——一句话概括盘子大小。
 - `memberType`：internal=矩阵成员口（栏目偏好/concept 生效）；external=通用口（固定 real_shot + 可商用）。
-- `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、几个颗粒（不含黑底轨）。
-- `lay.blackTrack`：黑底垫轨轨号（未铺时 null）。
-- `lay.blackBedHoleSec` / `lay.blackBedHoles`：**黑底空洞**（纯黑压口播时段），恒全量不按阈值过滤——非零就主动报（哪个 beat、几秒、在哪），这是粗剪期既定取舍不是故障。
+- `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、几个颗粒（不含空档补片 / 黑底轨）。
+- `lay.bed`：底板形态——`fill`（缺省：候选片段自带纯黑底、空档在候选轨内补黑）/ `track`（`--black-bed` 旧形态）；`lay.bed_fill` = 补了几段、几秒。
+- `lay.blackTrack`：黑底垫轨轨号（只有 `--black-bed` 才有，缺省 null）。
+- `lay.blackBedHoleSec` / `lay.blackBedHoles`：**纯黑时段**（没有任何 B-roll、靠黑片压住口播的段落；两种形态数值相同），恒全量不按阈值过滤——非零就主动报（哪个 beat、几秒、在哪），这是粗剪期既定取舍不是故障。
 - `lay.removedTracks` / `lay.keptEditedTracks`：剥了哪些旧自产轨 / 因「你编辑过」保留未剥的轨。删了什么必须跟用户说。
 - `lay.dedup`：`emptySlots`（宁空不重复的空槽数——多了是该补料或走动线②的信号）、`adjacentWaived`。
 - `lay.pinned`（有钉选才出现）：`requested/placed/yielded`——三个数**按段计**（键 `<clip_id>@<段内锚点毫秒>`）且同分母，`placed + yielded === requested` 恒成立。整片单素材的工程（二创：一条长视频钉多处引用）全靠这个粒度才看得出「钉了 5 段只落了 1 段」。`yielded` 非空要**逐段指名**哪些没落上（stderr 也有告警）。
@@ -431,7 +432,8 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - 在同合云桌面客户端（opencut / OpenCut Gitruck Edition）里打开工程，候选轨已铺好。
 - 用轨道头「小眼睛」逐条切换对比，留满意的、关不要的。
 - 候选默认是 preview 代理；下载原片属挑选后的动作（客户端挑选 UI）。
-- 候选轨下方垫了纯黑底轨（`lay.blackTrack`）——删多余候选轨时**别误删它**；换片拖到**候选轨颗粒**上、别拖到黑底条上（0.2.10 起客户端会拒绝并提示；旧版会静默建轨——用户说「拖了没反应」先让他重启客户端吃强更，再查轨道数，`Ctrl+Z` 整条撤销）。**MUST NOT 对旧版客户端用户承诺「客户端会拒绝并提示」**。
+- 候选片段**自带纯黑底**（片段级背景填充，客户端属性面板「基础 › 背景填充」可逐片段改），空档在每条候选轨上各补了纯黑片——所以**关掉某条候选轨的小眼睛会露口播**，那是用户主动切换。纯黑补片也是候选轨上的片段，换片拖到**候选轨颗粒**上替换即可。
+- **旧工程**（之前按黑底垫轨铺的）可能还有一条纯黑底轨（`struct_meta.broll.black_track`）——别误删；重铺时它会被换成新形态。用户的客户端太旧、打开后 B-roll 黑边处露口播 ⇒ 让他升级客户端，或本次加 `--black-bed`。
 - 觉得填充有问题（太杂/太空/漏段）→ 回来找我调参重铺（配方 B 的理解裁定也在这时上场）。
 
 **用户明确说「B-roll 就这样」之后**，才往下走——先看 AI 情景片段腿（同属 ③），三源齐了再进 ④ 全局抽帧检查，过了才交棒 ⑤ 铺 MG。详见末节「下一步」。
@@ -441,10 +443,10 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | 情况 | 怎么做 |
 |---|---|
 | 想在多个候选里挑 | `--lay N` 多铺几条候选轨。**只增加可选方案数，不扩大覆盖**——别把它当空洞的解药 |
-| 填充太差 / 命中太杂 | 先看排序前几条质量再调 `--score-floor`（调高留空处露黑底，必看空洞告警）；杂得可疑 → 走配方 B：describe top 候选，按 `usable_flags`+`desc` 剔除后 `matrix lay` |
+| 填充太差 / 命中太杂 | 先看排序前几条质量再调 `--score-floor`（调高留空处补纯黑，必看空洞告警）；杂得可疑 → 走配方 B：describe top 候选，按 `usable_flags`+`desc` 剔除后 `matrix lay` |
 | 「像但不能用」（水印/字幕/黑边混进候选） | 配方 B 的标准场景：`describe --plan` → 你删掉命中的 result → `matrix lay`。**CLI 不会自动剔**（零件不裁定），删不删你判断 |
 | 某候选非用不可 / 顺序想钦定 | 编辑 plan：该 result 标 `pinned:true` → `matrix lay`。钉选是落位保证（免负词/地板/不二用抢占/紧邻避让），`lay.pinned.yielded` 非空说明确实钉多了在打架，名单逐段指名 |
-| **出现黑底空洞告警** | 不是故障：照 `lay.blackBedHoles` 逐段报给用户，出路=调低 `--score-floor` / `--no-black-bed` 露主轨 / opencut 手动补片 / 动线②云端垫底 |
+| **出现空档补黑 / 黑底空洞告警** | 不是故障：照 `lay.blackBedHoles` 逐段报给用户，出路=调低 `--score-floor` / opencut 手动补片 / 动线②云端垫底 |
 | 每段候选太少不够挑 | `--top-k` 调大重跑 |
 | 某段有空槽 / 想补特定意象 | `gtrk matrix search "<英文长句场景描述>" --project <目录> --json` 单条补检；影视解说类补检记得带 `--source-window` 保时序 |
 | 只想先看清单不铺轨 | `--lay 0`（只产 plan）；之后铺 = `matrix lay`（不重新检索、不重新烧配额） |

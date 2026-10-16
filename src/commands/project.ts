@@ -401,6 +401,7 @@ export interface ProjectInitOpts {
 	color?: string;
 	clear?: boolean;
 	dryRun?: boolean;
+	scope?: string;
 }
 
 /** background 专属旗标；其它子命令收到其一即报错。 */
@@ -410,13 +411,17 @@ const BACKGROUND_ONLY_OPTIONS = [
 	["color", "--color"],
 	["clear", "--clear"],
 	["dryRun", "--dry-run"],
+	["scope", "--scope"],
 ] as const;
 
 function backgroundOnlyOption(opts: ProjectInitOpts): string | undefined {
 	return BACKGROUND_ONLY_OPTIONS.find(([key]) => opts[key] !== undefined)?.[1];
 }
 
-/** `gtrk project background`：只写 struct_meta.client_background（零计费、不访问云端）。 */
+/**
+ * `gtrk project background`：缺省给主轨每个片段写 `background_fill`（link-clip-background-fill D6）；
+ * `--scope canvas` 只写 struct_meta.client_background（零计费、不访问云端）。
+ */
 function runProjectBackgroundCommand(opts: ProjectInitOpts): void {
 	if (opts.json) routeLogsToStderr();
 	for (const [key, flag] of [
@@ -429,7 +434,7 @@ function runProjectBackgroundCommand(opts: ProjectInitOpts): void {
 	if (opts.particles === false) throw new Error("background 不接受 --no-particles");
 	const gtrkPath = resolveProjectGtrkPath(opts, "background");
 	const bgOpts: BackgroundOpts & { dryRun?: boolean } = {
-		blur: opts.blur, intensity: opts.intensity, color: opts.color, clear: opts.clear, dryRun: opts.dryRun,
+		blur: opts.blur, intensity: opts.intensity, color: opts.color, clear: opts.clear, dryRun: opts.dryRun, scope: opts.scope,
 	};
 	let result;
 	try {
@@ -443,11 +448,27 @@ function runProjectBackgroundCommand(opts: ProjectInitOpts): void {
 		}
 		throw e;
 	}
-	const shown = result.background === null ? "已清除（客户端回到缺省黑底）"
-		: result.background.type === "blur" ? `模糊底 · 强度 ${result.background.blurIntensity}` : `纯色 ${result.background.color}`;
-	if (result.dry_run) log.info(`[dry-run] 将写入画布背景：${shown}（未写文件）`);
-	else if (!result.changed) log.ok(`画布背景已是${shown}，文件未改动`);
-	else log.ok(`画布背景：${shown}——客户端打开即见，可在设置里改回；剪映 / PR 工程与本地 gtrk render 不带它`);
+	const bg = result.background;
+	if (result.scope === "clips") {
+		const shown = bg === null ? "已去掉" : bg.type === "blur" ? `模糊底 · 强度 ${(bg as { intensity: number }).intensity}` : `纯色 ${bg.color}`;
+		const where = `主轨（轨 ${result.main_track}）${result.clips} 个片段`;
+		if (result.dry_run) log.info(`[dry-run] 将给${where}写底板：${shown}（其中 ${result.changed_clips} 个会变；未写文件）`);
+		else if (!result.changed) log.ok(`${where}的底板已是${shown}，文件未改动`);
+		else
+			log.ok(
+				`${where}底板：${shown}（改动 ${result.changed_clips} 个）——每个片段各带一份，客户端里可逐片段或多选批量改；` +
+					`从客户端导出的剪映草稿带它（底层轨原生），Pr 工程降级为纯黑，本地 gtrk render 带它`,
+			);
+		if (result.canvas_background) {
+			log.info("工程里还有一份画布级背景（client_background），本命令不动它；有片段的时段被片段底盖住看不见，要清它：--scope canvas --clear");
+		}
+	} else {
+		const shown = bg === null ? "已清除（客户端回到缺省黑底）"
+			: bg.type === "blur" ? `模糊底 · 强度 ${(bg as { blurIntensity: number }).blurIntensity}` : `纯色 ${bg.color}`;
+		if (result.dry_run) log.info(`[dry-run] 将写入画布背景：${shown}（未写文件）`);
+		else if (!result.changed) log.ok(`画布背景已是${shown}，文件未改动`);
+		else log.ok(`画布背景：${shown}——客户端打开即见，可在设置里改回；剪映 / PR 工程与本地 gtrk render 不带它`);
+	}
 	if (opts.json) console.log(JSON.stringify(result));
 }
 
@@ -962,10 +983,11 @@ export function registerProject(program: Command): void {
 		.option("--keep-punctuation", "transcript 文稿保留全部标点（缺省按统一口径去逗号句号、保留？！等）")
 		.option("--project <dir>", "export / background：工程目录（自动定位 gtrk/project.gtrk 或 project.gtrk）")
 		.option("--gtrk <path>", "export / background：显式指定 .gtrk 工程文件")
-		.option("--blur", "background：模糊底（主轨视频的模糊副本垫底，横竖互转时去黑边）")
-		.option("--intensity <n>", "background：配合 --blur 的模糊强度 0–1000（缺省 200）")
+		.option("--blur", "background：模糊底（片段自己画面的模糊副本铺满垫底，横竖互转时去黑边）")
+		.option("--intensity <n>", "background：配合 --blur 的模糊强度 0–1000（缺省 200；逐片段须为整数）")
 		.option("--color <#RRGGBB>", "background：纯色底")
-		.option("--clear", "background：删除画布背景设置，回到客户端缺省黑底")
+		.option("--clear", "background：去掉底板（逐片段 = 去掉主轨片段的 background_fill；画布级 = 删 client_background）")
+		.option("--scope <clips|canvas>", "background：作用面——clips（缺省）给主轨每个片段写底板；canvas 写画布级背景（旧写法）")
 		.option("--dry-run", "background：只校验并回执将写入的值，不写文件")
 		.option("-f, --formats <list>", "export：逗号分隔格式（默认 jianying,xml；支持 xml/fcpxml/otio/jianying/capcut/gtrk）")
 		.option("--jianying-draft-dir <dir>", "export：剪映/CapCut 草稿根目录；可用 auto 自动探测")

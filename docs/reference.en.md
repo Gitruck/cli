@@ -332,8 +332,8 @@ Each source becomes one low-resolution full-window preview candidate. `source-im
 | `--lay <n>` | How many candidate tracks to lay (`0` = produce the plan only, lay nothing) | `1` |
 | `--top-k <n>` | Candidate cap per query (overrides the dispatch's shots; server cap is 50) | dispatch value |
 | `--material-class <c>` | Material type `real_shot` \| `concept` (matrix-member endpoint only; overrides the show policy) | show policy |
-| `--score-floor <f>` | Fill-confidence floor: segments scoring below this are not used and the slot stays empty — empty spots **expose the black bed track** (laid by default; only `--no-black-bed` exposes the main track instead). Raising it shrinks the candidate pool, and a span that cannot be filled at all becomes pure black over the talking-head, so check the hole warnings after adjusting | `0.2` |
-| `--no-black-bed` | Do not lay the solid black bed track (one is laid by default) | laid by default |
+| `--score-floor <f>` | Fill-confidence floor: segments scoring below this are not used and the slot stays empty — in talking-head projects the candidate track **patches empty spots with solid black**. Raising it shrinks the candidate pool, and a span that cannot be filled at all becomes pure black over the talking-head, so check the hole warnings after adjusting | `0.2` |
+| `--black-bed` | Legacy layout: lay one solid black bed track and leave candidate clips without a background fill (for older clients that do not read clip fills); `--no-black-bed` is now the default (no-op) | off |
 | `--force-relay` | Strip and re-lay even when you have already edited a candidate track in the client (by default it refuses and keeps that track) — **this deletes the `broll-raw-*` material registrations of confirmed source clips, orphaning those files on disk** | off |
 | `--out <file>` | Write ad-hoc results to a file; for `matrix fetch`, the raw-footage output directory (never the Jianying draft folder) | stdout / `./matrix-fetch/` |
 | `--arrange <m>` | **B-roll arrangement route** — **picked automatically by material source; you normally do not pass it**: your own local footage → `cloud` (arranged in the cloud, billed by **arrangement volume**, with an estimate and a confirmation prompt first; `--yes` skips). Material from the asset matrix → `local` (arranged on your machine, not billed, unchanged byte for byte). `shadow` is an observation mode: your machine lays as usual while the cloud runs the same arrangement for comparison only. ⚠️ On the local-footage route `--arrange local` is not accepted (passing it is a parameter error), and if the cloud cannot deliver a result the command **fails outright** instead of quietly switching to a different algorithm. It is **not a way to save credits** either — asset-matrix material is billed for search. Both routes cost something; they just cost it at different steps | picked by material source |
@@ -368,7 +368,9 @@ Each source becomes one low-resolution full-window preview candidate. `source-im
 >
 > **Material-on-disk self-check**: after writing back the project, the CLI read-only checks whether every `materials[].path` exists. Relative paths resolve against the directory containing the `.gtrk` file (`<output>/gtrk/`). `--json` emits `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`; `dangling` lists registered materials missing on disk and marks whether the timeline references each one, while missing absolute paths are counted as `external`; http(s) materials are counted without network requests. This check only reports: it does not change `ok`, the exit code, material entries or files. Repair a dangling reference by re-confirming the source clip in the client or deleting the corresponding clip. Runs that never write back (`--lay 0` / refused / missing project) emit no `integrity` field.
 >
-> **The solid black bed track**: by default a solid black track covers the landed beat envelope beneath candidate tracks and above the talking-head track, so empty B-roll spans do not reveal the picture underneath. Empty candidate spans become “black-bed holes”; `--json` always emits `lay.blackBedHoleSec` and `lay.blackBedHoles`, with a non-fatal warning at ≥3 s for one span or ≥15% of one beat. Adjust `--score-floor`, use `--no-black-bed`, or patch in the client. The material is stored at `assets/builtin/solid-000000-<W>x<H>.png` and reused idempotently; drag replacements onto candidate tracks, never onto the black bed. Client 0.2.10+ rejects drops onto the black bed; upgrade older clients first. Use `--no-black-bed` to remove it.
+> **Clip background fill (default)**: every candidate clip carries a solid black fill (gtrk contract `background_fill`, so narrow or shrunken clips never reveal the talking-head underneath), and each candidate track patches its own empty spans inside every landed beat envelope with solid black clips — with `--lay 2`, leaving only one track visible still hides the talking-head; audio-driven projects (no talking-head) are not patched. `--json` emits `lay.bed` (`fill`) and `lay.bed_fill` (patches and seconds). Spans with no B-roll at all count as holes: `lay.blackBedHoleSec` / `lay.blackBedHoles` are always emitted, with a non-fatal warning at ≥3 s for one span or ≥15% of one beat; adjust `--score-floor` or patch in the client. The patch material is stored at `assets/builtin/solid-000000-<W>x<H>.png` and reused idempotently.
+>
+> **Solid black bed track (`--black-bed`, legacy)**: one solid black track covers the landed beat envelope beneath candidate tracks and above the talking-head track, and candidate clips carry no fill; holes are counted the same way with the same numbers. A black bed track left in an older project is replaced by clip fills on the next default re-lay.
 
 **Local-footage mode (`matrix index` / `--local`)**: footage does not have to live in the cloud library — retrieve and lay tracks straight from your local footage folders (video and images mixed):
 
@@ -509,9 +511,11 @@ There are two billing surfaces: structural project export is billed per task, wh
 
 Before particle rendering, the command performs HTML, path and cache preflight; a preflight failure submits no cloud task. A single particle render or download failure is recorded in `result.json` while other formats continue. With `--json`, stdout contains one result JSON line and human logs go to stderr.
 
-### `gtrk project background` — client canvas background (blur / solid color)
+### `gtrk project background` — clip background fill (blur / solid color)
 
-Changes only `struct_meta.client_background` in the `.gtrk`; the client renders the canvas background from it when the project opens, and the user can change it back in the client settings. The typical use is a blurred fill instead of black bars when a landscape source sits on a portrait canvas. Zero credits, no cloud access; Jianying / Premiere projects and local `gtrk render` do not carry this setting.
+By default writes a clip-level `background_fill` (gtrk contract field) on **every video / image clip of the main track**: beneath the clip, only for its duration, covering the whole canvas; blur = the clip's own picture scaled to cover and blurred. The typical use is a blurred fill instead of black bars when a landscape source sits on a portrait canvas. Users can change it per clip or for a multi-selection in the client; Jianying drafts exported from the client carry it natively (the main track is the bottom track), Premiere projects degrade it to solid black with a notice, and local `gtrk render` carries it. Overlay-track clips and gaps are left alone, and `struct_meta.client_background` is not touched (the receipt says whether one is still present). Zero credits, no cloud access.
+
+`--scope canvas` keeps the old canvas-level write: only `struct_meta.client_background` changes (the client renders the canvas background from it; Jianying / Premiere projects and local rendering do not carry it).
 
 ```bash
 gtrk project background --gtrk <project-file> --blur
@@ -523,10 +527,11 @@ gtrk project background --gtrk <project-file> --clear
 | Option | Purpose |
 |---|---|
 | `--project <dir>` / `--gtrk <path>` | Locate the project, same rules as `project export` |
-| `--blur` | Blurred fill: a blurred copy of the visible main-track picture underneath |
-| `--intensity <n>` | With `--blur`, 0–1000, default 200 |
+| `--blur` | Blurred fill: the clip's own picture scaled to cover and blurred (canvas scope: a blurred copy of the main-track picture) |
+| `--intensity <n>` | With `--blur`, 0–1000, default 200 (must be an integer per clip) |
 | `--color <#RRGGBB>` | Solid color (six-digit hex) |
-| `--clear` | Remove the setting and return to the client's default black |
+| `--clear` | Remove the fill (per clip: drop `background_fill` from main-track clips; canvas: delete `client_background` and return to the client's default black) |
+| `--scope <clips\|canvas>` | Scope: `clips` (default) per main-track clip; `canvas` canvas level (old behavior) |
 | `--dry-run` | Validate and report the value that would be written, without writing |
 
 Exactly one mode is required. Writes go through atomic replace with the content-revision guard and leave everything else intact; nothing is written when the value is unchanged. The `--json` receipt includes the revisions before and after.

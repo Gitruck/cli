@@ -240,6 +240,8 @@ export function layAiDramaTracks(opts: {
 				producer,
 				beat: pkg.beatId,
 				shot_index: item.shotIndex,
+				// [link-clip-background-fill] AI 片段默认纯黑底：画幅不满画布时不露下层口播（代替黑底垫轨）
+				background_fill: { type: "color", color: "#000000" },
 			});
 			beatClips.push({ clip_id: clipId, material_id: materialId, shot_index: item.shotIndex, ...timing });
 			cursor = nextMs;

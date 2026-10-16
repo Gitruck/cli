@@ -82,7 +82,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 - 产物根 `json/transcript.json`：**整片**源时基转写（一份服务全部 clip）。要给某条 clip 上客户端字幕轨（可换样式、可整轨删、不烧进画面）：
   `gtrk subtitle lay --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`
   （clip 工程文件名以 `clip{i}/gtrk/` 下实际文件为准）。上完字幕的是**客户端工程**；云端早先产出的剪映 / PR 工程不含这条字幕轨，要带字幕的剪映草稿请从客户端导出。老服务端没有这份文件时，CLI 会提示「无法自动上字幕」。
-- 横屏源进竖屏画布（缺省 9:16）时工程上下是黑边；要模糊底：`gtrk project background --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --blur`（客户端画布设置，可在设置里改回黑底；剪映 / PR 与本地渲染不带；零计费）。
+- 横屏源进竖屏画布（缺省 9:16）时工程上下是黑边；要模糊底：`gtrk project background --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --blur`——给该 clip **主轨每个片段**写模糊底（片段级底板），客户端里可逐片段或多选批量改成黑底 / 纯色；从客户端导出的剪映草稿带模糊底、Pr 工程降级为纯黑、本地 `gtrk render` 带模糊底；云端随长剪短产出的剪映 / PR 工程生成在它之前、不带。零计费。只想要旧的整片画布设置：加 `--scope canvas`。
 - 用了 `--camera-move` 时：`clips.md` 每条时长后标「运镜 N 处」（0 处属正常）；若有 clip 未能加运镜，`clips.md` 会单列「未能加运镜的切片」；告诉用户运镜在客户端 / 剪映里看，本地渲染与 PR 看不到。之后用 `gtrk patch` 裁剪 / 切分带运镜的片段，关键帧会跟着调整。
 - 用了 `--speed-factor` 时：`clips.md` 的时长是**变速后**的时长并标注倍率；若有 clip 未能变速，`clips.md` 会单列「未能变速的切片」，如实告诉用户。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
