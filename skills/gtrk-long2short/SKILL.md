@@ -78,6 +78,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 ## 产物（跑完把这些讲给用户）
 
 - 产物根 `<毛片名>-long2short/`：`report.json`（选段报告）+ `result.json` + 逐 clip 子目录 `clip0/ clip1/ …`（各含 `gtrk/` 客户端工程、`jianying/` 草稿、`xml/` PR 工程；开了 `--subtitle-out` 另有 `srt/clip{i}.srt` 单语字幕）。
+  打开 PR 工程时的重链提醒照 `gtrk-oralcut`「回给用户（三端打开方式）」PR/FCP 条，引用不复制。
 - 产物根 `json/transcript.json`：**整片**源时基转写（一份服务全部 clip）。要给某条 clip 上客户端字幕轨（可换样式、可整轨删、不烧进画面）：
   `gtrk subtitle lay --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`
   （clip 工程文件名以 `clip{i}/gtrk/` 下实际文件为准）。上完字幕的是**客户端工程**；云端早先产出的剪映 / PR 工程不含这条字幕轨，要带字幕的剪映草稿请从客户端导出。老服务端没有这份文件时，CLI 会提示「无法自动上字幕」。

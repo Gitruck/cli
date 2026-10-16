@@ -67,6 +67,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - **工程文件怎么打开**：CLI 提交时自动带上原片与产物目录的本机路径，各格式工程里的素材都指向本机的原片与产物目录里的 `dub.wav` / `bgm.wav` / `base.mp4`，打开即用。要剪映草稿加 `--project-formats gtrk,jianying`：草稿自动放进剪映草稿目录，打开剪映就在列表里；CLI 提示「没找到剪映草稿目录」或「草稿缺 draft_meta_info.json」时，让用户给出剪映草稿目录再用 `--jianying-draft-dir` 重跑，或先用客户端工程。CapCut 草稿留在产物目录 `capcut/`，需要时手动放进 CapCut 草稿目录。
 - **附带产物偶尔缺项不算失败**：字幕、逐句对齐记录、工程文件某一项没生成时，成片与配音轨照出、`ok=true`，终端打一行「部分附带产物未生成」，原因在 `result-output.json` 的 `errors`。照实告诉用户少了哪样。
 - 常用形态：`gtrk tool video_translate_dub ./talk.mp4 --language zh-CN --translate-language en-US --speaker clone --json`；用自己另录的干净人声做参考加 `--ref ./me.m4a`；要剪映草稿加 `--project-formats gtrk,jianying`，要 PR 工程加 `--project-formats gtrk,xml`。
+  打开 PR 工程时的重链提醒照 `gtrk-oralcut`「回给用户（三端打开方式）」PR/FCP 条，引用不复制。
 
 ### mad（一键剪 MAD）的特殊之处
 

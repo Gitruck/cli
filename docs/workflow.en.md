@@ -37,7 +37,7 @@ Give further requests to your agent or make manual changes in the client. Script
 | --- | --- | --- |
 | `gtrk/project.gtrk` | Open in the desktop client | Keeps the multitrack structure and supported motion graphics information |
 | Jianying drafts from talking-head / long-to-short cuts | Configure the draft folder during setup; open from Jianying's project list | Requires both fixed filenames, `draft_content.json` and `draft_meta_info.json` |
-| `xml/premiere.xml` from those cuts | Import into Premiere | Describes the corresponding rough cut; it does not promise lossless transfer of every later client effect |
+| `xml/premiere.xml` from those cuts | Import into Premiere | Describes the corresponding rough cut; it does not promise lossless transfer of every later client effect. If the *Link Media* dialog appears, check the *Media Path* column after relinking — Premiere's automatic relink matches by file name and may pick a same-named file from another project |
 | Jianying drafts exported by the client | Continue refining a packaged project | Preserves supported tracks and captions; graphics may be baked into video and are no longer editable as the original HTML |
 | MP4 from `gtrk render` | Playback, review or publishing | Composites visible video overlays and graphics; hidden tracks stay out. This command does not export Jianying drafts |
 
