@@ -12,12 +12,13 @@ export interface HighlightInput {
 }
 
 /**
- * v2 分析代理（link-video-highlight-analysis-proxy-cli）：短边 448、4fps、libx264 veryfast CRF 22，
- * 可带一路单声道 AAC。编码器与 CRF 同属规格——自研打分对有损压缩敏感（主件 design §3），
- * 调整须先按主件实验重测。下列判定条件与服务端 `classify_proxy` 逐项对表。
+ * v2 分析代理（link-video-highlight-analysis-proxy-cli）：短边 448、4fps、libx264 veryfast CRF 28，
+ * 可带一路单声道 AAC。编码器与 CRF 同属规格——自研打分对有损压缩敏感（主件 design §3）。
+ * 2026-10-16 主理人由 CRF 22 改定 28（上传体积约减半，全量 top1 仍 18/18 落在 top3，top1 同窗 15→10，
+ * 实测见主件 design 附录 C），再调整须先按主件实验重测。下列判定条件与服务端 `classify_proxy` 逐项对表。
  */
 export const HIGHLIGHT_PROXY_SPEC = "v2";
-const SHORT_SIDE = 448, LONG_SIDE_MAX = 4096, FPS = 4, CRF = "22";
+const SHORT_SIDE = 448, LONG_SIDE_MAX = 4096, FPS = 4, CRF = "28";
 const AUDIO_RATE = 16000, AUDIO_RATE_RANGE = [16000, 48000], AUDIO_MAX_BIT_RATE = 64000, DURATION_TOLERANCE = .26;
 
 interface ProbeStream { codec_type?: string; codec_name?: string; width?: number; height?: number; avg_frame_rate?: string;
@@ -55,7 +56,10 @@ export function checkHighlightProxy(probe: ProxyProbe, duration: number): string
 export async function prepareHighlightInput(input: string, out: string, ffmpegPath?: string,
 	{ audio = true }: { audio?: boolean } = {}): Promise<HighlightInput> {
 	const source = resolve(input), stat = statSync(source);
-	const sourceFingerprint = sha(JSON.stringify([source, stat.size, stat.mtimeMs, `highlight-proxy-${HIGHLIGHT_PROXY_SPEC}`, audio]));
+	// 编码参数整串进指纹：CRF 等任一参数改动都让旧代理失效、重新生成
+	// （2026-10-16 CRF 22 → 28 时发现：只认规格名会让旧 CRF 的缓存代理继续被上传）。
+	const encodeParams = highlightProxyArgs("<source>", "<output>", audio).join(" ");
+	const sourceFingerprint = sha(JSON.stringify([source, stat.size, stat.mtimeMs, `highlight-proxy-${HIGHLIGHT_PROXY_SPEC}`, audio, encodeParams]));
 	const dir = join(out, ".highlight-analysis");
 	await mkdir(dir, { recursive: true });
 	const artifact = join(dir, `${sourceFingerprint}.mp4`), manifest = join(dir, `${sourceFingerprint}.json`);
