@@ -159,11 +159,25 @@ export function parseMaterialDurationBounds(minRaw: string | undefined, maxRaw: 
 
 // ── 请求构建 ──────────────────────────────────────────────────────────────
 
+/** 外部图库补充源（link-pexels-stock-material-search-cli）：本期唯一取值。 */
+export const STOCK_SOURCE_PEXELS = "pexels";
+/** 补充结果 id 前缀——自有素材主键是纯数字雪花，补充结果恒为 `pexels:video:<n>` / `pexels:image:<n>`。 */
+export const STOCK_ID_PREFIX = "pexels:";
+/** 署名正本：Pexels API Terms 要求显著展示指向 Pexels 的链接（人读段首一行）。 */
+export const PEXELS_ATTRIBUTION_LINE = "素材来自 Pexels · https://www.pexels.com";
+
+/** 只有 clip / image 有补充源（Pexels 无音频）。 */
+export function stockApplies(scope: MaterialScope): boolean {
+	return scope === "clip" || scope === "image";
+}
+
 export interface MaterialSearchParams {
 	scope: MaterialScope;
 	query: string;
 	topK: number;
 	diversity?: boolean;
+	/** clip / image 附带外部图库补充（`--no-stock` 关闭）；audio 恒不带。两档都发。 */
+	stock?: boolean;
 	/** internal 档 → `copyright_scope:"commercial"`（缺省 all 搜全库）；external 档公开口无该入参。 */
 	commercialOnly?: boolean;
 	minDuration?: number;
@@ -179,15 +193,18 @@ export interface MaterialSearchBody {
 	copyright_scope?: "all" | "commercial";
 	/** custom 口独有（clip/audio 适用；image 无时长语义服务端忽略）。 */
 	filters?: { min_duration?: number; max_duration?: number };
+	/** 两档通用（gitruck-infra add-pexels-stock-material-search 把它加进公开口白名单）；旧服务端忽略该键。 */
+	stock_sources?: [typeof STOCK_SOURCE_PEXELS];
 }
 
 /**
- * 请求体构建：公开口只拼服务端白名单四键（scope/query/top_k/diversity），custom 口另加
+ * 请求体构建：公开口只拼服务端白名单键（scope/query/top_k/diversity/stock_sources），custom 口另加
  * `copyright_scope` 与 `filters`——**MUST NOT** 把 custom 专属键漏给公开口（服务端入参白名单明文）。
  */
 export function buildMaterialSearchBody(tier: Tier, p: MaterialSearchParams): MaterialSearchBody {
 	const body: MaterialSearchBody = { scope: p.scope, query: p.query, top_k: p.topK };
 	if (p.diversity) body.diversity = true;
+	if (p.stock && stockApplies(p.scope)) body.stock_sources = [STOCK_SOURCE_PEXELS];
 	if (tier === "internal") {
 		body.copyright_scope = p.commercialOnly ? "commercial" : "all";
 		const filters: { min_duration?: number; max_duration?: number } = {};
@@ -271,6 +288,39 @@ export interface MaterialRespData {
 	task_id?: string | null;
 	total?: number;
 	results: MaterialResult[];
+	/** 外部图库补充状态（`ok` / `empty` / `unavailable` / `not_applicable` / `disabled`；未知取值原样保留）。
+	 * 服务端没返回就**缺席**（旧服务端 / 未请求），MUST NOT 补造。 */
+	pexels_status?: string;
+	/** 外部图库补充结果；与 `pexels_status` 同进同出。 */
+	pexels_results?: StockResult[];
+}
+
+// ── 外部图库补充（link-pexels-stock-material-search-cli）──────────────────────
+//
+// 服务端（gitruck-infra add-pexels-stock-material-search，2026-10-16 主理人第三次定稿）把 Pexels 结果放在独立的
+// 顶层数组 `pexels_results`，另回 `pexels_status`；`results` / `total` 与不带参数时逐字节一致。
+// Pexels 条目 id 形如 `pexels:video:<n>`、带 `rank` 不带 `score`；不经同合云授予（`matrix fetch` 拒绝），
+// 直接用 `download_url` 下载。
+
+/** 单条补充结果：服务端字段原样透传，只保证 id 前缀与下载链存在。 */
+export interface StockResult {
+	id: string;
+	rank?: number;
+	download_url: string;
+	duration?: number;
+	[k: string]: unknown;
+}
+
+function isStockResult(raw: unknown): raw is StockResult {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+	const r = raw as Record<string, unknown>;
+	return typeof r.id === "string" && r.id.startsWith(STOCK_ID_PREFIX)
+		&& typeof r.download_url === "string" && r.download_url !== "";
+}
+
+/** `pexels_results` 归一：非数组 → 空数组；只留 id 以 `pexels:` 开头且有 `download_url` 的条目，字段原样透传。 */
+export function normalizePexelsResults(raw: unknown): StockResult[] {
+	return Array.isArray(raw) ? raw.filter(isStockResult).map((x) => ({ ...x })) : [];
 }
 
 /**
@@ -301,8 +351,9 @@ export function normalizeMaterialResults(raw: unknown): MaterialResult[] {
 	return raw.map(normalizeMaterialResult).filter((r): r is MaterialResult => r !== undefined);
 }
 
-/** 结果按 duration 过滤（公开口无 filters 入参时的本地兜底；无 duration 语义的条目不误杀）。 */
-export function filterMaterialsByDuration(results: MaterialResult[], bounds: MaterialDurationBounds): MaterialResult[] {
+/** 结果按 duration 过滤（公开口无 filters 入参时的本地兜底；无 duration 语义的条目不误杀）。
+ * 自有结果与 `pexels_results` 共用。 */
+export function filterMaterialsByDuration<T extends { duration?: unknown }>(results: T[], bounds: MaterialDurationBounds): T[] {
 	if (bounds.min === undefined && bounds.max === undefined) return results;
 	return results.filter((r) => {
 		const d = r.duration;
@@ -355,10 +406,12 @@ export async function searchMaterialOnce(cfg: CloudConfig, tier: Tier, body: Mat
 	const r = parseMaterialIdSafe<Record<string, unknown>>(await res.text(), res.status);
 	if (r.code !== 200) throw new CloudError(r.code, classifyMaterialApiError(r.code, r.msg));
 	const data = unwrapMaterialData(r.data);
+	const pexelsStatus = typeof data.pexels_status === "string" ? data.pexels_status : undefined;
 	return {
 		...(typeof data.request_id === "string" ? { request_id: data.request_id } : {}),
 		...(data.task_id !== undefined && data.task_id !== null ? { task_id: String(data.task_id) } : {}),
 		...(typeof data.total === "number" ? { total: data.total } : {}),
 		results: normalizeMaterialResults(data.results),
+		...(pexelsStatus !== undefined ? { pexels_status: pexelsStatus, pexels_results: normalizePexelsResults(data.pexels_results) } : {}),
 	};
 }

@@ -204,6 +204,14 @@ gtrk matrix describe --materials <同一素材> --review <工程目录/visual-ov
 
 出参逐条：`{id, note, duration, audio_type, tags, score, download_url, cover_url}`；`audio_type`（`pure` 纯音乐 / `song` 歌曲）与 `accompaniment_url`（song 类现成伴奏直链，零处理成本）**两档通用**；**只有 `is_copyright`（及 clip 的 `material_class`）是成员口独有**——公开口**没有**这个字段，零件如实缺省不伪造，你也别把「没有该字段」读成「不可商用」。`download_url` 带 24h 签名（过期重跑即重签）。
 
+**Pexels 补充（仅 clip / image）**：`--scope clip|image` 时零件缺省另附 Pexels 补充结果，放在 `--json` 出参顶层的 **`pexels_results`** 数组（另有 `pexels_status`，`counts.pexels` 计条数），**不在 `results` 里，也不算候选数**；`--no-stock` 关闭，`audio` 恒不带。
+
+- 补充条目 id 形如 `pexels:video:<n>` / `pexels:image:<n>`，带 `rank`（**没有 `score`**，别拿去和自有结果比分）、`author` / `author_url` / `page_url` / `download_url`；
+- 用之前先用 `download_url` **下载落地**再引用（`.gtrk` 不收 url 态素材）；**MUST NOT** 拿 `pexels:` id 跑 `matrix fetch`——补充素材不经同合云授予，CLI 会直接拒绝；
+- 引用时 **MUST 保留摄影师署名与 Pexels 链接**（条目的 `author` / `author_url`，以及 https://www.pexels.com）；
+- **MUST NOT** 把 Pexels 素材上传到任何对外可检索的素材库或图库（Pexels License 禁止再分发）；
+- `pexels_status` 为 `unavailable` / `disabled`，或出参里根本没有 `pexels_status` = 这次补充源没用上，**自有结果不受影响**，照常往下走，不必追问用户。
+
 > ⚠️ **`is_copyright` = 能不能商用，不是「有没有被版权保护」**
 >
 > ```

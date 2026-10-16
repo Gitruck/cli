@@ -21,6 +21,7 @@ import { loadConfig } from "./config";
 import { parseJson, CloudError, download as realDownload } from "./cloud";
 import { assertNotJianyingDraftDir } from "./mg-render";
 import { log } from "./log";
+import { STOCK_ID_PREFIX } from "./matrix-material";
 
 /** 服务端单批上限（api MAX_RESIGN_BATCH 同值；CLI 前置校验并提示分批）。 */
 export const MAX_FETCH_BATCH = 500;
@@ -120,6 +121,14 @@ export async function fetchMaterials(
 ): Promise<MatrixFetchResult> {
 	const clipIds = [...new Set(opts.clipIds.map((s) => s.trim()).filter(Boolean))];
 	if (!clipIds.length) throw new Error('用法：gtrk matrix fetch <clip_id...> [--out <dir>]——clip_id 来自 matrix search 的候选结果');
+	// [link-pexels-stock-material-search-cli] Pexels 补充结果不经同合云授予，重签必被拦——整批不发请求，点名报错
+	const stockIds = clipIds.filter((id) => id.startsWith(STOCK_ID_PREFIX));
+	if (stockIds.length) {
+		throw new Error(
+			`${stockIds.join("、")} 是 Pexels 补充素材，不经同合云授予、无需重签——直接用 matrix material 输出里 stock 段的 download_url 下载` +
+				"（引用时保留摄影师署名与 Pexels 链接）；去掉这些 id 后再跑 matrix fetch",
+		);
+	}
 	if (clipIds.length > MAX_FETCH_BATCH) {
 		throw new Error(`单批最多 ${MAX_FETCH_BATCH} 条（收到 ${clipIds.length}）——分批再跑；授予持久、重签免费，分几批都不花钱`);
 	}

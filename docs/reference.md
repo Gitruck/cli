@@ -415,7 +415,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 - **看点准则**：`--highlight-rubric <text|@file>`（describe 与 lay 同参，≤2000 字符，`@<路径>` 从文件读）给看点分（`--highlight-weight`）指定**评判基准**——垂类图纸各持一份（美食判分量对比/价格实物，旅拍判奇观地貌/极端天候）。**不传 = 整个字段不上行、服务端走领域无关缺省，与本参数引入前逐字节一致**。看点分按准则分桶缓存：换准则只重打分、客观描述缓存照常复用不被覆盖；`describe --plan` 会把本轮准则的 `rubric_hash` 钉进 plan，`lay` 据此自动取同一个桶（无需重复传参），两者不同源时**硬失败**而不是静默择一。⚠️ 换准则要重新打分就得重新看片（按张计费）——免看片的文本级重打分要等服务端轻通道，现在没有。
 - **索引参数与量纲**：`--scene-threshold` 调场景切分粒度、`--stability-threshold` 固定机位判稳收敛抽帧、`--rebuild` 强制重建（理解缓存不清）；索引跨机不可移植（键=绝对路径，换机重跑 index 即可）。本地 score 量纲与云端不同（完美命中可低至 ~0.25），`--score-floor` 别按云端直觉调高。
 
-**`gtrk matrix material "<词>"`（通用三态素材检索）**：与上面的 B-roll 检索并列的第二条线，出**整条素材**的下载直链（不是段落）——`--scope clip|image|audio`（缺省 `audio`，BGM 主场）、`--commercial-only` 只搜可商用（**按需收紧的显式开关，缺省不带**）、`--min-duration/--max-duration` 按成片时长挑、`--top-k`（缺省 5，服务端上限 50）、`--diversity` 去同质、`--json` 机读、`--out` 落盘。
+**`gtrk matrix material "<词>"`（通用三态素材检索）**：与上面的 B-roll 检索并列的第二条线，出**整条素材**的下载直链（不是段落）——`--scope clip|image|audio`（缺省 `audio`，BGM 主场）、`--commercial-only` 只搜可商用（**按需收紧的显式开关，缺省不带**）、`--min-duration/--max-duration` 按成片时长挑、`--top-k`（缺省 5，服务端上限 50）、`--diversity` 去同质、`--json` 机读、`--out` 落盘。`--scope clip|image` 时另附 **Pexels 补充结果**，单列在 `pexels_results`、不计入候选数（`--no-stock` 关闭）；补充素材直接用 `download_url` 下载（不走 `matrix fetch`），引用时保留摄影师署名与 Pexels 链接。
 
 > ⚠️ **`is_copyright` 读作「能不能商用」，不是「有没有被版权保护」**：`true` = **可商用**（自有 ∪ 已授权），`false` = **不可商用**。
 >

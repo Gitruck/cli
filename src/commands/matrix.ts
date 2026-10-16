@@ -128,10 +128,12 @@ import {
 	parseMaterialDurationBounds,
 	parseMaterialScope,
 	parseMaterialTopK,
+	PEXELS_ATTRIBUTION_LINE,
 	searchMaterialOnce,
 	type MaterialResult,
 	type MaterialScope,
 	type MaterialUpsell,
+	type StockResult,
 } from "../lib/matrix-material";
 import {
 	describeImages,
@@ -299,6 +301,8 @@ interface MatrixOpts {
 	diversity?: boolean;
 	/** `--exclude-recent <n>` / `--no-exclude-recent`：BGM 选曲避让窗口（scope=audio）。 */
 	excludeRecent?: string | false;
+	/** `--no-stock`：不附带外部图库（Pexels）补充结果。commander 的 `--no-*` 缺省为 true，只有 false 才算「出现」。 */
+	stock?: boolean;
 }
 
 /** 测试注入面（MUST NOT 真调云端）：图片运镜生成与计费确认；缺省 = 真实云链 / stdin 确认。
@@ -491,6 +495,7 @@ export function registerMatrix(program: Command): void {
 			`matrix material --scope audio：避让最近 n 首用过的 BGM（缺省 ${EXCLUDE_RECENT_DEFAULT}；历史由 audio lay 落轨自动记账）`,
 		)
 		.option("--no-exclude-recent", "matrix material --scope audio：关闭选曲避让（允许复用近期曲目）")
+		.option("--no-stock", "matrix material --scope clip|image：不附带 Pexels 补充结果（缺省附带，单列在 stock 段）")
 		.option("--out <file>", "ad-hoc 模式：结果落文件（缺省输出 stdout）；matrix fetch：原片落盘目录（缺省 ./matrix-fetch/；绝不写剪映草稿目录）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[] | undefined, opts: MatrixOpts) => {
@@ -696,6 +701,10 @@ export function assertModeOptions(pos: MatrixPositional, opts: MatrixOpts): void
 				throw new Error(`${flag} 仅用于 gtrk matrix material（通用三态素材检索），不做静默忽略`);
 			}
 		}
+		// `--no-stock` 的「出现」是 false（commander 缺省 true），不能塞进上面那张「非 false 即出现」的表
+		if (opts.stock === false) {
+			throw new Error("--no-stock 仅用于 gtrk matrix material（通用三态素材检索），不做静默忽略");
+		}
 	}
 	if ((opts.prepare || opts.review) && pos.kind !== "describe") throw new Error("--prepare/--review 仅用于 matrix describe");
 	if (opts.prepare && opts.review) throw new Error("--prepare 与 --review 不能同时使用");
@@ -832,8 +841,12 @@ export interface MatrixMaterialResult {
 	/** 计费口径（公开口 1 积分/次、custom 口 0 元）。 */
 	billing: string;
 	results: MaterialResult[];
-	counts: { results: number };
+	/** 自有候选条数；开了补充源时另计 Pexels（`pexels`）条数。 */
+	counts: { results: number; pexels?: number };
 	upsell?: MaterialUpsell;
+	/** 外部图库补充（link-pexels-stock-material-search-cli）：服务端没返回就两个键都缺席。 */
+	pexels_status?: string;
+	pexels_results?: StockResult[];
 	outPath?: string;
 	[k: string]: unknown;
 }
@@ -4298,6 +4311,42 @@ function materialLines(r: MaterialResult, idx: number, scope: MaterialScope): st
 }
 
 /**
+ * Pexels 补充段的人读行（link-pexels-stock-material-search-cli）：段首署名一行（Pexels API Terms 要求显著链接），
+ * 逐条列摄影师 / 尺寸 / 时长 / 下载与页面链接。无条目时不出段（状态由 reportStockStatus 交代）。
+ */
+export function stockLines(items: StockResult[]): string[] {
+	if (!items.length) return [];
+	const lines = [`── Pexels 补充（${items.length} 条）──`, PEXELS_ATTRIBUTION_LINE];
+	for (const [i, r] of items.entries()) {
+		const bits = [`${i + 1}. ${typeof r.author === "string" && r.author ? r.author : "摄影师未署名"}`];
+		if (typeof r.width === "number" && typeof r.height === "number") bits.push(`${r.width}×${r.height}`);
+		if (typeof r.duration === "number") bits.push(`${Math.round(r.duration)}s`);
+		lines.push(`${bits.join(" · ")}（id ${r.id}）`);
+		lines.push(`   下载：${r.download_url}`);
+		if (typeof r.page_url === "string" && r.page_url) lines.push(`   页面：${r.page_url}`);
+	}
+	return lines;
+}
+
+/**
+ * 补充段状态提示（--json 下随日志走 stderr）：降级只警告不失败——自有结果与退出码都不受影响。
+ * `requested` = 本次请求体带了 stock_sources；带了却没回 stock 段 = 服务端尚未支持（旧服务端忽略未知入参）。
+ */
+export function reportStockStatus(status: string | undefined, requested: boolean, count = 0): void {
+	if (status === undefined) {
+		if (requested) log.info("服务端尚未支持 Pexels 补充（未返回 pexels_status）——自有素材结果不受影响");
+		return;
+	}
+	if (status === "unavailable") {
+		log.warn("Pexels 补充暂不可用——自有素材结果不受影响，稍后重试即可");
+	} else if (status === "disabled") {
+		log.info("服务端未开启 Pexels 补充——自有素材结果不受影响");
+	} else if (status === "ok" || status === "empty") {
+		log.info(`Pexels 补充 ${count} 条（单列在 pexels_results，不计入自有候选数）`);
+	}
+}
+
+/**
  * 通用素材检索：身份路由（复用 probeMemberType→decideRoute 同一判据）→ 请求构建 → 归一 → upsell 判定。
  * 与剪辑向 `matrix search` 两条线出参契约独立（下载向 vs segments），MUST NOT 互相影响。
  */
@@ -4316,7 +4365,7 @@ async function runMaterialMode(query: string, cfg: ReturnType<typeof loadConfig>
 			`${tier === "internal" ? "（搜全库，含非商用/概念素材）" : "（服务端固定只含可商用实拍素材）"}`,
 	);
 
-	// ③ 两档入参差异显式提示（公开口服务端入参白名单只有 scope/query/top_k/diversity，不静默忽略）
+	// ③ 两档入参差异显式提示（公开口服务端入参白名单只有 scope/query/top_k/diversity/stock_sources，不静默忽略）
 	if (opts.commercialOnly && tier === "external") {
 		log.warn("--commercial-only 在公开口无区别：公开口本就只含可商用素材（服务端固定 is_copyright=true），该参数未随请求发出");
 	}
@@ -4330,6 +4379,8 @@ async function runMaterialMode(query: string, cfg: ReturnType<typeof loadConfig>
 		topK,
 		diversity: opts.diversity === true,
 		commercialOnly: opts.commercialOnly === true,
+		// [link-pexels-stock-material-search-cli] clip / image 缺省附带 Pexels 补充；--no-stock 关闭
+		stock: opts.stock !== false,
 		...(bounds.min !== undefined ? { minDuration: bounds.min } : {}),
 		...(bounds.max !== undefined ? { maxDuration: bounds.max } : {}),
 	});
@@ -4356,7 +4407,14 @@ async function runMaterialMode(query: string, cfg: ReturnType<typeof loadConfig>
 	}
 	log.ok(`${results.length} 条候选${typeof data.total === "number" && data.total !== results.length ? `（服务端返回 ${data.total}）` : ""}`);
 
-	// ④ upsell（仅 external 档 且 结果不足；独立字段不进 results）
+	// [link-pexels-stock-material-search-cli] Pexels 补充在独立的 pexels_results：公开口的本地时长过滤同样作用于它
+	// （矩阵成员口由服务端按 filters 过滤）
+	const pexelsStatus = data.pexels_status;
+	const pexelsResults =
+		data.pexels_results === undefined ? undefined : tier === "external" ? filterMaterialsByDuration(data.pexels_results, bounds) : data.pexels_results;
+	reportStockStatus(pexelsStatus, body.stock_sources !== undefined, pexelsResults?.length ?? 0);
+
+	// ④ upsell（仅 external 档 且 结果不足；独立字段不进 results）——只按自有结果计数：衡量的是自有库缺口
 	const upsell = decideMaterialUpsell(tier, results.length, topK);
 
 	const result: MatrixMaterialResult = {
@@ -4369,21 +4427,23 @@ async function runMaterialMode(query: string, cfg: ReturnType<typeof loadConfig>
 		top_k: topK,
 		billing: MATERIAL_BILLING_NOTE[tier],
 		results,
-		counts: { results: results.length },
+		counts: { results: results.length, ...(pexelsResults ? { pexels: pexelsResults.length } : {}) },
 		...(data.task_id ? { task_id: data.task_id } : {}),
 		...(upsell ? { upsell } : {}),
+		...(pexelsStatus !== undefined ? { pexels_status: pexelsStatus, pexels_results: pexelsResults ?? [] } : {}),
 	};
 
 	if (opts.out) {
 		const outPath = resolve(opts.out);
 		await writeFile(
 			outPath,
-			JSON.stringify({ query, scope, top_k: topK, member_type: tier, results, ...(upsell ? { upsell } : {}) }, null, 2),
+			JSON.stringify({ query, scope, top_k: topK, member_type: tier, results, ...(upsell ? { upsell } : {}), ...(pexelsStatus !== undefined ? { pexels_status: pexelsStatus, pexels_results: pexelsResults ?? [] } : {}) }, null, 2),
 		);
 		log.ok(`结果已落盘：${outPath}`);
 		result.outPath = outPath;
 	} else if (!opts.json) {
 		for (const [i, r] of results.entries()) for (const line of materialLines(r, i, scope)) log.info(line);
+		for (const line of stockLines(pexelsResults ?? [])) log.info(line);
 	}
 	// 人类可读一行（--json 下承载于独立顶层字段，不重复打扰 stdout）
 	if (upsell) log.warn(upsell.message);
