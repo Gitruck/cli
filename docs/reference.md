@@ -70,7 +70,7 @@ gtrk skills install --copy
 | ③ | `/gtrk-ai-drama` | （无命令，纯创作） | **B-roll 底轨·AI 情景片段腿（与 matrix 同阶段，不是最后）**：产四段描述稿（故事背景/角色/分镜/原文，中英分块）→ 任意外部平台出片、手动回铺（产物即描述文本、无机械尾巴，同 `/gtrk-style-maker` 只 skill 无命令） |
 | ④ | （无 skill） | （无命令） | **全局抽帧检查画面构图**：对三源合并后的最终底轨抽帧，用户确认构图——这是 agent 纪律硬门，供 ⑤ 的排版避让决策使用 |
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG（含 ov）最后叠上**（叠在已定稿、构图已核的底轨之上） |
-| ⑥ | `/gtrk-composite` | `gtrk composite` | **合成层**（字幕之后、出片之前）：把选定时间窗做成合成颗粒——一段时间内的整个画面由一颗代码颗粒接管（逐句换画面、对照并排、并列卡片、字幕排版），讲者与 B-roll 作为槽位画进去；入口三选一（整片铺满 / AI 判定 / 指定区间），候选显示在客户端大纲 CP 行；纯本地零计费。本版本导出时该段仍按粗剪出画 |
+| ⑥ | `/gtrk-composite` | `gtrk composite` | **合成层**（字幕之后、出片之前）：把选定时间窗做成合成颗粒——一段时间内的整个画面由一颗代码颗粒接管（逐句换画面、对照并排、并列卡片、字幕排版），讲者与 B-roll 作为槽位画进去；入口三选一（整片铺满 / AI 判定 / 指定区间），候选显示在客户端大纲 CP 行；纯本地零计费。出片时由 `gtrk composite bake` 在本机烘焙成视频（首次需 `gtrk deps install --browser`） |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
 | ③′ | 「**屏录画中画**」 | `gtrk pip lay` | 把口播粗剪的切点镜像到同步录的屏录 / 第二机位，铺屏录满幅轨 + 人像画中画副本轨（圆 / 圆角方 / 爱心 / 菱形 / 星形蒙版，可圆角）；纯本地零计费；低置信时产对齐工程让客户端拖齐后 `--resume` |
 | — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4（含 overlay 与 MG 颗粒；颗粒未命中缓存时云渲计费，`--no-particles` 可跳过） |
@@ -471,7 +471,7 @@ gtrk matrix lay --project <目录> [--plan <path>]               # ③ 消费（
 > **aux 叠层颗粒**：`gtrk split` 若在某 beat 的 `aux_layers` 派了 `overlay` 颗粒，会派生 `<beat>-aux<n>` 合成条目进 `dispatch.mg`——`gtrk mg` 一并铺，实现「同段既有底轨主视觉、又叠透明概念图解」。
 > **双读兼容**：`dispatch.mg`（读旧 `rrv_mg`）、源目录 `mg/`（读旧 `rrv/`）、素材前缀 `mg-`（读旧 `rrv-`）——去品牌化前的既有工程零迁移。
 
-### `gtrk composite` — 合成层（plan / review / scaffold / build / lint / lay / shots）
+### `gtrk composite` — 合成层（plan / review / scaffold / build / lint / lay / shots / bake）
 
 粗剪、B-roll、字幕都定了之后，把选定时间窗做成**合成颗粒**：一段时间内的整个画面由一颗代码颗粒接管，讲者与 B-roll 作为槽位由客户端画进去。由 `/gtrk-composite` 驱动（含编排规则与两个检查点）；纯本地、零计费。
 
@@ -483,6 +483,9 @@ gtrk composite shots --project <工程> --material <素材 id 或文件> [--arou
 gtrk composite build --project <工程> [--only cp-w03] [--theme <css>] [--materials <json>]
 gtrk composite lint --project <工程> [--only cp-w03] [--stills 26,86.6] [--no-browser]
 gtrk composite lay --project <工程> [--only cp-w03] [--dry-run]
+gtrk composite bake --project <工程> [--only cp-w03] [--fps 30] [--workers 4] [--install-browser] [--progress jsonl] [--json]
+gtrk composite bake --input <快照.gtrk> --base <工程 gtrk 目录> [--progress jsonl]
+gtrk composite bake --abi
 ```
 
 - `plan`：候选窗口写进 `.gtrk` 的 `struct_meta.composite`（只动这一个键、原子写回；与 `gtrk split` 写 `struct_meta.split` 同一套做法），客户端大纲 CP 行据此画提案块；另出审稿稿 `composite/plan.md`。重跑保留已做的、不再提用户不要的。
@@ -490,9 +493,16 @@ gtrk composite lay --project <工程> [--only cp-w03] [--dry-run]
 - `scaffold`：为已采纳窗口落场景骨架 `composite/scenes/cp-wNN.html` 与上下文 `cp-wNN.context.md`；已有场景不覆盖。
 - `shots`：给选片用——带源时间码的联系表、镜头切点、黑边实测（`data-crop` 取值）；不替你选、不改工程。
 - `build`：场景 → 自包含颗粒 `gtrk/assets/composite/<id>.html`。解析规则与 infra `composite-particle-profile` 逐字节一致（帧格窗口、轨身份、锚点、字幕输入、`inputs_hash`）；风格取 `composite/theme.css`。
-- `lint`：静态校验 + 本机 Chrome / Edge 逐帧排版机检（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台），可出静帧。退出码 0 通过 / 1 有问题 / 3 排版未机检（找不到浏览器，可设 `GTRK_CHROME`）。
+- `lint`：静态校验 + 本机 Chrome / Edge 逐帧排版机检（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台）与**帧纯度**机检（同一帧号按「先渲前一帧」「先渲远处一帧」两种顺序各渲一次，元素与槽位几何必须一致——不一致的场景在烘焙段首、预览跳转后会画错），可出静帧。退出码 0 通过 / 1 有问题 / 3 排版未机检（找不到浏览器，可设 `GTRK_CHROME`）。
 - `lay`：按自产身份幂等铺进 beat 轨最上层、补登记素材、窗口记为已做；过期颗粒拒铺；用户在客户端改过的同 id 颗粒不覆盖。
-- ⚠️ 本版本导出（原生 / 剪映 / Pr）时合成颗粒所在时段仍按粗剪出画，合成颗粒出片在后续版本。
+- `bake`：把已铺的合成颗粒在本机**烘焙成不透明视频**，产物落 `gtrk/assets/composite-bake/<键>.mp4`；输入（槽位画面、字幕、锚点）按**当前时间线**现算。纯本地、零计费。
+  - **浏览器**：优先钉定版本的 chrome-headless-shell（确定性出帧、最快）；没有时退回本机 Chrome / Edge（截图模式，更慢、并发降一档）。**不会静默下载**：`gtrk deps install --browser` 或本命令 `--install-browser` 显式授权才装（约 110 MB）。`GTRK_CHROME` 可指定浏览器。
+  - **并发**：常驻工作页分段并发，缺省 `min(逻辑核数/3, 6)`，`--workers` 覆盖；分段与顺序烤出的画面逐位相同。
+  - **缓存**：键含颗粒、现算输入、素材文件指纹（大小 + 修改时间）、帧率、浏览器版本与编码参数；命中直接复用。改并发不换键。
+  - **帧率**：缺省 = 工程帧率；`--fps` 指定（例如导出 30fps）。帧数 = `ceil(窗口 × fps)`，盖满整个窗口。
+  - **退出码**：0 全部成功（含命中缓存）/ 1 有颗失败（其余照常，逐颗给原因）/ 2 参数或环境错误 / 130 被取消。
+  - **机读**：`--progress jsonl` 逐行输出 `type` 为 `start` / `browser` / `prep` / `progress` / `composite` / `cancelled` / `done` 的事件，相邻两行不超过 1 秒；此模式下**关闭 stdin 即取消**（其它模式不认 stdin）。`--abi` 只输出 `{abi, version}`，不读工程。`--input <快照> --base <目录>`：以快照为时间线来源（客户端交未保存状态用），相对素材路径与产物落点按 `--base` 解析，快照不回写。
+- `gtrk render` / `gtrk project export` 会先烘焙工程里的合成颗粒：烘焙成功的那段以烘焙视频出画（剪映 / Pr 里是该层位上的一段视频），**时段整段落在合成窗口内的 MG / OV 不再预渲、不计费**；烘焙失败（素材丢失、找不到浏览器等）的那颗按粗剪出画并点名原因，不拦导出。
 
 ### `gtrk project init` / `gtrk audio lay` / `gtrk audio tighten` — 音频驱动工程零件（配音先行）
 
@@ -678,7 +688,7 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
 
 把 `.gtrk` 当 EDL 用本地 ffmpeg 出成片。**素材一律取本地原片**（`materials[].path`），云端不产成片。
 
-**合成什么**：底轨（`track_index` 最小的非黑底垫轨）+ 全部音源，再按契约 z 序（`track_index` **升序**，越大越靠前）叠**全部可见叠加层**——overlay 视频轨（B-roll 候选 / AI 情景动画回铺）与 `beat_track` 的 MG 颗粒。
+**合成什么**：底轨（`track_index` 最小的非黑底垫轨）+ 全部音源，再按契约 z 序（`track_index` **升序**，越大越靠前）叠**全部可见叠加层**——overlay 视频轨（B-roll 候选 / AI 情景动画回铺）与 `beat_track` 的 MG 颗粒。合成颗粒先在本机烘焙（见 `gtrk composite bake`，零计费），以烘焙视频叠在原层位；被它整段盖住的 MG 不再云渲。
 
 - **可见性只读 `hidden` 字段**（客户端的「小眼睛」）：关掉的轨整条不进片，如实计数告知。渲染器**不猜**哪条该叠。
 - **多条候选轨都可见时成片取最上层**（= 客户端预览所见）。要换，在客户端关小眼睛或删轨。
@@ -709,8 +719,8 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
 - `gtrk install [--api-key … -y --skill-agents codex,cursor --all-agents --copy-skills --skills-dir …]` — 一条命令装全（skill + 配置 + 体检），对标飞书 `lark-cli install`。
 - `gtrk init [--api-key … --api-base … --jianying-draft-dir … -y]` — 仅配置（交互 / 非交互）。
 - `gtrk doctor` — 体检（含 CLI 版本 / 有无新版）。
-- `gtrk deps status` — 查 ffmpeg/ffprobe 与渲染字体的**当前来源**（`--ffmpeg-path` / `~/.gitruck` / 系统 / 缺失）、版本、授权与源码地址。
-- `gtrk deps install [--ffmpeg] [--font] [--force]` — 从同合云镜像安装运行时资产，**已存在则跳过**。
+- `gtrk deps status` — 查 ffmpeg/ffprobe、渲染字体与合成烘焙浏览器的**当前来源**（`--ffmpeg-path` / `~/.gitruck` / 系统 / 缺失）、版本、授权与源码地址。
+- `gtrk deps install [--ffmpeg] [--font] [--browser] [--force]` — 从同合云镜像安装运行时资产，**已存在则跳过**。不带开关装 ffmpeg 与字体；`--browser` 另装合成烘焙用的钉定版本 chrome-headless-shell（约 110 MB，落 `~/.gitruck/browsers`，BSD 许可，来源与源码见分发点 `SOURCE.md`），**只在显式点名时装**。
   - **不会静默自动下载**：任何缺失路径只报错并指向本命令（包体 30–90 MB，且分发物涉及授权，须由用户/agent 显式触发）。
   - 下载一律 https + **sha256 强校验**，校验不过即丢弃、不落地；解包调**系统 tar**（Win10+/macOS/Linux 自带），不引第三方解压依赖。
   - 定位优先级不变：`--ffmpeg-path` → `~/.gitruck/ffmpeg` → 系统 PATH。镜像只填中间那一格，**不越过你自己装的 ffmpeg**。

@@ -15,7 +15,7 @@ import { createReadStream } from "node:fs";
 import { once } from "node:events";
 import { pipeline } from "node:stream/promises";
 import { basename, dirname, join } from "node:path";
-import { ffmpegDir, fontsDir, tmpDir } from "./paths";
+import { browsersDir, ffmpegDir, fontsDir, tmpDir } from "./paths";
 
 /** 分发 manifest 位置。**该端口只说 HTTPS**，http:// 会被 nginx 以 400 拒绝。 */
 export const MANIFEST_URL =
@@ -425,5 +425,139 @@ export function hasLocalFonts(): boolean {
 		return readdirSync(fontsDir()).some((f) => /\.(otf|ttf|ttc|otc)$/i.test(f));
 	} catch {
 		return false;
+	}
+}
+
+/* ══════════ 无头浏览器（change: add-composite-bake） ══════════ */
+
+/**
+ * 合成烘焙用的 chrome-headless-shell 分发清单。与 ffmpeg 清单**各拉各的**（不改线上 ffmpeg 清单，
+ * 改坏它影响面是全部 `deps install`），纪律相同：https、sha256 强校验、暂存后原子改名、系统 tar 解包。
+ *
+ * 清单按「版本 → 平台」两层：镜像可并存多个版本，CLI 只取自己钉定的那一版——
+ * 换钉定版本时旧 CLI 不受影响（它要的版本仍在）。
+ */
+export const BROWSER_MANIFEST_URL =
+	"https://api.ai-mcn.tv:9000/broadcast/exe/chrome-headless-shell/dist/manifest.json";
+
+/** 本 CLI 钉定的 headless-shell 版本（spike-1 / 2 实测版本；进烘焙缓存键）。 */
+export const PINNED_HEADLESS_SHELL = "151.0.7922.47";
+
+/** 本 CLI 支持的浏览器清单 schema 上限。 */
+export const SUPPORTED_BROWSER_SCHEMA = 1;
+
+export interface BrowserEntry {
+	file: string;
+	sha256: string;
+	size: number;
+	version: string;
+	/** 包根下的可执行文件名（`chrome-headless-shell[.exe]`）。 */
+	executable: string;
+	builder: string;
+	license: string;
+	source: string;
+	upstream?: string;
+	archive: string;
+}
+export interface BrowserManifest {
+	schema: number;
+	generated: string;
+	base: string;
+	/** 版本 → 平台键 → 包。 */
+	browser: Record<string, Record<string, BrowserEntry>>;
+}
+
+/** 解析 + 校验浏览器清单（纯函数）。 */
+export function parseBrowserManifest(raw: unknown): BrowserManifest {
+	if (!raw || typeof raw !== "object") throw new Error("浏览器清单不是对象");
+	const m = raw as Partial<BrowserManifest>;
+	if (typeof m.schema !== "number") throw new Error("浏览器清单缺 schema 字段");
+	if (m.schema > SUPPORTED_BROWSER_SCHEMA) {
+		throw new Error(`浏览器清单 schema=${m.schema} 高于本 CLI 支持的 ${SUPPORTED_BROWSER_SCHEMA}，请先升级 CLI（gtrk upgrade）`);
+	}
+	if (!m.base || !m.browser || typeof m.browser !== "object") throw new Error("浏览器清单缺 base / browser 字段");
+	assertHttps(m.base);
+	return m as BrowserManifest;
+}
+
+/** 取浏览器清单。 */
+export async function fetchBrowserManifest(url = BROWSER_MANIFEST_URL): Promise<BrowserManifest> {
+	assertHttps(url);
+	const r = await fetch(url);
+	if (!r.ok) throw new Error(`取浏览器清单失败：HTTP ${r.status} ${url}`);
+	return parseBrowserManifest(await r.json());
+}
+
+/** `${platform}-${arch}` → 分发平台键；未覆盖返回 null（调用方决定怎么说）。 */
+export function platformKeyOf(platform: string = process.platform, arch: string = process.arch): string | null {
+	const os = { win32: "win", linux: "linux", darwin: "mac" }[platform];
+	const cpu = { x64: "x64", arm64: "arm64" }[arch];
+	const key = os && cpu ? `${os}-${cpu}` : "";
+	return key && (DISTRIBUTED_PLATFORMS as readonly string[]).includes(key) ? key : null;
+}
+
+/** 钉定版本的安装目录 `~/.gitruck/browsers/chrome-headless-shell/<version>/`。 */
+export function headlessShellDir(version: string = PINNED_HEADLESS_SHELL): string {
+	return join(browsersDir(), "chrome-headless-shell", version);
+}
+
+/** 已安装的钉定版本可执行文件；没有返回 null。 */
+export function installedHeadlessShell(version: string = PINNED_HEADLESS_SHELL): string | null {
+	const exe = join(headlessShellDir(version), process.platform === "win32" ? "chrome-headless-shell.exe" : "chrome-headless-shell");
+	return existsSync(exe) ? exe : null;
+}
+
+/** 在清单里取钉定版本、当前平台的包；取不到时给可读原因。 */
+export function selectBrowserEntry(
+	m: BrowserManifest,
+	{ version = PINNED_HEADLESS_SHELL, platform = process.platform, arch = process.arch } = {},
+): BrowserEntry {
+	const key = platformKeyOf(platform, arch);
+	if (!key) throw new Error(`当前平台 ${platform}-${arch} 无 chrome-headless-shell 分发包（已分发：${DISTRIBUTED_PLATFORMS.join(" / ")}）`);
+	const byPlatform = m.browser[version];
+	if (!byPlatform) throw new Error(`镜像上没有本 CLI 钉定的 chrome-headless-shell ${version}（镜像现有：${Object.keys(m.browser).join(" / ") || "无"}）`);
+	const entry = byPlatform[key];
+	if (!entry) throw new Error(`镜像上 chrome-headless-shell ${version} 没有 ${key} 的包（有：${Object.keys(byPlatform).join(" / ")}）`);
+	return entry;
+}
+
+/**
+ * 装钉定版本的 chrome-headless-shell 到 `~/.gitruck/browsers/chrome-headless-shell/<version>/`。
+ * 已存在则跳过（`force` 覆盖）。先解到暂存子目录、确认可执行文件在，再整体改名到位——
+ * 中断或校验失败都不会留下一个看似可用的半套目录；同目录的其它版本不受影响。
+ */
+export async function installBrowser(
+	m: BrowserManifest,
+	opts: {
+		force?: boolean;
+		version?: string;
+		onProgress?: (got: number, total: number) => void;
+		/** 测试注入：替代真实下载（返回已过校验的暂存文件路径）。 */
+		download?: (url: string, sha256: string, onProgress?: (got: number, total: number) => void) => Promise<string>;
+	} = {},
+): Promise<InstallResult & { executable?: string }> {
+	const version = opts.version ?? PINNED_HEADLESS_SHELL;
+	const entry = selectBrowserEntry(m, { version });
+	const dest = headlessShellDir(version);
+	const exeAt = join(dest, entry.executable);
+	if (existsSync(exeAt) && !opts.force) {
+		return { installed: false, reason: "已存在", detail: `${dest}（--force 可覆盖）`, executable: exeAt };
+	}
+	const dl = opts.download ?? downloadVerified;
+	const tmp = await dl(`${m.base}/${entry.file}`, entry.sha256, opts.onProgress);
+	const stage = join(tmpDir(), `browser-${Date.now()}`);
+	try {
+		extractTar(tmp, stage);
+		if (!existsSync(join(stage, entry.executable))) {
+			throw new Error(`解包结果缺可执行文件 ${entry.executable}，已中止，未改动 ${dest}`);
+		}
+		mkdirSync(dirname(dest), { recursive: true });
+		rmSync(dest, { recursive: true, force: true });
+		renameSync(stage, dest);
+		if (process.platform !== "win32") chmodSync(exeAt, 0o755);
+		return { installed: true, detail: `chrome-headless-shell ${version} → ${dest}`, executable: exeAt };
+	} finally {
+		rmSync(stage, { recursive: true, force: true });
+		rmSync(tmp, { force: true });
 	}
 }

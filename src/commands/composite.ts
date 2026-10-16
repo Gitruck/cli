@@ -8,6 +8,7 @@
  *   lint    静态校验 + 逐帧排版机检（本机 Chrome / Edge），可出静帧
  *   lay     幂等铺进 beat_track 最上层，窗口记为 built
  *   shots   素材观察：联系表 + 镜头切点 + 黑边实测（给选片用，不替你选）
+ *   bake    整段烘焙成不透明视频（本机无头浏览器；四个出口共用，change add-composite-bake）
  *
  * 全部本地、零计费。规则在 lib/composite-*.ts（纯函数）；本文件只做定位、读写盘与回执。
  */
@@ -17,6 +18,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { requireFfmpeg } from "../lib/ffmpeg";
+import { clipSpeed } from "../lib/clip-speed";
 import { r3 } from "../lib/frame-domain";
 import { probeGeometry } from "../lib/media";
 import { assertGtrkV1, readGtrk, writeGtrkAtomic, writeStructMetaKey } from "../lib/gtrk-writeback";
@@ -28,8 +30,13 @@ import { transcriptCandidates } from "../lib/reproject";
 import { collectProjectionClips, projectTranscript, type GtrkProject, type Transcript } from "../lib/projection";
 import { evaluateComposite, type ResolveGtrk } from "../lib/composite-resolve";
 import { buildParticle, COMPOSITE_PRODUCER, CompositeSceneError, parseScene, type CompositeKit } from "../lib/composite-scene";
-import { findBrowser, HeadlessBrowser, layoutLintScript } from "../lib/composite-browser";
-import { mergeFrameIssues, sampleFrames, staticLint, type FrameIssue, type LintIssue } from "../lib/composite-lint";
+import { findBrowser, HeadlessBrowser, layoutLintScript, purityLintScript } from "../lib/composite-browser";
+import { BAKE_ABI } from "../lib/composite-bake-plan";
+import { bakeComposites, BakeEnvError, type BakeEvent, type BakeResult } from "../lib/composite-bake";
+import { logBakeEvent } from "../lib/composite-export";
+import { installedHeadlessShell, PINNED_HEADLESS_SHELL } from "../lib/runtime-assets";
+import { JsonlOut } from "../lib/jsonl-out";
+import { mergeFrameIssues, mergePurityIssues, sampleFrames, staticLint, type FrameIssue, type LintIssue, type PurityDiff } from "../lib/composite-lint";
 import { contactSheetArgs, cropDetectArgs, parseCropDetect, parseSceneCuts, sceneCutArgs, shotsRange } from "../lib/composite-shots";
 import {
 	COMPOSITE_DENSITY_DEFAULT,
@@ -492,7 +499,7 @@ function stageData(ctx: CompositeContext, entries: BuildManifestEntry[], extra: 
 		materials,
 		tracks: (g.video_track ?? []).map((t) => ({
 			index: t.track_index,
-			clips: (t.track_timeline ?? []).map((c) => ({ clip_id: c.clip_id, material: c.material, clip_st: Number(c.clip_st ?? 0), track_st: Number(c.track_st), track_ed: Number(c.track_ed) })),
+			clips: (t.track_timeline ?? []).map((c) => ({ clip_id: c.clip_id, material: c.material, clip_st: Number(c.clip_st ?? 0), track_st: Number(c.track_st), track_ed: Number(c.track_ed), speed: clipSpeed(c) })),
 		})),
 		entries: entries.map((e) => ({ ...e, url: pathToFileURL(resolve(ctx.gtrkDir, e.html)).href })),
 	};
@@ -524,9 +531,9 @@ export async function runCompositeLint(opts: LintCmdOpts) {
 	let layoutChecked = false;
 	const stillFiles: string[] = [];
 	if (!exe) {
-		log.warn(opts.browser === false ? "排版未机检（--no-browser）" : "排版未机检：本机找不到 Chrome / Edge（可设环境变量 GTRK_CHROME 指定浏览器路径）");
+		log.warn(opts.browser === false ? "排版与帧纯度未机检（--no-browser）" : "排版与帧纯度未机检：本机找不到 Chrome / Edge（可设环境变量 GTRK_CHROME 指定浏览器路径）");
 	} else {
-		log.step(`② 逐帧排版机检（${basename(exe)}，每 10 帧一采样）`);
+		log.step(`② 逐帧排版与帧纯度机检（${basename(exe)}，每 10 帧一采样）`);
 		const b = await HeadlessBrowser.launch(exe);
 		try {
 			for (const e of entries) {
@@ -536,7 +543,13 @@ export async function runCompositeLint(opts: LintCmdOpts) {
 					layoutLintScript({ fps: rate, anchors: e.anchors_f, texts: e.texts }, sampleFrames(span)),
 				);
 				report.get(e.id)?.push(...mergeFrameIssues(r.samples));
-				for (const msg of [...new Set(r.errors)]) report.get(e.id)?.push({ kind: "layout", rule: "script-error", message: `场景脚本报错：${msg}` });
+				// 帧纯度（add-composite-bake design D10）：同一帧号两种渲染顺序下几何必须一致
+				await b.open(pathToFileURL(resolve(ctx.gtrkDir, e.html)).href);
+				const pr = await b.evaluate<{ samples: Array<{ f: number; diffs: PurityDiff[] }>; errors: string[] }>(
+					purityLintScript({ fps: rate, anchors: e.anchors_f, texts: e.texts }, sampleFrames(span), span),
+				);
+				report.get(e.id)?.push(...mergePurityIssues(pr.samples));
+				for (const msg of [...new Set([...r.errors, ...pr.errors])]) report.get(e.id)?.push({ kind: "layout", rule: "script-error", message: `场景脚本报错：${msg}` });
 			}
 			layoutChecked = true;
 			if (stills.length) {
@@ -712,7 +725,120 @@ export function runCompositeShots(opts: ShotsCmdOpts) {
 const collect = (v: string, acc: string[]) => [...acc, v];
 
 const USAGE =
-	"用法：gtrk composite <plan|review|scaffold|build|lint|lay|shots> --project <工程目录> …（见 gtrk composite --help）";
+	"用法：gtrk composite <plan|review|scaffold|build|lint|lay|shots|bake> --project <工程目录> …（见 gtrk composite --help）";
+
+// ------------------------------------------------------------------ bake
+
+export interface BakeCmdOpts extends CompositeOpts {
+	input?: string;
+	base?: string;
+	fps?: string;
+	workers?: string;
+	installBrowser?: boolean;
+	abi?: boolean;
+	progress?: string;
+}
+
+/** 退出码：0 全部成功（含命中缓存）/ 1 有颗失败 / 2 参数或环境错误 / 130 被取消。 */
+export const BAKE_EXIT = { ok: 0, partial: 1, env: 2, cancelled: 130 } as const;
+
+export async function runCompositeBake(opts: BakeCmdOpts): Promise<BakeResult | null> {
+	if (opts.abi) {
+		const { version } = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")) as { version: string };
+		// browser.pinned：钉定版本的 headless-shell 装没装（只看文件在不在，不起浏览器）。调用方据此在开烤前
+		// 征得「下载约 110 MB 渲染组件」的同意——没装时 bake 会直接退到系统浏览器，等它开跑再问就晚了
+		const pinned = installedHeadlessShell() !== null;
+		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL } }));
+		return null;
+	}
+	const jsonl = opts.progress === "jsonl";
+	if (opts.progress !== undefined && !jsonl) throw new Error(`--progress 只支持 jsonl（收到 ${opts.progress}）`);
+	if (jsonl || opts.json) routeLogsToStderr();
+
+	let gtrk: Record<string, unknown>;
+	let baseDir: string;
+	try {
+		if (opts.input) {
+			// 客户端快照交接：以快照为时间线来源、--base 解析相对素材路径与产物落点；快照不回写
+			if (!opts.base) throw new Error("--input 需配 --base <工程 gtrk 目录>（解析相对素材路径与产物落点）");
+			const p = resolve(opts.input);
+			if (!existsSync(p)) throw new Error(`快照不存在：${p}`);
+			gtrk = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+			assertGtrkV1(gtrk);
+			baseDir = resolve(opts.base);
+		} else {
+			const ctx = loadCompositeContext(opts);
+			gtrk = ctx.gtrk;
+			baseDir = ctx.gtrkDir;
+		}
+	} catch (e) {
+		log.err((e as Error).message);
+		process.exitCode = BAKE_EXIT.env;
+		return null;
+	}
+	const fps = opts.fps !== undefined ? Number(opts.fps) : undefined;
+	const workers = opts.workers !== undefined ? Number(opts.workers) : undefined;
+	if ((fps !== undefined && !(fps > 0 && Number.isInteger(fps))) || (workers !== undefined && !(workers > 0 && Number.isInteger(workers)))) {
+		log.err("--fps / --workers 需为正整数");
+		process.exitCode = BAKE_EXIT.env;
+		return null;
+	}
+
+	// 取消：只在 --progress jsonl 下认 stdin 结束（agent / 脚本调用时 stdin 常常一开始就是关的，不能当取消）
+	const abort = new AbortController();
+	if (jsonl && !process.stdin.isTTY) {
+		process.stdin.on("end", () => abort.abort());
+		process.stdin.on("error", () => abort.abort());
+		process.stdin.resume();
+	}
+	// 兜底：读端没了时 stdout / stderr 写出会 EPIPE，不接住就是未捕获异常、跳过收尾直接退出；按取消处理。
+	// （调用方整个没了时 stdin 结束会先触发取消；被硬杀则谁都收不了——那由调用方的进程托管兜，见 design D8）
+	if (jsonl) for (const s of [process.stdout, process.stderr]) s.on("error", () => abort.abort());
+	// 机读进度经独立线程写出：主线程起子进程时会同步卡顿（Windows），不能让进度行跟着断档
+	const out = jsonl ? new JsonlOut() : null;
+	const isStatus = (ev: BakeEvent) => ev.type === "prep" || ev.type === "progress" || (ev.type === "browser" && ev.phase === "installing");
+	const onEvent = (ev: BakeEvent) => (out ? out.line(ev, isStatus(ev)) : logBakeEvent(ev));
+	let result: BakeResult;
+	try {
+		result = await bakeComposites({
+			gtrk,
+			baseDir,
+			fps,
+			workers,
+			only: onlyList(opts.only),
+			installBrowser: opts.installBrowser === true,
+			onEvent,
+			signal: abort.signal,
+		});
+	} catch (e) {
+		const env = e instanceof BakeEnvError;
+		out?.line({ type: "error", kind: env ? "env" : "internal", message: (e as Error).message });
+		await out?.close();
+		log.err((e as Error).message);
+		process.exitCode = env ? BAKE_EXIT.env : 1;
+		return null;
+	} finally {
+		process.stdin.pause();
+	}
+	const failed = result.items.filter((i) => i.state === "failed").length;
+	const ok = !result.cancelled && failed === 0;
+	process.exitCode = result.cancelled ? BAKE_EXIT.cancelled : failed ? BAKE_EXIT.partial : BAKE_EXIT.ok;
+	if (out) {
+		out.line({ type: "done", ok, seconds: result.seconds, items: result.items, fallback_seeks: result.fallbackSeeks, retakes: result.retakes });
+		await out.close();
+	} else {
+		if (result.fallbackSeeks) log.warn(`有 ${result.fallbackSeeks} 次取帧没走中间文件（取用区间算漏，慢但结果正确）`);
+		if (!result.items.length) log.ok("工程里没有合成颗粒");
+		else log.ok(`烘焙结束：${result.items.length - failed} 颗可用、${failed} 颗失败，用时 ${result.seconds.toFixed(1)} 秒${result.workers ? `（${result.workers} 个工作页）` : ""}`);
+		if (opts.json) {
+			const { settled: _settled, ...plain } = result;
+			console.log(JSON.stringify({ ok, ...plain }));
+		}
+	}
+	// 结果已交出；工作页退出、临时目录删除在后台进行，等它完再退出进程（调用方拿到 done 即可往下走）
+	await result.settled;
+	return result;
+}
 
 export function registerComposite(program: Command): void {
 	program
@@ -747,6 +873,13 @@ export function registerComposite(program: Command): void {
 		.option("--span <sec>", "[shots] --around 的观察跨度")
 		.option("--every <sec>", "[shots] 联系表取帧间隔（缺省按范围算到约 60 格）")
 		.option("--ffmpeg-path <dir>", "[shots] 指定 ffmpeg/ffprobe 所在目录")
+		.option("--input <gtrk>", "[bake] 以这份快照为时间线来源（客户端交未保存状态用；需配 --base，快照不回写）")
+		.option("--base <dir>", "[bake] 配 --input：解析相对素材路径与产物落点的目录（= 工程 .gtrk 所在目录）")
+		.option("--fps <n>", "[bake] 烘焙帧率（缺省 = 工程帧率；导出 30fps 就传 30）")
+		.option("--workers <n>", "[bake] 并发工作页数（缺省 min(逻辑核数/3, 6)，系统浏览器退路再减一）")
+		.option("--install-browser", "[bake] 显式授权：缺钉定版本的 chrome-headless-shell 时先从同合云镜像安装（约 110 MB）；不带则绝不下载")
+		.option("--abi", "[bake] 只输出烘焙 ABI 与 CLI 版本（JSON），不读工程")
+		.option("--progress <format>", "[bake] 机读进度：jsonl（逐行事件；此模式下关闭 stdin 即取消，退出码 130）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON")
 		.action(async (words: string[], opts: CompositeOpts) => {
 			const sub = (words ?? [])[0];
@@ -757,6 +890,7 @@ export function registerComposite(program: Command): void {
 			if (sub === "shots") return void runCompositeShots(opts as ShotsCmdOpts);
 			if (sub === "lint") return void (await runCompositeLint(opts as LintCmdOpts));
 			if (sub === "lay") return void runCompositeLay(opts as LayCmdOpts);
+			if (sub === "bake") return void (await runCompositeBake(opts as BakeCmdOpts));
 			throw new Error(USAGE);
 		});
 }

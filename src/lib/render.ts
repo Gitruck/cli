@@ -685,6 +685,7 @@ export function buildFilterGraph(
 		}
 		vLabels.push(lab);
 	});
+	const voutChain = chains.length;
 	chains.push(vLabels.map((x) => `[${x}]`).join("") +
 		`concat=n=${vLabels.length}:v=1:a=0,setpts=N/(${g(rate)}*TB)[vout]`);
 
@@ -728,6 +729,12 @@ export function buildFilterGraph(
 
 	let videoLabel = "vout";
 	if (layers.length > 0) {
+		/** 主轨换回帧时基再叠（★ add-composite-bake 5.1 实测）：`concat` 的输出时基是微秒，`setpts=N/(rate*TB)`
+		 *  对 1/30 秒这类除不尽的帧距**截断**取整（第 62 帧 → 2066666µs），而叠加输入换到同一时基时是**四舍五入**
+		 *  （2066667µs）——overlay 按「≤ 主帧时刻的最后一帧」取叠加帧，于是 30 / 60fps 工程每 3 帧就有 1 帧叠加层
+		 *  显示成前一帧（颗粒、B-roll 叠加都一样；25fps 帧距整除不受影响）。`settb` 按最近取整换回 1/帧率，
+		 *  主帧与叠加帧在同一帧格上精确比较。只在有叠加层时加，无叠加工程的滤镜图逐字节不变（零回归门）。 */
+		chains[voutChain] = chains[voutChain]!.replace(/\[vout\]$/, `,settb=1/${g(rate)}[vout]`);
 		/** 叠加输入的公共几何链：**保 alpha**。
 		 *  · `format=rgba` 前置——qtrle 解码出的像素格式随源而异，不显式转就可能拿不到 alpha 通道；
 		 *    且 `pad` 要填**透明**必须先有 alpha。

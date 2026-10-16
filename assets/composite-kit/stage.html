@@ -13,18 +13,32 @@
 <canvas id="slots" class="layer" width="1920" height="1080"></canvas>
 <iframe id="front" class="layer" title="front"></iframe>
 <script>
-/* 合成颗粒出片台（composite-kit@1，`gtrk composite lint --stills` 用）：与客户端预览同一套规则——
- * 两层图形 iframe（back / front）夹一块槽位画布。颗粒走宿主协议（init / apply → frame）；槽位取帧：
- *   ref = 片段在时间线该时刻的画面（之前首帧、之后末帧）；ref-lane = 按 lane_clip_id 找轨、空档定格前一段末帧；
- *   own = 入点 + (f − starts_at_f) 帧。每个槽位一个 <video>（同源取帧不共用解码，见客户端 R15）。
- * 用法：stageInit({ fps, entries, materials, tracks }) → renderAt(时间线秒)。全部经 file:// 读本地文件。 */
-let FPS = 60, entries = [], matUrl = new Map(), byClip = new Map();
+/* 合成颗粒出片台（composite-kit@1；`gtrk composite lint --stills` 与 `gtrk composite bake` 共用）：与客户端预览同一套规则——
+ * 两层图形 iframe（back / front）夹一块槽位画布。颗粒走宿主协议（init / apply → frame）。
+ *
+ * 槽位取帧（与客户端 `composite-slot-frames.ts` 的 `resolveSlotSource` 同口径）：
+ *   ref      = 片段在时间线该时刻的画面（之前首帧、之后末帧），源时刻 = clip_st + (T − track_st) × speed；
+ *   ref-lane = 按 lane_clip_id 找轨，空档定格前一段末帧，窗口前无片段取后一段首帧；
+ *   own      = 入点 + (f − starts_at_f) 帧。
+ * 取到的源时刻按「时间戳区间覆盖该时刻的那一帧」取帧（与客户端 VideoCache 同规则）：
+ *   - 给了中间文件（`segs`：素材 → [{url, off, ed, pts, tag, eof}]）时，按中间文件实测的帧时间戳表找覆盖帧、定位到帧中点
+ *     （不假设首帧时间戳为 0，也不靠帧率推算——可变帧率同样成立）；画完读回中间文件底部的帧号条，核对确是那一帧
+ *     （`seeked` 之后新帧未必已可画：满载时会画出上一帧或空帧），不对就等、必要时重新定位，始终不对则报错；
+ *   - 没给时直接定位原素材（lint 静帧）。
+ * 绘制：先把视频帧 1:1 拷进一张画布，再从画布缩放画进槽位——与客户端同一种绘制源（客户端画的是 VideoCache 的 RGB 画布）。
+ * 每个槽位一个 <video>（同源取帧不共用解码，见客户端 R15）；图片素材用 <img>。
+ *
+ * 用法：stageInit({ fps, entries, materials, images?, segs?, tracks }) → renderAt(时间线秒)。全部经 file:// 读本地文件。
+ * `window.SETTLE`：画完后等多少毫秒（缺省 60，lint 静帧用）；烘焙置 -1（截帧由 beginFrame / 截图本身推进合成器）。 */
+let FPS = 60, entries = [], matUrl = new Map(), imageIds = new Set(), segsOf = new Map(), byClip = new Map();
 const back = document.getElementById("back"), front = document.getElementById("front");
 const canvas = document.getElementById("slots"), ctx = canvas.getContext("2d");
 
 window.stageInit = (data) => {
   FPS = data.fps; entries = data.entries;
   matUrl = new Map(Object.entries(data.materials));
+  imageIds = new Set(data.images || []);
+  segsOf = new Map(Object.entries(data.segs || {}));
   byClip = new Map();
   for (const t of data.tracks) {
     const clips = t.clips.filter((c) => c.material).sort((a, b) => a.track_st - b.track_st);
@@ -40,7 +54,7 @@ addEventListener("message", (ev) => {
   if (!m || m.ch !== "gtrk-composite") return;
   const layer = ev.source === back.contentWindow ? "back" : ev.source === front.contentWindow ? "front" : null;
   if (!layer) return;
-  if (m.type === "error") console.error("[composite]", layer, m.message);
+  if (m.type === "error") { console.error("[composite]", layer, m.message); window.__scriptErrors = (window.__scriptErrors || []).concat(m.message); }
   const key = layer + ":" + (m.type === "frame" ? "frame:" + m.seq : m.type);
   const w = waiters.get(key);
   if (w) { waiters.delete(key); w(m); }
@@ -74,11 +88,22 @@ function videoFor(key, url) {
   }
   return v;
 }
+const images = new Map();
+function imageFor(url) {
+  let p = images.get(url);
+  if (!p) {
+    p = new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = url; });
+    images.set(url, p);
+  }
+  return p;
+}
 const once = (el, ev) => new Promise((res) => el.addEventListener(ev, res, { once: true }));
-async function seek(v, sec) {
+async function seek(v, sec, force = false) {
   if (v.readyState < 1) await once(v, "loadedmetadata");
   const target = Math.min(Math.max(sec, 0), Math.max(v.duration - 0.001, 0));
-  if (Math.abs(v.currentTime - target) > 0.25 / FPS || v.readyState < 2) {
+  // 强制重定位：先挪到同一帧内略早的位置再回来（目标是帧中点，±2 毫秒仍在该帧内），逼解码器重出这一帧
+  if (force) { const d = once(v, "seeked"); v.currentTime = Math.max(target - 0.002, 0); await d; }
+  if (force || Math.abs(v.currentTime - target) > 1e-4 || v.readyState < 2) {
     const done = once(v, "seeked");
     v.currentTime = target;
     await done;
@@ -86,34 +111,62 @@ async function seek(v, sec) {
   if (v.readyState < 2) await once(v, "loadeddata");
   return v;
 }
-const lastFrameSec = (c) => c.clip_st + (c.track_ed - c.track_st) - 1 / FPS;
+
+/** 有序帧时间戳表里「≤ t 的最后一帧」的下标（二分）。 */
+function coverIndex(pts, t) {
+  let lo = 0, hi = pts.length - 1;
+  if (t < pts[0]) return 0;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (pts[mid] <= t + 1e-6) lo = mid; else hi = mid - 1; }
+  return lo;
+}
+/** 源时刻 → { url, at（定位目标）, srcFrame（该帧对应的源时刻，供核对）}。 */
+function locate(materialId, sec) {
+  const segs = segsOf.get(materialId);
+  if (segs) {
+    // eof：中间文件转到了素材结尾，更晚的源时刻（片段出点超出素材长度）取它的末帧
+    const s = segs.find((x) => sec >= x.off - 1e-6 && (sec < x.ed || x.eof)) || null;
+    if (s) {
+      const local = s.pts[0] + (sec - s.off);
+      const i = coverIndex(s.pts, local);
+      const next = i + 1 < s.pts.length ? s.pts[i + 1] : s.pts[i] + (i > 0 ? s.pts[i] - s.pts[i - 1] : 1 / FPS);
+      return { url: s.url, at: (s.pts[i] + next) / 2, srcFrame: s.off + (s.pts[i] - s.pts[0]), viaSeg: true, idx: i, tag: s.tag || 0 };
+    }
+  }
+  return { url: matUrl.get(materialId), at: sec, srcFrame: sec, viaSeg: false, idx: -1, tag: 0 };
+}
+
+const speedOf = (c) => (typeof c.speed === "number" && c.speed > 0 ? c.speed : 1);
+const clipSrc = (c, T) => c.clip_st + (T - c.track_st) * speedOf(c);
+const lastFrameT = (c) => c.track_ed - 1 / FPS;
 function sourceFor(b, T, f) {
   if (b.kind === "ref") {
     const hit = byClip.get(b.clip_id); if (!hit) return null;
     const c = hit.clip;
-    const tt = Math.min(Math.max(T, c.track_st), c.track_ed - 1 / FPS);
-    return { url: matUrl.get(c.material), sec: c.clip_st + (tt - c.track_st) };
+    const tt = Math.min(Math.max(T, c.track_st), lastFrameT(c));
+    return { material: c.material, sec: clipSrc(c, tt) };
   }
   if (b.kind === "ref-lane") {
     const hit = byClip.get(b.lane_clip_id); if (!hit) return null;
     const act = hit.clips.find((c) => T >= c.track_st && T < c.track_ed);
-    if (act) return { url: matUrl.get(act.material), sec: act.clip_st + (T - act.track_st) };
+    if (act) return { material: act.material, sec: clipSrc(act, T) };
     const prev = hit.clips.filter((c) => c.track_ed <= T).pop();
-    if (prev) return { url: matUrl.get(prev.material), sec: lastFrameSec(prev) };
+    if (prev) return { material: prev.material, sec: clipSrc(prev, lastFrameT(prev)) };
     const next = hit.clips.find((c) => c.track_st > T);
-    return next ? { url: matUrl.get(next.material), sec: next.clip_st } : null;
+    return next ? { material: next.material, sec: next.clip_st } : null;
   }
   if (b.kind === "own") {
     const k = Math.min(Math.max(f - b.starts_at_f, 0), b.dur_f - 1);
-    return { url: matUrl.get(b.material), sec: b.src_in_ms / 1000 + k / FPS };
+    return { material: b.material, sec: b.src_in_ms / 1000 + k / FPS };
   }
   return null;
 }
+/** fit / framing / crop 合成的绘制矩形（与客户端 `slotDrawRect` 逐值相同；源或槽位尺寸为 0 时返回 null，不画）。 */
 function drawRect(g, sw0, sh0, fit, framing) {
   const [top, right, bottom, left] = g.crop;
   const sx = sw0 * left, sy = sh0 * top, sw = sw0 * (1 - left - right), sh = sh0 * (1 - top - bottom);
+  if (!(sw > 0 && sh > 0 && g.w > 0 && g.h > 0)) return null;
   const base = fit === "contain" ? Math.min(g.w / sw, g.h / sh) : Math.max(g.w / sw, g.h / sh);
-  const scale = base * Math.max((framing && framing.scale_pm) || 1000, 1000) / 1000;
+  const scale = base * (Math.max((framing && framing.scale_pm) || 1000, 1000) / 1000);
   const dw = sw * scale, dh = sh * scale;
   const cx = g.x + g.w / 2 + ((framing && framing.x_pm) || 0) / 1000 * g.w;
   const cy = g.y + g.h / 2 + ((framing && framing.y_pm) || 0) / 1000 * g.h;
@@ -124,6 +177,41 @@ function shape(g) {
   if (g.shape === "circle") ctx.ellipse(g.x + g.w / 2, g.y + g.h / 2, g.w / 2, g.h / 2, 0, 0, Math.PI * 2);
   else if (g.shape === "roundrect" && g.radius > 0) ctx.roundRect(g.x, g.y, g.w, g.h, Math.min(g.radius, g.w / 2, g.h / 2));
   else ctx.rect(g.x, g.y, g.w, g.h);
+}
+/** 视频帧 1:1 拷进的中转画布（每个 <video> 一张，复用）。 */
+const relay = new Map();
+function relayOf(v) {
+  let k = relay.get(v);
+  if (!k) { k = document.createElement("canvas"); relay.set(v, k); }
+  if (k.width !== v.videoWidth || k.height !== v.videoHeight) { k.width = v.videoWidth; k.height = v.videoHeight; }
+  const c = k.getContext("2d", { willReadFrequently: true });
+  c.clearRect(0, 0, k.width, k.height);
+  c.drawImage(v, 0, 0);
+  return k;
+}
+/** 读中转画布底部帧号条：16 位黑白块（块宽 floor(宽/32)*2，与 CLI 的 drawbox 同式）；没画上（透明）返回 -1。 */
+function readTag(k, tag) {
+  const bw = Math.floor(k.width / 32) * 2;
+  const row = k.getContext("2d", { willReadFrequently: true }).getImageData(0, k.height - Math.ceil(tag / 2), k.width, 1).data;
+  let n = 0;
+  for (let b = 0; b < 16; b++) {
+    const o = (b * bw + (bw >> 1)) * 4;
+    if (row[o + 3] < 255) return -1;
+    if (row[o] > 128) n |= 1 << b;
+  }
+  return n;
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 画到中转画布并核对帧号；不对就等新帧到位，每 40 次重新定位一次，约 3 秒仍不对即报错（该段会被重试）。 */
+async function drawVerified(v, at) {
+  for (let i = 0; ; i++) {
+    const k = relayOf(v);
+    const got = readTag(k, at.tag);
+    if (got === (at.idx & 0xffff)) return { k, waits: i };
+    if (i >= 400) throw new Error("取帧校验失败：要第 " + at.idx + " 帧，画出的是 " + got + "（" + at.url + "）");
+    if (i % 40 === 39) await seek(v, at.at, true);
+    else await sleep(i < 20 ? 2 : 8);
+  }
 }
 
 let seq = 0;
@@ -138,26 +226,39 @@ window.renderAt = async (T) => {
   for (const fr of [back, front]) fr.contentWindow.postMessage({ ch: "gtrk-composite", type: "apply", seq: s, frame: f }, "*");
   const [geo] = await Promise.all([pf, pb]);
   const Tf = (entry.window_f[0] + f) / FPS;
+  const used = [];
   const jobs = geo.slots.filter((g) => g.visible).map(async (g) => {
     const b = entry.bindings[g.id];
     if (!b || b.kind === "text") return null;
     const src = sourceFor(b, Tf, f);
-    if (!src || !src.url) return null;
-    const v = await seek(videoFor(g.id + "|" + src.url, src.url), src.sec);
-    return { g, b, v };
+    if (!src || !matUrl.has(src.material)) return null;
+    if (imageIds.has(src.material)) {
+      const img = await imageFor(matUrl.get(src.material));
+      used.push({ slot: g.id, material: src.material, sec: 0 });
+      return img ? { g, b, img } : null;
+    }
+    const at = locate(src.material, src.sec);
+    const v = await seek(videoFor(g.id + "|" + at.url, at.url), at.at);
+    const ver = at.tag ? await drawVerified(v, at) : { k: relayOf(v), waits: 0 };
+    used.push({ slot: g.id, material: src.material, sec: src.sec, srcFrame: at.srcFrame, viaSeg: at.viaSeg, waits: ver.waits });
+    return { g, b, v, k: ver.k, tag: at.tag };
   });
   const ready = (await Promise.all(jobs)).filter(Boolean);
   ctx.clearRect(0, 0, 1920, 1080);
-  for (const { g, b, v } of ready) {
+  for (const { g, b, v, k, tag, img } of ready) {
+    // 中间文件底部的帧号条不进画面：源高度按去掉条带算
+    const r = img ? drawRect(g, img.naturalWidth, img.naturalHeight, b.fit || g.fit, b.framing) : drawRect(g, v.videoWidth, v.videoHeight - (tag || 0), b.fit || g.fit, b.framing);
+    if (!r) continue;
     ctx.save();
     shape(g); ctx.clip();
     ctx.globalAlpha = g.opacity;
     if (g.filter) ctx.filter = g.filter;
-    ctx.drawImage(v, ...drawRect(g, v.videoWidth, v.videoHeight, b.fit || g.fit, b.framing));
+    ctx.drawImage(img || k, ...r);
     ctx.restore();
   }
-  await new Promise((r) => setTimeout(r, 60));
-  return { id: entry.id, f };
+  const settle = window.SETTLE ?? 60;
+  if (settle > 0) await new Promise((r) => setTimeout(r, settle));
+  return { id: entry.id, f, used };
 };
 </script>
 </body>

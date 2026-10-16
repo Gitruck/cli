@@ -410,13 +410,16 @@ gtrk composite shots --project <工程> --material <素材 id 或文件> [--arou
 gtrk composite build --project <工程> [--only cp-w03] [--theme <css>] [--materials <json>]
 gtrk composite lint --project <工程> [--stills 26,86.6] [--no-browser]
 gtrk composite lay --project <工程> [--only cp-w03] [--dry-run]
+gtrk composite bake --project <工程> [--only cp-w03] [--fps 30] [--workers 4] [--install-browser] [--progress jsonl]
 ```
 
 - **候选写 `struct_meta.composite`**（只动这一个键、原子写回），客户端大纲 CP 行画提案块——与 `gtrk split` 写 `struct_meta.split`、beat 色带呈现同一套做法。要用户看提案块，先请他在客户端**重新载入工程**。
 - **解析规则不自造**：`build` 按 infra `composite-particle-profile` 解析（帧格窗口、`lane_clip_id`、锚点局部帧、字幕输入、`inputs_hash`），对拍 infra 金样逐字节一致；窗口不在帧格上会被吸附并报挪动量。
-- **机检**：`lint` 退出码 0 通过 / 1 有问题 / 3 排版未机检（本机找不到 Chrome / Edge，可设 `GTRK_CHROME`）。**3 不是通过**：照实告诉用户，用静帧人眼查。
+- **机检**：`lint` 退出码 0 通过 / 1 有问题 / 3 排版未机检（本机找不到 Chrome / Edge，可设 `GTRK_CHROME`）。**3 不是通过**：照实告诉用户，用静帧人眼查。`lint` 含帧纯度检查（`impure-frame`：同一帧号随渲染顺序画出不同画面），不过的颗粒烘焙段首会画错。
 - **铺轨**：按 `producer=gtrk:composite@1` 认领自产轨（不按轨号）；过期颗粒（上游改过）拒铺；用户在客户端改过的同 id 颗粒不覆盖。
-- ⚠️ **导出口径**：本版本导出（原生 / 剪映 / Pr）时合成颗粒所在时段仍按粗剪出画——用户要交付成片时开工就说。
+- **出片**：`gtrk composite bake` 在本机把合成烤成不透明视频（缓存命中即复用，纯本地零计费）；`gtrk render` / `gtrk project export` 会自动先烤，成功的段以烘焙视频出画，整段落在合成窗口内的 MG / OV 不再预渲、不计费。
+  - 浏览器优先用钉定版本 chrome-headless-shell，没有时退回本机 Chrome / Edge（更慢）。**MUST NOT 自作主张下载**：征得用户同意后 `gtrk deps install --browser`（约 110 MB）或 `bake --install-browser`。
+  - 某颗烤失败（退出码 1，回执给原因）时，出片该段按粗剪出画——照实告诉用户。
 
 ---
 

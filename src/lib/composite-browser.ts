@@ -8,9 +8,11 @@
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { installedHeadlessShell, PINNED_HEADLESS_SHELL } from "./runtime-assets";
 
 /** 候选浏览器（按平台）；环境变量 `GTRK_CHROME` 优先。 */
 export function browserCandidates(platform = process.platform, env = process.env): string[] {
@@ -43,7 +45,78 @@ export function findBrowser(): string | null {
 	return browserCandidates().find((p) => existsSync(p)) ?? null;
 }
 
+/** 烘焙用的浏览器：来源决定截帧方式（headless-shell 走 beginFrame，系统浏览器走截图）。 */
+export interface BakeBrowser {
+	exe: string;
+	/** `env` = `GTRK_CHROME` 显式指定；`pinned` = ~/.gitruck 下的钉定 headless-shell；`system` = 本机 Chrome / Edge 退路。 */
+	source: "env" | "pinned" | "system";
+	/** 截帧方式：确定性出帧（beginFrame）只有 headless-shell 支持。 */
+	mode: "beginframe" | "screenshot";
+	/** 进缓存键的浏览器标识：钉定版本号，或可执行文件路径（系统浏览器 / 显式指定）。 */
+	build: string;
+}
+
+/** 可执行文件名是否为 chrome-headless-shell（`GTRK_CHROME` 指到它时也走 beginFrame）。 */
+export const isHeadlessShell = (exe: string): boolean => /chrome-headless-shell(\.exe)?$/i.test(exe);
+
+/**
+ * 烘焙浏览器定位（capability `composite-bake`「浏览器供给与退路」）：
+ * `GTRK_CHROME` → 钉定版本 headless-shell → 系统 Chrome / Edge → null。**绝不下载**——安装只走
+ * `gtrk deps install --browser` 或显式授权的 `bake --install-browser`。
+ */
+export function resolveBakeBrowser(
+	{ env = process.env, pinned = installedHeadlessShell(), system = () => findSystemBrowser(env) } = {} as {
+		env?: NodeJS.ProcessEnv;
+		pinned?: string | null;
+		system?: () => string | null;
+	},
+): BakeBrowser | null {
+	if (env.GTRK_CHROME) {
+		const exe = env.GTRK_CHROME;
+		const shell = isHeadlessShell(exe);
+		return { exe, source: "env", mode: shell ? "beginframe" : "screenshot", build: `env:${exe}` };
+	}
+	if (pinned) return { exe: pinned, source: "pinned", mode: "beginframe", build: `chrome-headless-shell@${PINNED_HEADLESS_SHELL}` };
+	const sys = system();
+	return sys ? { exe: sys, source: "system", mode: "screenshot", build: `system:${sys}` } : null;
+}
+
+/** 本机 Chrome / Edge（不含 `GTRK_CHROME`）。 */
+export function findSystemBrowser(env: NodeJS.ProcessEnv = process.env): string | null {
+	return browserCandidates(process.platform, { ...env, GTRK_CHROME: undefined }).find((p) => existsSync(p)) ?? null;
+}
+
 type Pending = { res: (v: Record<string, unknown>) => void; rej: (e: Error) => void };
+
+export type LaunchMode = "default" | "beginframe" | "screenshot-soft";
+
+/** beginFrame 出帧间隔（毫秒；只用于推进合成器时钟，页面内的画面由 renderAt 按帧号决定）。 */
+const FRAME_INTERVAL_MS = 1000 / 30;
+
+/**
+ * headless-shell 确定性出帧旗标（与 infra hyperframes 引擎 `browserManager` 同组）+ 软件 GL。
+ * `--disable-partial-raster` 是分段逐位等价的必要条件：不关时同一帧在「连续渲染」与「段首起渲」下
+ * 抗锯齿边缘不同（spike-1 实测最低 72 dB）。
+ */
+export const BEGIN_FRAME_ARGS = [
+	"--deterministic-mode",
+	"--enable-begin-frame-control",
+	"--disable-new-content-rendering-timeout",
+	"--run-all-compositor-stages-before-draw",
+	"--disable-threaded-animation",
+	"--disable-threaded-scrolling",
+	"--disable-checker-imaging",
+	"--disable-image-animation-resync",
+	"--enable-surface-synchronization",
+	"--disable-gpu-compositing",
+	"--use-gl=angle",
+	"--use-angle=swiftshader",
+	"--enable-unsafe-swiftshader",
+	"--disable-partial-raster",
+];
+
+/** 系统浏览器烘焙退路：新无头模式 + 关 GPU（spike-1：比开 GPU 快约 1.5 倍）+ 关局部重绘。 */
+export const SOFT_SCREENSHOT_ARGS = ["--headless=new", "--disable-gpu", "--disable-partial-raster"];
 
 /** 一个无头浏览器会话：一个页面 target，经管道收发 CDP。 */
 export class HeadlessBrowser {
@@ -56,12 +129,18 @@ export class HeadlessBrowser {
 	private sessionId: string | null = null;
 	private exited = false;
 
-	private constructor(exe: string) {
+	private mode: LaunchMode;
+	private frameTicks = 0;
+	private lastFrame: Buffer | null = null;
+	private beginFrameReady = false;
+
+	private constructor(exe: string, mode: LaunchMode) {
+		this.mode = mode;
 		this.profile = mkdtempSync(join(tmpdir(), "gtrk-composite-chrome-"));
 		this.proc = spawn(
 			exe,
 			[
-				"--headless=new",
+				...(mode === "beginframe" ? BEGIN_FRAME_ARGS : mode === "screenshot-soft" ? SOFT_SCREENSHOT_ARGS : ["--headless=new"]),
 				"--remote-debugging-pipe",
 				`--user-data-dir=${this.profile}`,
 				"--no-first-run",
@@ -101,18 +180,31 @@ export class HeadlessBrowser {
 				} else for (const l of this.listeners) l(m);
 			}
 		});
-		this.proc.on("exit", () => {
+		const fail = (why: string) => {
 			this.exited = true;
-			for (const p of this.pending.values()) p.rej(new Error("浏览器进程已退出"));
+			for (const p of this.pending.values()) p.rej(new Error(why));
 			this.pending.clear();
-		});
+		};
+		// 起不来（路径不对、不是可执行文件）时 spawn 发 error 而不是 exit：不接住会把整个 CLI 进程带崩
+		this.proc.on("error", (e) => fail(`浏览器起不来：${e.message}`));
+		(this.proc.stdio[3] as Writable | null)?.on("error", () => {});
+		this.proc.on("exit", () => fail("浏览器进程已退出"));
 	}
 
-	/** 起浏览器并开一个 1920×1080 的页面。 */
-	static async launch(exe: string): Promise<HeadlessBrowser> {
-		const b = new HeadlessBrowser(exe);
+	/**
+	 * 起浏览器并开一个 1920×1080 的页面。
+	 * - `default`：既有行为（lint / 静帧），新无头模式、截图；
+	 * - `beginframe`：chrome-headless-shell 确定性出帧（烘焙首选）；
+	 * - `screenshot-soft`：系统浏览器烘焙退路（截图，软件栅格、关局部重绘）。
+	 */
+	static async launch(exe: string, mode: LaunchMode = "default"): Promise<HeadlessBrowser> {
+		const b = new HeadlessBrowser(exe, mode);
 		try {
-			const { targetId } = (await b.send("Target.createTarget", { url: "about:blank" }, false)) as { targetId: string };
+			const { targetId } = (await b.send(
+				"Target.createTarget",
+				{ url: "about:blank", ...(mode === "beginframe" ? { enableBeginFrameControl: true } : {}) },
+				false,
+			)) as { targetId: string };
 			const { sessionId } = (await b.send("Target.attachToTarget", { targetId, flatten: true }, false)) as { sessionId: string };
 			b.sessionId = sessionId;
 			await b.send("Page.enable");
@@ -120,7 +212,7 @@ export class HeadlessBrowser {
 			await b.send("Emulation.setDeviceMetricsOverride", { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
 			return b;
 		} catch (e) {
-			b.close();
+			void b.closeAsync();
 			throw e;
 		}
 	}
@@ -209,9 +301,87 @@ export class HeadlessBrowser {
 		return r.result?.value as T;
 	}
 
-	async screenshot(format: "jpeg" | "png" = "jpeg"): Promise<Buffer> {
-		const r = (await this.send("Page.captureScreenshot", format === "jpeg" ? { format, quality: 92 } : { format })) as { data: string };
+	async screenshot(format: "jpeg" | "png" = "jpeg", quality = 92): Promise<Buffer> {
+		if (this.mode === "beginframe") return this.beginFrame(format, quality);
+		const r = (await this.send(
+			"Page.captureScreenshot",
+			format === "jpeg" ? { format, quality, ...(this.mode === "screenshot-soft" ? { optimizeForSpeed: true } : {}) } : { format },
+		)) as { data: string };
 		return Buffer.from(r.data, "base64");
+	}
+
+	/**
+	 * 确定性出一帧（`HeadlessExperimental.beginFrame`，只在 `beginframe` 模式可用）：推进一帧并直接回图。
+	 * 没有画面损伤时浏览器不回图，返回上一帧（画面本就没变）；「Another frame is pending」= 浏览器忙，退避重试。
+	 */
+	async beginFrame(format: "jpeg" | "png" = "jpeg", quality = 92): Promise<Buffer> {
+		if (this.mode !== "beginframe") throw new Error("beginFrame 只在 headless-shell 的确定性出帧模式下可用");
+		if (!this.beginFrameReady) {
+			await this.send("HeadlessExperimental.enable");
+			this.frameTicks = 1000;
+			this.beginFrameReady = true;
+		}
+		const shot = format === "jpeg" ? { format, quality, optimizeForSpeed: true } : { format };
+		for (let attempt = 0; ; attempt++) {
+			this.frameTicks += FRAME_INTERVAL_MS;
+			try {
+				const r = (await this.send("HeadlessExperimental.beginFrame", {
+					frameTimeTicks: this.frameTicks,
+					interval: FRAME_INTERVAL_MS,
+					screenshot: shot,
+				})) as { screenshotData?: string };
+				if (r.screenshotData) {
+					this.lastFrame = Buffer.from(r.screenshotData, "base64");
+					return this.lastFrame;
+				}
+				if (this.lastFrame) return this.lastFrame;
+			} catch (e) {
+				if (!/pending/i.test(String((e as Error).message)) || attempt >= 6) throw e;
+				await new Promise((r) => setTimeout(r, 20 * 2 ** attempt));
+			}
+		}
+	}
+
+	/** 进程号（取消时按进程树结束用）。 */
+	get pid(): number | undefined {
+		return this.proc.pid;
+	}
+
+	/**
+	 * 异步结束浏览器进程树，随后清临时用户目录——全程不阻塞事件循环（烘焙时工作页收尾若同步等 taskkill，
+	 * 机读进度会断档 1 秒以上；删目录的重试同理走异步）。
+	 *
+	 * `graceMs > 0`：先发 `Browser.close` 请浏览器自己退（整棵进程树一起收、文件随即解锁），超时再强制结束。
+	 * 实测（2026-10-16）：强制结束本身 0.5–0.8 秒，但子进程还占着用户目录里的文件，删目录要重试到 1.6–26 秒；
+	 * 自己退出约 0.2 秒、随后删目录 0.2 秒。取消 / 出错时传 0（立即结束，不等）。
+	 */
+	closeAsync(graceMs = 0): Promise<void> {
+		return new Promise((res) => {
+			let finished = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const done = () => {
+				if (finished) return;
+				finished = true;
+				if (timer) clearTimeout(timer);
+				// 浏览器刚退，个别文件还被占着时删不掉：留在系统临时目录，不影响结果
+				rm(this.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).then(res, () => res());
+			};
+			if (this.exited || !this.proc.pid) return done();
+			const kill = () => {
+				if (finished) return;
+				if (process.platform === "win32") spawn("taskkill", ["/F", "/T", "/PID", String(this.proc.pid)], { stdio: "ignore" }).on("close", done);
+				else {
+					this.proc.kill("SIGKILL");
+					done();
+				}
+			};
+			if (graceMs <= 0) return kill();
+			this.proc.once("exit", done);
+			timer = setTimeout(kill, graceMs);
+			this.send("Browser.close", {}, false, graceMs).catch(() => {
+				/* 管道已断或没回应：等超时强制结束 */
+			});
+		});
 	}
 
 	close(): void {
@@ -252,6 +422,67 @@ export function layoutLintScript(init: { fps: number; anchors: Record<string, nu
     send({ type: "lint", seq: f + 1 });
     const r = await p;
     if (r.issues && r.issues.length) out.push({ f, issues: r.issues });
+  }
+  return { samples: out, errors: errs };
+})()`;
+}
+
+/**
+ * 帧纯度机检脚本（change add-composite-bake，design D10）：同一帧号必须画出同一画面。
+ * 每个抽样帧渲两次——连续顺序（先渲前一帧）与跳跃顺序（先渲相距半个窗口的帧）——比对舞台内带 `id` 的元素、
+ * `data-layer` 子树内的元素与工具箱回报的槽位几何（舞台坐标，容差 0.5px）。只比几何不比像素：像素差还可能来自栅格化。
+ * 返回 `{ samples: [{ f, diffs: [{ target, prop, a, b }] }], errors }`（只含有差异的帧）。
+ */
+export function purityLintScript(init: { fps: number; anchors: Record<string, number>; texts: Record<string, unknown> }, frames: number[], span: number): string {
+	return `(async () => {
+  const wait = (pred, ms = 8000) => new Promise((res, rej) => {
+    const t = setTimeout(() => { removeEventListener("message", h); rej(new Error("颗粒无回应")); }, ms);
+    const h = (ev) => { const m = ev.data; if (m && m.ch === "gtrk-composite" && pred(m)) { clearTimeout(t); removeEventListener("message", h); res(m); } };
+    addEventListener("message", h);
+  });
+  const send = (m) => window.postMessage(Object.assign({ ch: "gtrk-composite" }, m), "*");
+  const errs = [];
+  addEventListener("message", (ev) => { const m = ev.data; if (m && m.ch === "gtrk-composite" && m.type === "error") errs.push(m.message); });
+  let p = wait((m) => m.type === "ready");
+  send(Object.assign({ type: "init", layer: "all" }, ${JSON.stringify(init)}));
+  await p;
+  let seq = 100000;
+  const apply = async (f) => { const s = ++seq; const q = wait((m) => m.type === "frame" && m.seq === s); send({ type: "apply", seq: s, frame: f }); return (await q).slots; };
+  const stage = document.getElementById("stage");
+  const keyOf = (el) => {
+    if (el.id) return "#" + el.id;
+    const parts = [];
+    for (let e = el; e && e !== stage; e = e.parentElement) parts.unshift(e.id ? "#" + e.id : e.tagName.toLowerCase() + ":" + (Array.prototype.indexOf.call(e.parentElement.children, e) + 1));
+    return parts.join(" > ");
+  };
+  const geom = (slots) => {
+    const s = stage.getBoundingClientRect(), k = s.width / CP.W;
+    const out = {};
+    const seen = new Set([...stage.querySelectorAll("[id]"), ...stage.querySelectorAll("[data-layer] *")]);
+    for (const el of seen) {
+      if (el.closest("[data-slot]") === el) continue; // 槽位按工具箱回报的几何比
+      const r = el.getBoundingClientRect();
+      out[keyOf(el)] = { left: (r.left - s.left) / k, top: (r.top - s.top) / k, width: r.width / k, height: r.height / k };
+    }
+    for (const g of slots) out["槽位 " + g.id] = { left: g.x, top: g.y, width: g.w, height: g.h, opacity: g.opacity };
+    return out;
+  };
+  const out = [];
+  for (const f of ${JSON.stringify(frames)}) {
+    const far = (f + Math.max(1, Math.floor(${span} / 2))) % ${span};
+    await apply(Math.max(f - 1, 0));
+    const a = geom(await apply(f));
+    await apply(far);
+    const b = geom(await apply(f));
+    const diffs = [];
+    for (const key of Object.keys(a)) {
+      if (!b[key]) continue;
+      for (const prop of Object.keys(a[key])) {
+        const tol = prop === "opacity" ? 0.002 : 0.5;
+        if (Math.abs(a[key][prop] - b[key][prop]) > tol) diffs.push({ target: key, prop, a: a[key][prop], b: b[key][prop] });
+      }
+    }
+    if (diffs.length) out.push({ f, diffs });
   }
   return { samples: out, errors: errs };
 })()`;

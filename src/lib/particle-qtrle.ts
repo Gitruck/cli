@@ -34,6 +34,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { CloudConfig } from "./config";
+import { takeOverComposites, type CompositeTakeover, type TakeoverDeps } from "./composite-export";
 import { compositeSkipReason, detectComposite } from "./composite-particle";
 import { loadConfig } from "./config";
 import {
@@ -628,6 +629,27 @@ export interface ParticleSummary {
 	rendered: number;
 	billedMinutes: number;
 	skipped: ParticleSkip[];
+	/**
+	 * [add-composite-bake] 合成颗粒的接管情况：烘焙成功（含命中缓存）、失败（按粗剪出画）、被整段盖住而不预渲的普通颗粒。
+	 * 条件键：工程里没有合成颗粒时整键缺席（JSON 零新键）。失败的合成同时也在 `skipped` 里（带 `composite` 标记）。
+	 */
+	composites?: {
+		baked: CompositeTakeover["baked"];
+		failed: Array<{ clipId: string; compositionId: string; reason: string }>;
+		covered: CompositeTakeover["covered"];
+	};
+}
+
+/** 合成接管 → 摘要条件键（没有合成时返回空对象）。 */
+export function compositeSummaryOf(t: CompositeTakeover): Pick<ParticleSummary, "composites"> {
+	if (!t.baked.length && !t.failed.length) return {};
+	return {
+		composites: {
+			baked: t.baked,
+			failed: t.failed.map((f) => ({ clipId: f.clipId, compositionId: f.composite?.compositionId ?? f.clipId, reason: f.reason })),
+			covered: t.covered,
+		},
+	};
 }
 
 export interface PrepareParticlesResult {
@@ -643,6 +665,8 @@ export interface PrepareParticlesDeps extends ParticleDeps {
 	confirm?: (question: string) => Promise<boolean>;
 	/** 合规告知（测试注入）。生产恒 `noticeOnce`。 */
 	notice?: () => boolean;
+	/** 合成烘焙（测试注入）。 */
+	composite?: TakeoverDeps;
 }
 
 /**
@@ -665,13 +689,17 @@ export async function prepareParticlesForRender(
 	deps: PrepareParticlesDeps = {},
 ): Promise<PrepareParticlesResult> {
 	const empty: ParticleSummary = { total: 0, unique: 0, cached: 0, rendered: 0, billedMinutes: 0, skipped: [] };
-	const beats = visibleBeats(gtrk);
-	if (beats.length === 0) return { paths: {}, summary: empty };
+	const allBeats = visibleBeats(gtrk);
+	if (allBeats.length === 0) return { paths: {}, summary: empty };
 
 	if (opts.noParticles) {
-		log.info(`--no-particles：跳过 ${beats.length} 颗颗粒的预渲与叠加（零计费；overlay 视频轨照常合成）`);
-		return { paths: {}, summary: { ...empty, total: beats.length } };
+		log.info(`--no-particles：跳过 ${allBeats.length} 颗颗粒的预渲与叠加（零计费；overlay 视频轨照常合成）`);
+		return { paths: {}, summary: { ...empty, total: allBeats.length } };
 	}
+
+	// ── 合成颗粒先烘焙（本地、零计费）：成功的直接出画，被它整段盖住的普通颗粒不进计划 ──────────
+	const takeover = await takeOverComposites(gtrk as Record<string, unknown>, gtrkDir, allBeats, deps.composite);
+	const beats = takeover.beats;
 
 	const fps = Math.round(num(gtrk.video_rate, 30));
 	const plan = await buildParticlePlan(beats, gtrk.materials || [], gtrkDir, fps, deps);
@@ -683,14 +711,15 @@ export async function prepareParticlesForRender(
 		cached: plan.cached,
 		rendered: 0,
 		billedMinutes: 0,
-		skipped: [...plan.skipped],
+		skipped: [...takeover.failed, ...plan.skipped],
+		...compositeSummaryOf(takeover),
 	};
-	if (plan.unique === 0) return { paths: {}, summary };
+	if (plan.unique === 0) return { paths: { ...takeover.paths }, summary };
 
 	// ── 全命中：零计费、零确认 ────────────────────────────────────────────────
 	if (plan.miss === 0) {
 		log.info(`颗粒 ${plan.total} 颗全部命中本地缓存（${PARTICLE_CACHE_DIR}），本次零计费`);
-		const paths: Record<string, string> = {};
+		const paths: Record<string, string> = { ...takeover.paths };
 		for (const gr of plan.groups) for (const id of gr.members) paths[id] = gr.leader.cachePath;
 		return { paths, summary };
 	}
@@ -701,7 +730,7 @@ export async function prepareParticlesForRender(
 			`颗粒缓存目录建不出来（${resolve(gtrkDir, PARTICLE_CACHE_DIR)}）：本次不预渲颗粒、零计费。` +
 				"修好目录权限后重跑，或用 --no-particles 明确出无颗粒版。",
 		);
-		return { paths: {}, summary };
+		return { paths: { ...takeover.paths }, summary };
 	}
 
 	// ── 计费闸 ────────────────────────────────────────────────────────────────
@@ -724,7 +753,7 @@ export async function prepareParticlesForRender(
 		const go = await (deps.confirm ?? confirmViaStdin)("确认提交颗粒云渲？");
 		if (!go) {
 			log.warn("已取消：零云端调用、零计费。想先出一版无颗粒的，用 --no-particles。");
-			return { paths: {}, summary: { ...summary, billedMinutes: 0 }, declined: true };
+			return { paths: { ...takeover.paths }, summary: { ...summary, billedMinutes: 0 }, declined: true };
 		}
 	}
 
@@ -748,7 +777,7 @@ export async function prepareParticlesForRender(
 	summary.rendered = r.rendered;
 	summary.skipped.push(...r.failed);
 	log.ok(`颗粒备齐：命中 ${plan.cached} / 本次烤 ${r.rendered}${r.failed.length ? ` / 失败 ${r.failed.length}` : ""}`);
-	return { paths: r.paths, summary };
+	return { paths: { ...takeover.paths, ...r.paths }, summary };
 }
 
 /** stdin 计费确认（与 `mg render` / `matrix image_move` 的确认闸同款姿势）。 */

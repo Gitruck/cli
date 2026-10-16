@@ -64,7 +64,7 @@ Then just say "**cut a version of this talking-head**", or explicitly pick `gtrk
 | ③ | `/gtrk-ai-drama` | (no command, pure authoring) | **B-roll base · AI scene-clip leg (same stage as matrix, not last)**: emits four-part description docs (backstory / characters / shots / source text, in Chinese and English blocks) → generate on any external platform and re-insert by hand (the artifact is description text with no mechanical tail, same as `/gtrk-style-maker`: skill only, no command) |
 | ④ | (no skill) | (no command) | **Global frame-sampling composition check**: sample frames from the merged three-source base layer and have the user confirm the composition — a hard agent-discipline gate feeding ⑤'s placement decisions |
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG (incl. ov) goes on last** (stacked on the settled, composition-checked base layer) |
-| ⑥ | `/gtrk-composite` | `gtrk composite` | **Composite layer** (after subtitles, before export): turn chosen time windows into composite particles — one code particle takes over the whole frame for that span (picture changes per sentence, side-by-side contrasts, list cards, subtitle layout) while the talking head and B-roll are drawn into its slots; three entry modes (cover the whole film / let the AI pick / user-given ranges), candidates show up in the client outline's CP row; purely local, zero billing. In this version, export still uses the rough cut for those spans |
+| ⑥ | `/gtrk-composite` | `gtrk composite` | **Composite layer** (after subtitles, before export): turn chosen time windows into composite particles — one code particle takes over the whole frame for that span (picture changes per sentence, side-by-side contrasts, list cards, subtitle layout) while the talking head and B-roll are drawn into its slots; three entry modes (cover the whole film / let the AI pick / user-given ranges), candidates show up in the client outline's CP row; purely local, zero billing. On export, `gtrk composite bake` bakes them into video locally (the first run needs `gtrk deps install --browser`) |
 | — | `/gtrk-style-maker` | (no command, builds a show) | A one-time interview that builds your show's style system (skill family + show config, see next section) |
 | ③′ | "**screen-recording PiP**" | `gtrk pip lay` | Mirror the talking-head rough cut's cut points onto a screen recording / second camera recorded in sync: lays a full-frame companion track + a muted picture-in-picture copy of the talking head (ellipse / rounded rectangle / heart / diamond / star mask, optional corner radius); purely local, zero billing; when alignment confidence is low it writes an alignment project for the client to drag into place, then `--resume` |
 | — | (wrap-up) | `gtrk render` | Render a gtrk project locally → finished mp4 (overlays and MG particles included; particles that miss the cache are cloud-rendered and billed, `--no-particles` skips them) |
@@ -439,7 +439,7 @@ Consumes the `dispatch.mg` dispatch landed by `gtrk split`, laying html-particle
 > **Aux overlay particles**: if `gtrk split` dispatched an `overlay` particle in some beat's `aux_layers`, it derives a `<beat>-aux<n>` composition entry into `dispatch.mg` — `gtrk mg` lays it too, giving you "a main visual on the base track plus a transparent conceptual diagram stacked on the same span".
 > **Dual-read compatibility**: `dispatch.mg` (also reads the old `rrv_mg`), the source directory `mg/` (also reads the old `rrv/`), the material prefix `mg-` (also reads the old `rrv-`) — projects created before the de-branding need zero migration.
 
-### `gtrk composite` — composite layer (plan / review / scaffold / build / lint / lay / shots)
+### `gtrk composite` — composite layer (plan / review / scaffold / build / lint / lay / shots / bake)
 
 Once the rough cut, B-roll and subtitles are settled, turn chosen time windows into **composite particles**: one code particle takes over the whole frame for that span, and the client draws the talking head and B-roll into its slots. Driven by `/gtrk-composite` (which carries the layout rules and two checkpoints); purely local, zero billing.
 
@@ -451,6 +451,9 @@ gtrk composite shots --project <dir> --material <material id or file> [--around 
 gtrk composite build --project <dir> [--only cp-w03] [--theme <css>] [--materials <json>]
 gtrk composite lint --project <dir> [--only cp-w03] [--stills 26,86.6] [--no-browser]
 gtrk composite lay --project <dir> [--only cp-w03] [--dry-run]
+gtrk composite bake --project <dir> [--only cp-w03] [--fps 30] [--workers 4] [--install-browser] [--progress jsonl] [--json]
+gtrk composite bake --input <snapshot.gtrk> --base <project gtrk dir> [--progress jsonl]
+gtrk composite bake --abi
 ```
 
 - `plan`: writes candidate windows to `struct_meta.composite` in the `.gtrk` (that key only, atomic write-back; the same pattern as `gtrk split` writing `struct_meta.split`); the client outline's CP row draws them as proposal blocks. Also writes a review sheet `composite/plan.md`. Re-running keeps built windows and does not re-propose rejected ones.
@@ -458,9 +461,16 @@ gtrk composite lay --project <dir> [--only cp-w03] [--dry-run]
 - `scaffold`: writes a scene skeleton `composite/scenes/cp-wNN.html` and a context sheet `cp-wNN.context.md` for each approved window; existing scenes are not overwritten.
 - `shots`: for picking footage — a contact sheet stamped with source time codes, shot cut points, and measured black bars (values for `data-crop`); it does not pick for you and does not touch the project.
 - `build`: scene → self-contained particle `gtrk/assets/composite/<id>.html`. Resolution matches the infra `composite-particle-profile` rules byte for byte (frame-grid window, track identity, anchors, subtitle input, `inputs_hash`); style comes from `composite/theme.css`.
-- `lint`: static checks plus a per-frame layout check in the local Chrome / Edge (a lower picture's foreground border over an upper picture, a foreground line crossing a picture, a picture leaving the stage), optionally rendering stills. Exit code 0 pass / 1 problems / 3 layout not checked (no browser found; set `GTRK_CHROME`).
+- `lint`: static checks plus a per-frame layout check in the local Chrome / Edge (a lower picture's foreground border over an upper picture, a foreground line crossing a picture, a picture leaving the stage) and a **frame-purity** check (each sampled frame is rendered twice — once right after the previous frame, once after a distant frame — and element and slot geometry must match; impure scenes draw the wrong picture at bake chunk starts and after preview seeks), optionally rendering stills. Exit code 0 pass / 1 problems / 3 layout not checked (no browser found; set `GTRK_CHROME`).
 - `lay`: idempotently lays onto the topmost beat track by producer identity, registers materials, marks windows built; refuses stale particles; never overwrites a same-id particle the user edited in the client.
-- ⚠️ In this version, export (native / Jianying / Premiere) still uses the rough cut for composite spans; composite export comes in a later version.
+- `bake`: bakes the laid composite particles **into opaque video locally**, written to `gtrk/assets/composite-bake/<key>.mp4`; inputs (slot pictures, subtitles, anchors) are computed from the **current timeline**. Purely local, zero billing.
+  - **Browser**: prefers the pinned chrome-headless-shell (deterministic frames, fastest); otherwise falls back to the local Chrome / Edge (screenshot mode, slower, one fewer worker by default). **Never downloads silently**: install only with `gtrk deps install --browser` or this command's explicit `--install-browser` (about 110 MB). `GTRK_CHROME` selects a browser.
+  - **Concurrency**: resident worker pages render chunks in parallel, default `min(logical cores/3, 6)`, overridden by `--workers`; chunked and sequential bakes are bit-identical.
+  - **Cache**: the key covers the particle, the computed inputs, material file fingerprints (size + mtime), fps, browser build and encode settings; hits are reused. Changing concurrency does not change the key.
+  - **Frame rate**: defaults to the project rate; `--fps` overrides (e.g. a 30fps export). Frame count = `ceil(window × fps)`, covering the whole window.
+  - **Exit codes**: 0 all succeeded (cache hits included) / 1 some composite failed (the rest still bake; reasons per composite) / 2 argument or environment error / 130 cancelled.
+  - **Machine-readable**: `--progress jsonl` prints one event per line with `type` in `start` / `browser` / `prep` / `progress` / `composite` / `cancelled` / `done`, at most 1 second apart; in this mode **closing stdin cancels** (other modes ignore stdin). `--abi` prints only `{abi, version}` without reading the project. `--input <snapshot> --base <dir>`: use the snapshot as the timeline (for the client's unsaved state); relative material paths and the output location resolve against `--base`; the snapshot is never written back.
+- `gtrk render` / `gtrk project export` bake the project's composites first: a successfully baked span shows the baked video (in Jianying / Premiere, a video clip on that layer), and **MG / OV particles lying entirely inside a composite window are no longer pre-rendered or billed**; a composite that fails to bake (missing footage, no browser, …) falls back to the rough cut with its reason reported, and never blocks export.
 
 ### `gtrk project init` / `gtrk audio lay` / `gtrk audio tighten` — audio-first project atoms (voice-over first)
 
@@ -636,7 +646,7 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
 
 Treats the `.gtrk` as an EDL and renders it with local ffmpeg. **Footage always comes from the local originals** (`materials[].path`); the cloud never produces the finished file.
 
-**What gets composited**: the base track (the lowest `track_index` that is not the black bed) plus every audio source, then **every visible overlay layer** stacked in contract z-order (ascending `track_index`, larger = closer to the front) — overlay video tracks (B-roll candidates, AI re-enactment) and the MG particles on `beat_track`.
+**What gets composited**: the base track (the lowest `track_index` that is not the black bed) plus every audio source, then **every visible overlay layer** stacked in contract z-order (ascending `track_index`, larger = closer to the front) — overlay video tracks (B-roll candidates, AI re-enactment) and the MG particles on `beat_track`. Composite particles are baked locally first (see `gtrk composite bake`, zero billing) and laid as the baked video on their layer; MG particles they fully cover are no longer cloud-rendered.
 
 - **Visibility reads the `hidden` field only** (the client's "eye" toggle): a hidden track stays out of the cut entirely and is reported. The renderer never guesses which track belongs in the picture.
 - **When several candidate tracks are visible, the topmost one wins** (exactly what the client preview shows). To pick a different one, hide or delete tracks in the client.
@@ -666,8 +676,8 @@ A QC pass runs automatically afterwards and writes `.qc.json` (`--no-qc` skips i
 - `gtrk install [--api-key … -y --skill-agents codex,cursor --all-agents --copy-skills --skills-dir …]` — install everything in one command (skills + config + health check), modelled on Feishu's `lark-cli install`.
 - `gtrk init [--api-key … --api-base … --jianying-draft-dir … -y]` — configuration only (interactive or not).
 - `gtrk doctor` — health check (including the CLI version and whether a newer one exists).
-- `gtrk deps status` — show **where** ffmpeg/ffprobe and the render fonts currently come from (`--ffmpeg-path` / `~/.gitruck` / system / missing), plus version, licence and source-code location.
-- `gtrk deps install [--ffmpeg] [--font] [--force]` — install runtime assets from the Gitruck Cloud mirror, **skipping anything already present**.
+- `gtrk deps status` — show **where** ffmpeg/ffprobe, the render fonts and the composite-bake browser currently come from (`--ffmpeg-path` / `~/.gitruck` / system / missing), plus version, licence and source-code location.
+- `gtrk deps install [--ffmpeg] [--font] [--browser] [--force]` — install runtime assets from the Gitruck Cloud mirror, **skipping anything already present**. Without flags it installs ffmpeg and fonts; `--browser` additionally installs the pinned chrome-headless-shell for composite baking (about 110 MB, into `~/.gitruck/browsers`, BSD licence, provenance and source in the mirror's `SOURCE.md`), **only when named explicitly**.
   - **It never downloads silently**: any missing-dependency path only errors out and points at this command (the packages are 30–90 MB and the distributed artifacts carry licence obligations, so a user or agent must trigger it explicitly).
   - Downloads are always https with **strict sha256 verification**; anything that fails verification is discarded and never lands. Extraction uses the **system tar** (bundled with Windows 10+/macOS/Linux), pulling in no third-party decompression dependency.
   - The resolution order is unchanged: `--ffmpeg-path` → `~/.gitruck/ffmpeg` → system `PATH`. The mirror only fills the middle slot and **never overrides an ffmpeg you installed yourself**.

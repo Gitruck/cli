@@ -47,6 +47,7 @@ import { r3 } from "../lib/frame-domain";
 import { assertGtrkV1, readGtrk as realReadGtrk } from "../lib/gtrk-writeback";
 import {
 	buildParticlePlan,
+	compositeSummaryOf,
 	ensureParticleQtrle,
 	PARTICLE_TASK_TYPE,
 	projectBeatTracksToVideoTracks,
@@ -54,8 +55,10 @@ import {
 	PARTICLE_RENDER_ABI,
 	type ParticleDeps,
 	type ParticlePlan,
+	type ParticleSummary,
 	visibleBeats,
 } from "../lib/particle-qtrle";
+import { takeOverComposites, type CompositeTakeover, type TakeoverDeps } from "../lib/composite-export";
 import { resolveToolPricing, type PriceResolver } from "../lib/tool-pricing";
 import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
 import { resolveJianyingDraftDir } from "../lib/jianying";
@@ -502,6 +505,8 @@ export interface ProjectExportDeps {
 	materialize?: typeof realMaterializeResult;
 	resolvePricing?: PriceResolver;
 	particle?: ParticleDeps;
+	/** 合成烘焙（测试注入）。 */
+	composite?: TakeoverDeps;
 	download?: typeof realDownload;
 	landingWait?: Partial<LandingWaitDeps>;
 	openFolder?: (dir: string) => void;
@@ -517,7 +522,7 @@ export interface ProjectExportResult extends MaterializeResult {
 		cacheHit: number;
 		rendered: number;
 		failed: number;
-	};
+	} & Pick<ParticleSummary, "composites">;
 	droppedByContract: ExportContractDrops;
 }
 
@@ -620,10 +625,19 @@ export async function runProjectExport(
 	let particlePaths: Record<string, string> = {};
 	let particleRendered = 0;
 	let particleSkipped: { clipId: string; reason: string }[] = [];
+	let takeover: CompositeTakeover | undefined;
 	if (wantsNle && hasBeats && !noParticles) {
 		const fps = Math.round(Number.isFinite(Number(gtrk.video_rate)) ? Number(gtrk.video_rate) : 30);
-		plan = await buildParticlePlan(
+		// [add-composite-bake] 合成颗粒先烘焙（本地、零计费）：成功的以产物视频放在原层位，被它整段盖住的颗粒不进计划；
+		// 失败的按设计跳过（不算预检失败、不拒导），该段按粗剪出画
+		takeover = await takeOverComposites(
+			gtrk,
+			gtrkDir,
 			visibleBeats(gtrk as { beat_track?: { track_index?: number; track_timeline?: any[]; hidden?: unknown }[] }),
+			depsOverride.composite,
+		);
+		plan = await buildParticlePlan(
+			takeover.beats,
 			(Array.isArray(gtrk.materials) ? gtrk.materials : []) as { id?: unknown; path?: unknown }[],
 			gtrkDir,
 			fps,
@@ -673,7 +687,7 @@ export async function runProjectExport(
 			{ concurrency: parseParticleConcurrency(opts.particleConcurrency), onTick: (done, total, id) => log.tick(`颗粒 ${done}/${total}（${id}）`), delivery: { json: opts.json, landingWait: depsOverride.landingWait } },
 			particleDeps,
 		);
-		particlePaths = rendered.paths;
+		particlePaths = { ...takeover?.paths, ...rendered.paths };
 		particleRendered = rendered.rendered;
 		particleSkipped = rendered.failed;
 		log.tickEnd();
@@ -722,7 +736,7 @@ export async function runProjectExport(
 		mode: "export",
 		gtrkPath,
 		formats,
-		particles: formatParticleSummary(plan, particleRendered, particleSkipped),
+		particles: { ...formatParticleSummary(plan, particleRendered, particleSkipped), ...(takeover ? compositeSummaryOf(takeover) : {}) },
 		droppedByContract,
 	};
 	await writeFile(join(outDir, "result.json"), JSON.stringify(result, null, 2));

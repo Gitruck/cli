@@ -10,9 +10,16 @@ import { join } from "node:path";
 import { log } from "../lib/log";
 import { ffmpegDir, fontsDir } from "../lib/paths";
 import { resolveFfmpeg, probeCapabilities } from "../lib/ffmpeg";
+import { resolveBakeBrowser } from "../lib/composite-browser";
 import {
+	BROWSER_MANIFEST_URL,
+	fetchBrowserManifest,
 	fetchManifest,
 	fetchFontManifest,
+	headlessShellDir,
+	installBrowser,
+	PINNED_HEADLESS_SHELL,
+	platformKeyOf,
 	installFfmpeg,
 	installFont,
 	resolvePlatformKey,
@@ -26,11 +33,11 @@ import {
 export function registerDeps(program: Command): void {
 	const deps = program
 		.command("deps")
-		.description("运行时资产：查看状态 / 显式安装 ffmpeg 与渲染字体");
+		.description("运行时资产：查看状态 / 显式安装 ffmpeg、渲染字体与合成烘焙用的无头浏览器");
 
 	deps
 		.command("status")
-		.description("查看 ffmpeg / 字体的当前来源、版本与授权信息")
+		.description("查看 ffmpeg / 字体 / 无头浏览器的当前来源、版本与授权信息")
 		.option("--ffmpeg-path <dir>", "显式 ffmpeg/ffprobe 目录")
 		.action(async (opts: { ffmpegPath?: string }) => {
 			await runStatus(opts.ffmpegPath);
@@ -41,6 +48,7 @@ export function registerDeps(program: Command): void {
 		.description("从同合云镜像安装运行时资产（已存在则跳过）")
 		.option("--ffmpeg", "只装 ffmpeg/ffprobe")
 		.option("--font", "只装渲染字体")
+		.option("--browser", `只装合成烘焙用的无头浏览器（chrome-headless-shell ${PINNED_HEADLESS_SHELL}，约 110 MB）；不带任何开关的 deps install 不含它`)
 		// ⚠️ 占位符 MUST 用 ASCII：commander 判 variadic 的正则是 `/\w\.\.\.[>\]]$/`，
 		// `\w` 不含中文 ⇒ 写成 `<族名...>` 会被当成普通单值选项，回调里拿到字符串而非数组，
 		// 表现是 `families.map is not a function`（2026-09-16 真机撞到）。
@@ -53,6 +61,7 @@ export function registerDeps(program: Command): void {
 			async (opts: {
 				ffmpeg?: boolean;
 				font?: boolean;
+				browser?: boolean;
 				fontFamily?: string[];
 				force?: boolean;
 			}) => {
@@ -132,21 +141,22 @@ export async function runStatus(ffmpegPath?: string): Promise<void> {
 		log.info(`  缺省字幕字体 ${SUBTITLE_FONT_FILE}；其余按需：gtrk deps install --font-family <族名>`);
 		log.info("  与客户端同源（同一份服务端投影），故共享目录内同款字体只存一份");
 	}
+
+	await browserStatus();
 }
 
 export async function runInstall(opts: {
 	ffmpeg?: boolean;
 	font?: boolean;
+	browser?: boolean;
 	fontFamily?: string[];
 	force?: boolean;
 }): Promise<void> {
-	// 都没指定 = 两样都装
-	const doFfmpeg = opts.ffmpeg || !opts.font;
-	const doFont = opts.font || !opts.ffmpeg;
-
-	log.step(`读 manifest：${MANIFEST_URL}`);
-	const m = await fetchManifest();
-	log.info(`schema ${m.schema}，生成于 ${m.generated}`);
+	// 都没指定 = ffmpeg + 字体（浏览器体积大、只有合成出片才用，必须显式 --browser）
+	const none = !opts.ffmpeg && !opts.font && !opts.browser;
+	const doFfmpeg = opts.ffmpeg || none;
+	const doFont = opts.font || none;
+	const doBrowser = !!opts.browser;
 
 	// 进度节流：\r 原地刷新只在 TTY 有效；被管道/agent 捕获时每个 chunk 一行会刷屏
 	// （86 MB 的包能刷出上千行）。故按「≥5% 或 ≥2s」才更新一次。
@@ -163,6 +173,9 @@ export async function runInstall(opts: {
 	};
 
 	if (doFfmpeg) {
+		log.step(`读 manifest：${MANIFEST_URL}`);
+		const m = await fetchManifest();
+		log.info(`schema ${m.schema}，生成于 ${m.generated}`);
 		const key = resolvePlatformKey();
 		log.step(`① ffmpeg（${key}）`);
 		const r = await installFfmpeg(m, { force: opts.force, onProgress });
@@ -190,5 +203,40 @@ export async function runInstall(opts: {
 		log.info("未写系统字体表、未改注册表——烧录时经 ass 滤镜 fontsdir 供给");
 	}
 
-	log.ok(`完成。二进制在 ${ffmpegDir()}，字体在 ${fontsDir()}`);
+	if (doBrowser) {
+		log.step(`③ 无头浏览器（chrome-headless-shell ${PINNED_HEADLESS_SHELL}）`);
+		const bm = await fetchBrowserManifest();
+		const r = await installBrowser(bm, { force: opts.force, onProgress });
+		log.tickEnd();
+		if (r.installed) log.ok(`已安装 ${r.detail}`);
+		else log.info(`跳过（${r.reason}）：${r.detail}`);
+	}
+
+	if (doFfmpeg || doFont) log.ok(`完成。二进制在 ${ffmpegDir()}，字体在 ${fontsDir()}`);
+	else log.ok("完成");
+}
+
+/** `deps status` 的浏览器一节：烘焙此刻会用哪一个、钉定版本装没装、分发物授权。 */
+async function browserStatus(): Promise<void> {
+	log.step("④ 合成烘焙用的无头浏览器");
+	const b = resolveBakeBrowser();
+	if (!b) log.warn(`未找到可用浏览器。装钉定版本：gtrk deps install --browser`);
+	else if (b.source === "env") log.ok(`来源：GTRK_CHROME（${b.exe}，${b.mode === "beginframe" ? "确定性出帧" : "截图模式"}）`);
+	else if (b.source === "pinned") log.ok(`来源：~/.gitruck（chrome-headless-shell ${PINNED_HEADLESS_SHELL}，${headlessShellDir()}）`);
+	else {
+		log.warn(`来源：系统浏览器退路（${b.exe}）——截图模式、更慢、并发降档`);
+		log.info(`装钉定版本可提速并确定性出帧：gtrk deps install --browser`);
+	}
+	try {
+		const bm = await fetchBrowserManifest();
+		const key = platformKeyOf();
+		const byPlatform = bm.browser[PINNED_HEADLESS_SHELL] ?? {};
+		for (const [k, v] of Object.entries(byPlatform)) {
+			log.info(`${k === key ? "→" : " "} ${k.padEnd(10)} ${v.version.padEnd(16)} ${v.license}  源码 ${v.source}`);
+		}
+		if (!Object.keys(byPlatform).length) log.warn(`镜像上暂无钉定版本 ${PINNED_HEADLESS_SHELL}`);
+		log.info(`合规说明：${bm.base}/SOURCE.md`);
+	} catch (e) {
+		log.warn(`取浏览器清单失败（${BROWSER_MANIFEST_URL}）：${e instanceof Error ? e.message : String(e)}`);
+	}
 }

@@ -12,7 +12,7 @@ import { detectComposite } from "./composite-particle";
 export interface LintIssue {
 	/** static：静态问题；layout：逐帧排版问题。 */
 	kind: "static" | "layout";
-	/** 判据：profile / forbidden-api / unregistered-material / off-grid / stale / border-over-slot / stroke-through-slot / slot-out-of-stage / same-z-overlap */
+	/** 判据：profile / forbidden-api / unregistered-material / off-grid / stale / border-over-slot / stroke-through-slot / slot-out-of-stage / same-z-overlap / impure-frame */
 	rule: string;
 	message: string;
 	/** 逐帧问题出现的帧区间与采样次数。 */
@@ -108,6 +108,48 @@ export function mergeFrameIssues(samples: Array<{ f: number; issues: FrameIssue[
 		kind: "layout" as const,
 		rule: r.issue.kind,
 		message: (RULE_TEXT[r.issue.kind] ?? ((x: FrameIssue) => JSON.stringify(x)))(r.issue),
+		frames: [r.a, r.b] as [number, number],
+		samples: r.n,
+	}));
+}
+
+/** 帧纯度机检的一处差异（design D10）：某元素 / 槽位的某个几何量，在连续顺序与跳跃顺序下不同。 */
+export interface PurityDiff {
+	target: string;
+	prop: string;
+	/** 连续顺序（先渲前一帧）下的值。 */
+	a: number;
+	/** 跳跃顺序（先渲远处一帧）下的值。 */
+	b: number;
+}
+
+const PROP_TEXT: Record<string, string> = { left: "left", top: "top", width: "宽度", height: "高度", opacity: "不透明度" };
+const r1 = (x: number) => Math.round(x * 10) / 10;
+
+/**
+ * 帧纯度结果 → 每个「元素 × 几何量」一条违规：帧区间、采样次数、最大差值与首个差异帧的两种取值。
+ * 同一帧号画出不同画面时，烘焙的段首帧、预览跳转后的首帧都会与连续播放不同。
+ */
+export function mergePurityIssues(samples: Array<{ f: number; diffs: PurityDiff[] }>): LintIssue[] {
+	const runs = new Map<string, { d: PurityDiff; f0: number; a: number; b: number; n: number; max: number }>();
+	for (const s of samples) {
+		for (const d of s.diffs) {
+			const key = `${d.target}\u0000${d.prop}`;
+			const delta = Math.abs(d.a - d.b);
+			const r = runs.get(key);
+			if (r) {
+				r.b = s.f;
+				r.n++;
+				r.max = Math.max(r.max, delta);
+			} else runs.set(key, { d, f0: s.f, a: s.f, b: s.f, n: 1, max: delta });
+		}
+	}
+	return [...runs.values()].map((r) => ({
+		kind: "layout" as const,
+		rule: "impure-frame",
+		message:
+			`帧纯度：${r.d.target} 的${PROP_TEXT[r.d.prop] ?? r.d.prop}随渲染顺序变化（第 ${r.f0} 帧：连续渲染 ${r1(r.d.a)}、跳着渲染 ${r1(r.d.b)}；最大差 ${r1(r.max)}）` +
+			"——同一帧号必须画出同一画面。常见成因：读取了带变换元素的渲染后几何（如对正在缩放的元素用 getBoundingClientRect 量宽度），改读 offsetWidth / offsetLeft 等不含变换的布局值",
 		frames: [r.a, r.b] as [number, number],
 		samples: r.n,
 	}));

@@ -42,6 +42,10 @@ export function audioCacheDir(): string {
 export function fontsDir(): string {
 	return join(GITRUCK_HOME, "fonts");
 }
+/** 无头浏览器目录 ~/.gitruck/browsers（按产品 / 版本分子目录，可并存多个版本；change add-composite-bake）。 */
+export function browsersDir(): string {
+	return join(GITRUCK_HOME, "browsers");
+}
 /** 下载暂存目录 ~/.gitruck/tmp：先落此处、校验通过后原子改名到目标位，避免中断产生半成品。 */
 export function tmpDir(): string {
 	return join(GITRUCK_HOME, "tmp");
