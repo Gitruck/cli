@@ -10,7 +10,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { installedHeadlessShell, PINNED_HEADLESS_SHELL } from "./runtime-assets";
 
@@ -118,6 +118,43 @@ export const BEGIN_FRAME_ARGS = [
 /** 系统浏览器烘焙退路：新无头模式 + 关 GPU（spike-1：比开 GPU 快约 1.5 倍）+ 关局部重绘。 */
 export const SOFT_SCREENSHOT_ARGS = ["--headless=new", "--disable-gpu", "--disable-partial-raster"];
 
+/** 主进程退出后等子进程自己跟着退的时长；平时约 0.2 秒内就全退了。 */
+export const REAP_GRACE_MS = 1000;
+/** 结束遗留子进程之后，再等调试管道关上的时长。 */
+export const REAP_WAIT_MS = 5000;
+/** 查进程表的 PowerShell 本身的时限（满载时起它也要几秒）。 */
+const REAP_QUERY_TIMEOUT_MS = 15_000;
+
+/**
+ * Windows：结束一棵无头浏览器进程树里还活着的进程（执行查询的 PowerShell 自己除外）。两条认法，查询与结束在同一条
+ * 管道里完成（按查到的进程对象结束，不先攒进程号列表再杀——进程号会被复用）：
+ * - 命令行里带本次独有的用户目录 = 主进程（用户自己的浏览器不会带这个目录）；
+ * - 父进程号 = 本次主进程号、映像名相同、且创建时刻不晚于主进程退出时刻 = 它的子进程。gpu / utility / renderer 的
+ *   命令行**不带**用户目录（2026-10-16 实测），只能这样认；主进程退出后号若被复用，复用者的子进程必在那一刻之后创建，
+ *   认不进来。
+ * 有时限、失败不抛：这是收尾，不能反过来拖住收尾。非 Windows 无需（子进程随主进程结束）。
+ */
+export function terminateBrowserTree(t: { profile: string; pid: number; image: string; before: Date }): Promise<void> {
+	if (process.platform !== "win32" || !Number.isInteger(t.pid)) return Promise.resolve();
+	const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
+	const ps =
+		`$t = [datetime]::Parse(${q(t.before.toISOString())}); ` +
+		"Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and (" +
+		`($_.CommandLine -and $_.CommandLine.Contains(${q(t.profile)})) -or ` +
+		`($_.ParentProcessId -eq ${t.pid} -and $_.Name -eq ${q(t.image)} -and $_.CreationDate -le $t)` +
+		") } | Invoke-CimMethod -MethodName Terminate | Out-Null";
+	return new Promise((res) => {
+		const p = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { stdio: "ignore", windowsHide: true });
+		const t = setTimeout(() => p.kill(), REAP_QUERY_TIMEOUT_MS);
+		const end = () => {
+			clearTimeout(t);
+			res();
+		};
+		p.on("close", end);
+		p.on("error", end);
+	});
+}
+
 /** 一个无头浏览器会话：一个页面 target，经管道收发 CDP。 */
 export class HeadlessBrowser {
 	private proc: ChildProcess;
@@ -128,6 +165,11 @@ export class HeadlessBrowser {
 	private listeners = new Set<(m: Record<string, unknown>) => void>();
 	private sessionId: string | null = null;
 	private exited = false;
+	/** 调试管道已关（子进程也全退了）：`exit` 只说明主进程退了。 */
+	private pipesClosed = false;
+	/** 主进程映像名与退出时刻：收遗留子进程时按「父进程号 + 映像名 + 创建早于退出」认（见 `terminateBrowserTree`）。 */
+	private image: string;
+	private exitedAt: Date | null = null;
 
 	private mode: LaunchMode;
 	private frameTicks = 0;
@@ -136,6 +178,8 @@ export class HeadlessBrowser {
 
 	private constructor(exe: string, mode: LaunchMode) {
 		this.mode = mode;
+		const name = basename(exe);
+		this.image = /\.exe$/i.test(name) ? name : `${name}.exe`;
 		this.profile = mkdtempSync(join(tmpdir(), "gtrk-composite-chrome-"));
 		this.proc = spawn(
 			exe,
@@ -188,7 +232,11 @@ export class HeadlessBrowser {
 		// 起不来（路径不对、不是可执行文件）时 spawn 发 error 而不是 exit：不接住会把整个 CLI 进程带崩
 		this.proc.on("error", (e) => fail(`浏览器起不来：${e.message}`));
 		(this.proc.stdio[3] as Writable | null)?.on("error", () => {});
-		this.proc.on("exit", () => fail("浏览器进程已退出"));
+		this.proc.on("exit", () => {
+			this.exitedAt = new Date();
+			fail("浏览器进程已退出");
+		});
+		this.proc.on("close", () => (this.pipesClosed = true));
 	}
 
 	/**
@@ -353,24 +401,35 @@ export class HeadlessBrowser {
 	 *
 	 * `graceMs > 0`：先发 `Browser.close` 请浏览器自己退（整棵进程树一起收、文件随即解锁），超时再强制结束。
 	 * 实测（2026-10-16）：强制结束本身 0.5–0.8 秒，但子进程还占着用户目录里的文件，删目录要重试到 1.6–26 秒；
-	 * 自己退出约 0.2 秒、随后删目录 0.2 秒。取消 / 出错时传 0（立即结束，不等）。
+	 * 自己退出约 0.2 秒、随后删目录 0.2 秒。`graceMs = 0` 立即强制结束。
+	 *
+	 * 主进程退了不等于整棵树退了：满载时渲染 / GPU 子进程要几十秒到几分钟才轮到退出（2026-10-16 满载实测 4–147 秒），
+	 * 期间握着调试管道（本进程要等它关上才能退出）和用户目录里的文件（删不掉）；`taskkill /T` 也会漏（spike-3：漏 24 个）。
+	 * 所以先 `reapChildren` 收干净再删目录。强制结束必然留下子进程：收树与 `taskkill` 同时发起，不等主进程退了再查
+	 * （满载时两者各要几秒，串行会把收尾拖过十几秒）。
 	 */
 	closeAsync(graceMs = 0): Promise<void> {
 		return new Promise((res) => {
 			let finished = false;
 			let timer: ReturnType<typeof setTimeout> | undefined;
+			let forced: Promise<void> | null = null;
 			const done = () => {
 				if (finished) return;
 				finished = true;
 				if (timer) clearTimeout(timer);
-				// 浏览器刚退，个别文件还被占着时删不掉：留在系统临时目录，不影响结果
-				rm(this.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).then(res, () => res());
+				// 收完子进程仍有个别文件被占着时删不掉：留在系统临时目录，不影响结果
+				this.reapChildren(forced)
+					.then(() => rm(this.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }))
+					.then(res, () => res());
 			};
 			if (this.exited || !this.proc.pid) return done();
 			const kill = () => {
 				if (finished) return;
-				if (process.platform === "win32") spawn("taskkill", ["/F", "/T", "/PID", String(this.proc.pid)], { stdio: "ignore" }).on("close", done);
-				else {
+				if (process.platform === "win32") {
+					// 主进程此刻还活着，进程号不会被复用：创建时刻上限取此刻
+					forced = terminateBrowserTree({ profile: this.profile, pid: this.proc.pid as number, image: this.image, before: new Date() });
+					spawn("taskkill", ["/F", "/T", "/PID", String(this.proc.pid)], { stdio: "ignore" }).on("close", done);
+				} else {
 					this.proc.kill("SIGKILL");
 					done();
 				}
@@ -382,6 +441,26 @@ export class HeadlessBrowser {
 				/* 管道已断或没回应：等超时强制结束 */
 			});
 		});
+	}
+
+	/**
+	 * 主进程退出后收子进程：调试管道关上 = 整棵树都退了。强制结束时收树已随 `taskkill` 发起（`forced`），等它完成；
+	 * 自己退出的，`REAP_GRACE_MS` 内没关才去结束这棵树里还活着的进程（认法见 `terminateBrowserTree`：用户目录 /
+	 * 父进程号 + 映像名 + 创建时刻；MUST NOT 按进程号列表结束）。再等 `REAP_WAIT_MS` 仍没关，松开本端管道，
+	 * 不让本进程陪着等（残留由系统随后回收，不影响结果）。
+	 */
+	private async reapChildren(forced: Promise<void> | null): Promise<void> {
+		if (this.pipesClosed) return;
+		const closed = new Promise<boolean>((r) => this.proc.once("close", () => r(true)));
+		const within = (ms: number) => Promise.race([closed, new Promise<boolean>((r) => setTimeout(() => r(false), ms).unref())]);
+		if (forced) await forced;
+		else if (await within(REAP_GRACE_MS)) return;
+		else await terminateBrowserTree({ profile: this.profile, pid: this.proc.pid as number, image: this.image, before: this.exitedAt ?? new Date() });
+		if (await within(REAP_WAIT_MS)) return;
+		// 极端满载（连 taskkill / PowerShell 都排不上）：不再陪等，交还本进程的退出权
+		(this.proc.stdio[3] as Writable | null)?.destroy();
+		(this.proc.stdio[4] as Readable | null)?.destroy();
+		this.proc.unref();
 	}
 
 	close(): void {

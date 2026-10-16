@@ -445,7 +445,8 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 	const work = openWorkDir(outDir);
 	const live = { browsers: new Set<HeadlessBrowser>(), encoders: new Set<ChildProcess>() };
 	// 浏览器一律异步收尾（同步 taskkill 会卡住事件循环、进度断档）。正常用完的先请它自己退（整棵进程树一起收、
-	// 文件随即解锁），出错 / 取消的立即结束。收尾不挡结果：结果先交回，收尾的 Promise 由 `settled` 交代
+	// 文件随即解锁）；出错 / 取消的立即强制结束——遗留的子进程由 `closeAsync` 同时按进程树收掉（满载时等它自己退
+	// 也退不及，只会白等宽限）。收尾不挡结果：结果先交回，收尾的 Promise 由 `settled` 交代
 	const closing: Promise<void>[] = [];
 	const retire = (b: HeadlessBrowser, graceful = false) => {
 		if (!live.browsers.delete(b)) return;
