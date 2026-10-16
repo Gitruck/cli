@@ -4,10 +4,10 @@
  * 离线只供给已缓存分片覆盖的池条目；缺失/损坏走自愈或明确报错（指引 --refresh/联网重跑）。
  */
 import { gunzipSync } from "node:zlib";
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { atomicWrite } from "./data";
+import { atomicWrite, ensureMadCacheDir } from "./data";
 import type { PoolEntry } from "./types";
 
 /** 迁入的 IR 工程类型（结构与 convert IRProject 同构，此处宽松声明避免跨模块耦合）。 */
@@ -81,7 +81,7 @@ export function makeIrLoader(
 		if (!res.ok) throw new Error(`IR 分片下载失败 HTTP ${res.status}：${url}`);
 		const buf = new Uint8Array(await res.arrayBuffer());
 		const s = decodeShard(buf); // 先验证可解，再落盘
-		await mkdir(join(verDir, "ir"), { recursive: true });
+		await ensureMadCacheDir(join(verDir, "ir"));
 		await atomicWrite(path, buf);
 		memo.set(shard, s);
 		return s;

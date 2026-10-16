@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { homeFile } from "../paths";
 import type { CatalogPattern, MadCatalog, MadManifest, PoolEntry } from "./types";
 import { readJson } from "../read-json";
@@ -77,8 +77,30 @@ async function fetchWithTimeout(fetchFn: typeof fetch, url: string, timeoutMs: n
 /** 原子写：临时文件 + rename。 */
 async function atomicWrite(dest: string, data: Uint8Array): Promise<void> {
 	const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tmp, data);
-	await rename(tmp, dest);
+	await madCacheWrite(dirname(dest), async () => {
+		await writeFile(tmp, data);
+		await rename(tmp, dest);
+	});
+}
+
+/** 仅增强缓存权限错误的说明；原对象、系统码和调用栈继续用于自动上报。 */
+async function madCacheWrite<T>(directory: string, write: () => Promise<T>): Promise<T> {
+	try {
+		return await write();
+	} catch (error) {
+		if (error instanceof Error && ["EPERM", "EACCES", "EROFS"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+			const stack = error.stack;
+			const heading = `${error.name}: ${error.message}`;
+			error.message = `MAD 技法缓存目录不可写 [cache=mad-cache]：${JSON.stringify(directory)}。` +
+				`请检查当前运行账号的目录写入权限、磁盘只读状态及安全软件/沙箱策略后重试。原始错误：${error.message}`;
+			if (stack?.startsWith(heading)) error.stack = `${error.name}: ${error.message}${stack.slice(heading.length)}`;
+		}
+		throw error;
+	}
+}
+
+export async function ensureMadCacheDir(directory: string): Promise<void> {
+	await madCacheWrite(directory, () => mkdir(directory, { recursive: true }));
 }
 
 /** 校验缓存文件 sha256；不存在或不符返回 false。 */
@@ -185,7 +207,7 @@ export async function ensureMadData(opts: { refresh?: boolean }, deps: DataDeps)
 				"首次使用需联网下载技法数据。请连网后重跑 `gtrk tool mad`（数据会缓存到本地，之后可离线出片）。",
 			);
 		}
-		await mkdir(verDir, { recursive: true });
+		await ensureMadCacheDir(verDir);
 		warn(`下载技法池数据 mad_pool（版本 v${version}，约 ${Math.round(poolMeta.size / 1024)} KB）…`);
 		const res = await deps.fetchFn(poolMeta.url);
 		if (!res.ok) throw new Error(`mad_pool 下载失败 HTTP ${res.status}`);
@@ -199,7 +221,7 @@ export async function ensureMadData(opts: { refresh?: boolean }, deps: DataDeps)
 
 	// ④ manifest 快照落盘 + 旧版本清理
 	if (online) {
-		await mkdir(cacheRoot, { recursive: true });
+		await ensureMadCacheDir(cacheRoot);
 		await atomicWrite(snapshotPath, new Uint8Array(Buffer.from(JSON.stringify(manifest), "utf8")));
 		await cleanupOldVersions(cacheRoot, version, warn);
 	}
@@ -244,7 +266,7 @@ export async function ensureMadCatalog(
 					: "技法目录需联网下载一次（约 100 KB）。请连网后重跑 `--technique` / `--search`；不带这两个选项的出片仍可离线跑。",
 			);
 		}
-		await mkdir(data.verDir, { recursive: true });
+		await ensureMadCacheDir(data.verDir);
 		warn(`下载技法目录 catalog（版本 v${data.version}，约 ${Math.round(meta.size / 1024)} KB）…`);
 		const res = await deps.fetchFn(meta.url);
 		if (!res.ok) throw new Error(`catalog 下载失败 HTTP ${res.status}`);
