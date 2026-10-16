@@ -1,9 +1,9 @@
 /** 私有外网素材任务传输；复用普通 CLI 鉴权与持久任务查询。 */
 import type { CloudConfig } from "./config";
 import { randomUUID } from "node:crypto";
-import { pollTask, submitTask } from "./cloud";
+import { CloudError, cloudErrorCode, pollTask, submitTask } from "./cloud";
 import type { PlanResult } from "./matrix";
-import { parseOnlineOrigin, type OnlinePlatform } from "./online-broll-contract";
+import { LEGACY_ONLINE_PLATFORMS, parseOnlineOrigin, type OnlinePlatform } from "./online-broll-contract";
 
 export interface OnlineSearchRequest {
 	need?: import("./online-broll-needs").OnlineMaterialNeed;
@@ -31,8 +31,10 @@ export interface OnlineSearchSubmission {
 }
 
 export function onlineSearchOutcome(value: Pick<OnlineSearchResult, "results" | "platforms" | "failures">): "ready" | "partial" | "empty" | "unavailable" {
+	// 服务端未开启的平台（目前只有 pexels 会报 disabled）只是提示，不参与降级判定
+	const active = value.platforms.filter(p => p.status !== "disabled");
 	const degraded = value.failures.length > 0
-		|| value.platforms.some(p => p.status === "unavailable" || p.status === "partial");
+		|| active.some(p => p.status === "unavailable" || p.status === "partial");
 	return value.results.length > 0 ? (degraded ? "partial" : "ready") : (degraded ? "unavailable" : "empty");
 }
 
@@ -45,6 +47,18 @@ export function searchPayload(request: OnlineRequest): OnlineRequest {
 		...(request.discovery_queries !== undefined ? { discovery_queries: [...request.discovery_queries] } : {}),
 		...(request.max_videos !== undefined ? { max_videos: request.max_videos } : {}),
 		...(request.top_k !== undefined ? { top_k: request.top_k } : {}) };
+}
+
+/** 署名对象（Pexels 等）：provider / text / https url 三项齐全才保留，坏项丢弃。 */
+function parseAttributions(raw: unknown): { provider: string; text: string; url: string }[] {
+	if (!Array.isArray(raw)) return [];
+	return raw.flatMap((item: unknown) => {
+		if (!item || typeof item !== "object") return [];
+		const a = item as Record<string, unknown>;
+		if (typeof a.provider !== "string" || !a.provider || typeof a.text !== "string" || !a.text
+			|| typeof a.url !== "string" || !a.url.startsWith("https://")) return [];
+		return [{ provider: a.provider, text: a.text, url: a.url }];
+	});
 }
 
 export function parseOnlineSearchResult(raw: unknown): OnlineSearchResult {
@@ -80,8 +94,12 @@ export function parseOnlineSearchResult(raw: unknown): OnlineSearchResult {
 	if (!manifest || typeof manifest.url !== "string" || !manifest.url.startsWith("https://")
 		|| typeof manifest.file_id !== "string" || !/^\d+$/.test(manifest.file_id))
 		throw new Error("外网检索缺少完整镜头清单引用");
+	const attributions = parseAttributions(value.attributions);
 	return { results, platforms: value.platforms, failures: value.failures,
-		diagnostics: Object.fromEntries(["need", "budget", "stop_reason", "source_screening", "discovery_queries", "score_model", "degraded_reason", "cache"].filter(k => value[k] !== undefined).map(k => [k, value[k]])),
+		diagnostics: {
+			...Object.fromEntries(["need", "budget", "stop_reason", "source_screening", "discovery_queries", "score_model", "degraded_reason", "cache"].filter(k => value[k] !== undefined).map(k => [k, value[k]])),
+			...(attributions.length ? { attributions } : {}),
+		},
 		manifest: { url: manifest.url, file_id: manifest.file_id } };
 }
 
@@ -102,7 +120,17 @@ export async function searchOnlineBroll(
 	const body = { ...payload, request_id: submission.requestId };
 	// 先保存再发 POST；响应丢失也能按同一身份查回，保存失败不得建单。
 	await hooks.onSubmitting?.(structuredClone(submission));
-	const taskId = await submitTask(cfg, "cli/online_broll_search", body);
+	let taskId: string;
+	try {
+		taskId = await submitTask(cfg, "cli/online_broll_search", body);
+	} catch (error) {
+		// 旧服务端不认 pexels：给出可执行的提示。不自动去掉 pexels 重试——改平台即改请求身份，
+		// 会绕开续跑记录、多扣一笔
+		if (cloudErrorCode(error) === 6016 && error instanceof Error && error.message.includes("platforms")
+			&& request.platforms?.includes("pexels"))
+			throw new CloudError(6016, `${error.message}。服务端尚未支持 Pexels；可加 --platforms ${LEGACY_ONLINE_PLATFORMS.join(",")} 继续`);
+		throw error;
+	}
 	await hooks.onSubmitted?.(taskId);
 	return { ...await resumeOnlineBroll(cfg, taskId, hooks.onTick), task_id: taskId };
 }

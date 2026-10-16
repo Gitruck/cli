@@ -1,5 +1,9 @@
-/** 指定来源的两端共同契约；与客户端同名文件保持一致。 */
+/** 指定来源的两端共同契约；与客户端同名文件保持一致。
+ * 本文件已含 pexels（link-online-broll-pexels-platform-cli）；客户端同名文件待客户端联动件
+ * link-online-broll-pexels-platform-client 同步，在那之前两端有意不一致。 */
 import { parseOnlineOrigin, type OnlineOrigin } from "./online-broll-contract";
+
+const SUPPORTED_SOURCES = "YouTube / Vimeo / TikTok / Bilibili / Pexels";
 
 export interface ManualCandidate {
  clip_id: string; selection_mode: "manual"; origin: OnlineOrigin;
@@ -20,7 +24,7 @@ export function normalizeSourceUrls(input: string[]): string[] {
  const urls = input.map(raw => {
   if (/[\s\\\[\]]/.test(raw) || raw.length > 2048) throw new Error("视频链接格式无效");
   const u = new URL(raw);
-  if (u.protocol !== "https:" || u.username || u.password || u.port) throw new Error("仅支持四平台 HTTPS 视频链接");
+  if (u.protocol !== "https:" || u.username || u.password || u.port) throw new Error(`仅支持 ${SUPPORTED_SOURCES} 的 HTTPS 视频链接`);
   const host = u.hostname, path = u.pathname;
   if (["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"].includes(host)) {
    const id = host === "youtu.be" ? path.slice(1) : path === "/watch" ? u.searchParams.get("v") : path.startsWith("/shorts/") ? path.slice(8) : "";
@@ -38,7 +42,12 @@ export function normalizeSourceUrls(input: string[]): string[] {
    const match = /^\/video\/(BV[0-9A-Za-z]{10}|av[0-9]+)\/?$/.exec(path), part = u.searchParams.get("p") ?? "1";
    if (match && /^[1-9][0-9]{0,3}$/.test(part)) return `https://www.bilibili.com/video/${match[1]}?p=${part}`;
   }
-  throw new Error("链接不是支持的视频页面，请展开短链后再提交");
+  if (["pexels.com", "www.pexels.com"].includes(host)) {
+   // 与服务端 canonical_source 同一规则（主件 design D1）：语言前缀、slug 可有可无，id 必须是末段数字
+   const match = /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?video\/(?:[a-z0-9]+(?:-[a-z0-9]+)*-)?([0-9]{1,15})\/?$/i.exec(path);
+   if (match) return `https://www.pexels.com/video/${match[1]}/`;
+  }
+  throw new Error(`链接不是支持的视频页面（${SUPPORTED_SOURCES}），请展开短链后再提交`);
  });
  return [...new Set(urls)];
 }

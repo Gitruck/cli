@@ -1,7 +1,7 @@
-import { searchOnlineBroll, onlineSearchOutcome } from "../lib/online-broll-client";
-import { claimOnlineSearch } from "../lib/online-search-journal";
+import { searchOnlineBroll, onlineSearchOutcome, type OnlineSearchRequest, type OnlineSearchSubmission } from "../lib/online-broll-client";
+import { claimOnlineSearch, findOnlineSearch } from "../lib/online-search-journal";
 import { onlineNeedsForEntry } from "../lib/online-broll-needs";
-import { parseOnlinePlatforms } from "../lib/online-broll-contract";
+import { LEGACY_ONLINE_PLATFORMS, ONLINE_PLATFORMS, parseOnlinePlatforms } from "../lib/online-broll-contract";
 /**
  * gtrk matrix —— B-roll 检索（Wave2 Change C + add-matrix-local-search 第三路）。
  *
@@ -348,7 +348,7 @@ export function registerMatrix(program: Command): void {
 		.option("--top-k <n>", `每 query 候选数上限（覆盖派单 shots 翻译；云端服务端上限 50；matrix material 缺省 ${MATERIAL_TOP_K_DEFAULT}）`)
 		.option("--material-class <c>", "素材类型 real_shot|concept（仅矩阵成员口；覆盖栏目 material_class_policy）")
 		.option("--online", "从外部视频平台检索 B-roll 镜头")
-		.option("--platforms <list>", "外网平台：youtube,vimeo,tiktok,bilibili")
+		.option("--platforms <list>", `外网平台：${ONLINE_PLATFORMS.join(",")}（缺省全部）`)
 		.option("--online-session <name>", "外网检索批次；同批次续跑，换名称发起新搜索")
 		.option("--url <url>", "matrix source-import：指定视频链接；可重复传", collectPathArg)
 		.option("--urls <file>", "matrix source-import：逐行读取指定视频链接文件")
@@ -909,6 +909,33 @@ interface SearchCtx {
 	search: (query: string, entry?: FilmDispatch) => Promise<SearchRespData>;
 }
 
+/**
+ * 外网平台状态分级提示（link-online-broll-pexels-platform-cli）：`disabled` 每次运行每个平台只提示一次（info），
+ * `unavailable` / `partial` 警告并附首条失败的 error_code，`ok` / `empty` 不提示。`noticed` 由调用方按一次运行持有。
+ */
+export function reportOnlinePlatforms(platforms: Record<string, unknown>[], noticed: Set<string>): void {
+	for (const report of platforms) {
+		const name = String(report.platform ?? "?");
+		if (report.status === "ok" || report.status === "empty") continue;
+		if (report.status === "disabled") {
+			if (noticed.has(`disabled:${name}`)) continue;
+			noticed.add(`disabled:${name}`);
+			log.info(`外网平台 ${name}：服务端未开启`);
+			continue;
+		}
+		const attempts = Array.isArray(report.attempts) ? (report.attempts as Record<string, unknown>[]) : [];
+		const code = typeof report.error_code === "string"
+			? report.error_code
+			: attempts.find(a => typeof a?.error_code === "string")?.error_code;
+		log.warn(`外网平台 ${name}：${String(report.status)}${code ? `（${String(code)}）` : ""}`);
+	}
+}
+
+/** Pexels 署名汇总行：候选明细在 --out 文件里，这里只打一行，不逐条刷屏。 */
+export function pexelsAttributionSummary(count: number): string {
+	return `含 ${count} 条 Pexels 候选 · 素材来自 Pexels（https://www.pexels.com），使用时保留摄影师署名`;
+}
+
 export async function runMatrix(
 	pos: MatrixPositional,
 	opts: MatrixOpts,
@@ -950,20 +977,37 @@ export async function runMatrix(
   const platforms = parseOnlinePlatforms(opts.platforms);
   const journalDir = pos.kind === "search" ? `${resolve(opts.out!)}.online-search`
    : join(opts.dispatch ? dirname(dirname(resolve(opts.dispatch))) : resolve(opts.project!), "split", ".online-search");
+  // [link-online-broll-pexels-platform-cli] 一次运行内的提示去重与 Pexels 候选计数
+  const noticed = new Set<string>();
+  let pexelsCandidates = 0;
   const ctx: SearchCtx = { cfg, memberType: "online", sourceLayer: "online", search: async (query, entry) => {
-   const request = {query, ...(entry?.need ? {need: entry.need} : {}), platforms, top_k: opts.topK ? Number(opts.topK) : 12};
-   const submission = await claimOnlineSearch(journalDir, cfg, request, opts.onlineSession);
+   let request: OnlineSearchRequest = {query, ...(entry?.need ? {need: entry.need} : {}), platforms, top_k: opts.topK ? Number(opts.topK) : 12};
+   let submission: OnlineSearchSubmission | undefined;
+   if (opts.platforms === undefined) {
+    // 升级前的 CLI 缺省发四平台：同批次已有四平台记录就沿用原请求续跑，不新建单、不再扣费
+    const legacy = {...request, platforms: [...LEGACY_ONLINE_PLATFORMS]};
+    submission = await findOnlineSearch(journalDir, cfg, legacy, opts.onlineSession);
+    if (submission) {
+     request = legacy;
+     if (!noticed.has("legacy")) { noticed.add("legacy"); log.info("沿用升级前的检索批次（不含 Pexels）；要加入 Pexels 请换 --online-session"); }
+    }
+   }
+   submission ??= await claimOnlineSearch(journalDir, cfg, request, opts.onlineSession);
    const output = await searchOnlineBroll(cfg, request, {
     submission,
     onSubmitted: (id) => { log.info(`外网检索任务：${id}`); },
     onTick: (state, progress) => { log.info(`外网检索 ${state}${progress === undefined ? "" : ` ${progress}%`}`); },
    });
-   for (const report of output.platforms) if (report.status !== "ok") log.warn(`外网平台 ${report.platform}: ${report.status}`);
+   reportOnlinePlatforms(output.platforms, noticed);
+   pexelsCandidates += output.results.filter(result => result.origin?.platform === "pexels").length;
    const eligible = output.results.filter(result => result.auto_eligible === true);
    return {results: eligible, recalled: output.results.length, request_id: output.task_id, online: {task_id: output.task_id, platforms: output.platforms, failures: output.failures, manifest: output.manifest,
     diagnostics: output.diagnostics, review_candidates: output.results.filter(result => result.auto_eligible !== true)}};
   }};
-  return pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts, deps);
+  const result = await (pos.kind === "search" ? runAdhoc(pos.query, ctx, opts) : runPlanMode(ctx, opts, deps));
+  // --json 下人读日志已转 stderr，stdout 仍只有一行 JSON
+  if (pexelsCandidates > 0) log.info(pexelsAttributionSummary(pexelsCandidates));
+  return result;
  }
 
  // ── 本地检索模式（--local）：跳过身份探针，不触任何云端检索端点 ──
