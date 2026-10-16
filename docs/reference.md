@@ -543,9 +543,11 @@ gtrk project export --gtrk <工程文件> --formats jianying,xml --out <产物�
 
 颗粒预渲前会先完成 HTML、路径和缓存预检；预检失败不会提交任何云任务。单颗粒渲染或下载失败会记录在 `result.json`，其余格式继续导出。`--json` 输出单行结果 JSON，人读日志走 stderr。
 
+**片段底板**（`background_fill`）：剪映 / CapCut 的最底层轨原生承接；其它轨（以及 Pr / FCPXML / OTIO 的全部轨）由云端在该片段之下插一段同色纯色图，模糊底在那些位置降级为纯黑并在日志里点名。纯色图引用产物目录里的 `solid-<rrggbb>-<W>x<H>.png`，命令在写工程文件之前把它们写好——**挪动或删除产物目录会让这些纯色图脱机**。`result.json` 的 `backgroundFill` 记录写出的纯色图与降级告警（工程不带底板时整键缺席）。
+
 ### `gtrk project background` — 片段底板（模糊底 / 纯色）
 
-缺省给**主轨每个视频 / 图片片段**写片段级底板 `background_fill`（gtrk 契约字段）：片段之下、仅在其时长内铺满画布，模糊 = 片段自己画面铺满后的模糊。典型用途是横屏源进竖屏画布时用模糊底替代黑边。客户端可逐片段或多选批量改；从客户端导出的剪映草稿原生承接（主轨是最底层轨），Pr 工程降级为纯黑并提示，本地 `gtrk render` 承接。叠加轨片段与空档不写不改，`struct_meta.client_background` 不动（回执点名它是否仍在）。零计费、不访问云端。
+缺省给**主轨每个视频 / 图片片段**写片段级底板 `background_fill`（gtrk 契约字段）：片段之下、仅在其时长内铺满画布，模糊 = 片段自己画面铺满后的模糊。典型用途是横屏源进竖屏画布时用模糊底替代黑边。客户端可逐片段或多选批量改；从客户端或 `gtrk project export` 导出的剪映草稿原生承接（主轨是最底层轨），Pr 工程降级为纯黑并提示，本地 `gtrk render` 承接。叠加轨片段与空档不写不改，`struct_meta.client_background` 不动（回执点名它是否仍在）。零计费、不访问云端。
 
 `--scope canvas` 走旧的画布级写法：只改 `struct_meta.client_background` 一个键（客户端打开即按它呈现画布背景；剪映 / PR 工程与本地渲染不承接）。
 

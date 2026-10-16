@@ -148,6 +148,10 @@ export interface OralCutOutput {
 	report?: unknown;
 	files?: ProductFile[];
 	errors?: Record<string, string>;
+	/** 产物级告警（video_project_struct：保调未承接 / 片段底板降级等，`format` = 产物键）。 */
+	warnings?: Array<{ kind?: string; format?: string; message?: string; count?: number; clip_ids?: string[] }>;
+	/** [link-clip-background-fill] 工程文件引用、须由调用方写出的纯色图（未校验原样；见 `acceptMaterializeFiles`）。 */
+	materialize_files?: unknown[];
 }
 
 /**

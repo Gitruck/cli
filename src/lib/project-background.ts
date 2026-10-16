@@ -16,8 +16,11 @@
  * 只动这一个键：其余 `struct_meta` 键（broll / mg / client_visual_elements …）与轨道、素材原样保留。
  * 写回走 `writeGtrkAtomic`（临时文件 + rename + 内容 revision 双重校验）；值未变时不写盘。
  */
+import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import { readGtrk, writeGtrkAtomic } from "./gtrk-writeback";
 import { pickMainTrack } from "./pip-lay";
+import { encodeSolidPng, MAX_BED_DIM } from "./solid-png";
 
 /** 缺省模糊强度 = 客户端「Medium」档；客户端按画布短边各向同性换算（`fix-blur-sigma-isotropic`），1080×1920 竖屏下 σ = 40，与精剪模糊底同值（以真机目视为准）。 */
 export const DEFAULT_BLUR_INTENSITY = 200;
@@ -217,4 +220,80 @@ export function runBackground(
 		revision_before: revision,
 		revision_after: revisionAfter,
 	};
+}
+
+// ── 工程导出的片段底板物化（infra add-clip-background-fill design D3「落点定稿」）─────────────
+//
+// 剪映 / Pr 表达不了上层轨片段的填充，云端在导出副本里插辅助轨，引用本机 `<nle_asset_dir>/solid-<rrggbb>-<W>x<H>.png`，
+// 结果 `materialize_files` 列出须由调用方写出的纯色图。`gtrk project export` 把产物目录作为 `nle_asset_dir` 上行
+// （所有格式共用一处：XML / 草稿都按绝对路径引用），拿回结果后写图。与客户端 `tonghe/materialize-files.ts` 同口径。
+
+/** 工程里有没有带 `background_fill` 的视频片段（没有就不上行 `nle_asset_dir`，提交体与改前逐字节一致）。 */
+export function hasClipFill(gtrk: Record<string, unknown>): boolean {
+	const tracks = Array.isArray(gtrk.video_track) ? (gtrk.video_track as Array<{ track_timeline?: unknown }>) : [];
+	return tracks.some((t) =>
+		Array.isArray(t.track_timeline) &&
+		(t.track_timeline as Array<Record<string, unknown>>).some((c) => c && typeof c === "object" && CLIP_FILL_KEY in c),
+	);
+}
+
+export interface MaterializeSolid {
+	/** 正斜杠绝对路径（与云端引用的字面一致）。 */
+	path: string;
+	color: string;
+	width: number;
+	height: number;
+}
+
+const fwd = (p: string): string => p.split("\\").join("/").replace(/\/+$/, "");
+
+/**
+ * 只认落在本次给出的目录里、文件名由色值与尺寸推得出（`solid-<rrggbb>-<W>x<H>.png`）的条目：
+ * 云端回传的是路径，照单全收等于让它往本机任意位置写文件。其余丢弃并计数。
+ */
+export function acceptMaterializeFiles(raw: unknown, dir: string): { files: MaterializeSolid[]; rejected: number } {
+	if (!Array.isArray(raw)) return { files: [], rejected: 0 };
+	const want = fwd(dir).toLowerCase();
+	const files: MaterializeSolid[] = [];
+	const seen = new Set<string>();
+	let rejected = 0;
+	for (const item of raw) {
+		const f = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+		const { path, color, width, height } = f;
+		const ok =
+			f.kind === "solid" &&
+			typeof path === "string" &&
+			typeof color === "string" &&
+			/^#[0-9a-f]{6}$/i.test(color) &&
+			Number.isInteger(width) &&
+			Number.isInteger(height) &&
+			(width as number) > 0 &&
+			(height as number) > 0 &&
+			(width as number) <= MAX_BED_DIM &&
+			(height as number) <= MAX_BED_DIM;
+		const p = ok ? fwd(path as string) : "";
+		const cut = p.lastIndexOf("/");
+		const name = ok ? `solid-${(color as string).slice(1).toLowerCase()}-${width}x${height}.png` : "";
+		if (!ok || p.slice(0, cut).toLowerCase() !== want || p.slice(cut + 1) !== name) {
+			rejected++;
+			continue;
+		}
+		if (seen.has(p.toLowerCase())) continue;
+		seen.add(p.toLowerCase());
+		files.push({ path: p, color: (color as string).toUpperCase(), width: width as number, height: height as number });
+	}
+	return { files, rejected };
+}
+
+/** 写出纯色图（已在盘即跳过：像素由文件名完全决定）；写失败直接抛。返回新写张数。 */
+export async function writeMaterializeFiles(files: MaterializeSolid[], dir: string): Promise<number> {
+	if (!files.length) return 0;
+	await mkdir(dir, { recursive: true });
+	let written = 0;
+	for (const f of files) {
+		if (existsSync(f.path)) continue;
+		await writeFile(f.path, encodeSolidPng({ hex: f.color, width: f.width, height: f.height }));
+		written++;
+	}
+	return written;
 }

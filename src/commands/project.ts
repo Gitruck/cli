@@ -40,7 +40,7 @@ import { invalidateUpload, uploadCached } from "../lib/upload-cache";
 import { readJson } from "../lib/read-json";
 import { DEFAULT_VISIBILITY_BACKOFF_MS } from "../lib/upload-submit";
 import { defaultExtsFor, extFromUrl, pickUrl } from "../lib/tool-descriptors";
-import { FORMAT_META, materializeResult as realMaterializeResult, type MaterializeResult } from "../lib/materialize";
+import { baseFormat, FORMAT_META, materializeResult as realMaterializeResult, type MaterializeResult } from "../lib/materialize";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
 import { r3 } from "../lib/frame-domain";
@@ -64,7 +64,7 @@ import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait
 import { resolveJianyingDraftDir } from "../lib/jianying";
 import { createOutDir, timestamp as toolTimestamp } from "../lib/tool-runner";
 import { composeProject } from "../lib/project-compose";
-import { runBackground, type BackgroundOpts } from "../lib/project-background";
+import { acceptMaterializeFiles, hasClipFill, runBackground, writeMaterializeFiles, type BackgroundOpts } from "../lib/project-background";
 import { GtrkWritebackConflictError } from "../lib/gtrk-writeback";
 export { buildComposedProject, parseComposeList, composeProject } from "../lib/project-compose";
 
@@ -189,6 +189,8 @@ export interface BuildExportPayloadOptions {
 	formats: string[];
 	particlePaths?: Record<string, string>;
 	draftDir?: string;
+	/** [link-clip-background-fill] 片段底板纯色图落点（产物目录）→ `struct_meta.nle_asset_dir`；缺省不上行。 */
+	assetDir?: string;
 }
 
 /** 构造 video_project_struct 提交体；源 gtrk 只读，返回全新对象。 */
@@ -219,6 +221,10 @@ export function buildExportPayload(
 	if (opts.draftDir) {
 		const current = out.struct_meta && typeof out.struct_meta === "object" && !Array.isArray(out.struct_meta) ? out.struct_meta : {};
 		out.struct_meta = { ...(current as Record<string, unknown>), nle_draft_dir: resolve(opts.draftDir) };
+	}
+	if (opts.assetDir) {
+		const current = out.struct_meta && typeof out.struct_meta === "object" && !Array.isArray(out.struct_meta) ? out.struct_meta : {};
+		out.struct_meta = { ...(current as Record<string, unknown>), nle_asset_dir: resolve(opts.assetDir).split("\\").join("/") };
 	}
 
 	if (exportUsesNle(opts.formats)) {
@@ -545,6 +551,13 @@ export interface ProjectExportResult extends MaterializeResult {
 		failed: number;
 	} & Pick<ParticleSummary, "composites">;
 	droppedByContract: ExportContractDrops;
+	/** [link-clip-background-fill] 片段底板：写出的纯色图、被拒条数、云端降级告警（工程不带填充且无告警时整键缺席）。 */
+	backgroundFill?: {
+		solids: string[];
+		written: number;
+		rejected: number;
+		warnings: Array<{ kind: string; format?: string; count?: number; clip_ids?: string[] }>;
+	};
 }
 
 function hasExportOnlyOptions(opts: ProjectInitOpts): string | undefined {
@@ -714,7 +727,9 @@ export async function runProjectExport(
 		log.tickEnd();
 	}
 
-	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, draftDir });
+	// [link-clip-background-fill] 工程带片段底板时，产物目录兼作纯色底图落点（所有格式共用、按绝对路径引用）
+	const assetDir = hasClipFill(gtrk) ? outDir : undefined;
+	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, draftDir, assetDir });
 	const droppedByContract = inspectContractDrops(gtrk, gtrkDir, particleSkipped.map((s) => s.clipId));
 	if (droppedByContract.clientVisualElements) {
 		log.warn(`契约告警：client_visual_elements 在导出链中不承接（${droppedByContract.clientVisualElementCount} 个顶层条目）`);
@@ -738,6 +753,20 @@ export async function runProjectExport(
 	log.step(`▶ 精修工程导出：${basename(gtrkPath)} → ${formats.join("/")}`);
 	const taskId = await submit(cfg, "video_project_struct", payload);
 	const output = await poll(cfg, "video_project_struct", taskId);
+	// 纯色底图先于工程文件落地：草稿 / XML 引用它，宁可「图在、草稿还没写」也不留「草稿引用了、盘上没有」
+	const solids = assetDir ? acceptMaterializeFiles(output.materialize_files, assetDir) : { files: [], rejected: 0 };
+	const solidsWritten = await writeMaterializeFiles(solids.files, outDir);
+	if (solids.rejected) log.warn(`云端物化清单有 ${solids.rejected} 条不在产物目录或形状不自洽，未写出；对应片段之下会露出下层画面`);
+	const rawFillWarnings = (output.warnings ?? []).filter((w) => typeof w?.kind === "string" && w.kind.startsWith("background_fill_"));
+	for (const w of rawFillWarnings) {
+		log.warn(`${w.format ? (FORMAT_META[baseFormat(w.format)]?.label ?? w.format) : "工程"}：${w.message ?? w.kind}`);
+	}
+	const fillWarnings = rawFillWarnings.map((w) => ({
+		kind: w.kind as string,
+		...(w.format ? { format: w.format } : {}),
+		...(typeof w.count === "number" ? { count: w.count } : {}),
+		...(Array.isArray(w.clip_ids) ? { clip_ids: w.clip_ids } : {}),
+	}));
 	const materialize = depsOverride.materialize ?? realMaterializeResult;
 	const landed = await materialize({
 		outDir,
@@ -759,6 +788,9 @@ export async function runProjectExport(
 		formats,
 		particles: { ...formatParticleSummary(plan, particleRendered, particleSkipped), ...(takeover ? compositeSummaryOf(takeover) : {}) },
 		droppedByContract,
+		...(assetDir || fillWarnings.length
+			? { backgroundFill: { solids: solids.files.map((f) => f.path), written: solidsWritten, rejected: solids.rejected, warnings: fillWarnings } }
+			: {}),
 	};
 	await writeFile(join(outDir, "result.json"), JSON.stringify(result, null, 2));
 	if (opts.open !== false) {
