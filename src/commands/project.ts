@@ -66,6 +66,7 @@ import { createOutDir, timestamp as toolTimestamp } from "../lib/tool-runner";
 import { composeProject } from "../lib/project-compose";
 import { acceptMaterializeFiles, hasClipFill, runBackground, writeMaterializeFiles, type BackgroundOpts } from "../lib/project-background";
 import { GtrkWritebackConflictError } from "../lib/gtrk-writeback";
+import { clientOnlyElementCount, clientOnlyNotice, summarizeClientOnly, type ClientOnlySummary } from "../lib/client-only-state";
 export { buildComposedProject, parseComposeList, composeProject } from "../lib/project-compose";
 
 // cli 域同步轻接口（SYNC_INLINE 家族）：cloud.ts 的 /task/${taskType} 模板天然拼出该路径
@@ -133,7 +134,10 @@ function isPortableAbsolutePath(value: string): boolean {
 
 export interface ExportContractDrops {
 	clientVisualElements: boolean;
+	/** 客户端专属视觉元素**个数**（link-client-only-notice 起按元素计，此前误按车道数计） */
 	clientVisualElementCount: number;
+	/** 客户端专属视觉状态分类计数（文字 / 贴纸 / 图形 / 特效 / 其它 + 画布背景是否非缺省） */
+	clientOnly: ClientOnlySummary;
 	noPathMaterialIds: string[];
 	missingMaterialPaths: string[];
 	beatClips: number;
@@ -160,14 +164,8 @@ export function inspectContractDrops(
 			const path = String(m.path);
 			return isPortableAbsolutePath(path) ? path : resolve(gtrkDir, path);
 		});
-	const lanes = (gtrk.struct_meta as Record<string, unknown> | undefined)?.client_visual_elements;
-	const clientVisualElementCount = Array.isArray(lanes)
-		? lanes.length
-		: lanes && typeof lanes === "object" && Array.isArray((lanes as Record<string, unknown>).lanes)
-			? ((lanes as Record<string, unknown>).lanes as unknown[]).length
-			: lanes && typeof lanes === "object"
-				? Object.keys(lanes).length
-			: 0;
+	const clientOnly = summarizeClientOnly(gtrk);
+	const clientVisualElementCount = clientOnlyElementCount(clientOnly);
 	const beatClips = Array.isArray(gtrk.beat_track)
 		? (gtrk.beat_track as Record<string, unknown>[]).reduce(
 				(total, t) => (t.hidden === true ? total : total + (Array.isArray(t.track_timeline) ? t.track_timeline.length : 0)),
@@ -177,6 +175,7 @@ export function inspectContractDrops(
 	return {
 		clientVisualElements: clientVisualElementCount > 0,
 		clientVisualElementCount,
+		clientOnly,
 		noPathMaterialIds,
 		missingMaterialPaths,
 		beatClips,
@@ -731,9 +730,13 @@ export async function runProjectExport(
 	const assetDir = hasClipFill(gtrk) ? outDir : undefined;
 	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, draftDir, assetDir });
 	const droppedByContract = inspectContractDrops(gtrk, gtrkDir, particleSkipped.map((s) => s.clipId));
-	if (droppedByContract.clientVisualElements) {
-		log.warn(`契约告警：client_visual_elements 在导出链中不承接（${droppedByContract.clientVisualElementCount} 个顶层条目）`);
-	}
+	// link-client-only-notice：人话说清哪些东西进不了这次导出的工程文件（原告警直出字段名、且按车道计数）
+	const clientOnlyMsg = clientOnlyNotice(
+		droppedByContract.clientOnly,
+		"export",
+		(gtrk.struct_meta as Record<string, unknown> | undefined)?.client_background,
+	);
+	if (clientOnlyMsg) log.warn(clientOnlyMsg);
 	if (droppedByContract.noPathMaterialIds.length) {
 		log.warn(`契约告警：${droppedByContract.noPathMaterialIds.length} 条素材没有本机 path，将交服务端校验：${droppedByContract.noPathMaterialIds.join(", ")}`);
 	}

@@ -543,11 +543,13 @@ gtrk project export --gtrk <工程文件> --formats jianying,xml --out <产物�
 
 颗粒预渲前会先完成 HTML、路径和缓存预检；预检失败不会提交任何云任务。单颗粒渲染或下载失败会记录在 `result.json`，其余格式继续导出。`--json` 输出单行结果 JSON，人读日志走 stderr。
 
-**片段底板**（`background_fill`）：剪映 / CapCut 的最底层轨原生承接；其它轨（以及 Pr / FCPXML / OTIO 的全部轨）由云端在该片段之下插一段同色纯色图，模糊底在那些位置降级为纯黑并在日志里点名。纯色图引用产物目录里的 `solid-<rrggbb>-<W>x<H>.png`，命令在写工程文件之前把它们写好——**挪动或删除产物目录会让这些纯色图脱机**。`result.json` 的 `backgroundFill` 记录写出的纯色图与降级告警（工程不带底板时整键缺席）。
+**只在客户端出画的东西**（客户端加的文字、贴纸、图形、特效与画布背景）进不了这次导出的工程文件：工程里有它们时提交前提示一次哪几类、各几个；有文字时指向客户端导出剪映草稿（客户端会把文字带成可编辑字幕）。`result.json` 的 `droppedByContract.clientOnly` 记分类计数，`clientVisualElementCount` 为元素个数（此前误按车道数计）。
+
+**片段底板**（`background_fill`）：剪映 / CapCut 的最底层轨原生承接；其它轨由云端在该片段之下插一条辅助轨——纯色 = 一段同色纯色图，模糊 = 同一段素材（同一时间段、静音、铺满画布）加剪映「模糊」特效。Pr 工程全部轨同样处理，模糊用高斯模糊；FCPXML / OTIO 只做纯色，模糊降级为纯黑并在日志里点名（素材缺尺寸信息、没法铺满时，剪映 / Pr 也降级）。片段自己就铺满画布时不垫底。纯色图引用产物目录里的 `solid-<rrggbb>-<W>x<H>.png`，命令在写工程文件之前把它们写好——**挪动或删除产物目录会让这些纯色图脱机**。`result.json` 的 `backgroundFill` 记录写出的纯色图与降级告警（工程不带底板时整键缺席）。
 
 ### `gtrk project background` — 片段底板（模糊底 / 纯色）
 
-缺省给**主轨每个视频 / 图片片段**写片段级底板 `background_fill`（gtrk 契约字段）：片段之下、仅在其时长内铺满画布，模糊 = 片段自己画面铺满后的模糊。典型用途是横屏源进竖屏画布时用模糊底替代黑边。客户端可逐片段或多选批量改；从客户端或 `gtrk project export` 导出的剪映草稿原生承接（主轨是最底层轨），Pr 工程降级为纯黑并提示，本地 `gtrk render` 承接。叠加轨片段与空档不写不改，`struct_meta.client_background` 不动（回执点名它是否仍在）。零计费、不访问云端。
+缺省给**主轨每个视频 / 图片片段**写片段级底板 `background_fill`（gtrk 契约字段）：片段之下、仅在其时长内铺满画布，模糊 = 片段自己画面铺满后的模糊。典型用途是横屏源进竖屏画布时用模糊底替代黑边。客户端可逐片段或多选批量改；从客户端或 `gtrk project export` 导出的剪映草稿原生承接（主轨是最底层轨），Pr 工程用同一素材铺满加高斯模糊，FCPXML / OTIO 降级为纯黑并提示，本地 `gtrk render` 承接。叠加轨片段与空档不写不改，`struct_meta.client_background` 不动（回执点名它是否仍在）。零计费、不访问云端。
 
 `--scope canvas` 走旧的画布级写法：只改 `struct_meta.client_background` 一个键（客户端打开即按它呈现画布背景；剪映 / PR 工程与本地渲染不承接）。
 
@@ -700,6 +702,7 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
 - **可见性只读 `hidden` 字段**（客户端的「小眼睛」）：关掉的轨整条不进片，如实计数告知。渲染器**不猜**哪条该叠。
 - **多条候选轨都可见时成片取最上层**（= 客户端预览所见）。要换，在客户端关小眼睛或删轨。
 - overlay 素材本地缺失（如 B-roll 代理没下全）**只降级不阻断**：该 clip 不叠 + 告警，片子照出。
+- **只在客户端出画的东西不进片**：客户端加的文字（含 `gtrk subtitle lay` 铺的字幕）、贴纸、图形、特效，以及画布背景（`gtrk project background --scope canvas`）。工程里有它们时，渲染前提示一次哪几类、各几个，并指向客户端本地导出；不拦、不改渲染。`--json` 结果恒带 `clientOnly`（`text / sticker / graphic / effect / other` 计数与 `background` 布尔，全零也给）。
 
 **颗粒那一段有计费**（本命令唯一的云端出口）：
 

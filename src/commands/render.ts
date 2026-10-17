@@ -20,6 +20,7 @@ import {
 import { runPostRenderQc } from "./qc";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
+import { clientOnlyNotice, summarizeClientOnly } from "../lib/client-only-state";
 
 interface RenderOpts {
 	out?: string;
@@ -77,6 +78,16 @@ export function registerRender(program: Command): void {
 			log.step(`▶ 本地渲染：${basename(gtrkAbs)} → ${basename(outMp4)}`);
 			const project = await readGtrkFile(gtrkAbs);
 
+			// link-client-only-notice：本地渲染不读客户端专属的文字 / 贴纸 / 图形 / 特效与画布背景，
+			// 用户在这里才真受影响（客户端已不在编辑器里常驻提示）——渲染前说一次，不拦、不改行为。
+			const clientOnly = summarizeClientOnly(project);
+			const clientOnlyMsg = clientOnlyNotice(
+				clientOnly,
+				"render",
+				(project.struct_meta as Record<string, unknown> | undefined)?.client_background,
+			);
+			if (clientOnlyMsg) log.warn(clientOnlyMsg);
+
 			// ── 颗粒预渲（计费闸在此，**先于任何 ffmpeg 动作**）────────────────────────
 			// 拒绝确认 ⇒ 零副作用退出：MUST NOT 已经写了半个 mp4 才问用户要不要花钱。
 			const particles = await prepareParticlesForRender(
@@ -129,6 +140,8 @@ export function registerRender(program: Command): void {
 						overlay: result.overlay,
 						// 滤镜图规模（adjust-local-render-clip-ceiling）：clips 不含叠加元素
 						scale: result.scale,
+						// 客户端专属视觉状态（link-client-only-notice）：全零也给，「查过且没有」与「没查」分得开
+						clientOnly,
 						...(qc ? { qc: qc.summary } : {}),
 					}),
 				);
