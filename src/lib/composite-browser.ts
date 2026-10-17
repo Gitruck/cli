@@ -4,12 +4,12 @@
  * - 不加 npm 依赖：用本机已装的 Chrome / Edge（Windows 必有 Edge），找不到就如实报「排版未机检」。
  * - 走 `--remote-debugging-pipe`（CDP 消息经 fd 3 / 4 的管道、NUL 分隔），不开端口、不依赖 WebSocket
  *   （Node 20 没有全局 WebSocket，本仓 engines 是 >=20.6）。
- * - 进程树收干净：Chrome 会拉起一串子进程，Windows 上按进程树 taskkill。
+ * - 进程树收干净：Chrome 会拉起一串子进程，Windows 上按进程树结束，结束前先提优先级（满载时才退得完，见 `boostForExit`）。
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { constants as osConstants, setPriority, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { installedHeadlessShell, PINNED_HEADLESS_SHELL } from "./runtime-assets";
@@ -124,25 +124,110 @@ export const REAP_GRACE_MS = 1000;
 export const REAP_WAIT_MS = 5000;
 /** 查进程表的 PowerShell 本身的时限（满载时起它也要几秒）。 */
 const REAP_QUERY_TIMEOUT_MS = 15_000;
+/** 删浏览器用户目录的总时限：删不掉（还有进程握着文件）就留在系统临时目录，不拖收尾。 */
+const PROFILE_RM_BUDGET_MS = 2000;
 
 /**
- * Windows：结束一棵无头浏览器进程树里还活着的进程（执行查询的 PowerShell 自己除外）。两条认法，查询与结束在同一条
- * 管道里完成（按查到的进程对象结束，不先攒进程号列表再杀——进程号会被复用）：
+ * Windows：把本进程的一个子进程（浏览器主进程、编码器）的优先级类提到「高」，让它的退出（自己退或被结束）尽快走完。
+ *
+ * 浏览器多数线程低于普通优先级运行；进程退出要等每个线程都被调度到一次，普通优先级的负载占满 CPU 时它们排不上。
+ * 实测（2026-10-17，20 线程机器 + 24 个普通优先级烧核进程）：直接结束，主进程 4–11 分钟后才真正退出（期间握着调试管道
+ * 与用户目录、工作目录里的文件）；先提到「高」再结束 0.06–0.2 秒；已在结束中的进程再提也随即退出。
+ * 只用于本进程的直接子进程且尚未退出时（句柄在手，进程号不会被复用）；失败不抛。
+ */
+function boostForExit(proc: ChildProcess): void {
+	if (process.platform !== "win32" || !proc.pid || proc.exitCode !== null || proc.signalCode !== null) return;
+	try {
+		setPriority(proc.pid, osConstants.priority.PRIORITY_HIGH);
+	} catch {
+		/* 已退出 / 无权：照常结束，只是满载时退得慢 */
+	}
+}
+
+/** 强制结束本进程的一个子进程（浏览器主进程、编码器）：Windows 上先提优先级，满载时才退得完（见 `boostForExit`）。 */
+export function forceKill(proc: ChildProcess): void {
+	boostForExit(proc);
+	proc.kill("SIGKILL");
+}
+
+/**
+ * 删目录：只在顶层重试、总时长有上限，返回是否删净。不用 `fs.rm` 自带的 `maxRetries`：它在每一层目录各重试一圈，
+ * 文件被别的进程占着时重试次数逐层相乘（两层深、`maxRetries: 3` 要试 4×4×4 轮，约 28 秒才放弃，2026-10-17 实测）。
+ */
+export async function removeDir(path: string, budgetMs: number): Promise<boolean> {
+	const deadline = Date.now() + budgetMs;
+	for (let delay = 50; ; delay = Math.min(delay * 2, 400)) {
+		try {
+			await rm(path, { recursive: true, force: true });
+			return true;
+		} catch {
+			if (Date.now() + delay > deadline) return false;
+			await new Promise((r) => setTimeout(r, delay));
+		}
+	}
+}
+
+export interface BrowserTreeTarget {
+	/** 本次独有的用户目录（主进程命令行里带着它）。 */
+	profile: string;
+	/** 主进程号。 */
+	pid: number;
+	/** 主进程映像名（子进程同名）。 */
+	image: string;
+	/** 子进程创建时刻上限：主进程退出时刻，或强制结束之前的那一刻。 */
+	before: Date;
+}
+
+let pendingReap: { targets: BrowserTreeTarget[]; done: Promise<void> } | null = null;
+
+/**
+ * Windows：结束一棵无头浏览器进程树里还活着的进程（执行查询的 PowerShell 自己除外）。两条认法，查询、提优先级与结束
+ * 在同一条管道里逐个完成（认到一个处理一个，并核对启动时刻；不先攒进程号列表——进程号会被复用）：
  * - 命令行里带本次独有的用户目录 = 主进程（用户自己的浏览器不会带这个目录）；
- * - 父进程号 = 本次主进程号、映像名相同、且创建时刻不晚于主进程退出时刻 = 它的子进程。gpu / utility / renderer 的
+ * - 父进程号 = 本次主进程号、映像名相同、且创建时刻不晚于 `before` = 它的子进程。gpu / utility / renderer 的
  *   命令行**不带**用户目录（2026-10-16 实测），只能这样认；主进程退出后号若被复用，复用者的子进程必在那一刻之后创建，
  *   认不进来。
- * 有时限、失败不抛：这是收尾，不能反过来拖住收尾。非 Windows 无需（子进程随主进程结束）。
+ * 认到的先提优先级（进程「高」、各线程「最高」）再结束（原因见 `boostForExit`；已在结束中的也照提，提了才退得完）。
+ * 同一轮事件里的多次调用并成一次进程表查询（取消时几个工作页同时结束；满载时 PowerShell 起一次加查一遍进程表要
+ * 1.5–4 秒，几个一起起互相拖慢）。有时限、失败不抛：这是收尾，不能反过来拖住收尾。非 Windows 无需（子进程随主进程结束）。
  */
-export function terminateBrowserTree(t: { profile: string; pid: number; image: string; before: Date }): Promise<void> {
+export function terminateBrowserTree(t: BrowserTreeTarget): Promise<void> {
 	if (process.platform !== "win32" || !Number.isInteger(t.pid)) return Promise.resolve();
+	if (!pendingReap) {
+		const batch: { targets: BrowserTreeTarget[]; done: Promise<void> } = { targets: [], done: Promise.resolve() };
+		batch.done = new Promise((res) =>
+			setImmediate(() => {
+				pendingReap = null;
+				reapTrees(batch.targets).then(res);
+			}),
+		);
+		pendingReap = batch;
+	}
+	pendingReap.targets.push(t);
+	return pendingReap.done;
+}
+
+function reapTrees(targets: BrowserTreeTarget[]): Promise<void> {
 	const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 	const ps =
-		`$t = [datetime]::Parse(${q(t.before.toISOString())}); ` +
+		targets.map((t, i) => `$t${i} = [datetime]::Parse(${q(t.before.toISOString())}); `).join("") +
 		"Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and (" +
-		`($_.CommandLine -and $_.CommandLine.Contains(${q(t.profile)})) -or ` +
-		`($_.ParentProcessId -eq ${t.pid} -and $_.Name -eq ${q(t.image)} -and $_.CreationDate -le $t)` +
-		") } | Invoke-CimMethod -MethodName Terminate | Out-Null";
+		targets
+			.map(
+				(t, i) =>
+					`($_.CommandLine -and $_.CommandLine.Contains(${q(t.profile)})) -or ` +
+					`($_.ParentProcessId -eq ${t.pid} -and $_.Name -eq ${q(t.image)} -and $_.CreationDate -le $t${i})`,
+			)
+			.join(" -or ") +
+		// 认到即在本进程里提优先级、结束（不走 CIM 方法：每次调用一个来回，十来个进程要多花 3 秒以上）：
+		// - 按进程号打开后核对启动时刻与查到的创建时刻一致：查询之后号若被复用，复用者的启动时刻不同，不碰；
+		//   已在退出、读不到启动时刻的，只提优先级不结束（它本就在退，提了才退得完）；
+		// - 优先级类之外逐个线程提到「最高」：已在退出的进程改优先级类，正在走退出的那个线程跟不上（实测 GPU 进程
+		//   剩一个基础优先级 7 的线程，满载下排不上；直接提线程才随即退完）
+		") } | ForEach-Object { try { $p = [Diagnostics.Process]::GetProcessById([int]$_.ProcessId); $exiting = $false; " +
+		"try { if ([math]::Abs(($p.StartTime - $_.CreationDate).TotalMilliseconds) -ge 1) { return } } catch { $exiting = $true }; " +
+		"$p.PriorityClass = 'High'; foreach ($th in $p.Threads) { try { $th.PriorityLevel = 'Highest' } catch {} }; " +
+		"if (-not $exiting) { $p.Kill() } } catch {} }";
 	return new Promise((res) => {
 		const p = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { stdio: "ignore", windowsHide: true });
 		const t = setTimeout(() => p.kill(), REAP_QUERY_TIMEOUT_MS);
@@ -165,11 +250,14 @@ export class HeadlessBrowser {
 	private listeners = new Set<(m: Record<string, unknown>) => void>();
 	private sessionId: string | null = null;
 	private exited = false;
-	/** 调试管道已关（子进程也全退了）：`exit` 只说明主进程退了。 */
+	/** 调试管道已关（本端 `close`）：管道只由主进程握着，与主进程退出同时关上（2026-10-17 实测）；子进程可能还在退。 */
 	private pipesClosed = false;
 	/** 主进程映像名与退出时刻：收遗留子进程时按「父进程号 + 映像名 + 创建早于退出」认（见 `terminateBrowserTree`）。 */
 	private image: string;
 	private exitedAt: Date | null = null;
+	/** `closeAsync` 只走一遍（取消与出错可能先后各收一次）；收过树就不再收。 */
+	private closing: Promise<void> | null = null;
+	private reaped = false;
 
 	private mode: LaunchMode;
 	private frameTicks = 0;
@@ -400,16 +488,15 @@ export class HeadlessBrowser {
 	 * 机读进度会断档 1 秒以上；删目录的重试同理走异步）。
 	 *
 	 * `graceMs > 0`：先发 `Browser.close` 请浏览器自己退（整棵进程树一起收、文件随即解锁），超时再强制结束。
-	 * 实测（2026-10-16）：强制结束本身 0.5–0.8 秒，但子进程还占着用户目录里的文件，删目录要重试到 1.6–26 秒；
-	 * 自己退出约 0.2 秒、随后删目录 0.2 秒。`graceMs = 0` 立即强制结束。
+	 * 实测（2026-10-16）：空闲时自己退出约 0.2 秒、随后删目录 0.2 秒。`graceMs = 0` 立即强制结束。
 	 *
-	 * 主进程退了不等于整棵树退了：满载时渲染 / GPU 子进程要几十秒到几分钟才轮到退出（2026-10-16 满载实测 4–147 秒），
-	 * 期间握着调试管道（本进程要等它关上才能退出）和用户目录里的文件（删不掉）；`taskkill /T` 也会漏（spike-3：漏 24 个）。
-	 * 所以先 `reapChildren` 收干净再删目录。强制结束必然留下子进程：收树与 `taskkill` 同时发起，不等主进程退了再查
-	 * （满载时两者各要几秒，串行会把收尾拖过十几秒）。
+	 * 满载时（2026-10-17 实测）：被结束的浏览器进程排不上调度、迟迟退不完（主进程 4–11 分钟），期间握着调试管道（本进程
+	 * 退不出）和用户目录、工作目录里的文件；`taskkill /T` 并没有漏掉子进程，它们只是在排队退出。所以结束（或请它自己退）
+	 * 之前先把主进程提到「高」优先级（`boostForExit`），强制结束时直接结束主进程，同时按进程树收子进程（同样先提优先级，
+	 * 见 `terminateBrowserTree`），收完再删用户目录（`removeProfile`）。重复调用返回同一个 Promise。
 	 */
 	closeAsync(graceMs = 0): Promise<void> {
-		return new Promise((res) => {
+		return (this.closing ??= new Promise((res) => {
 			let finished = false;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			let forced: Promise<void> | null = null;
@@ -417,37 +504,39 @@ export class HeadlessBrowser {
 				if (finished) return;
 				finished = true;
 				if (timer) clearTimeout(timer);
-				// 收完子进程仍有个别文件被占着时删不掉：留在系统临时目录，不影响结果
 				this.reapChildren(forced)
-					.then(() => rm(this.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }))
+					.then(() => this.removeProfile())
 					.then(res, () => res());
 			};
 			if (this.exited || !this.proc.pid) return done();
 			const kill = () => {
 				if (finished) return;
-				if (process.platform === "win32") {
-					// 主进程此刻还活着，进程号不会被复用：创建时刻上限取此刻
-					forced = terminateBrowserTree({ profile: this.profile, pid: this.proc.pid as number, image: this.image, before: new Date() });
-					spawn("taskkill", ["/F", "/T", "/PID", String(this.proc.pid)], { stdio: "ignore" }).on("close", done);
-				} else {
-					this.proc.kill("SIGKILL");
-					done();
-				}
+				// 主进程此刻还活着，进程号不会被复用：子进程创建时刻上限取结束之前的这一刻
+				const before = new Date();
+				forceKill(this.proc);
+				if (process.platform === "win32") forced = this.reapTree(before);
+				done();
 			};
 			if (graceMs <= 0) return kill();
 			this.proc.once("exit", done);
 			timer = setTimeout(kill, graceMs);
+			boostForExit(this.proc);
 			this.send("Browser.close", {}, false, graceMs).catch(() => {
 				/* 管道已断或没回应：等超时强制结束 */
 			});
-		});
+		}));
+	}
+
+	private reapTree(before: Date): Promise<void> {
+		this.reaped = true;
+		return terminateBrowserTree({ profile: this.profile, pid: this.proc.pid as number, image: this.image, before });
 	}
 
 	/**
-	 * 主进程退出后收子进程：调试管道关上 = 整棵树都退了。强制结束时收树已随 `taskkill` 发起（`forced`），等它完成；
-	 * 自己退出的，`REAP_GRACE_MS` 内没关才去结束这棵树里还活着的进程（认法见 `terminateBrowserTree`：用户目录 /
-	 * 父进程号 + 映像名 + 创建时刻；MUST NOT 按进程号列表结束）。再等 `REAP_WAIT_MS` 仍没关，松开本端管道，
-	 * 不让本进程陪着等（残留由系统随后回收，不影响结果）。
+	 * 主进程退出后收子进程。强制结束时收树已随结束发起（`forced`），等它完成；自己退出的，`REAP_GRACE_MS` 内调试管道
+	 * 没关才去结束这棵树里还活着的进程（认法见 `terminateBrowserTree`：用户目录 / 父进程号 + 映像名 + 创建时刻；
+	 * MUST NOT 按进程号列表结束）。再等 `REAP_WAIT_MS` 仍没关，松开本端管道，不让本进程陪着等（残留由系统随后回收，
+	 * 不影响结果）。
 	 */
 	private async reapChildren(forced: Promise<void> | null): Promise<void> {
 		if (this.pipesClosed) return;
@@ -455,18 +544,31 @@ export class HeadlessBrowser {
 		const within = (ms: number) => Promise.race([closed, new Promise<boolean>((r) => setTimeout(() => r(false), ms).unref())]);
 		if (forced) await forced;
 		else if (await within(REAP_GRACE_MS)) return;
-		else await terminateBrowserTree({ profile: this.profile, pid: this.proc.pid as number, image: this.image, before: this.exitedAt ?? new Date() });
+		else await this.reapTree(this.exitedAt ?? new Date());
 		if (await within(REAP_WAIT_MS)) return;
-		// 极端满载（连 taskkill / PowerShell 都排不上）：不再陪等，交还本进程的退出权
+		// 极端满载（连 PowerShell 都排不上）：不再陪等，交还本进程的退出权
 		(this.proc.stdio[3] as Writable | null)?.destroy();
 		(this.proc.stdio[4] as Readable | null)?.destroy();
 		this.proc.unref();
 	}
 
+	/**
+	 * 删临时用户目录。删不掉 = 还有子进程握着里面的文件（满载时主进程退了、子进程还在排队退出）：没收过树就收一遍
+	 * （提优先级让它们退完）再删；仍删不净的留在系统临时目录，不影响结果。
+	 */
+	private async removeProfile(): Promise<void> {
+		if (await removeDir(this.profile, PROFILE_RM_BUDGET_MS)) return;
+		if (this.reaped || process.platform !== "win32" || !this.proc.pid) return;
+		await this.reapTree(this.exitedAt ?? new Date());
+		await removeDir(this.profile, PROFILE_RM_BUDGET_MS);
+	}
+
 	close(): void {
 		if (!this.exited && this.proc.pid) {
-			if (process.platform === "win32") spawnSync("taskkill", ["/F", "/T", "/PID", String(this.proc.pid)], { stdio: "ignore" });
-			else this.proc.kill("SIGKILL");
+			if (process.platform === "win32") {
+				boostForExit(this.proc);
+				spawnSync("taskkill", ["/F", "/T", "/PID", String(this.proc.pid)], { stdio: "ignore" });
+			} else this.proc.kill("SIGKILL");
 		}
 		try {
 			rmSync(this.profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });

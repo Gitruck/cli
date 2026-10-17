@@ -11,7 +11,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
 import { availableParallelism, cpus } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -30,7 +29,7 @@ import {
 	type BakePlanFailure,
 	type SourceCluster,
 } from "./composite-bake-plan";
-import { HeadlessBrowser, resolveBakeBrowser, type BakeBrowser } from "./composite-browser";
+import { forceKill, HeadlessBrowser, removeDir, resolveBakeBrowser, type BakeBrowser } from "./composite-browser";
 import { resolveFfmpeg, FFMPEG_INSTALL_HINT, type FfmpegResolution } from "./ffmpeg";
 import { packageRoot } from "./paths";
 import { fetchBrowserManifest, installBrowser } from "./runtime-assets";
@@ -165,6 +164,8 @@ export function withCsp(html: string): string {
 /** 心跳间隔与判死阈值：运行中每 2 秒刷新锁文件修改时间，30 秒没刷新即判遗留（不靠 PID——PID 会被复用）。 */
 const HEARTBEAT_MS = 2000;
 export const STALE_AFTER_MS = 30_000;
+/** 收尾删工作目录的总时限（浏览器与编码器都已结束，平时一次就删净）。 */
+const WORK_RM_BUDGET_MS = 5000;
 
 /** 清扫遗留工作目录（锁文件超过阈值未刷新、或没有锁文件）。返回清掉的目录。 */
 export function sweepStaleWorkDirs(dir: string, now = Date.now()): string[] {
@@ -206,10 +207,11 @@ function openWorkDir(dir: string): { path: string; release: () => Promise<void> 
 	timer.unref();
 	return {
 		path,
-		// 异步删：取消时编码器刚被结束、文件可能还占着，同步重试会卡住事件循环
+		// 异步删：取消时编码器刚被结束、文件可能还占着，同步重试会卡住事件循环。总时长有上限（见 `removeDir`）：
+		// 删不掉的留着，下次运行按锁心跳清扫
 		release: async () => {
 			clearInterval(timer);
-			await rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+			await removeDir(path, WORK_RM_BUDGET_MS);
 		},
 	};
 }
@@ -457,7 +459,7 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 	// 取消即刻并行结束本次起的编码器与浏览器：在途的 CDP 调用随之失败返回，不必等各工作页渲完手上这一帧
 	const onAbort = () => {
 		cancelled = true;
-		for (const enc of live.encoders) enc.kill("SIGKILL");
+		for (const enc of live.encoders) forceKill(enc);
 		for (const b of [...live.browsers]) retire(b);
 	};
 	opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -493,6 +495,8 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 				try {
 					b = await HeadlessBrowser.launch(browser!.exe, launchMode);
 					live.browsers.add(b);
+					// 起的过程中被取消：取消那一刻它还不在 live 里、没被收，别再去开出片台（满载时最多要等 20 秒）
+					if (cancelled) throw new CancelledError();
 					await b.open(stageUrl, 20000);
 					release();
 					return b;
@@ -671,7 +675,7 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 				throw e;
 			} finally {
 				live.encoders.delete(enc);
-				if (enc.exitCode === null) enc.kill("SIGKILL");
+				if (enc.exitCode === null) forceKill(enc);
 			}
 		};
 
@@ -695,7 +699,7 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 	} finally {
 		opts.signal?.removeEventListener("abort", onAbort);
 		if (cancelled) {
-			for (const enc of live.encoders) enc.kill("SIGKILL");
+			for (const enc of live.encoders) forceKill(enc);
 			result.cancelled = true;
 		}
 		// 预起的工作页可能还在路上（或根本没被用上）：等它们落定后一并收掉，再删工作目录（浏览器退了文件才解锁）
