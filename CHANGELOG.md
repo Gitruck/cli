@@ -11,8 +11,22 @@
 
 ## 未发布
 
+## 1.3.5（2026-10-17）
+
+- 新增合成层命令族 `gtrk composite`：`plan` / `review` / `scaffold` / `shots` 把候选窗口写进 `struct_meta.composite`（客户端大纲 CP 行），支持整片铺满 / AI 判定 / 指定区间三种入口；`build` 把场景构建成自包含合成颗粒（随包工具箱 `composite-kit@1`）；`lint` 做静态校验加本机 Chrome / Edge 逐帧排版机检（穿模 / 线条穿画面 / 越界）；`lay` 按自产身份幂等铺进 beat 轨最上层。新增 `/gtrk-composite` skill，口播图纸挂可选合成步。
+- `gtrk composite bake`：用钉定版本的 chrome-headless-shell（`gtrk deps install --browser`）逐帧确定性出帧，按段并发、带缓存；`render` / `project export` 接管已烘焙的合成颗粒，`lint` 增帧纯度检查；支持 `--progress jsonl`，关闭 stdin 即取消（退出码 130），取消或出错时连同浏览器遗留子进程一起收掉。
+- 片段背景填充：`gtrk matrix` 的候选片段自带纯黑 `background_fill`，不再另铺黑底垫轨（`--black-bed` 回到旧形态）；`ai-drama lay` 的 AI 片段同样带黑底；`gtrk project background` 缺省改为逐片段写底板；本地 `gtrk render` 承接片段底板；`project export` 承接云端物化，先写出纯色图再落工程（剪映 / Pr 的上层轨模糊为真模糊，FCPXML / OTIO 降级为纯黑，铺满画布的片段不垫底）。**需配合客户端 1.2.12 起**，旧客户端不认片段底板。
+- `gtrk render` / `project export` 遇到工程里有客户端专属视觉状态（文字 / 贴纸 / 图形 / 特效、画布背景）时用人话提示一次，`--json` 恒带 `clientOnly`；`project export` 的 `clientVisualElementCount` 改按元素计数（原误按车道数）。
+- 外网 B-roll 缺省加入 Pexels 第五平台：解析可选署名字段（`uploader_url` / `license`），平台 `disabled` 不算降级；旧服务端不认 pexels 时提示加 `--platforms` 继续；未指定平台时先回看四平台旧续跑记录，不重复扣费；`source_urls` 接受 Pexels 视频页。**服务端开关打开前 Pexels 只报 `disabled`、不出候选。**
 - `matrix material --scope clip|image` 缺省附带 Pexels 补充结果：单列在 `--json` 顶层 `pexels_results`（另有 `pexels_status`、`counts.pexels`），不进 `results`、不算候选数，人读输出另起一段并在段首署名 Pexels；`--no-stock` 关闭，`audio` 不带。补充素材直接用 `download_url` 下载，`matrix fetch` 见 `pexels:` id 会整批拒绝。**需服务端 `add-pexels-stock-material-search` 上线并打开开关后才会出现补充结果**，老服务端下只提示一次、不报错。
 - `tool video_highlight` 分析代理升至 448p/4fps（libx264 CRF 28；本地代理缓存按编码参数区分，参数变更后自动重新生成），缺省附单声道低码率原声，新增 `--no-audio`；上传前本地自检，旧版 224 代理不再复用。**需云端先升级，旧云端会以「短边必须224」拒绝新代理。**
+- MAD 缓存目录不可写时给出权限提示与诊断类别。
+- 交工文案补 Premiere 自动重链提醒：正本在 `gtrk-oralcut`「回给用户」的 PR / FCP 条，`long2short` / `live-slicing` / `tools` 引用同一条。
+
+## 1.3.4（2026-10-14）
+
+> 版本段补录于 2026-10-17：发版时这几条留在「未发布」里。归属按 npm 记录的 `gitHead`（1.3.4 `144ed89`）与写入这些条目的提交时间判定，未逐条核对包体。
+
 - `long2short --camera-move`：云端按与精剪同一套调度把推 / 拉镜头写成主轨片段的 `clip_keyframes.scale_x / scale_y`，客户端与剪映可见可改；`clips.md` 标「运镜 N 处」，未能加运镜的切片单列；`/gtrk-live-slicing` 开工问询变五问（⑤ 运镜，缺省不加）。需配合服务端 `add-long2short-for-cli-camera-move` 与客户端承接 `clip_keyframes` 的版本。
 - `gtrk patch` 的 trim / split / seal / snap 同步维护 `clip_keyframes`（入点平移、越界截断补插值端点、切分两段各自合法），写前校验拒绝任何非法关键帧并点名 clip 与通道；`audio tighten` 遇带音量关键帧的音频片段拒绝；本地 `gtrk render` 读到关键帧时提示按静态画面出片。
 - `gtrk project background --blur [--intensity n] | --color #RRGGBB | --clear`：写客户端画布背景 `struct_meta.client_background`（零计费、不访问云端），横屏源进竖屏画布时用模糊底替代黑边；`/gtrk-live-slicing` 对横竖互转的入选切片缺省加模糊底。剪映 / PR 与本地 `gtrk render` 不带该设置。
@@ -20,6 +34,12 @@
 - `long2short` 产物根新增整片转写 `json/transcript.json`，可用 `gtrk subtitle lay --gtrk … --transcript …` 给任一 clip 上客户端字幕轨；字幕文件来源时 `clips.md` 提示词级时间为近似值。需配合服务端 `add-long2short-for-cli-transcript` 上线，老服务端下不报错。
 - `subtitle lay --language <code>`：指定云端拆行语种（缺省仍为 zh-CN），非中文源上字幕不再按中文断句。
 - `/gtrk-live-slicing` 选题确认后对入选切片缺省字幕上轨；调速只在用户主动要求时加。
+
+## 1.3.3（2026-10-08）
+
+> 版本段补录于 2026-10-17。npm 记录的 `gitHead` 为 `13d43e9`，但同步版本号的提交 `2f5c68d` 晚于发布约 4 分钟，推断与 1.2.7 一样是从带未提交改动的工作区发的；以下按该提交说明补记，未核包体。
+
+- 完善 Vlog 分段组装、旁白归轨和颗粒检查。
 
 ## 1.3.2（2026-10-08）
 
