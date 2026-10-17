@@ -24,13 +24,17 @@ const BIND_DECL_KEYS: Record<string, Set<string>> = {
 	text: new Set(["kind", "source"]),
 };
 const RESOLVED_KEYS = new Set(["video_rate", "window", "bindings", "anchors_f", "inputs_hash"]);
-const OVERRIDES = ["fit", "framing"];
+// 用户覆盖（add-composite-slot-user-overrides）：crop / box 适用全部视频槽位，slip_ms 只给 ref（与 infra profile.py 同口径）
+const OVERRIDES = ["fit", "framing", "crop", "box"];
 const RESOLVED_BIND_KEYS: Record<string, Set<string>> = {
-	ref: new Set(["kind", "clip_id", ...OVERRIDES]),
+	ref: new Set(["kind", "clip_id", "slip_ms", ...OVERRIDES]),
 	"ref-lane": new Set(["kind", "lane_clip_id", "track_index", ...OVERRIDES]),
 	own: new Set(["kind", "material", "src_in_ms", "dur_f", "starts_at_f", ...OVERRIDES]),
 	text: new Set(["kind"]),
 };
+/** 裁切上下、左右合计上限（各至少留 10% 画面）；窗口缩放千分比上下限。 */
+export const CROP_SUM_MAX_PM = 900;
+export const BOX_SCALE_PM = [200, 4000] as const;
 const SLOT_ID = /^[A-Za-z0-9_-]+$/;
 const HASH = /^sha256:[0-9a-f]{64}$/;
 
@@ -109,6 +113,28 @@ function checkOverrides(b: Obj, path: string): string[] {
 			errs.push(`${path}.framing.scale_pm：不得小于 1000`);
 		}
 	}
+	if ("crop" in b) {
+		const cr = b.crop;
+		const keys = ["t_pm", "r_pm", "b_pm", "l_pm"] as const;
+		if (!(isObj(cr) && sameKeys(cr, [...keys]) && keys.every((k) => isInt(cr[k])))) {
+			errs.push(`${path}.crop：必须为 { t_pm, r_pm, b_pm, l_pm } 整数`);
+		} else if (!keys.every((k) => (cr[k] as number) >= 0 && (cr[k] as number) < 1000)) {
+			errs.push(`${path}.crop：各边须在 [0, 1000) 内`);
+		} else if ((cr.t_pm as number) + (cr.b_pm as number) > CROP_SUM_MAX_PM || (cr.l_pm as number) + (cr.r_pm as number) > CROP_SUM_MAX_PM) {
+			errs.push(`${path}.crop：上下、左右合计均不得超过 ${CROP_SUM_MAX_PM}`);
+		}
+	}
+	if ("box" in b) {
+		const bx = b.box;
+		if (!(isObj(bx) && sameKeys(bx, ["scale_pm", "dx_pm", "dy_pm"]) && isInt(bx.scale_pm) && isInt(bx.dx_pm) && isInt(bx.dy_pm))) {
+			errs.push(`${path}.box：必须为 { scale_pm, dx_pm, dy_pm } 整数`);
+		} else if ((bx.scale_pm as number) < BOX_SCALE_PM[0] || (bx.scale_pm as number) > BOX_SCALE_PM[1]) {
+			errs.push(`${path}.box.scale_pm：须在 [${BOX_SCALE_PM[0]}, ${BOX_SCALE_PM[1]}] 内`);
+		} else if ([bx.dx_pm, bx.dy_pm].some((v) => (v as number) < -1000 || (v as number) > 1000)) {
+			errs.push(`${path}.box：dx_pm / dy_pm 须在 [-1000, 1000] 内`);
+		}
+	}
+	if ("slip_ms" in b && !isInt(b.slip_ms)) errs.push(`${path}.slip_ms：必须为整数`);
 	return errs;
 }
 

@@ -503,7 +503,7 @@ gtrk composite bake --abi
   - **缓存**：键含颗粒、现算输入、素材文件指纹（大小 + 修改时间）、帧率、浏览器版本与编码参数；命中直接复用。改并发不换键。
   - **帧率**：缺省 = 工程帧率；`--fps` 指定（例如导出 30fps）。帧数 = `ceil(窗口 × fps)`，盖满整个窗口。
   - **退出码**：0 全部成功（含命中缓存）/ 1 有颗失败（其余照常，逐颗给原因）/ 2 参数或环境错误 / 130 被取消。
-  - **机读**：`--progress jsonl` 逐行输出 `type` 为 `start` / `browser` / `prep` / `progress` / `composite` / `cancelled` / `done` 的事件，相邻两行不超过 1 秒；此模式下**关闭 stdin 即取消**（其它模式不认 stdin）。`--abi` 只输出 `{abi, version}`，不读工程。`--input <快照> --base <目录>`：以快照为时间线来源（客户端交未保存状态用），相对素材路径与产物落点按 `--base` 解析，快照不回写。
+  - **机读**：`--progress jsonl` 逐行输出 `type` 为 `start` / `browser` / `prep` / `progress` / `composite` / `cancelled` / `done` 的事件，相邻两行不超过 1 秒；此模式下**关闭 stdin 即取消**（其它模式不认 stdin）。`--abi` 只输出 `{abi, version, browser, overrides}`，不读工程：`browser.pinned` 是钉定的渲染组件装没装；`overrides` 是本版能烤出的槽位用户覆盖（`fit` / `framing` / `crop` 裁切 / `box` 画中画窗口大小与位置 / `slip_ms` 引用片段前后挪取帧），客户端据此判断工程里的调整能否烤出。`--input <快照> --base <目录>`：以快照为时间线来源（客户端交未保存状态用），相对素材路径与产物落点按 `--base` 解析，快照不回写。
 - `gtrk render` / `gtrk project export` 会先烘焙工程里的合成颗粒：烘焙成功的那段以烘焙视频出画（剪映 / Pr 里是该层位上的一段视频），**时段整段落在合成窗口内的 MG / OV 不再预渲、不计费**；烘焙失败（素材丢失、找不到浏览器等）的那颗按粗剪出画并点名原因，不拦导出。
 
 ### `gtrk project init` / `gtrk audio lay` / `gtrk audio tighten` — 音频驱动工程零件（配音先行）

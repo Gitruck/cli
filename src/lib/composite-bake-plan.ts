@@ -199,7 +199,9 @@ export function sourceAt(b: Record<string, unknown>, T: number, f: number, index
 		const hit = laneOf(String(b.clip_id));
 		if (!hit) return null;
 		const c = hit.clip;
-		return { material: c.material, sec: src(c, Math.min(Math.max(T, c.track_st), lastT(c))) };
+		// slip_ms：源时钟上整体挪取帧（add-composite-slot-user-overrides），与出片台同式；只钳下界，超出素材末尾由中间文件 eof 段兜底
+		const slip = typeof b.slip_ms === "number" ? b.slip_ms / 1000 : 0;
+		return { material: c.material, sec: Math.max(0, src(c, Math.min(Math.max(T, c.track_st), lastT(c))) + slip) };
 	}
 	if (b.kind === "ref-lane") {
 		const hit = laneOf(String(b.lane_clip_id));

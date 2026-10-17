@@ -19,6 +19,9 @@ import type { CompositeBinding, CompositeBlock } from "./composite-particle";
 /** 客户端 MediaTime 的 tick 基数（镜像保存态时间单位；契约不登记，与 subtitle-lay 同值）。 */
 export const COMPOSITE_TICKS_PER_SECOND = 120000;
 
+/** 进输入快照的用户覆盖键（与 infra `snapshot.py::OVERRIDE_SNAPSHOT_KEYS` 同序同集；add-composite-slot-user-overrides）。 */
+export const OVERRIDE_SNAPSHOT_KEYS = ["fit", "framing", "crop", "box", "slip_ms"] as const;
+
 export class CanonicalError extends TypeError {}
 
 function encodeStr(s: string): string {
@@ -213,8 +216,8 @@ function slotEntry(
 		return cues.length ? { slot, kind, status: "filled", cues } : { slot, kind, status: "empty" };
 	}
 	const entry: Record<string, unknown> = { slot, kind };
-	if (b.fit !== undefined) entry.fit = b.fit;
-	if (b.framing !== undefined) entry.framing = b.framing;
+	// 进快照的用户覆盖：缺席不写（不带新覆盖的快照与引入它们之前逐字节相同）
+	for (const k of OVERRIDE_SNAPSHOT_KEYS) if (b[k] !== undefined) entry[k] = b[k];
 	if (kind === "ref") {
 		const cid = b.clip_id as string | undefined;
 		const clip = cid ? findRefClip(gtrk, cid) : null;

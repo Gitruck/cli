@@ -28,7 +28,7 @@ import { log, routeLogsToStderr } from "../lib/log";
 import { packageRoot } from "../lib/paths";
 import { transcriptCandidates } from "../lib/reproject";
 import { collectProjectionClips, projectTranscript, type GtrkProject, type Transcript } from "../lib/projection";
-import { evaluateComposite, type ResolveGtrk } from "../lib/composite-resolve";
+import { evaluateComposite, OVERRIDE_SNAPSHOT_KEYS, type ResolveGtrk } from "../lib/composite-resolve";
 import { buildParticle, COMPOSITE_PRODUCER, CompositeSceneError, parseScene, type CompositeKit } from "../lib/composite-scene";
 import { findBrowser, HeadlessBrowser, layoutLintScript, purityLintScript } from "../lib/composite-browser";
 import { BAKE_ABI } from "../lib/composite-bake-plan";
@@ -748,7 +748,9 @@ export async function runCompositeBake(opts: BakeCmdOpts): Promise<BakeResult | 
 		// browser.pinned：钉定版本的 headless-shell 装没装（只看文件在不在，不起浏览器）。调用方据此在开烤前
 		// 征得「下载约 110 MB 渲染组件」的同意——没装时 bake 会直接退到系统浏览器，等它开跑再问就晚了
 		const pinned = installedHeadlessShell() !== null;
-		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL } }));
+		// overrides：本 CLI 认得并能烤出的槽位用户覆盖键（add-composite-slot-user-overrides）。客户端据此判断工程里的
+		// 覆盖能否烤出，不认就提示升级——不让老 CLI 烤出缺覆盖的画面
+		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL }, overrides: [...OVERRIDE_SNAPSHOT_KEYS] }));
 		return null;
 	}
 	const jsonl = opts.progress === "jsonl";

@@ -143,7 +143,8 @@ function sourceFor(b, T, f) {
     const hit = byClip.get(b.clip_id); if (!hit) return null;
     const c = hit.clip;
     const tt = Math.min(Math.max(T, c.track_st), lastFrameT(c));
-    return { material: c.material, sec: clipSrc(c, tt) };
+    // slip_ms：源时钟上整体前后挪取帧（add-composite-slot-user-overrides）；超过素材末尾由 locate 的 eof 段取末帧
+    return { material: c.material, sec: Math.max(0, clipSrc(c, tt) + (b.slip_ms || 0) / 1000) };
   }
   if (b.kind === "ref-lane") {
     const hit = byClip.get(b.lane_clip_id); if (!hit) return null;
@@ -159,6 +160,21 @@ function sourceFor(b, T, f) {
     return { material: b.material, sec: b.src_in_ms / 1000 + k / FPS };
   }
   return null;
+}
+/**
+ * 用户覆盖套到颗粒回报的几何上（add-composite-slot-user-overrides，与客户端 `applySlotOverrides` 逐值相同）：
+ * box = 以槽位中心缩放 scale_pm/1000 倍、中心位移舞台宽高的 dx_pm / dy_pm 千分比，圆角同乘缩放；
+ * crop = 替换颗粒的 data-crop（[上, 右, 下, 左] 比例）。
+ */
+function applySlotOverrides(g, b) {
+  let out = g;
+  if (b.box) {
+    const s = b.box.scale_pm / 1000, w = g.w * s, h = g.h * s;
+    const cx = g.x + g.w / 2 + (b.box.dx_pm / 1000) * 1920, cy = g.y + g.h / 2 + (b.box.dy_pm / 1000) * 1080;
+    out = { ...out, x: cx - w / 2, y: cy - h / 2, w, h, radius: (g.radius || 0) * s };
+  }
+  if (b.crop) out = { ...out, crop: [b.crop.t_pm / 1000, b.crop.r_pm / 1000, b.crop.b_pm / 1000, b.crop.l_pm / 1000] };
+  return out;
 }
 /** fit / framing / crop 合成的绘制矩形（与客户端 `slotDrawRect` 逐值相同；源或槽位尺寸为 0 时返回 null，不画）。 */
 function drawRect(g, sw0, sh0, fit, framing) {
@@ -245,7 +261,8 @@ window.renderAt = async (T) => {
   });
   const ready = (await Promise.all(jobs)).filter(Boolean);
   ctx.clearRect(0, 0, 1920, 1080);
-  for (const { g, b, v, k, tag, img } of ready) {
+  for (const { g: g0, b, v, k, tag, img } of ready) {
+    const g = applySlotOverrides(g0, b);
     // 中间文件底部的帧号条不进画面：源高度按去掉条带算
     const r = img ? drawRect(g, img.naturalWidth, img.naturalHeight, b.fit || g.fit, b.framing) : drawRect(g, v.videoWidth, v.videoHeight - (tag || 0), b.fit || g.fit, b.framing);
     if (!r) continue;
