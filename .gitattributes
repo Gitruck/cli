@@ -17,3 +17,11 @@ test/fixtures/broll-arrange/** text eol=lf
 # 不钉的话，这道闸就从「挡两份实现漂移」退化成「挡你是不是在 Linux 上」。
 src/lib/text-ir/compile.ts text eol=lf
 src/lib/text-ir/compile.ts.sha256 text eol=lf
+
+# 同步给客户端的另两份同理（2026-10-18 补）：`scripts/text-ir-sync.mjs` 按 cli 这边的**字节**复制
+# 并写指纹旁挂，这边检出成 CRLF 时同步过去的指纹就是 CRLF 的，客户端提交时又被转回 LF ⇒ 客户端
+# 指纹用例判红。客户端仓同一天补了同样四行（发 1.2.13 的干净检出里撞上 validate.ts）。
+src/lib/text-ir/validate.ts text eol=lf
+src/lib/text-ir/validate.ts.sha256 text eol=lf
+src/lib/text-ir/layout.ts text eol=lf
+src/lib/text-ir/layout.ts.sha256 text eol=lf
