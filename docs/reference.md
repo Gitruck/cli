@@ -235,6 +235,8 @@ DO_NOT_TRACK=1 gtrk …   # 业界通用的「不追踪」约定，同样生效
 | `--platforms <list>` | 逗号分隔 `youtube,vimeo,tiktok,bilibili`，仅配合 `--online`；不指定时查询已登记的四个平台。实际结果仍取决于服务与来源可访问性 |
 | `--online-session <name>` | 外部检索批次名，仅配合 `--online` 且不可为空；同批次续跑，换名称发起新搜索，可能产生新任务与费用 |
 
+派单消费时若这一轮**零可铺候选**而工程里已有带候选的 `split/broll-plan.json`（例如上一轮云端或本地 plan），既有 plan 不会被覆盖：本轮 plan（含逐条报错与待核候选）另存为 `split/broll-plan.online-attempt.json`，`--json` 结果带 `plan_kept`，`planPath` 仍指既有 plan。退出码照旧非 0。
+
 ### `gtrk transcript <本地视频|配音音频>`
 
 把本地视频或配音音频转为一个多层级的 Markdown 文字稿。只接受本地文件路径：视频在本机抽取、音频在本机转码为 16 kHz 单声道音频，只上传音频衍生物，原文件不会上传，也不支持 URL 或平台视频下载。
@@ -426,7 +428,7 @@ gtrk matrix source-import --project <工程目录> --beat B07 --urls links.txt -
 >
 > **素材落盘自检**：写回工程之后只读检查 `materials[].path` 是否落盘。相对路径以 `.gtrk` 文件所在目录（`<产物目录>/gtrk/`）为基准解析。`--json` 出 `integrity:{ checked, counts, dangling:[…], danglingReferenced, danglingOrphan, external:[…], noPathIds:[…] }`；`dangling` 是登记存在但文件缺失的素材，并标出是否被时间线引用，绝对路径缺失另计 `external`，http(s) 素材只计数且不发网络请求。检查只告知，不改 `ok`、退出码、素材条目或文件；修复悬空引用请在客户端重新确认原片或删除对应 clip。未写回的运行（`--lay 0` / 拒铺 / 工程缺失）不出 `integrity` 字段。
 >
-> **片段底板（缺省）**：每个候选片段自带纯黑底（gtrk 契约 `background_fill`，窄画幅 / 缩小时不露下层口播），每条候选轨在已落成的 beat 包络内把自己的空档补成纯黑片——`--lay 2` 时只留任一条可见也不露口播；音频驱动工程（无口播）不补。`--json` 出 `lay.bed`（`fill`）与 `lay.bed_fill`（补了几段、几秒）。没有任何 B-roll 的纯黑时段记作空洞：`lay.blackBedHoleSec` / `lay.blackBedHoles` 恒出，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时给非致命告警，可调 `--score-floor` 或在客户端补片。补片素材落在 `assets/builtin/solid-000000-<W>x<H>.png` 并幂等复用。
+> **片段底板（缺省）**：每个候选片段自带纯黑底（gtrk 契约 `background_fill`，窄画幅 / 缩小时不露下层口播），每条候选轨在已落成的 beat 包络内把自己的空档补成纯黑片——`--lay 2` 时只留任一条可见也不露口播；音频驱动工程（无口播）不补。`--json` 出 `lay.bed`（`fill`）与 `lay.bed_fill`（补了几段、几秒）。没有任何 B-roll 的纯黑时段记作空洞：`lay.blackBedHoleSec` / `lay.blackBedHoles` 恒出，单段 ≥ 3s 或单 beat 占比 ≥ 15% 时给非致命告警，可调 `--score-floor` 或在客户端补片。补片素材落在 `assets/builtin/solid-000000-<W>x<H>.png` 并幂等复用。短于 1.2s 的空档（片段之间 1–2 帧的缝、锚定镜头前的空档）先在源窗余量内并进相邻片段（不越检索段界、段内切点与黑段），并不掉的才补黑，并在 `lay.flash_gaps.kept` 与告警里逐段点名。
 >
 > **纯黑底垫轨（`--black-bed`，旧形态）**：在候选轨之下、口播主轨之上铺满已落成的 beat 包络，候选片段不带底板；空洞口径与数值同上。老工程里已有的黑底轨在下次缺省重铺时被换成片段底板。
 

@@ -17,7 +17,7 @@ import { LEGACY_ONLINE_PLATFORMS, ONLINE_PLATFORMS, parseOnlinePlatforms } from 
 import type { Command } from "commander";
 import { resolve, join, dirname, basename, isAbsolute, relative, sep } from "node:path";
 import { existsSync, writeFileSync, mkdirSync, statSync, readFileSync } from "node:fs";
-import { writeFile, mkdir, rename } from "node:fs/promises";
+import { writeFile, mkdir, rename, rm } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "../lib/config";
 import { readUserConfig } from "../lib/user-config";
@@ -1489,6 +1489,25 @@ export function summarizePlanCandidates(plan: BrollPlan): {
 	return { planResults, distinctClips: clips.size, beatCandidateCounts };
 }
 
+/** 外网零候选时本轮 plan 的另存文件名（`split/` 下；fix-matrix-lay-pitfalls D4）。 */
+export const ONLINE_ATTEMPT_PLAN_FILE = "broll-plan.online-attempt.json";
+
+/**
+ * 盘上既有 plan 是否值得保护（fix-matrix-lay-pitfalls D4）：能解析且至少 1 行候选才算；缺文件 / 读不出 / 零行 ⇒ `undefined`
+ * （没什么可保护，外网照旧写主 plan）。只读、不抛。
+ */
+export function protectedPlanOf(path: string): { member_type?: string; plan_results: number } | undefined {
+	if (!existsSync(path)) return undefined;
+	try {
+		const plan = readJsonSync<BrollPlan>(path, "既有 plan");
+		const { planResults } = summarizePlanCandidates(plan);
+		if (planResults < 1) return undefined;
+		return { ...(typeof plan.member_type === "string" ? { member_type: plan.member_type } : {}), plan_results: planResults };
+	} catch {
+		return undefined;
+	}
+}
+
 /** [add-broll-plan-summary-honesty] 掏空风险清单文案（候选数 ≤1 的 beat 逐个点名）。
  * 纯函数：给定账面即出文案，`null` = 全 beat 候选 ≥2（不打扰）。
  * **只补判据不夺裁定权**：CLI MUST NOT 依据本清单剔除/保留/改写任何 result 条目
@@ -2289,6 +2308,12 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	// 全部需求先校验，避免跑到后半程才发现结构错误。其他素材来源保留原查询口径。
 	const needsByEntry = new Map(queue.map(entry => [entry, ctx.memberType === "online" ? onlineNeedsForEntry(entry) : []]));
 	if (ctx.memberType === "online") log.info(`本轮 ${[...needsByEntry.values()].reduce((n, needs) => n + needs.length, 0)} 条素材需求；查询变体在单次搜索内处理，恢复沿用原建单身份。`);
+	// 外网零候选不冲掉既有 plan（fix-matrix-lay-pitfalls D4）：开跑前记下盘上 plan 是否值得保护；本轮出现第一条可铺候选之前，
+	// 进度只写另存文件。判据取可铺候选数（与收尾 online_no_candidates 同一个量）。
+	const mainPlanPath = join(baseDir, "split", "broll-plan.json");
+	const attemptPlanPath = join(baseDir, "split", ONLINE_ATTEMPT_PLAN_FILE);
+	const guardedPlan = ctx.memberType === "online" ? protectedPlanOf(mainPlanPath) : undefined;
+	const onlinePlanTarget = (): string => (guardedPlan && resultCount === 0 ? attemptPlanPath : mainPlanPath);
 	for (const entry of queue) {
 		const outcomes: QueryOutcome[] = [];
 		// 锚 query 并入同一检索链（add-keyword-anchored-broll）：与普通 queries 同口同参跑；
@@ -2334,7 +2359,7 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 				const partial = buildPlan({ generatedAt: new Date().toISOString(), memberType: ctx.memberType,
 					projectSlug: slugify(basename(baseDir)), columnId: ctx.columnId,
 					beats: [...beats, buildPlanBeat(entry, outcomes)] });
-				const target = join(baseDir, "split", "broll-plan.json"), temporary = `${target}.${process.pid}.tmp`;
+				const target = onlinePlanTarget(), temporary = `${target}.${process.pid}.tmp`;
 				await mkdir(dirname(target), { recursive: true });
 				await writeFile(temporary, JSON.stringify({ ...partial, retrieval_progress: { complete: false, completed_needs: okCount + errCount } }, null, 2));
 				await rename(temporary, target);
@@ -2379,11 +2404,16 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	});
 	const splitDir = join(baseDir, "split");
 	await mkdir(splitDir, { recursive: true });
-	const planPath = join(splitDir, "broll-plan.json");
+	const planPath = mainPlanPath;
+	// 外网零候选且盘上有值得保护的 plan ⇒ 主 plan 原样，本轮 plan 只落另存文件（fix-matrix-lay-pitfalls D4）
+	const planKept = guardedPlan && resultCount === 0 ? guardedPlan : undefined;
 	if (ctx.memberType === "online") {
-		const temporary = `${planPath}.${process.pid}.tmp`;
+		const target = onlinePlanTarget();
+		const temporary = `${target}.${process.pid}.tmp`;
 		await writeFile(temporary, JSON.stringify({ ...plan, retrieval_progress: { complete: true, completed_needs: totalQueries } }, null, 2));
-		await rename(temporary, planPath);
+		await rename(temporary, target);
+		// 本轮已换上新 plan ⇒ 另存文件（本轮或更早失败轮次留下的）描述的是被取代的尝试，清掉免得误读
+		if (!planKept && existsSync(attemptPlanPath)) await rm(attemptPlanPath, { force: true });
 	} else {
 		await writeFile(planPath, JSON.stringify(plan, null, 2));
 	}
@@ -2391,11 +2421,18 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 	// 真机 P1 260902：`resultCount` 报 15 条候选，plan 里只有 8 行 result、且全指向 **1 条**素材
 	// ——只看那一个数会让调用方判「料够了」，而实际上这个 beat 一删就空。
 	const planStats = summarizePlanCandidates(plan);
-	log.ok(
-		`候选清单已生成：${planPath}（${beats.length} beat · ${okCount}/${totalQueries} query **执行**成功` +
-			` · 其中 ${zeroYieldQueries.length} 条零候选 · plan 落盘 ${planStats.planResults} 行 / ${planStats.distinctClips} 个素材` +
-			`；逐条日志里的 ${resultCount} 条候选是**去重前**口径）`,
-	);
+	const tally =
+		`${beats.length} beat · ${okCount}/${totalQueries} query **执行**成功` +
+		` · 其中 ${zeroYieldQueries.length} 条零候选 · plan 落盘 ${planStats.planResults} 行 / ${planStats.distinctClips} 个素材` +
+		`；逐条日志里的 ${resultCount} 条候选是**去重前**口径`;
+	if (planKept) {
+		log.warn(
+			`外网本轮零可铺候选，既有 plan 未覆盖：${planPath}（${planKept.member_type ?? "未知来源"} · ${planKept.plan_results} 行）。\n` +
+				`本轮 plan（含逐条诊断）另存：${attemptPlanPath}（${tally}）`,
+		);
+	} else {
+		log.ok(`候选清单已生成：${planPath}（${tally}）`);
+	}
 	// 零产出点名（非致命）：此前调用方只能去 57 行 dim 灰 info 里自己扒 `→ 0 条候选`。
 	// ⚠️ 这条 warn MUST NOT 改退出码、MUST NOT 触发任何补检索——只是把已知事实说出来。
 	// `--lay 0`（只出 plan 不铺轨）下同样会走到这里：lay 侧的 emptySlots / upsell 通道那时整段不执行，
@@ -2465,6 +2502,8 @@ async function runPlanMode(ctx: SearchCtx, opts: MatrixOpts, deps: MatrixRunDeps
 		memberType: ctx.memberType,
 		...(ctx.columnId ? { columnId: ctx.columnId } : {}),
 		planPath,
+		// 外网零候选保住了既有 plan（fix-matrix-lay-pitfalls D4）：planPath 仍指它，本轮 plan 在 online_attempt_path
+		...(planKept ? { plan_kept: { path: planPath, member_type: planKept.member_type, plan_results: planKept.plan_results, online_attempt_path: attemptPlanPath } } : {}),
 		...(refused ? { refused, reason: "tracks_edited", planReusable: true } : {}),
 		...(declined ? { reason: "image_move_billing_declined", planReusable: true } : {}),
 		// 只预估不执行（add-arrange-estimate-only）：**成功**结局，与 declined 互斥且形态不同
@@ -4219,6 +4258,8 @@ async function layIntoProject(
 			// 底板形态（link-clip-background-fill）：fill = 候选片段自带纯黑底 + 空档补片；track = --black-bed 旧形态
 			...(summary.bed ? { bed: summary.bed } : {}),
 			...(summary.bedFill ? { bed_fill: summary.bedFill } : {}),
+			// 短空档并入相邻片段（fix-matrix-lay-pitfalls D2）：fill 形态口播工程才出现；kept = 照旧补黑、成片会闪的段（全量，不按阈值过滤）
+			...(summary.flashGaps ? { flash_gaps: summary.flashGaps } : {}),
 			// 合成颗粒引用账面（link-composite-particle-profile D2）：条件键，无合成颗粒 / 无读失败时整键缺席。
 			// ⚠️ 逐键重投影：决策层 summary.compositeRefs 不在这里补一行就到不了产物。
 			...(summary.compositeRefs
