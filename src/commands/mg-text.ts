@@ -14,7 +14,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { log } from "../lib/log";
-import { lintParticle } from "../lib/mg-lint";
+import { projectCanvas } from "../lib/composite-scene";
+import { readGtrk } from "../lib/gtrk-writeback";
+import { lintParticle, parseDeclaredCanvas } from "../lib/mg-lint";
 import { assertNotJianyingDraftDir } from "../lib/mg-render";
 import { describeState, identifyParticle } from "../lib/particle-identity";
 import {
@@ -24,6 +26,7 @@ import {
 	type GenerateCandidate,
 } from "../lib/text-ir-client";
 import { compileIrLocal } from "../lib/text-ir/compile-local";
+import { REF_H, REF_W } from "../lib/text-ir/layout";
 import { resolveToolPricing } from "../lib/tool-pricing";
 import {
 	describeCatalog,
@@ -38,7 +41,7 @@ import {
 	categoryOf,
 } from "../lib/text-templates";
 // 派单读取与 registry 中性块路共用同一份口径（fix-mg-fetch-text-slot-identity）
-import { MG_SRC_DIRS, matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
+import { MG_SRC_DIRS, locateProjectGtrk, matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
 import { MG_EXCEPTIONS_REL, appendMgException } from "../lib/mg-exceptions";
 import { r3 } from "../lib/frame-domain";
 
@@ -59,6 +62,11 @@ export interface TextCmdOpts {
 	offline?: boolean;
 	/** `mg compile` 走服务端而不是本地。排查与对拍用（§4.1），不是默认路径。 */
 	remote?: boolean;
+	/**
+	 * 目标画幅 `WxH`（fix-text-template-canvas-not-compiled）。取块与 `mg compile` 都按它编；
+	 * 缺省取值见 `resolveTextTarget` / `runCompile`。
+	 */
+	canvas?: string;
 	/**
 	 * [gate-mg-visual-job §2B.3] 放行排产顺序闸：原创档没产完也允许取模板块。
 	 * ⚠️ MUST 配 `--why`；MUST NOT 做成常开配置。
@@ -99,6 +107,65 @@ function resolveTextCategory(raw: string | undefined): string | undefined {
 	return v;
 }
 
+/**
+ * 解析 `--canvas WxH`（`x` / `×` 皆可）。两条取块路与 `mg compile` 共用这一份口径，
+ * registry 路「只收 1920×1080」那条闸在 `mg.ts` 自己加。
+ */
+export function parseCanvasFlag(raw: string): [number, number] {
+	const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(raw.trim());
+	if (!m) throw new Error(`--canvas 格式应为 WxH：${raw}`);
+	const w = Number(m[1]);
+	const h = Number(m[2]);
+	if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) {
+		throw new Error(`--canvas 的宽高须为正整数：${raw}`);
+	}
+	return [w, h];
+}
+
+/** 画幅从哪来：显式 `--canvas` / 工程 `.gtrk` 的 `video_size` / 重置时颗粒自身的声明 / 参考画幅。 */
+type CanvasFrom = "flag" | "project" | "particle" | "reference";
+
+const CANVAS_FROM_TEXT: Record<CanvasFrom, string> = {
+	flag: "--canvas",
+	project: "工程 .gtrk 的 video_size",
+	particle: "颗粒自身声明的尺寸",
+	reference: "参考画幅",
+};
+
+const REF_CANVAS: [number, number] = [REF_W, REF_H];
+const sameCanvas = (a: readonly number[] | undefined, b: readonly number[]): boolean => !!a && a[0] === b[0] && a[1] === b[1];
+const wxh = (c: readonly number[] | undefined): string => (c ? `${c[0]}×${c[1]}` : "未声明");
+
+/**
+ * 派单模式的目标画幅：颗粒要铺进这个工程，画幅就是工程的 `video_size`。
+ *
+ * ⚠️ 显式 `--canvas` 与工程画幅不符 ⇒ **拒**，MUST NOT 两者取一：挂载走的是非等比
+ * `scale(w/dw, h/dh)`，铺进去就是拉伸变形，而渲染与铺轨两边都不报错。
+ * ⚠️ 找不到 `.gtrk`（只给了 `--dispatch`、工程文件不在常规位置）⇒ 按参考画幅编并**明示**——
+ * 这是本修复之前的全部行为，静默改成拒会断掉「先取块、后建工程」的用法；但要说出来，
+ * 竖屏工程的人才知道该补 `--canvas`。
+ */
+function resolveSlotCanvas(baseDir: string, flag: [number, number] | undefined): { canvas: [number, number]; from: CanvasFrom } {
+	const gtrkPath = locateProjectGtrk(baseDir);
+	const proj = gtrkPath ? projectCanvas(readGtrk(gtrkPath).gtrk as { video_size?: unknown }) : null;
+	if (flag) {
+		if (proj && !sameCanvas(proj, flag)) {
+			throw new Error(
+				`--canvas ${wxh(flag)} 与工程画幅 ${wxh(proj)} 不符（${gtrkPath}）——派单模式的颗粒要铺进这个工程，` +
+					"挂载走的是非等比 scale(w/dw, h/dh)，跨比例会把颗粒拉伸变形。" +
+					"去掉 --canvas（派单模式缺省就取工程画幅），或改用独立模式 --as <composition_id> 另编一颗",
+			);
+		}
+		return { canvas: flag, from: "flag" };
+	}
+	if (proj) return { canvas: proj, from: "project" };
+	log.warn(
+		`${gtrkPath ? `工程 ${gtrkPath} 的 video_size 不是两个正整数` : `${baseDir} 下找不到工程 .gtrk（gtrk/project.gtrk 或 project.gtrk）`}` +
+			`——按参考画幅 ${wxh(REF_CANVAS)} 编；竖屏 / 方形工程请显式给 --canvas <WxH>`,
+	);
+	return { canvas: [REF_W, REF_H], from: "reference" };
+}
+
 /** 候选数只有两档：确认框的金额就只有两种，用户不必在 1/2/3 之间做无意义的权衡。 */
 const ALLOWED_N = [1, 3];
 
@@ -123,8 +190,9 @@ function announceCatalog(resolved: ResolvedCatalog): void {
 export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<Record<string, unknown>> {
 	const query = args.join(" ").trim();
 	const top = Math.max(1, Number(opts.top ?? 3) || 3);
-	// 先于目录解析与任何网络：同名异义的误用在这里就拒
+	// 先于目录解析与任何网络：同名异义的误用在这里就拒；`--canvas` 写错也在这里拒
 	const category = resolveTextCategory(opts.category);
+	const flagCanvas = opts.canvas !== undefined ? parseCanvasFlag(opts.canvas) : undefined;
 	const resolved = await resolveCatalog({ ...(opts.offline ? { offline: true } : {}) });
 	const catalog = resolved.catalog;
 	const pickId = opts.pick ?? (query && findTemplate(query, catalog) ? query : undefined);
@@ -176,7 +244,7 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 				"--category 是候选态的分类过滤，取块时可以不给；给了就要对得上，免得取错件",
 		);
 	}
-	const target = await resolveTextTarget(item, opts);
+	const target = await resolveTextTarget(item, opts, flagCanvas);
 
 	log.step(`▶ 取模板 ${item.id}（${item.file.path}，${item.file.bytes} B，sha256 ${item.file.sha256.slice(0, 12)}…）`);
 	const got = await fetchTemplateHtml(catalog, item);
@@ -206,8 +274,17 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 		// 而派单其实早就写了要用什么颜色，闸就只是在挡路。
 		...(target.bg ? { bg: target.bg } : {}),
 	});
+	// ── 画幅：镜像块是按参考画幅编的；目标画幅不同就得用同一份 IR 按目标画幅重编 ──
+	// （fix-text-template-canvas-not-compiled）IR 住在 1920 参考系、画幅只是编译入参，所以这里
+	// **不动 IR**（`pinned` 照旧只记 id / 时长 / 底色），只换编译入参。判据取镜像块根上的声明，
+	// 与 lint `1-canvas-match` 同一个根——此前取块恒落参考画幅，竖屏工程拿到的是一颗横屏颗粒。
+	const declared = parseDeclaredCanvas(got.html);
+	const recanvas = !sameCanvas(declared, target.canvas);
 	let html = got.html;
-	if (pinned.changed) {
+	if (pinned.changed || recanvas) {
+		if (recanvas) {
+			log.step(`▶ 按目标画幅编：模板声明 ${wxh(declared)} → ${wxh(target.canvas)}（取自${CANVAS_FROM_TEXT[target.canvasFrom]}）`);
+		}
 		if (pinned.id) log.step(`▶ 钉 composition_id：${pinned.id.from} → ${pinned.id.to}`);
 		if (pinned.duration) {
 			const why =
@@ -222,7 +299,7 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 				`▶ 钉满屏底色：${pinned.bg.from ?? "（模板原本没有底）"} → ${pinned.bg.to}` +
 					"（派单 category=fullscreen 且写了 bg；transparent 同批翻 false）",
 			);
-		const res = compileIrLocal(pinned.ir);
+		const res = compileIrLocal(pinned.ir, target.canvas);
 		// 自证不过 = 编译器与三态判定的口径漂了，比落一颗坏颗粒更该当场停（同 `mg compile`）。
 		const after = identifyParticle(res.html);
 		if (after.state !== "ir") {
@@ -235,6 +312,8 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 		compositionId: target.cid,
 		slotDuration: target.lintSec,
 		identity: "ir",
+		// 目标画幅交给 lint 对拍：编出来的根声明与目标不符就是 `1-canvas-match` 致命，不落盘
+		canvas: target.canvas,
 		...(target.category ? { category: target.category } : {}),
 	});
 	for (const v of lint.violations) (v.fatal ? log.err : log.warn)(`${v.fatal ? "✗" : "·"} ${v.law}: ${v.msg}`);
@@ -256,7 +335,9 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 			...(pinned.bg ? { bg: pinned.bg } : {}),
 			layers: pinned.pinnedLayers,
 		},
-		compiled: pinned.changed,
+		canvas: target.canvas,
+		canvas_from: target.canvasFrom,
+		compiled: pinned.changed || recanvas,
 		lint: { ok: lint.ok, opaque: lint.opaque, violations: lint.violations },
 	};
 	if (!lint.ok) {
@@ -266,7 +347,7 @@ export async function runFetchText(args: string[], opts: TextCmdOpts): Promise<R
 	await mkdir(dirname(target.outPath), { recursive: true });
 	// 恒 LF：哈希是三态身份的判据，CRLF 会让这颗在别的机器上被判 detached
 	await writeFile(target.outPath, html, "utf8");
-	log.ok(`已落 ${target.outPath}（${describeState("ir")}；${base.duration}s；槽位 ${item.slots.join("、") || "无"}）`);
+	log.ok(`已落 ${target.outPath}（${describeState("ir")}；${base.duration}s；${wxh(target.canvas)}；槽位 ${item.slots.join("、") || "无"}）`);
 	log.warn("改内容走 `gtrk mg compile`（改 IR 重编译）或 `gtrk mg edit --say`（云端改写）——直接改 HTML 会让它脱离模板，云端就调不动了。");
 	return { ...base, ok: true, stage: "written", path: target.outPath };
 }
@@ -290,6 +371,12 @@ interface TextTarget {
 	 * 而派单其实**早就写了要用什么颜色**——这根线不接上，闸就只是在挡路。
 	 */
 	bg?: string;
+	/**
+	 * 目标画幅（fix-text-template-canvas-not-compiled）：显式 `--canvas` > 派单模式取工程 `.gtrk` 的
+	 * `video_size` > 参考画幅 1920×1080（独立模式无工程可取，派单模式找不到 `.gtrk` 时明示）。
+	 */
+	canvas: [number, number];
+	canvasFrom: CanvasFrom;
 }
 
 /**
@@ -380,13 +467,19 @@ async function assertOriginalsFirst(
  * 都按后者对账。旧实现把前者直接当 id 用，于是派单模式**必然** `1-cid-expect` 致命。
  * 口径与 registry 中性块路共用 `matchSlot`，两条路不再各写一份。
  */
-async function resolveTextTarget(item: TextTemplateItem, opts: TextCmdOpts): Promise<TextTarget> {
+async function resolveTextTarget(
+	item: TextTemplateItem,
+	opts: TextCmdOpts,
+	flagCanvas: [number, number] | undefined,
+): Promise<TextTarget> {
 	if (opts.slot) {
 		if (!opts.project && !opts.dispatch) throw new Error("--slot 需要配 --project <dir>（或 --dispatch <path>）");
 		if (opts.duration !== undefined) {
 			throw new Error("--slot 与 --duration 互斥：派单模式的坑位包络由 dispatch.mg 的 track_st / track_ed 定，显式给时长会与它打架");
 		}
 		const { dispatchPath, baseDir } = resolveDispatch(opts);
+		// 画幅先于排产顺序闸：`--canvas` 与工程不符注定要拒，MUST NOT 先往工程里记一条例外留痕
+		const { canvas, from } = resolveSlotCanvas(baseDir, flagCanvas);
 		const queue = await readMgQueue(dispatchPath);
 		await assertOriginalsFirst(queue, baseDir, opts);
 		const hit = matchSlot(queue, opts.slot);
@@ -399,24 +492,31 @@ async function resolveTextTarget(item: TextTemplateItem, opts: TextCmdOpts): Pro
 			slotSec: hit.slotSec,
 			...(hit.category ? { category: hit.category } : {}),
 			...(hit.bg ? { bg: hit.bg } : {}),
+			canvas,
+			canvasFrom: from,
 		};
 	}
 	const cid = opts.as ?? item.id;
 	const outDir = resolve(opts.out ?? "./mg-fetch");
 	assertNotJianyingDraftDir(outDir);
 	const outPath = join(outDir, `${cid}.html`);
-	if (opts.duration === undefined) return { cid, outPath, lintSec: item.duration };
+	// 独立模式没有工程可取画幅：不给 `--canvas` 就是参考画幅（与本修复之前逐字节相同）
+	const canvasOf = flagCanvas
+		? { canvas: flagCanvas, canvasFrom: "flag" as const }
+		: { canvas: [REF_W, REF_H] as [number, number], canvasFrom: "reference" as const };
+	if (opts.duration === undefined) return { cid, outPath, lintSec: item.duration, ...canvasOf };
 	const d = Number(opts.duration);
 	if (!(d > 0)) throw new Error(`--duration 必须为正数秒：${opts.duration}`);
 	// 独立模式无坑位包络，`--duration` 就是 lint 包络（同 `mg render` / registry 独立模式口径）
-	return { cid, outPath, lintSec: d, pinDuration: d };
+	return { cid, outPath, lintSec: d, pinDuration: d, ...canvasOf };
 }
 
 // ─────────────────────────── mg compile ───────────────────────────
 
 export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Record<string, unknown>> {
 	const file = args[0];
-	if (!file) throw new Error("用法：gtrk mg compile <ir.json | particle.html> [--out <dir>] [--remote]");
+	if (!file) throw new Error("用法：gtrk mg compile <ir.json | particle.html> [--canvas <WxH>] [--out <dir>] [--remote]");
+	const flagCanvas = opts.canvas !== undefined ? parseCanvasFlag(opts.canvas) : undefined;
 	const inputPath = resolve(file);
 	if (!existsSync(inputPath)) throw new Error(`文件不在：${inputPath}`);
 	const raw = await readFile(inputPath, "utf8");
@@ -440,16 +540,29 @@ export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Rec
 		}
 	}
 
+	// 目标画幅（fix-text-template-canvas-not-compiled）：显式 `--canvas` > 重置时颗粒自身的声明 > 参考画幅。
+	// ⚠️ 重置那一档 MUST 取颗粒自己的声明：竖屏工程里那颗 1080×1920 的颗粒「重置回模板」之后
+	// 还得是 1080×1920，按参考画幅重编就成了一颗横屏颗粒、铺回原处被非等比拉伸，而两边都不报错。
+	const own = reset ? parseDeclaredCanvas(raw) : undefined;
+	const [canvas, canvasFrom]: [[number, number], CanvasFrom] = flagCanvas
+		? [flagCanvas, "flag"]
+		: own
+			? [own, "particle"]
+			: [[REF_W, REF_H], "reference"];
+	const canvasNote = `${wxh(canvas)}，取自${CANVAS_FROM_TEXT[canvasFrom]}`;
+
 	// 默认本地编译：零请求、零计费、断网可用（change move-text-ir-compiler-to-client）。
 	// `--remote` 留给排查与对拍——服务端那条路 MUST NOT 下线，它是等价闸的参照系。
 	const remote = Boolean(opts.remote);
 	let res;
 	if (remote) {
-		log.step("▶ 云端编译（0 积分，--remote 显式指定）");
-		res = await compileIrRemote(ir);
+		log.step(`▶ 云端编译（0 积分，--remote 显式指定；${canvasNote}）`);
+		// 画幅入参与服务端同形（`canvas: [宽, 高]`，缺省 = 参考画幅）。参考画幅不带这个键：
+		// 请求体与本修复之前逐字节相同，服务端缺省也正是它。
+		res = await compileIrRemote(ir, {}, sameCanvas(canvas, REF_CANVAS) ? undefined : canvas);
 	} else {
-		log.step("▶ 本地编译（0 积分、零请求）");
-		res = compileIrLocal(ir);
+		log.step(`▶ 本地编译（0 积分、零请求；${canvasNote}）`);
+		res = compileIrLocal(ir, canvas);
 	}
 	const outDir = resolve(opts.out ?? dirname(inputPath));
 	assertNotJianyingDraftDir(outDir);
@@ -463,16 +576,30 @@ export async function runCompile(args: string[], opts: TextCmdOpts): Promise<Rec
 			`${remote ? "服务端" : "本地"}产物自证失败（identity=${identity.state}）——编译器与三态判定的哈希口径可能已不一致，请报 issue，不落盘`,
 		);
 	}
+	// 画幅自证：根声明 MUST 等于请求的画幅。`--remote` 撞上旧服务端时这条是唯一的信号——
+	// 旧版不认 `canvas`、照旧按参考画幅编，产物自证是 ir 态、哪儿都不报错。
+	const declared = parseDeclaredCanvas(res.html);
+	if (!sameCanvas(declared, canvas)) {
+		throw new Error(
+			`${remote ? "服务端" : "本地"}产物声明画幅 ${wxh(declared)}，与请求的 ${wxh(canvas)} 不符——` +
+				(remote
+					? "服务端可能还没上线画幅入参（旧版忽略 canvas、恒按 1920×1080 编），去掉 --remote 走本地编译"
+					: "编译器没把画幅接进根声明，请报 issue") +
+				"，不落盘",
+		);
+	}
 	await mkdir(outDir, { recursive: true });
 	// 恒 LF：哈希是三态身份的判据，CRLF 会让这颗在别的机器上被判 detached
 	await writeFile(outPath, res.html, "utf8");
-	log.ok(`已落 ${outPath}（${describeState(identity.state)}；${res.duration}s；html_sha256 ${res.html_sha256.slice(0, 12)}…）`);
+	log.ok(`已落 ${outPath}（${describeState(identity.state)}；${res.duration}s；${wxh(canvas)}；html_sha256 ${res.html_sha256.slice(0, 12)}…）`);
 	return {
 		ok: true,
 		mode: "compile",
 		composition_id: res.composition_id,
 		path: outPath,
 		duration: res.duration,
+		canvas,
+		canvas_from: canvasFrom,
 		ir_sha256: res.ir_sha256,
 		html_sha256: res.html_sha256,
 		identity: identity.state,

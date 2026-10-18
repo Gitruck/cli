@@ -59,6 +59,14 @@ export async function readMgQueue(dispatchPath: string): Promise<MgDispatch[]> {
  */
 export const MG_SRC_DIRS = ["mg", "rrv"] as const;
 
+/**
+ * 定位工程 `.gtrk`：`<baseDir>/gtrk/project.gtrk` 优先，回落 `<baseDir>/project.gtrk`。
+ * 放在这里的理由同 `MG_SRC_DIRS`：铺轨（`mg.ts`）与文字模板取块（`mg-text.ts` 读工程画幅）共用一份。
+ */
+export function locateProjectGtrk(baseDir: string): string | undefined {
+	return [join(baseDir, "gtrk", "project.gtrk"), join(baseDir, "project.gtrk")].find((p) => existsSync(p));
+}
+
 export interface SlotHit {
 	/** 派单条目的 composition_id —— 落点与期望 id 的**唯一**来源，MUST NOT 用 `--slot` 的值代替。 */
 	compositionId: string;

@@ -83,6 +83,19 @@ export function parseCompositionId(html: string): string | undefined {
 	return root ? attr(root, "data-composition-id") : undefined;
 }
 
+/**
+ * 解析颗粒根声明的画幅 `[data-width, data-height]`（拿不到或不是正整数 = undefined）。
+ * 取法与 `1-width` / `1-height` / `1-canvas-match` 同一个根、同一个判据——命令层拿它决定
+ * 「要不要按目标画幅重编」，口径若与 lint 分家，就会出现「命令说对得上、lint 说对不上」。
+ */
+export function parseDeclaredCanvas(html: string): [number, number] | undefined {
+	const root = rootTag(html);
+	if (!root) return undefined;
+	const w = Number(attr(root, "data-width"));
+	const h = Number(attr(root, "data-height"));
+	return Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 ? [w, h] : undefined;
+}
+
 /** 非渲染性子节点：找「第一个子**层**」时要跳过（它们不画像素，不可能是实心底）。 */
 const NON_RENDERING = ["style", "script", "meta", "link", "title"];
 

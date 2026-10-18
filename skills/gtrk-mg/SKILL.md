@@ -123,7 +123,8 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 2. **取块**：`gtrk mg fetch --source text --pick <模板 id> --slot <beatId> --project <目录> --json`，或独立模式 `--as <composition_id> [--duration <坑位秒>] [--out <目录>]`。落盘即可铺，**不需要改写**。
    - **落点与时长由命令钉定，你不用管**（fix-mg-fetch-text-slot-identity）：派单模式的 `composition_id` 取自 `dispatch.mg` 那条（`<工程slug>-<beatId>`，**不是** `--slot` 收的 beat id），产物落 `<产物目录>/mg/<composition_id>.html`；颗粒内嵌 IR 的 `id` 与 `canvas.duration` 被一并钉到「期望 id」与「坑位包络 + 0.3s 余量」（铁律⑦），贴模板末尾的层跟着钉，然后走 `mg compile` 同一条本地编译链重编。产物因此仍是 `ir` 态（云端还能改），且 `mg lint --dispatch` 的 `1-cid-expect` 天然对得上。
    - `--slot` 与 `--duration` **互斥**：派单模式的包络由 `track_st` / `track_ed` 定，显式给时长会与它打架；独立模式才用 `--duration`。
-   - 出参里的 `pinned` 写明改了什么（`id` 的 from→to、`duration` 的 from→to、被钉的层）；两者都没改时 `changed:false` 且**原字节落盘**（不重编）。
+   - 出参里的 `pinned` 写明改了什么（`id` 的 from→to、`duration` 的 from→to、被钉的层）；两者都没改、且目标画幅就是模板的 1920×1080 时 `changed:false` 且**原字节落盘**（不重编）。
+   - **画幅也由命令定**（fix-text-template-canvas-not-compiled）：派单模式按工程 `.gtrk` 的 `video_size` 编，出参 `canvas` / `canvas_from` 写明用了哪个画幅、从哪来；画幅不是 IR 改动，`pinned` 不记它。
    - **满屏槽位拿不出实心底 ⇒ 致命 `x-category-opaque`，拒落盘**（`gate-fullscreen-slot-needs-solid-bed`）。
      判据只看**产物**——「这颗有没有满屏实心底」，**不看它是不是模板颗粒**。
      ⚠️ 派单模式下**通常不用你操心**：`dispatch.mg[].bg` 写了底色的话，取块时会自动钉进
@@ -134,10 +135,14 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
      **静态判不出来**，`opaque` 登记不上（画出来了但成片按透明叠加处理）。
    - 反方向（槽位派 `overlay`、颗粒却是实心）仍是**非致命**告警：那只是多盖了底轨，看得见、改得动，
      不是「以为有其实没有」的静默落空。两个方向后果不对称，判据也就不对称。
-3. **改字（L0，0 积分）**：把内嵌的 IR 存成 `<id>.ir.json`，改 `slots` 里的文字（也可改 `colors` / `font` / `stroke` / `shadow` / `canvas.duration`），然后 `gtrk mg compile <id>.ir.json --out <目录>`。
+3. **改字（L0，0 积分）**：把内嵌的 IR 存成 `<id>.ir.json`，改 `slots` 里的文字（也可改 `colors` / `font` / `stroke` / `shadow` / `canvas.duration`），然后 `gtrk mg compile <id>.ir.json --out <目录>`。竖屏 / 方形工程加 `--canvas <工程画幅>`（如 `--canvas 1080x1920`）——`.ir.json` 里不记画幅，不给就按 1920×1080 编；给颗粒 HTML 重置时缺省沿用那颗自己的画幅。
 4. **改效果（2 积分/候选）**：`gtrk mg edit <particle.html> --say "打字机快一倍，副标改成青色" [--n 1|3]`。`--n` 只收 1 或 3，**它就是计费单位数**。返回的候选带 `scope`：`L1` = 在模板可调范围内，`L2` = 越界了、等于新生成（**不是失败**）。服务端说做不到时会给一句 `refusal`，**如实转述给用户**——他要的是「为什么不能」，不是一个没有解释的错误。
 5. **lint → 铺**：同中性块，`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`。
-6. **竖屏工程**：⚠️ 文字模板眼下仍按 1920×1080 出——`--canvas` 收任意正整数画幅，但还没接到编译（取块与 `mg compile` 都按 1920 参考画幅编），竖屏工程里取来的就是一颗横屏颗粒。竖屏先走栏目 skill 按工程画幅产颗粒（见「逐槽位工作流」第 2 步「画幅 = 工程画布」），MUST NOT 把横屏颗粒铺进竖屏工程。
+6. **竖屏 / 方形工程**：文字模板按工程画幅现编（IR 住在 1920 参考系、画幅是编译入参），**不用另做**。
+   - 派单模式缺省就取工程 `.gtrk` 的 `video_size`，不用给 `--canvas`；给了却与工程不符命令会拒（跨比例挂载是非等比缩放，铺进去就是拉伸）。
+   - 找不到 `.gtrk`（只给了 `--dispatch`、或工程文件不在 `gtrk/project.gtrk` / `project.gtrk`）时会按 1920×1080 编并提示——竖屏工程看到这句提示就补 `--canvas 1080x1920` 重取。
+   - 独立模式没有工程可取：竖屏要显式 `--canvas 1080x1920`。
+   - 取完核一眼出参 `canvas` 等于工程画幅再铺；1.3.7 及更早的 CLI 无论给什么都出 1920×1080，见到竖屏工程里取来横屏颗粒先 `gtrk upgrade`。
 
 ## 中性块工作流（registry 骨架 → 改内容审美 → lint → 铺）
 

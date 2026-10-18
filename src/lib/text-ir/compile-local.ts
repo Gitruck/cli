@@ -27,7 +27,8 @@ export function compileIrLocal(
 	 * ⚠️ 这里**有缺省**而 `compileIrBody` 没有，是有意的分工：底层纯函数少传画幅
 	 * 等于静默产错画幅的颗粒，必须拦；本函数是 CLI 适配层，调用方是命令面——
 	 * 独立模式下用户本就没有工程画幅可给，取参考画幅是唯一说得通的答案。
-	 * 派单模式 MUST 显式传工程画幅（见 `mg fetch`）。
+	 * 派单模式 MUST 显式传工程画幅（`mg-text.ts` 的 `resolveTextTarget` 取工程 `.gtrk` 的
+	 * `video_size`；fix-text-template-canvas-not-compiled 之前两处调用都没传，竖屏工程恒拿到横屏颗粒）。
 	 */
 	canvasSize: [number, number] = [REF_W, REF_H],
 ): CompileResult {
@@ -57,5 +58,7 @@ export function compileIrLocal(
 		html_sha256: htmlSha,
 		composition_id: String(ir.id ?? ""),
 		duration: Number(canvas?.duration ?? 0),
+		// 同服务端 `run_compile` 回显画幅
+		canvas: [canvasSize[0], canvasSize[1]],
 	};
 }

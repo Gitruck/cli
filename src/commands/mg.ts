@@ -32,14 +32,14 @@ import { isInsideDir } from "../lib/outdir-guard";
 import { renderParticle, CID_SHAPE, assertNotJianyingDraftDir } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type MgLayException, type StructMetaMg } from "../lib/mg-lay";
 // 派单读取与槽位命中：与 `fetch --source text` 共用同一份口径（fix-mg-fetch-text-slot-identity）
-import { MG_SRC_DIRS, matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
+import { MG_SRC_DIRS, locateProjectGtrk, matchSlot, readMgQueue, resolveDispatch } from "../lib/mg-dispatch";
 import { reportReprojection, reprojectDispatchWindows, withTimecodeSource } from "../lib/reproject";
 import { reportMaterialIntegrity, safeCheckMaterialIntegrity } from "../lib/material-integrity";
 import { log, routeLogsToStderr } from "../lib/log";
 import { writeFile } from "node:fs/promises";
 import { adoptBlock, AdoptError, DEFAULT_FONT, PARTICLE_H, PARTICLE_W } from "../lib/mg-adopt";
 import { fetchBlockFile, findBlock, loadSnapshot, primaryFile, searchBlocks, type SnapshotItem } from "../lib/mg-registry";
-import { runCompile, runEdit, runFetchText } from "./mg-text";
+import { parseCanvasFlag, runCompile, runEdit, runFetchText } from "./mg-text";
 import { describeState, identifyParticle } from "../lib/particle-identity";
 
 const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
@@ -83,7 +83,7 @@ interface MgOpts {
 	slot?: string;
 	/** fetch 独立模式：目标 composition_id（配 --duration）。 */
 	as?: string;
-	/** fetch：画布 WxH。`--source text` 收任意正整数画幅；registry 路仍只收 1920×1080。 */
+	/** fetch / compile：目标画幅 WxH。`--source text` 与 compile 按它编（缺省见 mg-text.ts）；registry 路仍只收 1920×1080。 */
 	canvas?: string;
 	/**
 	 * fetch：registry 路 = 不透明度品类 overlay / fullscreen（缺省按块底色推断，派单模式取派单 category）；
@@ -139,7 +139,11 @@ export function registerMg(program: Command): void {
 		.option("--top <n>", "fetch 候选态：列前 N 件（缺省 3）")
 		.option("--slot <beat>", "fetch 派单模式：目标 beat id（如 B03）——从 dispatch.mg 取 composition_id / 坑位包络 / category，产物落 <project>/mg/<composition_id>.html（注意：落点用派单的 composition_id，不是 beat id）")
 		.option("--as <composition_id>", "fetch 独立模式：目标 composition_id（配 --duration），产物落 --out（缺省 ./mg-fetch/）；--source text 下会一并改写颗粒内部的 id")
-		.option("--canvas <WxH>", "fetch：画布尺寸。--source text 收任意正整数画幅（文字模板按画幅现编）；registry 中性块仍只收 1920x1080")
+		.option(
+			"--canvas <WxH>",
+			"fetch / compile：目标画幅。fetch --source text 按它编文字模板（派单模式缺省取工程 .gtrk 的 video_size，给了却与工程不符当场拒；独立模式缺省 1920x1080）；" +
+				"compile 缺省取颗粒自身声明的尺寸（重置）或 1920x1080，--remote 同样带给服务端；registry 中性块仍只收 1920x1080",
+		)
 		.option(
 			"--category <c>",
 			"fetch：registry 路=不透明度品类 overlay / fullscreen（缺省派单值或按块底色推断）；--source text 路=模板目录分类过滤（如 打字机 / 标题），收到 overlay / fullscreen 当场报错指路",
@@ -176,11 +180,6 @@ export async function runMg(words: string[], opts: MgOpts): Promise<MgResult> {
 	if (sub === "edit") return done(opts, (await runEdit(words.slice(1), opts)) as MgResult);
 	if (sub) throw new Error(`未知子命令「${sub}」——铺轨：gtrk mg --project <dir>；lint：gtrk mg lint <file>；看板：gtrk mg status；独立渲染：gtrk mg render <file> --duration <sec>；文字模板：gtrk mg fetch --source text <检索词> / gtrk mg compile <ir.json> / gtrk mg edit <file> --say "…"`);
 	return runLay(opts);
-}
-
-/** 定位工程 .gtrk：`<baseDir>/gtrk/project.gtrk` 优先，回落 `<baseDir>/project.gtrk`。 */
-function locateGtrk(baseDir: string): string | undefined {
-	return [join(baseDir, "gtrk", "project.gtrk"), join(baseDir, "project.gtrk")].find((p) => existsSync(p));
 }
 
 /** 定位颗粒源 HTML：双探源目录（mg/ 写侧、rrv/ 读旧），命中即返回绝对路径。 */
@@ -279,7 +278,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 	// 剥离面守门要先知道登记里有没有已铺条目；重投影更要在 lint / 复制 HTML / 铺轨**三者之前**拿到当刻工程。
 	// `--lint-only` 也读（D6 ①a）：读得到且 v1 就按当刻窗口 lint；读不到 / 非 v1 / JSON 坏一律**门内吞掉**
 	// 降级为快照窗口——它 MUST NOT 进版本门，其退出码与 lint 报告须与本能力上线前逐条一致。
-	const gtrkPath = locateGtrk(baseDir);
+	const gtrkPath = locateProjectGtrk(baseDir);
 	let project: ReturnType<typeof readGtrk> | undefined;
 	let gtrkUnreadable = false;
 	if (gtrkPath) {
@@ -697,7 +696,7 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 async function runStatus(opts: MgOpts): Promise<MgResult> {
 	const { dispatchPath, baseDir } = resolveDispatch(opts);
 	const queue = await readMgQueue(dispatchPath);
-	const gtrkPath = locateGtrk(baseDir);
+	const gtrkPath = locateProjectGtrk(baseDir);
 	let laidIds = new Set<string>();
 	if (gtrkPath) {
 		const { gtrk } = readGtrk(gtrkPath);
@@ -775,19 +774,14 @@ async function runFetch(args: string[], opts: MgOpts): Promise<MgResult> {
 	}
 	if (item.compat === "review") log.warn(`块「${item.name}」标 review（${item.compat_reasons.join("；")}）——可取，但 MUST 真渲验收后再交付`);
 	if (opts.canvas) {
-		const m = /^(\d+)\s*[x×]\s*(\d+)$/i.exec(opts.canvas.trim());
-		if (!m) throw new Error(`--canvas 格式应为 WxH：${opts.canvas}`);
 		// [add-text-ir-aspect-agnostic-layout] 从「只收 1920×1080」改成「须为正整数」。
 		// 引擎早已按颗粒声明尺寸挂载缩放（fix-particle-subcomposition-scale），
 		// 原来那条硬闸拦的是一个**不存在的失败形态**。
 		// ⚠️ 但**registry 中性块仍只有 1920×1080 一种**——那批是手写 HTML、几何写死在块里，
 		// 取块改写不会跟着缩，给它别的画幅出来就是错的。
-		// 所以放开的只有 `--source text` 这一路（文字模板按画幅现编），registry 路照旧钉死。
-		const cw = Number(m[1]);
-		const ch = Number(m[2]);
-		if (!Number.isInteger(cw) || !Number.isInteger(ch) || cw <= 0 || ch <= 0) {
-			throw new Error(`--canvas 的宽高须为正整数：${opts.canvas}`);
-		}
+		// 所以放开的只有 `--source text` 这一路（文字模板按画幅现编，见 mg-text.ts），registry 路照旧钉死。
+		// （`--source text` 在 runMg 就分流走了、到不了这里；格式解析与它共用 `parseCanvasFlag`。）
+		const [cw, ch] = parseCanvasFlag(opts.canvas);
 		if (opts.source !== "text" && (cw !== PARTICLE_W || ch !== PARTICLE_H)) {
 			throw new Error(
 				`registry 中性块只有 ${PARTICLE_W}×${PARTICLE_H} 一种几何（块是手写 HTML、尺寸写死在块里，` +

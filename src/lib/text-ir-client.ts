@@ -28,6 +28,11 @@ export interface CompileResult {
 	html_sha256: string;
 	composition_id: string;
 	duration: number;
+	/**
+	 * 实际编译用的画幅 `[宽, 高]`（服务端 `run_compile` 回显、本地适配层同形给出）。
+	 * 旧服务端不回显——判「拿到的是不是要的画幅」以产物根声明为准，不靠这个字段。
+	 */
+	canvas?: [number, number];
 	task_id?: string;
 }
 
@@ -61,14 +66,17 @@ export interface ClientDeps {
 /**
  * 同步编译。服务端校验失败会指名到路径（如 `layers[1].mask.type`），
  * 这里 SHALL 原样转述，MUST NOT 包装成一句「编译失败」——路径才是能修的那个信息。
+ *
+ * `canvas`：目标画幅 `[宽, 高]`，与服务端入参同名同形（add-text-ir-aspect-agnostic-layout）。
+ * 不给 = 请求体里没有这个键、服务端按参考画幅编（与本参数出现之前逐字节相同）。
  */
-export async function compileIr(ir: unknown, deps: ClientDeps = {}): Promise<CompileResult> {
+export async function compileIr(ir: unknown, deps: ClientDeps = {}, canvas?: [number, number]): Promise<CompileResult> {
 	const cfg = (deps.loadCfg ?? loadConfig)();
 	const f = deps.fetch ?? fetch;
 	const res = await f(`${cfg.base.replace(/\/+$/, "")}/task/${COMPILE_TASK_TYPE}`, {
 		method: "POST",
 		headers: { Authorization: cfg.apiKey, "Content-Type": "application/json" },
-		body: JSON.stringify({ ir }),
+		body: JSON.stringify(canvas ? { ir, canvas } : { ir }),
 	});
 	const r = await parseJson<CompileResult>(res);
 	if (r.code !== 200 || !r.data?.html) {
