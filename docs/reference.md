@@ -23,7 +23,7 @@
 | ![在 Agent 中调用 gtrk 示例 1](../assets/agent-example-1.png) | ![在 Agent 中调用 gtrk 示例 2](../assets/agent-example-2.png) |
 | ![在 Agent 中调用 gtrk 示例 3](../assets/agent-example-3.png) | ![在 Agent 中调用 gtrk 示例 4](../assets/agent-example-4.png) |
 
-`gtrk install` 会把 19 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-composite`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`·`gtrk-talking-head`·`gtrk-narration`·`gtrk-voiceover`·`gtrk-food-recap`·`gtrk-vlog-docu`）装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
+`gtrk install` 会把 20 个 CLI 自带 skill（`gtrk-oralcut`·`gtrk-long2short`·`gtrk-splitter`·`gtrk-matrix`·`gtrk-mg`·`gtrk-composite`·`gtrk-ai-drama`·`gtrk-style-maker`·`gtrk-transcript`·`gtrk-tools`·`gtrk-music-visualizer`·`gtrk-cover`·`gtrk-travel-recap`·`gtrk-live-slicing`·`gtrk-talking-head`·`gtrk-narration`·`gtrk-voiceover`·`gtrk-food-recap`·`gtrk-vlog-docu`·`gtrk-ref-reading`）装进本机检测到的 Agent。实现方式与 lark-cli 一致：gtrk 把本地 skill 源交给通用 `skills` CLI，由它维护 Agent 探测、目录映射及更新规则；gtrk 不再硬编码各家路径。
 
 默认使用 `~/.agents/skills` 作为统一正本，再链接到各 Agent 的兼容目录（Windows 使用 junction）；链接不可用时适配器会回退复制。这样更新只有一份正本，不会让多份副本逐渐漂移。常用命令：
 
@@ -72,6 +72,7 @@ gtrk skills install --copy
 | ⑤ | `/gtrk-mg` | `gtrk mg` | **MG（含 ov）最后叠上**（叠在已定稿、构图已核的底轨之上） |
 | ⑥ | `/gtrk-composite` | `gtrk composite` | **合成层**（字幕之后、出片之前）：把选定时间窗做成合成颗粒——一段时间内的整个画面由一颗代码颗粒接管（逐句换画面、对照并排、并列卡片、字幕排版），讲者与 B-roll 作为槽位画进去；入口三选一（整片铺满 / AI 判定 / 指定区间），候选显示在客户端大纲 CP 行；纯本地零计费。出片时由 `gtrk composite bake` 在本机烘焙成视频（首次需 `gtrk deps install --browser`） |
 | — | `/gtrk-style-maker` | （无命令，建栏目） | 一次性访谈式建你栏目的风格体系（skill 家族 + 栏目配置，见下节） |
+| 🔍 | `/gtrk-ref-reading` | `gtrk transcript` + `gtrk media` | **参考片精读**：别人的一条视频 → 字级转写 + 带台词标签的网格 + 关键动效逐帧 → 按「系统」记每个设计事件对着哪句话，落成 `ANALYSIS.md` / `TIMELINE.md` / `PROGRESS.md`；读完可交 `/gtrk-style-maker` 建栏目。看片命令纯本地零计费（只有转写一步计费），**不在成片 SOP 序列内** |
 | ③′ | 「**屏录画中画**」 | `gtrk pip lay` | 把口播粗剪的切点镜像到同步录的屏录 / 第二机位，铺屏录满幅轨 + 人像画中画副本轨（圆 / 圆角方 / 爱心 / 菱形 / 星形蒙版，可圆角）；纯本地零计费；低置信时产对齐工程让客户端拖齐后 `--resume` |
 | — | （收口） | `gtrk render` | 本地渲染 gtrk 工程 → 成片 mp4（含 overlay 与 MG 颗粒；颗粒未命中缓存时云渲计费，`--no-particles` 可跳过） |
 | ✂️ | `/gtrk-long2short` | `gtrk long2short` | 长剪短·粗剪：长视频语义选段+跳剪 → 逐 clip 出客户端/剪映/PR 三方工程（毛片不上传），**不在成片 SOP 序列内**、随时可独立用 |
@@ -88,7 +89,7 @@ gtrk skills install --copy
 | 🧭 | `/gtrk-vlog-docu` | 编排 `gtrk transcript` → `tool audio_tts_clone` → `split` → `matrix` → `mg` → `audio lay` → `subtitle lay` | **Vlog 纪实图纸**：一批现场素材 → 素材理解、选档写稿、一次拍板 → 同期声骨架 + 旁白配音 + B-roll + 字幕层 + BGM 全自动 → 客户端可出片工程；「现场同期声 × 后期旁白」双声道交替，区别于纯口播链与纯配音链 |
 
 > **skill 与命令的区别**：`/gtrk-mg` 是**脑**——懂它在 SOP 第 ⑤ 步（B-roll 三源全齐、构图核过才铺 MG）、带用户确认、按栏目配置解析该产哪种颗粒；`gtrk mg` 是**手**——纯确定性 lint + 铺轨。你对话触发 skill，skill 替你跑命令。
-> 上面 19 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装；名单与「给 AI Agent 用」一节、「结构」一节完全一致）——其中 🧭 标记的 7 张是**组合图纸**（一句话跑全链，只编排上面的单命令 skill、本身不新增命令）；`/gtrk-long2short` 独立驱动长剪短，`/gtrk-transcript` 独立驱动视频/音频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，四者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
+> 上面 20 个 `/gtrk-X` 都是 **CLI 自带框架 skill**（`gtrk skills install` 装；名单与「给 AI Agent 用」一节、「结构」一节完全一致）——其中 🧭 标记的 7 张是**组合图纸**（一句话跑全链，只编排上面的单命令 skill、本身不新增命令）；`/gtrk-long2short` 独立驱动长剪短，`/gtrk-transcript` 独立驱动视频/音频转文字稿，`/gtrk-tools` 只负责单点工具族，`/gtrk-cover` 管封面，`/gtrk-ref-reading` 管参考片精读，五者都不属成片 SOP 序列；`/gtrk-ai-drama`·`/gtrk-style-maker`·`/gtrk-cover` 是纯创作 skill（无命令）。栏目专属的**视觉风格/生产内容**另由你栏目的生产 skill（`/gtrk-style-maker` 产、经栏目配置 `style.skills` 绑定）供，不写死在这些框架 skill 里。
 
 **各车道的具体视觉/内容怎么产**——MG 动态图长什么样、AI 情景动画什么调性——不写死在 CLI 里，而由**你自己栏目的生产 skill** 提供（用 `/gtrk-style-maker` 访谈式产出、留本地）。它们经**栏目配置 `style.skills[].produces`**（值 = 车道名）绑定，`gtrk mg` / `gtrk matrix` 等**通用驱动器**据此消费。**驱动方向 = CLI 驱动栏目 skill**：栏目 skill 只供风格/内容、不含任何「跑哪条命令」的编排职责；框架只认车道与管线接口，画面风格永远归你的栏目。不建栏目就用内置默认，端到端照常跑。
 
@@ -253,6 +254,31 @@ gtrk transcript "D:/素材/采访视频.mp4" --lang zh-CN --out "D:/文字稿/�
 实时计费在运行前从官网价格表按 `asr` 查询，CLI 与文档不保存价格数字。`--json` 的 stdout 只输出 `{ok,taskId,fileId,output,transcriptJson,summaryPending}`，其中 `output` 指向这一个 Markdown；`summaryPending:true` 表示 `/gtrk-transcript` 驱动 Agent 还需生成语义总结、原地替换待总结标记，完成后仍只交付同一个文件。
 
 > `--json` 时另在源文件旁产一份句级时码 `<名>-transcript.json`（`utterances[]{id,text,st,ed}` + `material_id` + `text_hash` + `duration`，与 `gtrk split` 的 transcript 结构逐字段对齐），可直接被 `gtrk project init --transcript` 兜底路消费。**TTS 合成的配音勿走本零件重跑 ASR**——`gtrk project init --tts-task` 直取服务端句级时码，零 ASR 零额外计费。
+
+### `gtrk media <子命令>` — 本地看片（参考片精读取证）
+
+按时码或台词看任意本地视频：带台词标签的抽帧网格、逐帧看动效、视觉变化候选。**纯本地、零计费、不联网、不要 API Key**；只读本地文件，不下载链接。由 `/gtrk-ref-reading` 驱动，也可用来复核自家成片。
+
+| 子命令 | 做什么 |
+|---|---|
+| `probe <视频>` | 时长、显示尺寸（计入像素宽高比与旋转）、帧率与 VFR、有无音轨 |
+| `lines <转写稿>` | 逐句 `u<id> 起–止 文本`；`--find <台词>` 列出每处出现与字级起止 |
+| `frames <视频>` | 按 `--at` / `--every` / `--frames` / `--every-frame` 取单帧；带 `--transcript` 或 `--label` 时帧下方加标签 |
+| `tile <视频>` | 一张带标签的网格（≤60 格） |
+| `tiles <视频>` | 分页网格（`--cols × --rows`，缺省 3×3）；`--ranges <json>` 一次看多段；`--every-frame` 每段连续解码、保留每一原始帧 |
+| `boundaries <视频>` | 视觉变化候选（`--rate` 缺省 12、`--threshold` 缺省 0.1、`--min-gap` 合并近邻）；带 `--transcript` 时标注对着哪句话。**是机械证据，不是镜头判定** |
+| `cut <视频>` | 截一段证据片（`.mp4/.mov/.mkv`） |
+
+```bash
+gtrk media tiles "参考片.mp4" --frames 48 --cols 6 --rows 4 --cell 320 --transcript "精读/transcript.json" -o "精读/evidence/overview"
+gtrk media tiles "参考片.mp4" --around "买不动" --occurrence 1 --every-frame --cols 6 --rows 4 --transcript "精读/transcript.json" -o "精读/evidence/motion/stamp"
+gtrk media boundaries "参考片.mp4" --rate 4 --threshold 0.12 --transcript "精读/transcript.json" -o "精读/evidence/boundaries.json"
+```
+
+- **区间**：`--start/--end`（秒或 `[hh:]mm:ss.mmm`），或 `--around <台词> [--occurrence n] [--padding s]` 按台词定位（须配 `--transcript`；台词多处出现时必须指定第几处，`lines --find` 可先列出）。
+- **转写稿**：`gtrk transcript --json` 的产物（v1，含字级时码）原生可用，也认 `hypit.transcript@1`。转写稿须是这条视频的——时长 / 文件名对不上会在 stderr 告警。
+- **标签**（画面下方，不遮原片字幕与图形）：源片秒 · 时码（逐帧加帧号）· 句号 / 正在读的字与字级起止 / 所在整句（当前字高亮）。无字时写「此刻无字在读」「句间空隙」，不推断静音。标签用 libass 画，ffmpeg 缺 `ass` 滤镜时报错并指向 `gtrk deps install --ffmpeg`。
+- **落点**：`-o` 必填，不落当前目录或源片旁；已存在不覆盖，`--force` 只覆盖本命令族的旧产物。`frames` / `tiles` 的产物目录含 `index.json`，逐格记录文件、时间、字与句号。逐帧单次上限 1800 帧。
 
 ### `gtrk oralcut <毛片>`
 

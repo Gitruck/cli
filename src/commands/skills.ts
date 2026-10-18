@@ -64,6 +64,8 @@ export const SKILL_NAMES = [
 	"gtrk-vlog-docu",
 	// 合成层（add-composite-layer）：粗剪之上把选定时间窗做成合成颗粒，候选显示在客户端大纲 CP 行
 	"gtrk-composite",
+	// 参考片精读（add-reference-video-reading）：字级转写 + 带台词网格 + 逐帧 → ANALYSIS / TIMELINE，交棒 gtrk-style-maker
+	"gtrk-ref-reading",
 ] as const;
 
 export interface InstallSkillOptions {

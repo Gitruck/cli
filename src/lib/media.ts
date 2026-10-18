@@ -337,7 +337,7 @@ export async function probeFontAvailable(font: string, ffmpegPath?: string): Pro
 }
 
 /** ass 滤镜的路径参数要转义 Windows 盘符冒号与反斜杠，否则被当成滤镜参数分隔符。 */
-function assFilterPath(p: string): string {
+export function assFilterPath(p: string): string {
 	return p.replace(/\\/g, "/").replace(/:/g, "\\:");
 }
 
