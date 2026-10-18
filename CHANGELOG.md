@@ -15,6 +15,7 @@
 - 修：`gtrk tool image_matting` 处理带 EXIF 方向标记的手机照片（如 Orientation=6），产物转了 90°。上传前先按显示方向摆正（原图不动，摆正件按原图指纹缓存在 `~/.gitruck/audio-cache/`）；无方向标记或非 JPEG 照旧原文件直传；缺 ffmpeg 等摆正失败时提示后按原像素上传（fix-image-matting-exif-orientation）。
 - `gtrk-mg` skill / 参考文档改准画幅口径：颗粒画幅须等于工程画布，竖屏可用；registry 中性块仍只有 1920×1080。
 - 修：竖屏 / 方形工程取文字模板（`gtrk mg fetch --source text`）恒得 1920×1080 颗粒，铺进去被拉伸。`--canvas` 原先在这条路上只被收下、不生效；现在按目标画幅编：派单模式缺省取工程 `.gtrk` 的 `video_size`（显式 `--canvas` 与工程不符当场拒，找不到工程文件时按 1920×1080 编并提示），独立模式按 `--canvas`。`gtrk mg compile` 新增 `--canvas`，重置颗粒时缺省沿用颗粒自己的画幅，`--remote` 同样把画幅交给服务端。横屏工程与不给 `--canvas` 时产物不变（fix-text-template-canvas-not-compiled）。
+- 修：`gtrk composite bake --progress jsonl` 的取消恰好落在工作页打开出片台时，要约 24 秒才报 `cancelled` 并退出（浏览器已被结束，打开页面却仍按每轮 8 秒等到期限）；现在浏览器一退出即放弃，取消照常几秒内收尾。开烤前建工作目录那一段也有进度行了（原先这段可能超过 1 秒没有输出）；装渲染组件期间关闭 stdin，装完即按取消收尾（原先会漏掉、照常烤完）（add-composite-bake）。
 
 ## 1.3.7（2026-10-18）
 
