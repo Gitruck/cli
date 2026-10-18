@@ -14,6 +14,7 @@
 - 修：竖屏 / 方形工程的 MG 颗粒经 `gtrk render` / `gtrk project export` 预渲后被压扁（横胖竖扁、旋转被拉平）。颗粒预渲原先一律按 1280×720 开舞台，云端按「舞台 / 颗粒声明尺寸」非等比挂载；现在舞台按颗粒声明的 `data-width` / `data-height` 等比缩到短边 720（竖屏 1080×1920 → 720×1280，方形 → 720×720），`project export` 登记的颗粒 MOV 尺寸随之对齐。横屏 16:9 颗粒的舞台与缓存键不变，存量缓存照常命中；竖屏 / 方形颗粒升级后首次渲染会重烤一次（旧缓存是压扁的，不复用）。客户端导出剪映 / PR 的颗粒预渲需客户端同步跟进（fix-particle-capture-follows-declared-aspect）。
 - 修：`gtrk tool image_matting` 处理带 EXIF 方向标记的手机照片（如 Orientation=6），产物转了 90°。上传前先按显示方向摆正（原图不动，摆正件按原图指纹缓存在 `~/.gitruck/audio-cache/`）；无方向标记或非 JPEG 照旧原文件直传；缺 ffmpeg 等摆正失败时提示后按原像素上传（fix-image-matting-exif-orientation）。
 - `gtrk-mg` skill / 参考文档改准画幅口径：颗粒画幅须等于工程画布，竖屏可用；registry 中性块仍只有 1920×1080；文字模板的 `--canvas` 尚未接到编译（眼下仍出 1920×1080）。
+- 修：`gtrk composite bake --progress jsonl` 的取消恰好落在工作页打开出片台时，要约 24 秒才报 `cancelled` 并退出（浏览器已被结束，打开页面却仍按每轮 8 秒等到期限）；现在浏览器一退出即放弃，取消照常几秒内收尾。开烤前建工作目录那一段也有进度行了（原先这段可能超过 1 秒没有输出）；装渲染组件期间关闭 stdin，装完即按取消收尾（原先会漏掉、照常烤完）（add-composite-bake）。
 
 ## 1.3.7（2026-10-18）
 
