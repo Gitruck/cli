@@ -16,6 +16,11 @@
 - `gtrk-mg` skill / 参考文档改准画幅口径：颗粒画幅须等于工程画布，竖屏可用；registry 中性块仍只有 1920×1080。
 - 修：竖屏 / 方形工程取文字模板（`gtrk mg fetch --source text`）恒得 1920×1080 颗粒，铺进去被拉伸。`--canvas` 原先在这条路上只被收下、不生效；现在按目标画幅编：派单模式缺省取工程 `.gtrk` 的 `video_size`（显式 `--canvas` 与工程不符当场拒，找不到工程文件时按 1920×1080 编并提示），独立模式按 `--canvas`。`gtrk mg compile` 新增 `--canvas`，重置颗粒时缺省沿用颗粒自己的画幅，`--remote` 同样把画幅交给服务端。横屏工程与不给 `--canvas` 时产物不变（fix-text-template-canvas-not-compiled）。
 - 修：`gtrk composite bake --progress jsonl` 的取消恰好落在工作页打开出片台时，要约 24 秒才报 `cancelled` 并退出（浏览器已被结束，打开页面却仍按每轮 8 秒等到期限）；现在浏览器一退出即放弃，取消照常几秒内收尾。开烤前建工作目录那一段也有进度行了（原先这段可能超过 1 秒没有输出）；装渲染组件期间关闭 stdin，装完即按取消收尾（原先会漏掉、照常烤完）（add-composite-bake）。
+- 合成层在英文口播片上更好用：
+  - 场景锚点的关键词照句子原文写即可：匹配时关键词与句子都忽略空格、标点与大小写，英文按整词（`"cold brew"` 直接写，`tea` 不再先命中 `teas`）；找不到时报错打印句子原文。
+  - `gtrk composite plan` 的「建议画面」识别英文的对照（unlike / but / instead of …）、列举（逗号列举，或转写不带标点时的一长串并列）、数字与分点；其他语种不做文字信号，审稿稿里写明。中文判定不变。
+  - `gtrk composite lay` 的回执改为当前出片口径：客户端（1.2.13 起）原生导出与剪映 / Pr 导出、`gtrk render`、`gtrk project export` 都先在本机烤合成，失败段按粗剪出画。
+  - `/gtrk-composite` 场景速查写明：工具箱只给舞台直接子元素定位，容器里的元素自己写 `position:absolute` 或加 `.abs`。
 
 ## 1.3.7（2026-10-18）
 

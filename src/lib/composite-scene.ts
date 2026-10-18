@@ -135,22 +135,50 @@ export function sourceToTimeline(gtrk: GtrkProject, materialId: string, src: num
 	return later[0].track_st;
 }
 
-/** 句 id + 关键词（第 nth 处）→ 关键词首字在时间线上的时刻；关键词所在的字被剪掉时取其后第一个保留的字。 */
+// 锚点匹配的规范化（fix-composite-english-pitfalls）：关键词与句子走同一套——去掉空白与标点、统一小写。
+const ANCHOR_DROP = /[\s\p{P}]/u;
+// 以空格分词的文字（英文等）：关键词两端 MUST 落在词界上，「at」不命中「that」；中日韩泰不分词，照旧子串匹配
+const SPACED_CHAR = /[\p{L}\p{N}]/u;
+const UNSPACED_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}]/u;
+const spaced = (c: string) => SPACED_CHAR.test(c) && !UNSPACED_CHAR.test(c);
+const anchorChars = (s: string): string[] => [...s].filter((c) => !ANCHOR_DROP.test(c)).flatMap((c) => [...c.toLowerCase()]);
+
+/** 句子原文（报错用）：有 `text` 用它；没有就把逐字拼回去，以空格分词的文字之间补空格。 */
+function sentenceText(u: { text?: string; words?: Array<{ w: string }> }): string {
+	if (typeof u.text === "string" && u.text.trim()) return u.text;
+	let out = "";
+	for (const { w } of u.words ?? []) {
+		const t = w.trim();
+		if (out && t && spaced(out[out.length - 1]) && spaced(t[0])) out += " ";
+		out += t;
+	}
+	return out;
+}
+
+/**
+ * 句 id + 关键词（第 nth 处）→ 关键词首字在时间线上的时刻；关键词所在的字被剪掉时取其后第一个保留的字。
+ * 匹配忽略空白、标点与大小写（`"cold brew"` 命中逐字 `cold` `brew`）；以空格分词的文字按整词匹配。
+ */
 export function anchorTime(transcript: Transcript, gtrk: GtrkProject, uid: string, keyword: string, nth = 0): number {
 	const u = transcript.utterances.find((x) => x.id === uid);
 	if (!u) throw new Error(`转写里没有句 ${uid}`);
-	const chars = (u.words ?? []).map((w) => w.w).join("");
-	let idx = -1;
-	for (let k = 0; k <= nth; k++) {
-		idx = chars.indexOf(keyword, idx + 1);
-		if (idx < 0) throw new Error(`${uid} 里找不到「${keyword}」（第 ${nth + 1} 处）：${chars}`);
+	const key = anchorChars(String(keyword ?? ""));
+	if (!key.length) throw new Error(`关键词「${keyword}」去掉空格与标点后为空`);
+	// 规范化后的字流，每个字记着它属于第几个逐字
+	const stream: Array<{ c: string; wi: number }> = [];
+	(u.words ?? []).forEach((w, wi) => {
+		for (const c of anchorChars(w.w)) stream.push({ c, wi });
+	});
+	const midWord = (a: number, b: number) => a >= 0 && b < stream.length && stream[a].wi === stream[b].wi && spaced(stream[a].c) && spaced(stream[b].c);
+	let seen = 0;
+	for (let i = 0; i + key.length <= stream.length; i++) {
+		if (!key.every((c, k) => stream[i + k].c === c)) continue;
+		if (midWord(i - 1, i) || midWord(i + key.length - 1, i + key.length)) continue;
+		if (seen++ < nth) continue;
+		const w = u.words[stream[i].wi];
+		return sourceToTimeline(gtrk, String(u.material_id ?? transcript.material_id), w.st);
 	}
-	let pos = 0;
-	for (const w of u.words) {
-		if (pos + w.w.length > idx) return sourceToTimeline(gtrk, String(u.material_id ?? transcript.material_id), w.st);
-		pos += w.w.length;
-	}
-	throw new Error(`${uid}「${keyword}」：字下标越界`);
+	throw new Error(`${uid} 里找不到「${keyword}」（第 ${nth + 1} 处；匹配时忽略空格、标点与大小写，英文按整词）：${sentenceText(u)}`);
 }
 
 export interface ResolvedScene {

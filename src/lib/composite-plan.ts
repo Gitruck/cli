@@ -200,6 +200,111 @@ const RE_CONTRAST = /(但是|可是|然而|而是|不是|相比|反而|对比|�
 const RE_NUMBER = /(\d+|[两三四五六七八九十百千万]|[一二两三四五六七八九十百千万]{2,})(个|种|步|条|点|年|岁|倍|成|%|万|亿|次|分钟|小时|天|句)/;
 const RE_STEP = /(第[一二三四五六七八九十\d]+步|接下来|第一步|最后一步)/;
 
+// 英文（fix-composite-english-pitfalls）：口播转写常不带标点，列举既认逗号也认「一长串名词 + and」
+const EN_LIST_MARK = /\b(first(?:ly)?|second(?:ly)?|third(?:ly)?|finally|plus|including|such as|another|on top of that|not only|as well as)\b/gi;
+const EN_CONTRAST = /\b(unlike|but|however|instead of|instead|rather than|whereas|versus|vs|compared (?:to|with)|on the other hand|different from|differs? from|although|even though)\b/gi;
+// 单个「one」（one of those）是口语，不算「具体的量」——与中文排除单个「一」同理
+const EN_NUMBER = /\d|\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand|million|billion|dozen|half|percent)\b/i;
+const EN_STEP = /\b(step (?:one|two|three|four|five|\d+)|first step|next step|last step|first of all|firstly|secondly|thirdly|lastly|last but not least|to begin with)\b/i;
+/** 虚词：一长串里出现它就断开（「一长串并列」只数连着的实词）。 */
+const EN_FUNCTION = new Set(
+	(
+		"a an the this that these those it its it's i i'm i've you you're you've your we our they their he his she her me my us them " +
+		"is are was were be been being am do does did done have has had having will would can could should shall may might must " +
+		"and or but nor so if then than as of to in on at for with from by about into onto over under out up down off " +
+		"not no all any some every each own more most very just also too only even such what which who whom whose when where why how " +
+		"there here because while though although once since until"
+	).split(" "),
+);
+/** 判语种用的高频虚词（命中占比够高才认英文）。 */
+const EN_COMMON = new Set("the a an and or but of to in on at for with is are was were be it this that you i we they not have has do will can so if".split(" "));
+
+/** 文字信号识别覆盖的语种；null = 未覆盖（只看 B-roll 密度，审稿稿写明）。 */
+export type SignalLang = "zh" | "en" | null;
+
+/** 按全片文字判信号语种：汉字为主 → zh；拉丁字母为主且高频英文虚词占比够 → en；假名、谚文或其他拉丁语种 → null。 */
+export function signalLangOf(texts: string[]): SignalLang {
+	const all = texts.join(" ");
+	const count = (re: RegExp) => all.match(re)?.length ?? 0;
+	const han = count(/\p{Script=Han}/gu);
+	const kana = count(/[\p{Script=Hiragana}\p{Script=Katakana}]/gu);
+	const hangul = count(/\p{Script=Hangul}/gu);
+	const latin = count(/\p{Script=Latin}/gu);
+	const letters = han + kana + hangul + latin;
+	if (!letters) return "zh";
+	if (kana >= 0.05 * letters || hangul >= 0.3 * letters) return null;
+	if (han >= 0.3 * letters) return "zh";
+	if (latin < 0.5 * letters) return null;
+	const words = all.toLowerCase().match(/[a-z']+/g) ?? [];
+	const common = words.filter((w) => EN_COMMON.has(w)).length;
+	return words.length && common >= 0.15 * words.length ? "en" : null;
+}
+
+interface TextSignals {
+	/** 列举的项数（数得出时）或 0。 */
+	listItems: number;
+	/** 不带逗号的一长串并列里连着的实词数（中文恒 0）。 */
+	listRun: number;
+	/** 分点词出现次数。 */
+	listMarks: number;
+	contrast: number;
+	number: boolean;
+	step: boolean;
+}
+
+function zhSignals(texts: string[]): TextSignals {
+	const text = texts.join("，");
+	return {
+		listMarks: text.match(RE_LIST_MARK)?.length ?? 0,
+		listItems: (text.match(/[^，。！？、\s]{1,8}、[^，。！？、\s]{1,8}(、[^，。！？、\s]{1,8})*/g) ?? []).reduce((n, s) => Math.max(n, s.split("、").length), 0),
+		listRun: 0,
+		contrast: text.match(RE_CONTRAST)?.length ?? 0,
+		number: RE_NUMBER.test(text),
+		step: RE_STEP.test(text),
+	};
+}
+
+/** 英文逐句看（句与句之间不连成一串，免得句界被当成列举的逗号）。 */
+function enSignals(texts: string[]): TextSignals {
+	const out: TextSignals = { listMarks: 0, listItems: 0, listRun: 0, contrast: 0, number: false, step: false };
+	for (const t of texts) {
+		out.listMarks += t.match(EN_LIST_MARK)?.length ?? 0;
+		out.contrast += t.match(EN_CONTRAST)?.length ?? 0;
+		out.number ||= EN_NUMBER.test(t);
+		out.step ||= EN_STEP.test(t);
+		for (const clause of t.split(/[.;:!?]+/)) {
+			// 逗号列举：连着的短段（≤ 4 词）各算一项，带 and / or 的短段算两项；长段的尾巴可能是第一项，从它重新数。
+			// 三项要带 and / or 才算（「So, honestly, I love it」不是列举），四项起不论
+			let items = 0;
+			let joined = false;
+			for (const seg of clause.split(",")) {
+				const n = seg.trim().split(/\s+/).filter(Boolean).length;
+				const conj = /\b(and|or)\b/i.test(seg);
+				if (n >= 1 && n <= 4) {
+					items += conj && n >= 2 ? 2 : 1;
+					joined ||= conj;
+				} else {
+					items = n ? 1 : 0;
+					joined = false;
+				}
+				if (items >= 4 || (items >= 3 && joined)) out.listItems = Math.max(out.listItems, items);
+			}
+			// 不带逗号的一长串：连着的实词 + and / or + 实词
+			const tokens = clause.toLowerCase().replace(/’/g, "'").match(/[a-z0-9'-]+/g) ?? [];
+			let run = 0;
+			for (let i = 0; i < tokens.length; i++) {
+				const tk = tokens[i];
+				if ((tk === "and" || tk === "or") && run > 0 && i + 1 < tokens.length && !EN_FUNCTION.has(tokens[i + 1])) out.listRun = Math.max(out.listRun, run);
+				run = EN_FUNCTION.has(tk) ? 0 : run + 1;
+			}
+		}
+	}
+	return out;
+}
+
+/** 不带逗号的一长串并列：连着的实词至少这么多个才算列举。 */
+const EN_LIST_RUN_MIN = 5;
+
 interface Scored {
 	lo: number;
 	hi: number;
@@ -219,15 +324,18 @@ function maxStartsIn(starts: number[], st: number, ed: number, span = 6): number
 	return best;
 }
 
-function scoreChunk(inp: PlanInput, lo: number, hi: number, isFirst: boolean, isLast: boolean): Scored {
+/** 此语种未做文字信号识别时的缺省建议（不说「没有对照」——没判过就不下这个结论）。 */
+const HINT_UNSCANNED = "此语种未做文字信号识别，缺省一画；按台词自己定画面数";
+
+function scoreChunk(inp: PlanInput, lo: number, hi: number, isFirst: boolean, isLast: boolean, lang: SignalLang): Scored {
 	const U = inp.utterances;
-	const text = U.slice(lo, hi + 1).map((u) => u.text).join("，");
+	const texts = U.slice(lo, hi + 1).map((u) => u.text);
 	const st = U[lo].st;
 	const ed = U[hi].ed;
 	const signals: string[] = [];
 	const reasons: string[] = [];
 	let score = 0;
-	let hint: PlanWindow["layout_hint"] = { pictures: "single", why: "没有对照或并列，一画即可" };
+	let hint: PlanWindow["layout_hint"] = { pictures: "single", why: lang ? "没有对照或并列，一画即可" : HINT_UNSCANNED };
 	const broll = Math.max(0, ...inp.brollStarts.map((s) => maxStartsIn(s, st, ed)));
 	if (broll >= 3) {
 		// 几秒内连着多个短镜头是合成的头号场景（explore §16.2），权重高于单个文字信号
@@ -236,27 +344,25 @@ function scoreChunk(inp: PlanInput, lo: number, hi: number, isFirst: boolean, is
 		reasons.push(`6 秒内有 ${broll} 个 B-roll 短镜头`);
 		hint = { pictures: "sequence", why: "逐句换成这句说到的画面；不按粗剪轨数并排" };
 	}
-	const listMarks = text.match(RE_LIST_MARK)?.length ?? 0;
-	const enumItems = (text.match(/[^，。！？、\s]{1,8}、[^，。！？、\s]{1,8}(、[^，。！？、\s]{1,8})*/g) ?? []).reduce((n, s) => Math.max(n, s.split("、").length), 0);
-	if (listMarks >= 2 || enumItems >= 3) {
+	const ts: TextSignals | null = lang === "zh" ? zhSignals(texts) : lang === "en" ? enSignals(texts) : null;
+	if (ts && (ts.listMarks >= 2 || ts.listItems >= 3 || ts.listRun >= EN_LIST_RUN_MIN)) {
 		score += 0.3;
 		signals.push("list");
-		reasons.push(enumItems >= 3 ? `列举了 ${enumItems} 项` : "有列举 / 分点");
+		reasons.push(ts.listItems >= 3 ? `列举了 ${ts.listItems} 项` : ts.listRun >= EN_LIST_RUN_MIN ? `列举了一长串（${ts.listRun} 个词连着）` : "有列举 / 分点");
 		hint = { pictures: "row", why: "并列的几件事，说到哪件亮哪张" };
 	}
-	const contrast = text.match(RE_CONTRAST)?.length ?? 0;
-	if (contrast >= 1) {
+	if (ts && ts.contrast >= 1) {
 		score += 0.25;
 		signals.push("contrast");
 		reasons.push("有对照 / 转折");
 		if (hint.pictures !== "row") hint = { pictures: "pair", why: "说到对照的那一刻再拆成两画，此前一画" };
 	}
-	if (RE_NUMBER.test(text)) {
+	if (ts?.number) {
 		score += 0.15;
 		signals.push("number");
 		reasons.push("有具体数字或量");
 	}
-	if (RE_STEP.test(text)) {
+	if (ts?.step) {
 		score += 0.15;
 		signals.push("step");
 		reasons.push("章节 / 步骤转折");
@@ -279,13 +385,14 @@ function scoreChunk(inp: PlanInput, lo: number, hi: number, isFirst: boolean, is
 export function planFull(inp: PlanInput): CompositePlanMeta {
 	const fixed = keptFromExisting(inp.existing);
 	const fresh: Array<Omit<PlanWindow, "id">> = [];
+	const lang = signalLangOf(inp.utterances.map((u) => u.text));
 	for (const g of freeRanges(inp, fixed.map(winOf))) {
 		const us = units(inp, g.lo, g.hi);
 		us.forEach(([a, b], k) => {
 			// 首尾相接：窗口起点 = 本组首句起点（第一组取空闲区间起点），终点 = 下一组首句起点（末组取空闲区间终点）
 			const st = k === 0 ? g.st : inp.utterances[a].st;
 			const ed = k === us.length - 1 ? g.ed : inp.utterances[us[k + 1][0]].st;
-			const sc = scoreChunk(inp, a, b, false, false);
+			const sc = scoreChunk(inp, a, b, false, false, lang);
 			fresh.push({
 				state: "proposed",
 				...windowFromUtterances(inp, a, b, st, ed),
@@ -305,13 +412,14 @@ export function planAuto(inp: PlanInput, density = COMPOSITE_DENSITY_DEFAULT): C
 	const U = inp.utterances;
 	const cands: Scored[] = [];
 	const all = U.length ? units(inp, 0, U.length - 1, 10) : [];
+	const lang = signalLangOf(U.map((u) => u.text));
 	all.forEach(([a, b], k) => {
 		const w = { st: U[a].st, ed: U[b].ed };
 		if (w.ed - w.st < AUTO_MIN_SEC) return;
 		if (built.some((x) => overlap(x, w) > 0)) return;
 		if (rejected.some((x) => overlap(x, w) > 0.5 * (w.ed - w.st))) return;
 		if (inp.opaqueParticles.some((p) => overlap(p, w) > 0.5 * (w.ed - w.st))) return;
-		const sc = scoreChunk(inp, a, b, k === 0, k === all.length - 1);
+		const sc = scoreChunk(inp, a, b, k === 0, k === all.length - 1, lang);
 		if (sc.score > 0) cands.push(sc);
 	});
 	const budget = density * inp.end - built.reduce((n, w) => n + (w.ed - w.st), 0);
@@ -630,20 +738,29 @@ const clock = (s: number) => {
 /** 由 `struct_meta.composite` 单向渲染的审稿稿（不回读）。 */
 export function renderPlanMd(plan: CompositePlanMeta, inp: Pick<PlanInput, "utterances" | "end">): string {
 	const U = inp.utterances;
+	const lang = signalLangOf(U.map((u) => u.text));
 	const textOf = (w: PlanWindow) => {
 		const a = U.findIndex((u) => u.id === w.span.from);
 		const b = U.findIndex((u) => u.id === w.span.to);
-		const t = a >= 0 && b >= a ? U.slice(a, b + 1).map((u) => u.text).join("，") : "";
+		const t = a >= 0 && b >= a ? U.slice(a, b + 1).map((u) => u.text).join(lang === "zh" ? "，" : " / ") : "";
 		return t.length > 80 ? `${t.slice(0, 80)}…` : t;
 	};
 	const live = plan.windows.filter((w) => w.state !== "trimmed" && w.state !== "rejected");
 	const covered = live.reduce((n, w) => n + (w.track_ed - w.track_st), 0);
+	// 中文是原有口径，不加行；英文写明按英文识别；其余语种写明没识别（「一画」不是结论）
+	const langNote =
+		lang === "en"
+			? ["- 文字信号：按英文识别（unlike / but / instead of 等对照词、逗号或一长串并列、数字、first / finally 等分点）"]
+			: lang === null
+				? ["- ⚠️ 此语种未做信号识别：「建议画面」只按 B-roll 密度给，列举 / 对照 / 数字 / 步骤这些文字信号没判，画面数按台词自己定"]
+				: [];
 	const lines = [
 		"# 合成层候选窗口",
 		"",
 		`- 入口：${MODE_TEXT[plan.mode]}${plan.density !== undefined ? `（密度上限 ${Math.round(plan.density * 100)}%）` : ""}`,
 		`- 生成时刻：${plan.projected_at}`,
 		`- 覆盖：${covered.toFixed(1)} 秒 / 全片 ${inp.end.toFixed(1)} 秒（${inp.end > 0 ? Math.round((covered / inp.end) * 100) : 0}%）`,
+		...langNote,
 		"- 在客户端大纲的 CP 行能看到这些窗口（虚线框 = 待审，加浅底 = 已采纳）。在对话里说「W01、W03 要，W02 不要，W04 改到 80 到 90.9 秒」即可。",
 		"",
 		"| 窗口 | 起止 | 状态 | 为什么 | 建议画面 | 这段在说什么 |",
