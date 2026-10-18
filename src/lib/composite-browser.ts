@@ -250,6 +250,10 @@ export class HeadlessBrowser {
 	private listeners = new Set<(m: Record<string, unknown>) => void>();
 	private sessionId: string | null = null;
 	private exited = false;
+	/** 进程为什么没了（起不来 / 已退出）：之后的指令与等待都以它失败。 */
+	private exitReason = "浏览器进程已退出";
+	/** 等事件的一方（`waitEvent`）：进程一没就叫醒它们——事件不会再来，别空等到各自超时。 */
+	private exitWatchers = new Set<(why: string) => void>();
 	/** 调试管道已关（本端 `close`）：管道只由主进程握着，与主进程退出同时关上（2026-10-17 实测）；子进程可能还在退。 */
 	private pipesClosed = false;
 	/** 主进程映像名与退出时刻：收遗留子进程时按「父进程号 + 映像名 + 创建早于退出」认（见 `terminateBrowserTree`）。 */
@@ -313,9 +317,11 @@ export class HeadlessBrowser {
 			}
 		});
 		const fail = (why: string) => {
+			if (!this.exited) this.exitReason = why;
 			this.exited = true;
 			for (const p of this.pending.values()) p.rej(new Error(why));
 			this.pending.clear();
+			for (const w of [...this.exitWatchers]) w(why);
 		};
 		// 起不来（路径不对、不是可执行文件）时 spawn 发 error 而不是 exit：不接住会把整个 CLI 进程带崩
 		this.proc.on("error", (e) => fail(`浏览器起不来：${e.message}`));
@@ -390,20 +396,24 @@ export class HeadlessBrowser {
 		});
 	}
 
+	/** 等页面上的一个 CDP 事件，至多 `timeoutMs`；浏览器进程没了即失败（与在途指令同一时刻）。 */
 	private waitEvent(method: string, timeoutMs: number): Promise<void> {
+		if (this.exited) return Promise.reject(new Error(this.exitReason));
 		return new Promise((res, rej) => {
-			const timer = setTimeout(() => {
+			const end = (err?: Error) => {
+				clearTimeout(timer);
 				this.listeners.delete(l);
-				rej(new Error(`等待 ${method} 超时`));
-			}, timeoutMs);
-			const l = (m: Record<string, unknown>) => {
-				if (m.method === method && m.sessionId === this.sessionId) {
-					clearTimeout(timer);
-					this.listeners.delete(l);
-					res();
-				}
+				this.exitWatchers.delete(gone);
+				if (err) rej(err);
+				else res();
 			};
+			const timer = setTimeout(() => end(new Error(`等待 ${method} 超时`)), timeoutMs);
+			const l = (m: Record<string, unknown>) => {
+				if (m.method === method && m.sessionId === this.sessionId) end();
+			};
+			const gone = (why: string) => end(new Error(why));
 			this.listeners.add(l);
+			this.exitWatchers.add(gone);
 		});
 	}
 
@@ -413,6 +423,9 @@ export class HeadlessBrowser {
 	 * ⚠️ 偶发（机器忙时实测）：新开的页面第一次导航，`Page.navigate` 迟迟不回、load 事件也不来，原样等会卡死整轮
 	 * （原型 render.mjs 同一现象，靠定时补导航解决）。所以：不阻塞在导航的回包上；每轮等 load 至多 8 秒，
 	 * 没等到就看页面是否其实已经到了（事件丢了），还没到就再导航一次，整体限时。
+	 *
+	 * 进程没了（取消收尾结束了它 / 崩溃）就立即失败：每轮先查一次，等 load 的那一轮也随进程退出结束。否则每轮空等
+	 * 8 秒、走满整个期限——2026-10-18 实测取消落在打开出片台这一步（期限 20 秒）时，`cancelled` 晚了 24 秒。
 	 */
 	async open(url: string, timeoutMs = 60000): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
@@ -424,6 +437,8 @@ export class HeadlessBrowser {
 			}
 		};
 		while (Date.now() < deadline) {
+			// 不查这一句，进程没了之后等事件、导航、求值都立即失败，循环会在微任务里空转到期限
+			if (this.exited) throw new Error(`${this.exitReason}，页面没打开：${url}`);
 			const loaded = this.waitEvent("Page.loadEventFired", 8000).then(
 				() => true,
 				() => false,

@@ -443,6 +443,16 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 		return result;
 	}
 
+	// ---- 预处理从这里起算：先报 prep 0，再建工作目录。建目录（mkdir / 清扫遗留 / 写锁文件）是同步的，满载时实测
+	// 能卡主线程 1 秒；先有一条阶段事件，写线程才有东西可重发（否则 start 与首条 prep 之间断档，design D8「保活的前提」）
+	const sub: BakePlan = { ...plan, entries: todo.map((x) => x.entry), failed: [] };
+	const clusters = sourceClusters(sub, fps).filter((c) => {
+		const p = materialPath(opts.gtrk, c.material, opts.baseDir);
+		return p && existsSync(p) && !isImagePath(p);
+	});
+	let prepDone = 0;
+	emit({ type: "prep", done: 0, total: clusters.length });
+
 	// ---- 工作目录、取消
 	const work = openWorkDir(outDir);
 	const live = { browsers: new Set<HeadlessBrowser>(), encoders: new Set<ChildProcess>() };
@@ -463,6 +473,8 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 		for (const b of [...live.browsers]) retire(b);
 	};
 	opts.signal?.addEventListener("abort", onAbort, { once: true });
+	// 登记之前就已取消（如装浏览器期间关了 stdin）：abort 事件不会再来，这里补认
+	if (opts.signal?.aborted) onAbort();
 	const failComposite = new Map<string, string>();
 	try {
 		// ---- 分段队列与并发数（只依赖待烤清单，先算出来：预处理期间就把工作页拉起来）
@@ -518,16 +530,9 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 			return p;
 		});
 
-		// ---- 中间文件（只为要烤的颗粒）
-		const sub: BakePlan = { ...plan, entries: todo.map((x) => x.entry), failed: [] };
-		const clusters = sourceClusters(sub, fps).filter((c) => {
-			const p = materialPath(opts.gtrk, c.material, opts.baseDir);
-			return p && existsSync(p) && !isImagePath(p);
-		});
+		// ---- 中间文件（只为要烤的颗粒；簇在报 prep 0 之前已算好）
 		const segs: Record<string, Segment[]> = {};
 		const startCache = new Map<string, number>();
-		let prepDone = 0;
-		emit({ type: "prep", done: 0, total: clusters.length });
 		const segResults = await limit(
 			6,
 			clusters.map((c, i) => async () => {
