@@ -66,7 +66,7 @@ gtrk composite scaffold --project <工程>          # 为已采纳窗口落场�
    看联系表（每格左上是源时间码）、切点列表、黑边实测。入点与在场时长 MUST 落在一个镜头内（规则 5），`data-crop` 按黑边实测取（规则 3）。工程里还没登记的素材写进 `<工程>/composite/materials.json`（`[{ "id", "path", "duration" }]`），铺轨时一并登记。
 3. **写场景**（格式见「场景写法速查」）。
 4. **构建**：`gtrk composite build --project <工程> [--only cp-w03]`——按 infra 规则解析（帧格窗口、轨身份、锚点、字幕输入、`inputs_hash`）并校验，产 `<工程>/gtrk/assets/composite/<id>.html`。回执里每颗应为 `fresh`。
-5. **机检**：`gtrk composite lint --project <工程> --stills 26,86.6`——静态校验 + 逐帧排版（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台），顺带出静帧。**不过就改场景重跑，过了才往下走。**
+5. **机检**：`gtrk composite lint --project <工程> --stills 26,86.6`——静态校验 + 逐帧排版（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台、容器里的元素写了偏移却没定位），顺带出静帧。**不过就改场景重跑，过了才往下走。**
    - 退出码 3 = 本机找不到 Chrome / Edge，**排版没机检**：照实告诉用户，用静帧（或客户端预览）人眼逐颗查穿模，MUST NOT 当成通过。
 
 ### 检查点②：看静帧
@@ -159,7 +159,7 @@ CP.render = (t) => {
 - **槽位元素**：`data-slot` 一槽一个；`data-z` 叠放次序；`data-fit` cover / contain；`data-shape` rect / roundrect / circle；`data-crop` 上右下左比例；`data-filter` 只收白名单滤镜。
 - **装饰跟随**：`data-for="<槽位>"` 的元素与槽位同框（`data-pad` 外扩）；`.shadow` 在下（背景层），`.frame` / `.ring` 加 `data-layer="front"` 在上——**只给最上层的画面加前景描边**（规则 2）。
 - **分层**：缺省是背景层（画在视频之下）；`data-layer="front"` 的子树在视频之上（文字、标签、描边、线条）。
-- **定位**：工具箱只给**舞台的直接子元素**绝对定位（`#stage > *`）。放进容器里的子元素（如 `<div id="grid">` 下的一排徽章）不会自动定位，`left` / `top` 不生效、按文档流挤成一列，lint 也不报——容器内要摆位置的子元素自己写 `position:absolute`，或加工具箱的 `.abs` 类；坐标相对容器（容器自己要写宽高）。
+- **定位**：工具箱只给**舞台的直接子元素**绝对定位（`#stage > *`）。放进容器里的子元素（如 `<div id="grid">` 下的一排徽章）不会自动定位，`left` / `top` 不生效、按文档流挤成一列（lint 报 `unpositioned-offset`）——容器内要摆位置的子元素自己写 `position:absolute`，或加工具箱的 `.abs` 类；坐标相对容器（容器自己要写宽高）。
 - **工具箱 `CP`**：`prog(t, 起, 时长, ease)` 进度；`span` 进出；`at(id, [x,y,w,h], 透明度)` 定框；`mix(矩形A, 矩形B, p)` 版式插值；`seq(t, 到点, 下一张到点)` 同一位置逐句换画面的透明度；`place(el, x, y, o)`；`reveal / look / wipe / draw / typeOn`；`caption(el, "subs", t, 高亮词[], 隐藏区间[])`；`cues("subs")` 取字幕条目（局部帧）；`fps()`。
 - **常用样式**：`.bed`（底色）/ `.bed.dark`；`.kicker` `.h1` `.h2` `.h3` `.body` `.tag` `.num`；`.ptag` / `.ptag.warm`（画面标签）；`.cap` / `.cap.dark`（字幕）；`.bubble`（对话气泡）；`.stamp`（印章）；`.card` `.pill` `.rule`。配色与字体都是变量：`--bg --bg2 --ink --muted --line --accent --accent2 --accent3 --alert --font --font-serif`。
 - **纯函数**：场景脚本 MUST NOT 用 `Date`、`Math.random`、`requestAnimationFrame`、`setInterval`、`setTimeout`（lint 会拦）——同一帧号永远画出同一画面，客户端是逐帧 seek 的。
@@ -183,11 +183,11 @@ CP.render = (t) => {
 |---|---|
 | build 报「素材 X 未登记」 | 写进 `composite/materials.json`（`id` + `path`），或换工程里已登记的素材 |
 | build 报「锚点落在窗口外 / 找不到关键词」 | 关键词照句子原文抄（看 `context.md`；空格、标点、大小写不影响，英文按整词），或换一个落在窗口内的词 |
-| 容器里的徽章 / 卡片挤成一列、`left` / `top` 不生效（lint 不报） | 它们不是舞台的直接子元素：自己写 `position:absolute` 或加 `.abs`（见场景速查「定位」） |
 | build 报「轨 N 在窗口内没有片段」 | 那条轨这段是空的：换轨，或改用 `own` |
 | lint 报 `border-over-slot` | 两张画面重叠且下层有前景描边：错开时序（等前一张到位再换）或去掉下层的前景描边 |
 | lint 报 `stroke-through-slot` | 前景线条穿过画面：挪画面或改线条走向 |
 | lint 报 `slot-out-of-stage` | 画面出了舞台：收回到舞台（= 工程画布，竖屏是 1080×1920）内（满屏底图除外） |
+| lint 报 `unpositioned-offset`（容器里的徽章 / 卡片挤成一列、`left` / `top` 不生效） | 它们不是舞台的直接子元素：自己写 `position:absolute` 或加 `.abs`（见场景速查「定位」）；本来就想按文档流 / flex 排的，删掉偏移 |
 | build 报「场景舞台 A，工程画布 B」 | 工程画布改过（或拿了别的画幅的场景）：按新画布重写场景，`gtrk composite scaffold --force` 重起骨架 |
 | lint / lay 报「需重渲」 | 上游（粗剪 / 素材 / 字幕）改过：重跑 `build`（再 `lint`、`lay`） |
 | lint 退出码 3 | 本机没 Chrome / Edge：排版未机检，用静帧人眼查，照实告诉用户 |
