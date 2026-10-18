@@ -400,6 +400,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 - `memberType`：internal=矩阵成员口（栏目偏好/concept 生效）；external=通用口（固定 real_shot + 可商用）。
 - `lay.laidTracks` / `lay.laidClips`：铺了几条候选轨、几个颗粒（不含空档补片 / 黑底轨）。
 - `lay.bed`：底板形态——`fill`（缺省：候选片段自带纯黑底、空档在候选轨内补黑）/ `track`（`--black-bed` 旧形态）；`lay.bed_fill` = 补了几段、几秒。
+- `lay.flash_gaps`（fill 形态口播工程才有）：短于 1.2s 的空档（片段间 1–2 帧缝、锚点前的空档）会在源窗余量内并进相邻片段，`absorbed` 是并掉的；`kept` 是余量不够、照旧补黑的——**成片里会闪**，非空就逐段报给用户（beat / 轨 / 区间 / 差多少余量）。
 - `lay.blackTrack`：黑底垫轨轨号（只有 `--black-bed` 才有，缺省 null）。
 - `lay.blackBedHoleSec` / `lay.blackBedHoles`：**纯黑时段**（没有任何 B-roll、靠黑片压住口播的段落；两种形态数值相同），恒全量不按阈值过滤——非零就主动报（哪个 beat、几秒、在哪），这是粗剪期既定取舍不是故障。
 - `lay.removedTracks` / `lay.keptEditedTracks`：剥了哪些旧自产轨 / 因「你编辑过」保留未剥的轨。删了什么必须跟用户说。
@@ -447,6 +448,7 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 | 「像但不能用」（水印/字幕/黑边混进候选） | 配方 B 的标准场景：`describe --plan` → 你删掉命中的 result → `matrix lay`。**CLI 不会自动剔**（零件不裁定），删不删你判断 |
 | 某候选非用不可 / 顺序想钦定 | 编辑 plan：该 result 标 `pinned:true` → `matrix lay`。钉选是落位保证（免负词/地板/不二用抢占/紧邻避让），`lay.pinned.yielded` 非空说明确实钉多了在打架，名单逐段指名 |
 | **出现空档补黑 / 黑底空洞告警** | 不是故障：照 `lay.blackBedHoles` 逐段报给用户，出路=调低 `--score-floor` / opencut 手动补片 / 动线②云端垫底 |
+| **`--online` 结果带 `plan_kept`** | 外网这轮零可铺候选，**既有 plan 没被覆盖**（`planPath` 仍是上一轮的，可直接 `matrix lay`）；本轮逐条报错与待核候选在 `plan_kept.online_attempt_path`，照它说明失败原因 |
 | 每段候选太少不够挑 | `--top-k` 调大重跑 |
 | 某段有空槽 / 想补特定意象 | `gtrk matrix search "<英文长句场景描述>" --project <目录> --json` 单条补检；影视解说类补检记得带 `--source-window` 保时序 |
 | 只想先看清单不铺轨 | `--lay 0`（只产 plan）；之后铺 = `matrix lay`（不重新检索、不重新烧配额） |
@@ -523,6 +525,9 @@ gtrk matrix --project "<split 产物目录>" [--lay N] [--score-floor F] [--top-
 gtrk patch move --project <dir> --clip <clip_id> --to 5.0
 gtrk patch trim --project <dir> --clip <clip_id> --out -1s
 ```
+
+`gtrk matrix` 铺的片段 `clip_id` 形如 `B05-local-broll-0-3`（beat-来源层-broll-轨内序-槽序；补黑片为 `-bedfill-`），
+各层互不撞名，`--clip` 可直接寻址。
 
 **MUST NOT 直接编辑 `.gtrk` 的 JSON。** 片段时码是两套并存的（`clip_st`+`clip_ed` 与
 `clip_st`+`duration`）：改一份不改另一份，客户端优先读 `clip_ed`、后端又不强校验它 ⇒

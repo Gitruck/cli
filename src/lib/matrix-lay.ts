@@ -841,18 +841,182 @@ export function slotSegmentEnd(
 	beat: PlanBeat,
 	slot: { clip_id: string; clip_st: number; clip_ed: number },
 ): number | undefined {
+	return slotSegmentHit(plan, beat, slot)?.seg.end;
+}
+
+type PlanSegment = NonNullable<PlanResult["segments"]>[number];
+
+/** 段回查的唯一实现（`slotSegmentEnd` 与短空档并入共用）：返回包含该窗口的检索段及其所属候选。判据见 `slotSegmentEnd` 头注。 */
+export function slotSegmentHit(
+	plan: BrollPlan,
+	beat: PlanBeat,
+	slot: { clip_id: string; clip_st: number; clip_ed: number },
+): { seg: PlanSegment; result: PlanResult } | undefined {
 	const beatsToScan = [beat, ...plan.beats.filter((b) => b !== beat)];
 	for (const bb of beatsToScan) {
 		for (const q of bb.queries) {
 			for (const rr of q.results ?? []) {
 				if (rr.clip_id !== slot.clip_id || rr.kind === "image") continue;
 				for (const sg of rr.segments ?? []) {
-					if (sec2ms(sg.start) <= sec2ms(slot.clip_st) && sec2ms(slot.clip_ed) <= sec2ms(sg.end)) return sg.end;
+					if (sec2ms(sg.start) <= sec2ms(slot.clip_st) && sec2ms(slot.clip_ed) <= sec2ms(sg.end)) return { seg: sg, result: rr };
 				}
 			}
 		}
 	}
 	return undefined;
+}
+
+// ── 候选轨短空档并入相邻片段（fix-matrix-lay-pitfalls D2，写出侧）──────────────────────────
+//
+// 决策层槽位按素材帧率吸附、锚槽钉在 at_sec − 0.5s，投影到工程帧网格后同轨相邻两颗之间会留 1–2 帧缝，
+// beat 开头也会留下不足一个镜头的空档；fill 形态把它们补成纯黑片，成片里就是闪帧。
+// 这里在帧网格上把短于 MIN_SHOT_SEC 的空档并进相邻片段：只挪片段的一端、只吃源窗余量，选段身份不动。
+// 决策层（含云端编排）产物零改动——本步跑在写出侧，两条来路共用。
+
+/** 短空档的位置：beat 开头 / 两颗之间 / beat 末尾。 */
+export type FlashGapAt = "lead" | "inner" | "tail";
+export interface FlashGap {
+	beat: string;
+	track_index: number;
+	at: FlashGapAt;
+	track_st: number;
+	track_ed: number;
+	sec: number;
+}
+/** 已并入：`by` 列出吃掉它的片段（`edge: tail` = 前一颗向后延，`head` = 后一颗向前延）。 */
+export interface FlashGapAbsorbed extends FlashGap {
+	by: { clip_id: string; edge: "head" | "tail"; sec: number }[];
+}
+/** 未并入、照旧补黑：`no_room` 余量不够吃下整段 / `no_neighbor` 段旁无片段 / `not_extendable` 邻片是图片或回查不到段界。
+ * `room_sec` = 两侧可用余量之和。 */
+export interface FlashGapKept extends FlashGap {
+	reason: "no_room" | "no_neighbor" | "not_extendable";
+	room_sec: number;
+}
+
+/**
+ * 候选轨短空档并入相邻片段（纯函数、零 IO）。入参是**一条轨、一个 beat** 已投影到帧网格的槽位（源片时间）。
+ *
+ * - 射程：包络内本轨未覆盖、整毫秒格上 `< MIN_SHOT_SEC` 的段；更长的空档是「候选不够」，不归这里。
+ * - 并入：枚举分界帧 F（从段尾往段首），前一颗延到 F、后一颗从 F 起；第一个两侧余量都够的 F 即采用 ⇒ 优先前一颗多吃
+ *   （后一颗起点常是切点吸附位 / 锚点位）。beat 开头只有后一颗、末尾只有前一颗可吃。
+ * - 余量由 `roomOf` 给（源片时间整毫秒的 `[loMs, hiMs]`，含段界 / 素材时长 / 代理源起点 / 段内切点与黑段）；
+ *   `undefined` = 该颗不可延伸。余量不够吃下整段 ⇒ **一帧都不延**，整段留给补黑并记入 `kept`。
+ * - 改写只动一端：前一颗 `track_ed`/`clip_ed`、后一颗 `track_st`/`clip_st`，两端都落在帧网格上，裁剪恒等式由构造成立。
+ *
+ * 返回的 `slots` 保持入参原序（槽序是 clip_id 序号的来源），元素是新对象；入参不被改写。
+ */
+export function absorbFlashGaps<T extends { clip_id: string; clip_st: number; clip_ed: number; track_st: number; track_ed: number }>(opts: {
+	slots: readonly T[];
+	/** beat 包络（帧网格上，与补黑同一包络）。 */
+	envelope: { track_st: number; track_ed: number };
+	rate: number;
+	beat: string;
+	trackIndex: number;
+	roomOf: (slot: T) => { loMs: number; hiMs: number } | undefined;
+}): { slots: T[]; absorbed: FlashGapAbsorbed[]; kept: FlashGapKept[] } {
+	const out = opts.slots.map((s) => ({ ...s }));
+	const absorbed: FlashGapAbsorbed[] = [];
+	const kept: FlashGapKept[] = [];
+	const limitMs = sec2ms(MIN_SHOT_SEC);
+	for (const g of scanEnvelopeGaps(opts.envelope, out)) {
+		const stMs = sec2ms(g.st);
+		const edMs = sec2ms(g.ed);
+		if (edMs - stMs >= limitMs) continue;
+		const prev = out.find((s) => sec2ms(s.track_ed) === stMs);
+		const next = out.find((s) => sec2ms(s.track_st) === edMs);
+		const base: FlashGap = {
+			beat: opts.beat,
+			track_index: opts.trackIndex,
+			at: !prev ? "lead" : !next ? "tail" : "inner",
+			track_st: ms2sec(stMs),
+			track_ed: ms2sec(edMs),
+			sec: ms2sec(edMs - stMs),
+		};
+		const prevRoom = prev ? opts.roomOf(prev) : undefined;
+		const nextRoom = next ? opts.roomOf(next) : undefined;
+		const prevAvail = prev && prevRoom ? Math.max(0, prevRoom.hiMs - sec2ms(prev.clip_ed)) : 0;
+		const nextAvail = next && nextRoom ? Math.max(0, sec2ms(next.clip_st) - nextRoom.loMs) : 0;
+		// 分界帧：端点用段本身的毫秒值（包络与槽位都在网格上，二者恒等；取段值防相位误差把整段判成不可吃）
+		const stF = sec2frame(g.st, opts.rate);
+		const edF = sec2frame(g.ed, opts.rate);
+		let cut: number | undefined;
+		for (let f = edF; f >= stF; f--) {
+			const bMs = f === edF ? edMs : f === stF ? stMs : f2ms(f, opts.rate);
+			if (bMs < stMs || bMs > edMs) continue;
+			const prevNeed = bMs - stMs;
+			const nextNeed = edMs - bMs;
+			if ((prevNeed > 0 && !prev) || (nextNeed > 0 && !next)) continue;
+			if (prevNeed <= prevAvail && nextNeed <= nextAvail) {
+				cut = bMs;
+				break;
+			}
+		}
+		if (cut === undefined) {
+			const extendable = (prev !== undefined && prevRoom !== undefined) || (next !== undefined && nextRoom !== undefined);
+			kept.push({
+				...base,
+				reason: !prev && !next ? "no_neighbor" : extendable ? "no_room" : "not_extendable",
+				room_sec: ms2sec(prevAvail + nextAvail),
+			});
+			continue;
+		}
+		const by: FlashGapAbsorbed["by"] = [];
+		if (prev && cut > stMs) {
+			const durMs = cut - sec2ms(prev.track_st);
+			prev.track_ed = cut / 1000;
+			prev.clip_ed = (sec2ms(prev.clip_st) + durMs) / 1000;
+			by.push({ clip_id: prev.clip_id, edge: "tail", sec: ms2sec(cut - stMs) });
+		}
+		if (next && cut < edMs) {
+			const durMs = sec2ms(next.track_ed) - cut;
+			next.track_st = cut / 1000;
+			next.clip_st = (sec2ms(next.clip_ed) - durMs) / 1000;
+			by.push({ clip_id: next.clip_id, edge: "head", sec: ms2sec(edMs - cut) });
+		}
+		absorbed.push({ ...base, by });
+	}
+	return { slots: out, absorbed, kept };
+}
+
+/**
+ * 槽位的源窗可延伸界（源片时间整毫秒），供 `absorbFlashGaps` 用。`undefined` = 不可延伸：
+ * 图片候选、找不到 plan 候选、或候选有 segments 却回查不到包含该窗口的段（决策层越段界的松弛档，不再往外推）。
+ * 无 segments 的整片伪段以 `[0, 素材时长]` 为界。段内切点与黑段把界收到窗口两侧最近的那一个：
+ * 切点正落在端点上 ⇒ 该侧余量为 0（越过去就是邻场景的帧）。`matDurSec` = 源片时间里的素材末端（已含代理源起点）。
+ */
+export function slotExtendRoom(
+	plan: BrollPlan,
+	beat: PlanBeat,
+	slot: { clip_id: string; clip_st: number; clip_ed: number },
+	cand: PlanResult | undefined,
+	matDurSec: number | undefined,
+): { loMs: number; hiMs: number } | undefined {
+	if (!cand || cand.kind === "image") return undefined;
+	const hit = slotSegmentHit(plan, beat, slot);
+	if (!hit && cand.segments?.length) return undefined;
+	const matMs = typeof matDurSec === "number" && Number.isFinite(matDurSec) && matDurSec > 0 ? sec2ms(matDurSec) : undefined;
+	let hiMs = hit ? sec2ms(hit.seg.end) : matMs;
+	if (hiMs === undefined) return undefined;
+	if (matMs !== undefined) hiMs = Math.min(hiMs, matMs);
+	let loMs = Math.max(0, hit ? sec2ms(hit.seg.start) : 0, cand.origin ? sec2ms(cand.origin.preview_clock.source_start) : 0);
+	const csMs = sec2ms(slot.clip_st);
+	const ceMs = sec2ms(slot.clip_ed);
+	for (const c of hit?.seg.cuts ?? []) {
+		if (!Number.isFinite(c)) continue;
+		const cMs = sec2ms(c);
+		if (cMs >= ceMs) hiMs = Math.min(hiMs, cMs);
+		if (cMs <= csMs) loMs = Math.max(loMs, cMs);
+	}
+	for (const [bs, be] of hit ? blackSpansOf(hit.seg) : []) {
+		const bsMs = sec2ms(bs);
+		const beMs = sec2ms(be);
+		if (bsMs >= ceMs) hiMs = Math.min(hiMs, bsMs);
+		else if (beMs > ceMs) hiMs = Math.min(hiMs, ceMs); // 黑段压着出点：后侧不延
+		if (beMs <= csMs) loMs = Math.max(loMs, beMs);
+		else if (bsMs < csMs) loMs = Math.max(loMs, csMs); // 黑段压着入点：前侧不延
+	}
+	return { loMs, hiMs };
 }
 
 /** 图片候选判据（broll-plan-contract kind 可选缺省 video；未知取值按 video 兜底）。 */
@@ -3011,6 +3175,8 @@ export interface LayResult {
 		bed?: BedMode;
 		/** `fill` 形态的空档补片：条数与总秒数（音频驱动工程不补、为 0）。 */
 		bedFill?: { patches: number; sec: number };
+		/** 短空档并入相邻片段（fix-matrix-lay-pitfalls D2）：fill ∧ 有保留轨时出现（两数组可空）；`kept` = 余量不够、照旧补黑的段。 */
+		flashGaps?: { absorbed: FlashGapAbsorbed[]; kept: FlashGapKept[] };
 		/** 全片累计黑底空洞秒数（= blackBedHoles 各段 sec 之和；未铺黑底时恒 0）。 */
 		blackBedHoleSec: number;
 		/**
@@ -3707,6 +3873,10 @@ export function layBrollTracks(opts: {
 		gapFillReq !== undefined && !hasShieldTargetTrack && keptOtherTracks.length === 0 && !lowerBandOccupied && Math.max(0, lay) > 0;
 	const gapSolidEntries: GapFillEntry[] = [];
 	let gapFillCanvasWarned = false;
+	// 短空档并入相邻片段（fix-matrix-lay-pitfalls D2/D3）：与补黑同一形态判定（fill ∧ 有保留轨）；音频驱动工程走 gap 填充，`--black-bed` 不进。
+	const absorbOn = fillOn && hasShieldTargetTrack;
+	const flashAbsorbed: FlashGapAbsorbed[] = [];
+	const flashKept: FlashGapKept[] = [];
 
 	const metaBeats: BrollMetaBeat[] = [];
 	const newMaterialsById = new Map<string, LooseMaterial>();
@@ -3734,8 +3904,8 @@ export function layBrollTracks(opts: {
 			//    本地槽位与云端编排（arrange-apply）返回的槽位走同一入口——fills 到这里已经不分来路。
 			//    clip_ed 上界 = 检索段界（严格，spec「越段界宁短一帧」）∧ 素材时长 + 1ms（与 assertSourceBound / T5 同一容差，
 			//    素材 = 本槽位真正会登记进 materials[] 的那条：图片走注入材料，其余走 plan 候选的 duration）。
-			const projected = projectSlotsToFrameGrid(decided, videoRate, (s) => {
-				const segEnd = slotSegmentEnd(plan, beat, s);
+			// 素材末端（源片时间，秒）：投影上界与短空档并入的余量共用这一份取值。
+			const matEndSec = (s: FillSlot): unknown => {
 				const injected = s.material_id !== undefined ? opts.injectedMaterials?.get(s.material_id) : undefined;
 				// 素材上界的真相源（add-cross-clock-adapter D1）：代理有实测就用文件本身的墙——否则 materials[] 写实测、
 				// 上界却按自述，代理比原片短时 assertSourceBound 会在写回前把本轮整个抛掉。判据（min / +1ms）一字未改。
@@ -3744,15 +3914,38 @@ export function layBrollTracks(opts: {
 				const fileDuration = injected ? injected.duration : probed && "wall" in probed ? probed.wall.durationSec
 					: origin?.preview_clock.duration ?? candById.get(s.clip_id)?.duration;
 				// 决策槽仍用源片时间：文件时长的上界须先加代理源起点。
-				const matDur = typeof fileDuration === "number" ? fileDuration + (origin?.preview_clock.source_start ?? 0) : fileDuration;
+				return typeof fileDuration === "number" ? fileDuration + (origin?.preview_clock.source_start ?? 0) : fileDuration;
+			};
+			const projected = projectSlotsToFrameGrid(decided, videoRate, (s) => {
+				const segEnd = slotSegmentEnd(plan, beat, s);
+				const matDur = matEndSec(s);
 				const segMs = segEnd === undefined ? undefined : sec2ms(segEnd);
 				const matMs = typeof matDur === "number" && Number.isFinite(matDur) && matDur > 0 ? sec2ms(matDur) + 1 : undefined;
 				return segMs === undefined ? matMs : matMs === undefined ? segMs : Math.min(segMs, matMs);
 			});
 			shiftedTotal += projected.shifted;
 			for (const m of projected.info) infos.push(`${beat.beat} 轨 ${trackIndex}：${m}`);
+			// ── 短空档并入相邻片段（fix-matrix-lay-pitfalls D2）：fill 形态口播工程，帧网格之后、补黑之前，仍在源片时间里比段界。
+			let gridSlots = projected.slots;
+			if (absorbOn) {
+				const r = absorbFlashGaps({
+					slots: gridSlots,
+					envelope: { track_st: gridSec(beat.track_st), track_ed: gridSec(beat.track_ed) },
+					rate: videoRate,
+					beat: beat.beat,
+					trackIndex,
+					roomOf: (s) => {
+						if (s.material_id !== undefined) return undefined;
+						const matDur = matEndSec(s);
+						return slotExtendRoom(plan, beat, s, candById.get(s.clip_id), typeof matDur === "number" ? matDur : undefined);
+					},
+				});
+				gridSlots = r.slots;
+				flashAbsorbed.push(...r.absorbed);
+				flashKept.push(...r.kept);
+			}
 			// 写出工程及 laid 槽使用文件内部时间；候选 seg/origin 保留源片时间。
-			const slots = projected.slots.map(s => {
+			const slots = gridSlots.map(s => {
 				const origin = s.material_id === undefined ? candById.get(s.clip_id)?.origin : undefined;
 				if (!origin) return s;
 				onlineMediaWindow(s.clip_st, s.clip_ed, origin.preview_clock);
@@ -3815,7 +4008,8 @@ export function layBrollTracks(opts: {
 					}
 				}
 				const gclip = {
-					clip_id: `${beat.beat}-broll-${k}-${i}`,
+					// 层名入 id（fix-matrix-lay-pitfalls D1）：他层同 beat 同序号的片段与本层不撞名，`gtrk patch --clip` 才寻得到
+					clip_id: `${beat.beat}-${targetLayer}-broll-${k}-${i}`,
 					material: materialId,
 					clip_st: s.clip_st,
 					clip_ed: s.clip_ed,
@@ -3880,7 +4074,7 @@ export function layBrollTracks(opts: {
 					holes.forEach((h, i) => {
 						const len = r3(h.track_ed - h.track_st);
 						bucket.push({
-							clip_id: `${beat.beat}-gapfill-${i}`,
+							clip_id: `${beat.beat}-${targetLayer}-gapfill-${i}`,
 							material: solidId,
 							clip_st: 0,
 							clip_ed: len,
@@ -4053,7 +4247,7 @@ export function layBrollTracks(opts: {
 					holes.forEach((h, i) => {
 						const len = r3(h.track_ed - h.track_st);
 						bucket.push({
-							clip_id: `${mb.beat}-bedfill-${ti - lo}-${i}`,
+							clip_id: `${mb.beat}-${targetLayer}-bedfill-${ti - lo}-${i}`,
 							material: solidId,
 							clip_st: 0,
 							clip_ed: len,
@@ -4072,6 +4266,26 @@ export function layBrollTracks(opts: {
 				}
 			}
 		}
+	}
+
+	// 短空档并入的人读面（fix-matrix-lay-pitfalls D2）：吸收一条 INFO；吸收不了、照旧补黑的逐段点名（告知，不改退出码）。
+	if (flashAbsorbed.length) {
+		infos.push(
+			`短空档并入相邻片段 ${flashAbsorbed.length} 处（合计 ${ms2sec(flashAbsorbed.reduce((n, g) => n + sec2ms(g.sec), 0))}s，` +
+				`源窗内延伸、选段不变），这些位置不再补黑片。明细见 --json lay.flash_gaps.absorbed。`,
+		);
+	}
+	if (flashKept.length) {
+		const why = (g: FlashGapKept): string =>
+			g.reason === "no_room" ? `源窗余量只有 ${g.room_sec}s` : g.reason === "no_neighbor" ? "段旁无片段" : "邻片是图片或查不到检索段界，不延伸";
+		const fmt = (g: FlashGapKept): string =>
+			`${g.beat} 轨 ${g.track_index} ${g.track_st}–${g.track_ed}（${g.sec}s，${g.at === "lead" ? "beat 开头" : g.at === "tail" ? "beat 末尾" : "两颗之间"}，${why(g)}）`;
+		warnings.push(
+			`${flashKept.length} 处短空档（短于最小槽长 ${MIN_SHOT_SEC}s）没能并入相邻片段、` +
+				`${patchesOn ? "照旧补了纯黑片" : "照旧留空（本轮空档未补黑、露下层）"}，成片里会是闪帧：` +
+				`${flashKept.slice(0, 5).map(fmt).join("；")}${flashKept.length > 5 ? ` 等 ${flashKept.length} 处` : ""}。` +
+				`可到客户端手动调整，或用 gtrk patch 挪动 / 延长相邻片段；全量明细见 --json lay.flash_gaps.kept。`,
+		);
 	}
 
 	const createdTracks = [...trackClips.entries()]
@@ -4361,6 +4575,28 @@ export function layBrollTracks(opts: {
 	}
 	for (const [id, m] of newMaterialsById) mergedMaterials.set(id, m);
 
+	// clip_id 全档唯一（fix-matrix-lay-pitfalls D1）：层名已让各层自产片段互不撞名；这里兜「本轮之外仍在工程里」的那些
+	// （用户复制进自己轨的片段若保留了 id 就会撞），撞名追加 `~n`（pip-lay 同一写法）。剥旧判据不读 clip_id，改名不影响认领。
+	{
+		const taken = new Set<string>();
+		for (const t of [...keptOtherTracks, ...rebasedBandTracks, ...((gtrk.audio_track as LooseTrack[] | undefined) ?? []), ...((gtrk.beat_track as LooseTrack[] | undefined) ?? [])]) {
+			for (const c of t.track_timeline ?? []) {
+				const id = (c as { clip_id?: unknown }).clip_id;
+				if (typeof id === "string" && id) taken.add(id);
+			}
+		}
+		const own = [...createdTracks, ...(blackTrackObj ? [blackTrackObj] : [])].flatMap(
+			(t) => (t as { track_timeline?: Record<string, unknown>[] }).track_timeline ?? [],
+		);
+		for (const c of own) {
+			const base = c.clip_id as string;
+			let id = base;
+			for (let n = 2; taken.has(id); n++) id = `${base}~${n}`;
+			c.clip_id = id;
+			taken.add(id);
+		}
+	}
+
 	// 带区轨（他层平移轨 + 本层新轨）按 track_index 升序落数组；黑底收尾（渲染层序=数组内号序一致）
 	const bandTracksSorted = [...rebasedBandTracks, ...createdTracks].sort(
 		(a, b) => (a.track_index as number) - (b.track_index as number),
@@ -4431,6 +4667,7 @@ export function layBrollTracks(opts: {
 			blackBedSkipped,
 			bed,
 			...(fillOn ? { bedFill: { patches: bedFillPatches, sec: r3(bedFillSec) } } : {}),
+			...(absorbOn ? { flashGaps: { absorbed: flashAbsorbed, kept: flashKept } } : {}),
 			blackBedHoleSec,
 			blackBedHoles,
 			...(gapFillSummary ? { gapFill: gapFillSummary } : {}),
