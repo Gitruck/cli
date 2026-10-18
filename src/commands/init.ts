@@ -16,6 +16,7 @@ import {
 } from "../lib/user-config";
 import { noticeOnce } from "../lib/compliance-notice";
 import { crashReportNoticeOnce } from "../lib/crash-report";
+import { disableUsageAnalytics, usageAnalyticsNoticeOnce } from "../lib/usage-analytics";
 import { FIRST_RUN_USAGE_LINES } from "../lib/first-run-tutorial";
 import { probeJianyingDraftDir } from "../lib/jianying";
 import { openFile } from "../lib/open";
@@ -36,6 +37,8 @@ interface InitOpts {
 	/** commander 的 `--no-crash-report`：**缺省 `true`**，只有显式传旗时才是 `false`。
 	 * ⚠️ 因此判定 MUST 写 `=== false`——写 `!opts.crashReport` 会把「没传」也当成关。 */
 	crashReport?: boolean;
+	/** commander 的 `--no-usage-stats`（add-usage-analytics）：同上，缺省 `true`，判定 MUST 写 `=== false`。 */
+	usageStats?: boolean;
 }
 
 export function registerInit(program: Command): void {
@@ -47,6 +50,7 @@ export function registerInit(program: Command): void {
 		.option("--jianying-draft-dir <dir>", "非交互：剪映草稿目录（传 auto 则自动探测）")
 		.option("--reconfigure", "重走配置向导（默认：已配过则跳过、保留现有配置）")
 		.option("--no-crash-report", "关闭崩溃自动上报（等价于设 GITRUCK_CRASH_REPORT=0）")
+		.option("--no-usage-stats", "关闭使用统计（等价于设 GITRUCK_USAGE_STATS=0）")
 		.option("-y, --yes", "非交互：用传入值 + 自动探测，不弹任何提示")
 		.action(runInit);
 }
@@ -61,6 +65,12 @@ export async function runInit(opts: InitOpts): Promise<void> {
 	if (opts.crashReport === false) {
 		writeUserConfig({ crashReport: false });
 		crashReportNoticeOnce({ force: true });
+	}
+	// 使用统计开关（add-usage-analytics），理由同上：落在所有分支之前、只在显式传旗时写、当场确认一次。
+	// 关闭时连本机还没发出去的一起删。
+	if (opts.usageStats === false) {
+		disableUsageAnalytics();
+		usageAnalyticsNoticeOnce({ force: true });
 	}
 
 	if (opts.yes || opts.apiKey) return runInitNonInteractive(opts); // 脚本/agent 驱动：免交互
@@ -144,6 +154,7 @@ export async function runInit(opts: InitOpts): Promise<void> {
 	// 崩溃上报告知（link-client-error-report-cli 2.1）：紧跟在合规告知**之后**，同样只在写盘成功后。
 	// ⚠️ 不新增「会打印的时刻」——纯本地命令零告知的既有条款不受影响。
 	crashReportNoticeOnce();
+	usageAnalyticsNoticeOnce(); // add-usage-analytics：紧跟崩溃告知，同样只在写盘成功后
 	if (!jianyingDraftDir) {
 		log.warn("未配剪映草稿目录：要剪映直接打开，之后可重跑 gtrk init，或单次加 --jianying-draft-dir");
 	}
@@ -198,6 +209,7 @@ async function runInitNonInteractive(opts: InitOpts): Promise<void> {
 	// 与交互式路径同一份文案、同样在写盘成功之后；上面缺 Key 提前 return 的分支 MUST NOT 告知。
 	noticeOnce();
 	crashReportNoticeOnce(); // 同交互式路径（link-client-error-report-cli 2.1）
+	usageAnalyticsNoticeOnce(); // 同交互式路径（add-usage-analytics）
 	log.info(`剪映草稿目录：${jianyingDraftDir ?? "未配（剪映需手动导入，可加 --jianying-draft-dir）"}`);
 	await runDoctor();
 }

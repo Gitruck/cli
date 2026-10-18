@@ -183,6 +183,36 @@ GITRUCK_CRASH_REPORT=0 gtrk oralcut a.mp4   # 环境变量，临时关一次（�
 
 当前状态随时可查：`gtrk doctor` 的「崩溃自动上报」一行会写明开 / 关，以及关是被谁关的。关闭后崩溃的呈现与退出码**与开启时完全一致**——它只影响发不发那条报告。
 
+### 使用统计与关闭方式
+
+gtrk 会发送匿名的使用统计，帮我们知道哪些命令有人用、失败率多少、新版本多久铺开。**默认开启，首次配置时会告知一次**（紧跟崩溃报告那一行）。
+
+**每条命令发送的内容只有这些**：命令名（注册名，如 `matrix.search`，不含任何参数）、成功或失败、失败时的错误码或分类（如 `ENOENT`，不含错误消息原文）、耗时所在的区间、调用方类型（终端，或 agent 名称，如 `claude-code`）、CLI 版本、系统与架构、Node 主版本、是否配置了 API Key（只记是 / 否）。
+
+**明确不发送**：命令参数与选项值、文件名与路径、素材与工程内容、你的文稿、API Key、错误消息原文、设备标识、主机名、账号信息。统计服务会接触到你的 IP 地址，只用来判断国家或地区，不保存 IP 本身。
+
+**不拖慢命令**：命令结束时只往本机 `~/.gitruck/usage-queue.jsonl` 追加一行，由一个后台进程去发，命令照常立即退出。发不出去的留在本机（最多 200 条、7 天），下次再发。
+
+**这些情况不发**：从源码运行、跑单元测试、设置了 `CI` 环境变量。
+
+四种关法（任选其一，都是即时生效）：
+
+```bash
+gtrk init --no-usage-stats          # 写进配置，永久关（同时删掉本机还没发出去的）
+```
+
+```bash
+GITRUCK_USAGE_STATS=0 gtrk patch move …   # 环境变量，临时关一次（优先级高于配置）
+```
+
+```bash
+DO_NOT_TRACK=1 gtrk …   # 业界通用的「不追踪」约定，同样生效
+```
+
+或直接在 `~/.gitruck/config.json` 里写 `"usageAnalytics": false`。
+
+当前状态随时可查：`gtrk doctor` 的「使用统计」一行会写明开 / 关、关是被谁关的，以及当前环境发不发。关闭后命令的输出与退出码**与开启时完全一致**。
+
 ---
 
 ## 命令参考
@@ -738,7 +768,7 @@ gtrk render <gtrk> [-o <out.mp4>] [--crf <n>] [--codec <c>] [--ffmpeg-path <dir>
   - 分发的 ffmpeg 为 GPLv3 构建，对应源码与二进制同处提供（见分发点 `SOURCE.md`）；**下载不附加任何使用限制**。
 - `gtrk upgrade [--check]` — 升级 CLI 到最新版 + 刷新 skill（配置保留）；`--check` 只查不装。
 - `gtrk skills install [--agents codex,workbuddy,comate,…] [--all] [--copy] [--dir <skills 目录>]` — 单独安装/刷新 Agent Skills；缺省由通用适配器与 gtrk 补充层自动检测。
-- `gtrk skills recommend [--scene <id>] [--json]` — 第三方 skill 推荐目录：不带 `--scene` 列十个场景（hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique），带场景按 tier 给条目（用途 / 安装命令 / 许可与依赖 / 登记命令）。**只推荐不打包**：目录随包分发、带快照日期、不联网不留痕；star 与许可以仓库页为准，装不装是你的选择。GPL / AGPL / 非商用 / 无许可证 / 只能经 MCP-SaaS 运行的不入目录。目录也收同合云一方的 MG 排版技法族（`--scene technique`，条目 `origin: first-party`）：技法不当车道生产者，由 agent 在 MG 步按槽位取用。
+- `gtrk skills recommend [--scene <id>] [--json]` — 第三方 skill 推荐目录：不带 `--scene` 列十个场景（hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique），带场景按 tier 给条目（用途 / 安装命令 / 许可与依赖 / 登记命令）。**只推荐不打包**：目录随包分发、带快照日期，命令本身不联网不留痕（使用统计除外，见「使用统计与关闭方式」）；star 与许可以仓库页为准，装不装是你的选择。GPL / AGPL / 非商用 / 无许可证 / 只能经 MCP-SaaS 运行的不入目录。目录也收同合云一方的 MG 排版技法族（`--scene technique`，条目 `origin: first-party`）：技法不当车道生产者，由 agent 在 MG 步按槽位取用。
 - `gtrk skills add <owner/repo> [--skill <name>]... [--produces MG|AI_DRAMA|FILM_BROLL|script|none] [--column <id>] [--agents ...] [--all] [--copy]` — 透传通用 `skills` 适配器安装第三方 skill，成功后把 `{id, ref: "<owner/repo>#<skill>", produces, status: "third-party"}`（一方条目 `status: "first-party"`）**追加**进栏目配置 `style.skills`（同 ref 幂等、失败不登记；`--produces` 缺省取目录值，目录外仓登记为 `routing:"none"`），之后 `gtrk mg` / `/gtrk-ai-drama` 按 `produces` 即可解析到它。
 
 ### 视频高光发现（内部验收）

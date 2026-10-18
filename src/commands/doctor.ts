@@ -14,6 +14,7 @@ import { skillFreshnessDoctorRow } from "../lib/skill-freshness";
 import { currentVersion, latestVersion, cmpSemver } from "../lib/version";
 import { commandReachDoctorRow } from "../lib/self-install";
 import { crashSwitchState, CRASH_REPORT_ENV } from "../lib/crash-report";
+import { notSendableReason, usageSwitchState, USAGE_ENV } from "../lib/usage-analytics";
 import { catalogSnapshotPath, primeCatalog, readSnapshot as readCatalogSnapshot } from "../lib/enum-catalog";
 import { readGtrk, assertGtrkV1 } from "../lib/gtrk-writeback";
 import { collectWriteViolations } from "../lib/gtrk-invariants";
@@ -162,6 +163,23 @@ export async function runDoctor(opts: { refreshCatalog?: boolean } = {}): Promis
 				: crashState === "off-env"
 					? `关（来源 环境变量 ${CRASH_REPORT_ENV}=0；它优先于配置文件）`
 					: "关（来源 gtrk init --no-crash-report 写下的 crashReport:false）",
+	});
+
+	// 使用统计（add-usage-analytics）：四态如实呈现，恒 ok 不挡路；开着但当前环境不发（CI / 源码）也照实说。
+	const usageState = usageSwitchState();
+	const usageWhyNot = notSendableReason();
+	rows.push({
+		name: "使用统计",
+		status: "ok",
+		detail:
+			usageState === "on"
+				? `开（只发命令名、成败与耗时区间；关闭：gtrk init --no-usage-stats 或 ${USAGE_ENV}=0）` +
+					(usageWhyNot === "ci" ? "｜当前是 CI 环境，不发送" : usageWhyNot === "source" ? "｜当前从源码运行，不发送" : "")
+				: usageState === "off-env"
+					? `关（来源 环境变量 ${USAGE_ENV}=0；它优先于配置文件）`
+					: usageState === "off-dnt"
+						? "关（来源 环境变量 DO_NOT_TRACK）"
+						: "关（来源 gtrk init --no-usage-stats 写下的 usageAnalytics:false）",
 	});
 
 	// skill 新鲜度（fix-skill-install-staleness）：已装 skill 与包内正本是否同步。

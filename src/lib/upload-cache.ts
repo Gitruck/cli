@@ -16,6 +16,7 @@ import {
 import { uploadFile } from "./cloud";
 import { noticeOnce } from "./compliance-notice";
 import { crashReportNoticeOnce } from "./crash-report";
+import { usageAnalyticsNoticeOnce } from "./usage-analytics";
 import type { CloudConfig } from "./config";
 import { readJson } from "./read-json";
 import { writeSidecar } from "./sidecar-write";
@@ -153,6 +154,7 @@ export async function uploadCached(
 	// 幂等靠留痕，已告知过即静默返回；只告知不设闸——不阻断、不等输入、不改退出码（恒走 stderr）。
 	noticeOnce();
 	crashReportNoticeOnce();
+	usageAnalyticsNoticeOnce(); // add-usage-analytics：紧跟崩溃告知，不新增会打印的时刻
 	const s0 = await deps.stat(path);
 	const fp = fingerprintFromStat(s0);
 	const cache = await deps.cacheStore.load();

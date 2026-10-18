@@ -39,6 +39,13 @@ export interface UserConfig {
 	 * ⚠️ **未告知 ⇒ 不上报**（design D7：宁可漏报，也不让「先发后说」在任何时序下发生）。
 	 * **纯本地留痕**，MUST NOT 上报服务端；它 MUST NOT 被当作任何命令的执行前置条件。 */
 	crashReportNoticeVersion?: string;
+	/** 使用统计开关（add-usage-analytics）：`false` 表关，缺失 = 开。
+	 * 环境变量 `GITRUCK_USAGE_STATS=0` / `DO_NOT_TRACK=1` 优先级更高。
+	 * **纯本地开关**，MUST NOT 上报服务端；它 MUST NOT 被当作任何命令的执行前置条件。 */
+	usageAnalytics?: boolean;
+	/** 使用统计告知留痕（add-usage-analytics）：已告知的文案版本标识。缺失 = 未告知 ⇒ **不上报**。
+	 * **纯本地留痕**，MUST NOT 上报服务端；它 MUST NOT 被当作任何命令的执行前置条件。 */
+	usageAnalyticsNoticeVersion?: string;
 	/** 首跑教程指路留痕（add-first-run-tutorial）：已指路的时间戳（ISO 8601）。缺失 = 未指路。
 	 * **纯本地留痕**，MUST NOT 上报服务端；它 MUST NOT 被当作任何命令的执行前置条件。
 	 * 注：存量老用户（配置里已有 apiKey）会被静默补痕、不打印——见 first-run-tutorial.ts 的 looksOnboarded()。 */

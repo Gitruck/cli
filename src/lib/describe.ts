@@ -31,6 +31,7 @@ import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { noticeOnce } from "./compliance-notice";
 import { crashReportNoticeOnce } from "./crash-report";
+import { usageAnalyticsNoticeOnce } from "./usage-analytics";
 import { log } from "./log";
 import { nextRateLimitWaitMs, rateLimitWaitNotice } from "./rate-limit-wait";
 import { readUserConfig } from "./user-config";
@@ -331,6 +332,7 @@ export async function describeImages(
 	// 同挂同一个幂等入口，提交发生前告知。零输入不算出口，故在早退之后。
 	noticeOnce();
 	crashReportNoticeOnce();
+	usageAnalyticsNoticeOnce(); // add-usage-analytics：紧跟崩溃告知，不新增会打印的时刻
 	const fetchFn = deps.fetchFn ?? fetch;
 	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 	const backoffBase = deps.backoffBaseMs ?? BACKOFF_BASE_MS;

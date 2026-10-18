@@ -180,6 +180,36 @@ Or set `"crashReport": false` directly in `~/.gitruck/config.json`.
 
 You can check the current state any time: the “崩溃自动上报” row in `gtrk doctor` shows on / off, and which of the two turned it off. With reporting off, the crash presentation and exit code are **exactly the same** as with it on — the switch only controls whether that one report is sent.
 
+### Usage statistics, and how to turn them off
+
+gtrk sends anonymous usage statistics so we know which commands get used, how often they fail, and how fast new versions roll out. **On by default; you are told once, when you first configure the CLI** (right after the crash-report line).
+
+**What is sent per command, in full**: the command name (its registered name, e.g. `matrix.search`, never any argument), success or failure, on failure an error code or category (e.g. `ENOENT`, never the error message), the elapsed-time range, the caller type (a terminal, or an agent name such as `claude-code`), the CLI version, OS and architecture, Node major version, and whether an API key is configured (yes / no only).
+
+**What is never sent**: command arguments and option values, file names and paths, media and project contents, your scripts, your API key, error messages, device identifiers, hostname, account information. The statistics service sees your IP address like any network request; it is used only to tell the country or region and is not stored.
+
+**It never slows a command down**: when a command finishes, gtrk only appends one line to `~/.gitruck/usage-queue.jsonl`; a background process sends it and the command exits immediately as usual. Anything that can't be sent stays on your machine (up to 200 entries, 7 days) and goes out next time.
+
+**Never sent when**: running from source, running unit tests, or the `CI` environment variable is set.
+
+Four ways to turn it off (any one of them, effective immediately):
+
+```bash
+gtrk init --no-usage-stats          # persisted in config, off for good (also deletes anything not yet sent)
+```
+
+```bash
+GITRUCK_USAGE_STATS=0 gtrk patch move …   # environment variable, off for one run (takes precedence over config)
+```
+
+```bash
+DO_NOT_TRACK=1 gtrk …   # the common “do not track” convention works too
+```
+
+Or set `"usageAnalytics": false` directly in `~/.gitruck/config.json`.
+
+You can check the current state any time: the “使用统计” row in `gtrk doctor` shows on / off, which setting turned it off, and whether the current environment sends at all. With statistics off, command output and exit codes are **exactly the same** as with them on.
+
 ---
 
 ## Command reference
@@ -695,7 +725,7 @@ A QC pass runs automatically afterwards and writes `.qc.json` (`--no-qc` skips i
   - The distributed ffmpeg is a GPLv3 build, and the corresponding source is provided alongside the binaries (see `SOURCE.md` at the distribution point); **downloads carry no additional usage restrictions**.
 - `gtrk upgrade [--check]` — upgrade the CLI to the latest version + refresh skills (config preserved); `--check` only reports.
 - `gtrk skills install [--agents codex,workbuddy,comate,…] [--all] [--copy] [--dir <skills dir>]` — install/refresh agent skills on their own; by default the generic adapter and the gtrk supplement layer detect hosts automatically.
-- `gtrk skills recommend [--scene <id>] [--json]` — third-party skill catalog: without `--scene` lists the ten scenes (hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique); with a scene prints entries by tier (purpose / install command / license and dependencies / register command). **Recommend, never bundle**: the catalog ships with the package with a snapshot date, no network, no state; stars and licenses are as of the snapshot, installing is your call. GPL / AGPL / non-commercial / unlicensed / MCP-SaaS-only skills are excluded. The catalog also lists Gitruck's own first-party MG layout-technique family (`--scene technique`, entries marked `origin: first-party`): techniques are not lane producers; the agent picks them per slot at the MG step.
+- `gtrk skills recommend [--scene <id>] [--json]` — third-party skill catalog: without `--scene` lists the ten scenes (hook / mg-explainer / kinetic-text / data-viz / map / ai-drama / collage / caption / principles / technique); with a scene prints entries by tier (purpose / install command / license and dependencies / register command). **Recommend, never bundle**: the catalog ships with the package with a snapshot date; the command itself makes no network requests and keeps no state (usage statistics aside, see “Usage statistics, and how to turn them off”); stars and licenses are as of the snapshot, installing is your call. GPL / AGPL / non-commercial / unlicensed / MCP-SaaS-only skills are excluded. The catalog also lists Gitruck's own first-party MG layout-technique family (`--scene technique`, entries marked `origin: first-party`): techniques are not lane producers; the agent picks them per slot at the MG step.
 - `gtrk skills add <owner/repo> [--skill <name>]... [--produces MG|AI_DRAMA|FILM_BROLL|script|none] [--column <id>] [--agents ...] [--all] [--copy]` — installs a third-party skill through the generic `skills` adapter and, on success, **appends** `{id, ref: "<owner/repo>#<skill>", produces, status: "third-party"}` (`"first-party"` for first-party entries) to the show config `style.skills` (idempotent per ref, nothing is registered on failure; `--produces` defaults to the catalog value, repos outside the catalog register with `routing:"none"`), after which `gtrk mg` / `/gtrk-ai-drama` resolve it by `produces`.
 
 ### Highlight discovery (internal preview)

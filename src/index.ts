@@ -27,6 +27,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { migrateLegacyHome, packageRoot } from "./lib/paths";
 import { installCrashHooks, handleTopLevelError } from "./lib/crash-report";
+import { beginCommand, finishCommand, finishOnExit, FLUSH_COMMAND, runUsageFlush } from "./lib/usage-analytics";
 import { registerInstall } from "./commands/install";
 import { registerInit } from "./commands/init";
 import { registerOralCut } from "./commands/oralcut";
@@ -102,6 +103,21 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
 	skillFreshnessNoticeOnce({ command: top.name() });
 });
 
+// ── 使用统计（add-usage-analytics）──
+// preAction 记命令路径（注册名，不含参数）与起点；postAction 按 exitCode 判成败、同步写本机队列、
+// 起脱离父进程的发送进程——父进程不等它，命令的输出、退出码与退出时机都不变。
+// 绕过 postAction 与顶层出口的路径（如 prompt 的 process.exit(130)）由 exit 兜底，只写队列。
+// 三道闸（发布版 / 已告知 / 开关）在模块里判，闸不开时零写盘零请求。
+program.hook("preAction", (_thisCommand, actionCommand) => {
+	const path: string[] = [];
+	for (let c: Command | null = actionCommand; c && c !== program; c = c.parent) path.unshift(c.name());
+	beginCommand(path);
+});
+program.hook("postAction", () => {
+	finishCommand({ exitCode: process.exitCode });
+});
+process.on("exit", (code) => finishOnExit(code));
+
 // 崩溃自动上报（change link-client-error-report-cli）：进程级两钩子（uncaught / unhandledRejection）。
 // ⚠️ MUST 在注册子命令之前装——命令注册期自己抛的异常也算崩溃。幂等，重复调无副作用。
 // 装钩子本身零网络、零磁盘、零输出；真要不要发由 reportCrash 的三道闸（开关/告知痕迹/Key）判。
@@ -148,8 +164,15 @@ registerComposite(program); // 合成层：plan（候选写 struct_meta.composit
 //   ③ 退出码恒 1
 // 为什么上报在打印之前：`process.exit(1)` 会立刻杀掉进程，打印之后再 await 就没机会发了；
 // 而上报器**绝不抛**、恒 resolve，所以它排在前面也不会挡住用户看到报错（最坏晚 2 s）。
-program.parseAsync(process.argv).catch(async (e: unknown) => {
-	await handleTopLevelError(e);
-	console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);
-	process.exit(1);
-});
+// 使用统计的发送进程（add-usage-analytics）：由 finishCommand 以 `<node> <入口> __usage-flush` 脱离父进程拉起，
+// 不走 commander（不触发任何钩子、不计入统计），发完即退。
+if (process.argv[2] === FLUSH_COMMAND) {
+	void runUsageFlush().finally(() => process.exit(0));
+} else {
+	program.parseAsync(process.argv).catch(async (e: unknown) => {
+		await handleTopLevelError(e);
+		finishCommand({ error: e }); // 使用统计：只同步写队列 + 起发送进程，不等、不抛、不打印
+		console.error(`\n❌ ${e instanceof Error ? e.message : String(e)}`);
+		process.exit(1);
+	});
+}

@@ -46,6 +46,7 @@ import { release } from "node:os";
 import { CloudError, parseJson } from "../lib/cloud";
 import { noticeOnce } from "../lib/compliance-notice";
 import { crashReportNoticeOnce } from "../lib/crash-report";
+import { usageAnalyticsNoticeOnce } from "../lib/usage-analytics";
 import { loadConfig, type CloudConfig } from "../lib/config";
 import { log, routeLogsToStderr } from "../lib/log";
 import { promptConfirm } from "../lib/prompt";
@@ -456,6 +457,7 @@ export async function postFeedback(
 ): Promise<{ duplicated: boolean; retried: boolean }> {
 	noticeOnce();
 	crashReportNoticeOnce();
+	usageAnalyticsNoticeOnce(); // add-usage-analytics：紧跟崩溃告知，不新增会打印的时刻
 
 	let lastNetworkError: unknown;
 	for (let attempt = 0; attempt < 2; attempt++) {
