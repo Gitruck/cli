@@ -11,7 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
-import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, probeGeometry } from "./media";
+import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, jpegOrientationOf, probeGeometry, uprightJpeg } from "./media";
 import { renderProReport } from "./clip-brief";
 import { assertEnum, catalogEnumSync } from "./enum-catalog";
 import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
@@ -406,6 +406,28 @@ const imageMove: ToolDescriptor = {
 	},
 };
 
+/**
+ * 手机照片常以「原始像素横放 + EXIF 方向标记」存盘，云端按像素排布处理、不读这个标记 ⇒ 产物转了 90°。
+ * 带方向标记的 JPEG 先按显示方向摆正再上传（原图不动）；无标记 / 非 JPEG 原文件直传、零开销。
+ * 摆正失败（缺 ffmpeg 等）不拦：提示后按原像素上传。
+ */
+async function uprightPhotoForUpload(ctx: ToolContext): Promise<string> {
+	const input = ctx.inputAbs!;
+	const orientation = jpegOrientationOf(input);
+	if (orientation === undefined || orientation === 1) return input;
+	try {
+		const upright = await uprightJpeg(input, orientation, ctx.ffmpegPath);
+		if (upright !== input) ctx.warn(`照片带 EXIF 方向标记（${orientation}），已按看图软件里的方向摆正后上传（原图不动）`);
+		return upright;
+	} catch (e) {
+		ctx.warn(
+			`照片带 EXIF 方向标记（${orientation}），本地摆正失败（${e instanceof Error ? e.message : String(e)}）——按原像素上传，` +
+				"产物方向可能与看图软件里不一致；装好 ffmpeg（gtrk deps install --ffmpeg）或先导出一张正向图片再跑。",
+		);
+		return input;
+	}
+}
+
 /** image_matting —— 图片抠像（公共域 /task/image_matting，价格运行时查公开价格表）。 */
 const imageMatting: ToolDescriptor = {
 	name: "image_matting",
@@ -417,6 +439,7 @@ const imageMatting: ToolDescriptor = {
 	outputHint: "透明 png",
 	enabled: true,
 	taskType: "image_matting",
+	preprocess: uprightPhotoForUpload,
 	buildPayload(fileId) {
 		return { file_id: fileId, output_format: "png" };
 	},

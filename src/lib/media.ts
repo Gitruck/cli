@@ -178,6 +178,101 @@ async function artifactPath(inputAbs: string, ext: string): Promise<string> {
 	return join(audioCacheDir(), `${base}.${s.size}_${Math.round(s.mtimeMs)}.${ext}`);
 }
 
+/**
+ * JPEG 的 EXIF 方向（IFD0 tag 0x0112，1–8；**纯函数**，入参是文件头部字节——EXIF 段在 SOS 之前，读前 256KiB 足够）。
+ * 不是 JPEG / 没有 EXIF / 没有该 tag / 类型或取值越界 ⇒ undefined。
+ */
+export function readJpegExifOrientation(buf: Uint8Array): number | undefined {
+	if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return undefined;
+	let p = 2;
+	while (p + 4 <= buf.length) {
+		if (buf[p] !== 0xff) return undefined;
+		const marker = buf[p + 1]!;
+		if (marker === 0xff) { p++; continue; } // 填充字节
+		if (marker === 0xd9 || marker === 0xda) return undefined; // EOI / SOS：其后不再有元数据段
+		if ((marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) { p += 2; continue; } // 无长度的独立标记
+		const len = (buf[p + 2]! << 8) | buf[p + 3]!;
+		if (len < 2) return undefined;
+		const start = p + 4;
+		const end = p + 2 + len;
+		if (marker === 0xe1 && end <= buf.length && String.fromCharCode(...buf.subarray(start, start + 6)) === "Exif\0\0") {
+			const o = tiffOrientation(buf, start + 6, end);
+			if (o !== undefined) return o;
+		}
+		p = end;
+	}
+	return undefined;
+}
+
+function tiffOrientation(buf: Uint8Array, t: number, end: number): number | undefined {
+	const le = buf[t] === 0x49 && buf[t + 1] === 0x49;
+	if (!le && !(buf[t] === 0x4d && buf[t + 1] === 0x4d)) return undefined;
+	const u16 = (o: number) => (o + 2 > end ? NaN : le ? buf[o]! | (buf[o + 1]! << 8) : (buf[o]! << 8) | buf[o + 1]!);
+	const u32 = (o: number) => (o + 4 > end ? NaN : le ? u16(o) + u16(o + 2) * 0x10000 : u16(o) * 0x10000 + u16(o + 2));
+	if (u16(t + 2) !== 42) return undefined;
+	const ifd = t + u32(t + 4);
+	const n = u16(ifd);
+	if (!Number.isFinite(n)) return undefined;
+	for (let i = 0; i < n; i++) {
+		const e = ifd + 2 + i * 12;
+		if (u16(e) !== 0x0112) continue;
+		// SHORT（type 3）× 1：值左对齐存在值域前两字节
+		if (u16(e + 2) !== 3) return undefined;
+		const v = u16(e + 8);
+		return v >= 1 && v <= 8 ? v : undefined;
+	}
+	return undefined;
+}
+
+/** EXIF 方向 → 把原始像素摆成显示方向的 ffmpeg 滤镜（1 / 缺席 = 无需处理）。 */
+export const EXIF_ORIENTATION_FILTERS: Readonly<Record<number, string>> = {
+	2: "hflip",
+	3: "hflip,vflip",
+	4: "vflip",
+	5: "transpose=0",
+	6: "transpose=1",
+	7: "transpose=3",
+	8: "transpose=2",
+};
+
+/** 读本地 JPEG 的 EXIF 方向（非 .jpg/.jpeg 一律 undefined）。 */
+export function jpegOrientationOf(path: string): number | undefined {
+	if (!/\.jpe?g$/i.test(path)) return undefined;
+	const fd = openSync(path, "r");
+	try {
+		const buf = Buffer.alloc(256 * 1024);
+		const n = readSync(fd, buf, 0, buf.length, 0);
+		return readJpegExifOrientation(buf.subarray(0, n));
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
+ * 按 EXIF 方向把 JPEG 摆正成上传物（原图不动）：像素按显示方向重排、元数据清空（不再带方向标记，云端不会二次旋转）。
+ * 抽出物按原片指纹缓存（与音频抽出物同目录），同图重跑免重做、上传缓存照常命中。
+ * `-noautorotate` + 显式滤镜：新版 ffmpeg 读 JPEG 会自动按 EXIF 转、旧版不会，两者都按这里的滤镜只转一次。
+ */
+export async function uprightJpeg(inputAbs: string, orientation: number, ffmpegPath?: string): Promise<string> {
+	const filter = EXIF_ORIENTATION_FILTERS[orientation];
+	if (!filter) return inputAbs;
+	const { ffmpeg } = requireFfmpeg(ffmpegPath);
+	const out = await artifactPath(inputAbs, `upright-o${orientation}.jpg`);
+	if (existsSync(out)) return out;
+	const tmp = `${out}.${randomUUID()}.jpg`;
+	try {
+		await runFfmpeg(ffmpeg, [
+			"-y", "-v", "error", "-noautorotate", "-i", inputAbs,
+			"-vf", filter, "-frames:v", "1", "-map_metadata", "-1", "-q:v", "2",
+			tmp,
+		]);
+		await rename(tmp, out);
+	} finally {
+		await rm(tmp, { force: true });
+	}
+	return out;
+}
+
 /** 本地抽 16k 单声道 mp3（云端转写目标格式，ASR.core 直通、体积最小）。命中缓存则复用。 */
 export async function extractAudio(inputAbs: string, ffmpegPath?: string): Promise<string> {
 	const { ffmpeg } = requireFfmpeg(ffmpegPath);

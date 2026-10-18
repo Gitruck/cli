@@ -187,6 +187,8 @@ export interface BuildExportPayloadOptions {
 	gtrkPath: string;
 	formats: string[];
 	particlePaths?: Record<string, string>;
+	/** clipId → 颗粒 MOV 的捕获尺寸（取自颗粒 plan）；缺席的按横屏基准登记。 */
+	particleSizes?: Record<string, { width: number; height: number }>;
 	draftDir?: string;
 	/** [link-clip-background-fill] 片段底板纯色图落点（产物目录）→ `struct_meta.nle_asset_dir`；缺省不上行。 */
 	assetDir?: string;
@@ -227,7 +229,7 @@ export function buildExportPayload(
 	}
 
 	if (exportUsesNle(opts.formats)) {
-		const projection = projectBeatTracksToVideoTracks(out, opts.particlePaths ?? {});
+		const projection = projectBeatTracksToVideoTracks(out, opts.particlePaths ?? {}, opts.particleSizes ?? {});
 		out.materials = projection.materials;
 		out.video_track = [...(out.video_track as Record<string, unknown>[]), ...projection.videoTracks];
 		// beat_track 是 HTML 形态，NLE 侧已投影成 qtrle，不得让服务端再透传一份。
@@ -656,6 +658,7 @@ export async function runProjectExport(
 
 	let plan: ParticlePlan | undefined;
 	let particlePaths: Record<string, string> = {};
+	const particleSizes: Record<string, { width: number; height: number }> = {};
 	let particleRendered = 0;
 	let particleSkipped: { clipId: string; reason: string }[] = [];
 	let takeover: CompositeTakeover | undefined;
@@ -721,6 +724,7 @@ export async function runProjectExport(
 			particleDeps,
 		);
 		particlePaths = { ...takeover?.paths, ...rendered.paths };
+		for (const g of plan.groups) for (const id of g.members) particleSizes[id] = { width: g.leader.width, height: g.leader.height };
 		particleRendered = rendered.rendered;
 		particleSkipped = rendered.failed;
 		log.tickEnd();
@@ -728,7 +732,7 @@ export async function runProjectExport(
 
 	// [link-clip-background-fill] 工程带片段底板时，产物目录兼作纯色底图落点（所有格式共用、按绝对路径引用）
 	const assetDir = hasClipFill(gtrk) ? outDir : undefined;
-	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, draftDir, assetDir });
+	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, particleSizes, draftDir, assetDir });
 	const droppedByContract = inspectContractDrops(gtrk, gtrkDir, particleSkipped.map((s) => s.clipId));
 	// link-client-only-notice：人话说清哪些东西进不了这次导出的工程文件（原告警直出字段名、且按车道计数）
 	const clientOnlyMsg = clientOnlyNotice(

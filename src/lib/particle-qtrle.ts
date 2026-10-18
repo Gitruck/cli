@@ -20,9 +20,11 @@
  *     两端金样 / 变异证红（`openspec/config.yaml` proposal 规则）。
  *
  * ⚠️ **与 `mg-render.ts` 有意分道**：那条是 `gtrk mg render`（脱离工程的精剪补给口），
- * 提交体 `video_size` 是 **1920×1080**（`mg-render.ts:168`，其射程本就是 1920×1080-only）。
- * 本模块恒 **1280×720**（= 客户端 `PARTICLE_CAPTURE_SIZE`）。两条路共用端点**不共用几何**，
- * MUST NOT 为「复用」把任一侧改成对方的尺寸。
+ * 提交体 `video_size` = 颗粒声明尺寸原值（竖屏 1080×1920 就开 1080×1920）。
+ * 本模块按 `particleCaptureSize` 把声明尺寸**等比归一到短边 720**（横屏 16:9 恒 1280×720 = 客户端
+ * `PARTICLE_CAPTURE_SIZE`）。两条路共用端点**不共用几何**，MUST NOT 为「复用」把任一侧改成对方的尺寸。
+ * 两条路共守一条：根舞台 MUST 与颗粒声明**同比例**——服务端按 `scale(舞台宽/声明宽, 舞台高/声明高)`
+ * 非等比挂载，比例不同就是横胖竖扁（fix-particle-capture-follows-declared-aspect）。
  *
  * 与在飞件 `add-project-export-command` 的分工（design D1，2026-09-09 拍板 A 案）：
  * 本模块提供两件都要的公共部分（常量 / 键 / 落点 / 取 HTML / 提交体 / 编排）；
@@ -60,11 +62,53 @@ export const PARTICLE_RENDER_ABI = "v2-subcomposition-scale";
  *  两式在 qtrle 身份上逐字节同（webm 身份不含此键，本模块不产 webm）。 */
 export const QTRLE_DELIVERY_RECIPE = "v1-premultiplied";
 
-/** 颗粒捕获尺寸。出处：客户端 `tonghe/cloud-render.ts:625 PARTICLE_CAPTURE_SIZE`。
- *  🔴 恒定，**MUST NOT** 取工程画布尺寸 —— 它进内容寻址键，一变即分叉。
- *  几何取舍（继承客户端既定口径）：颗粒是满帧叠加层，画布 >720p 时按 contain-fit 上采样回满帧，
- *  降画质已接受。MG 颗粒 HTML 恒声明 1920×1080（`mg-lint.ts` 的 fatal 门）与 720p 舞台同为 16:9。 */
+/** 横屏基准捕获尺寸。出处：客户端 `tonghe/cloud-render.ts:640 PARTICLE_CAPTURE_SIZE`。
+ *  = 16:9 颗粒（及取不到声明尺寸的颗粒）的捕获尺寸；其余比例见 `particleCaptureSize`。
+ *  🔴 **MUST NOT** 取工程画布尺寸 —— 捕获尺寸进内容寻址键，一变即分叉。
+ *  几何取舍（继承客户端既定口径）：颗粒是满帧叠加层，画布 >720p 时按 contain-fit 上采样回满帧，降画质已接受。 */
 export const PARTICLE_CAPTURE_SIZE = { width: 1280, height: 720 } as const;
+
+/** 捕获短边（720p 档）。 */
+export const PARTICLE_CAPTURE_SHORT_SIDE = 720;
+
+/**
+ * 颗粒根元素自声明的画幅（**纯函数**）。根 = 第一个带 `data-composition-id` 的元素开标签（与 `mg-lint` 同一取法），
+ * 取其 `data-width` / `data-height`；值须为纯十进制正整数（`^\d+$` 且 > 0），否则视为未声明、返回 undefined。
+ *
+ * 🔴 本函数决定缓存身份的 `width` / `height`，取法即跨端契约（capability `particle-cache-identity`）：
+ * 客户端同名实现 MUST 逐条同构，MUST NOT 换成「全文第一个 data-width」或宽松数值解析。
+ */
+export function parseParticleDeclaredSize(html: string): { width: number; height: number } | undefined {
+	const root = /<[a-zA-Z][^>]*\bdata-composition-id\s*=[^>]*>/.exec(html)?.[0];
+	if (!root) return undefined;
+	const attr = (name: string): number | undefined => {
+		const v = new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, "i").exec(root)?.[1];
+		if (v === undefined || !/^\d+$/.test(v)) return undefined;
+		const n = Number(v);
+		return n > 0 ? n : undefined;
+	};
+	const width = attr("data-width");
+	const height = attr("data-height");
+	return width !== undefined && height !== undefined ? { width, height } : undefined;
+}
+
+/**
+ * 颗粒捕获尺寸（**纯函数**，进缓存身份与提交体 `video_size`）：
+ * 声明尺寸**等比**缩到短边 `PARTICLE_CAPTURE_SHORT_SIDE`，每边 `2 × round(边 × 360 / 短边)`（取偶、.5 进位）；
+ * 取不到声明尺寸 ⇒ `PARTICLE_CAPTURE_SIZE`。
+ *
+ * 🔴 根舞台 MUST 与声明同比例：服务端按 `scale(舞台宽/声明宽, 舞台高/声明高)` **非等比**挂载颗粒，
+ * 1080×1920 颗粒放进 1280×720 舞台就是横胖竖扁、旋转被拉平，全链零报错。
+ * 横屏 16:9 任意尺寸恒得 1280×720 ⇒ 横屏颗粒缓存键不变；1080×1920 → 720×1280，1080×1080 → 720×720。
+ */
+export function particleCaptureSize(html: string): { width: number; height: number } {
+	const d = parseParticleDeclaredSize(html);
+	if (!d) return { width: PARTICLE_CAPTURE_SIZE.width, height: PARTICLE_CAPTURE_SIZE.height };
+	const short = Math.min(d.width, d.height);
+	const half = PARTICLE_CAPTURE_SHORT_SIDE / 2;
+	const side = (v: number) => 2 * Math.round((v * half) / short);
+	return { width: side(d.width), height: side(d.height) };
+}
 
 /** 计费任务类型（与 `gtrk mg render` 同一端点，task type id 38，measure=分钟）。 */
 export const PARTICLE_TASK_TYPE = "html_render_simple";
@@ -194,7 +238,8 @@ export function resolveParticleHtmlRef(
  * `video_size` 是 `{width,height}` 对象（非 `.gtrk` 的 `[宽,高]`）、beat 时长字段 = `start`+`duration`
  * （非 track_st/track_ed）、`assets.file_id` 必须为 dict（纯内联 beats 也要给空 map）。
  *
- * 🔴 三条硬约束，改任一条即偏离客户端：`video_size` 恒 1280×720、`tracks: []`、`assets.file_id: {}`。
+ * 🔴 三条硬约束，改任一条即偏离客户端：`video_size` = 进键的捕获尺寸（`particleCaptureSize`）、`tracks: []`、`assets.file_id: {}`。
+ * `width` / `height` 由 plan 携带（与进键同一份）；不给则按 `html` 现算（同一函数，结果相同）。
  */
 export function buildParticleComposition(opts: {
 	html: string;
@@ -203,11 +248,14 @@ export function buildParticleComposition(opts: {
 	opaque: boolean;
 	trackIndex: number;
 	id: string;
+	width?: number;
+	height?: number;
 }): Record<string, unknown> {
+	const size = opts.width && opts.height ? { width: opts.width, height: opts.height } : particleCaptureSize(opts.html);
 	return {
 		composition: {
-			// 恒 720p 捕获；MUST NOT 取工程画布（见 PARTICLE_CAPTURE_SIZE 注释）
-			video_size: { width: PARTICLE_CAPTURE_SIZE.width, height: PARTICLE_CAPTURE_SIZE.height },
+			// 720p 档、与颗粒声明同比例；MUST NOT 取工程画布（见 particleCaptureSize 注释）
+			video_size: size,
 			// 云端 _validate_render 要求 fps 为 int（29.97 这类小数会被拒）
 			fps: Math.round(opts.fps),
 			duration: opts.duration,
@@ -241,6 +289,9 @@ export interface ParticlePlanItem {
 	duration: number;
 	opaque: boolean;
 	trackIndex: number;
+	/** 捕获尺寸（`particleCaptureSize(html)`；进键与提交体 `video_size` 同一份）。 */
+	width: number;
+	height: number;
 }
 
 /** 同键分组（同一颗粒在轨上出现 N 次只烤一次）。 */
@@ -356,18 +407,19 @@ export async function buildParticlePlan(
 			continue;
 		}
 		const opaque = beat.opaque === true;
+		const { width, height } = particleCaptureSize(html);
 		const key = particleCacheKey({
 			html,
 			format: "qtrle",
 			quality: "draft",
 			fps: Math.round(fps),
-			width: PARTICLE_CAPTURE_SIZE.width,
-			height: PARTICLE_CAPTURE_SIZE.height,
+			width,
+			height,
 			duration,
 			opaque,
 		});
 		const cachePath = particleCachePath(gtrkDir, key);
-		items.push({ clipId, key, cachePath, cached: hit(cachePath), html, duration, opaque, trackIndex });
+		items.push({ clipId, key, cachePath, cached: hit(cachePath), html, duration, opaque, trackIndex, width, height });
 	}
 
 	// 按键分组（保序：首次出现者为 leader）
@@ -453,6 +505,9 @@ export async function ensureParticleQtrle(
 				opaque: it.opaque,
 				trackIndex: it.trackIndex,
 				id: it.clipId,
+				// 与进键同一份捕获尺寸（同上：键与提交体 MUST 描述同一件东西）
+				width: it.width,
+				height: it.height,
 			});
 			if (opts.delivery) {
 				const result = await deliverParticle(it.cachePath, opts.delivery, {
@@ -535,10 +590,14 @@ export function visibleBeats(gtrk: {
  * `ensureParticleQtrle()` 烤成 qtrle MOV，投影只负责登记本地 MOV 并保留
  * beat 轨的相对层序。输入对象永不原地修改；调用方在投影后应删除
  * `beat_track`，避免同一颗粒同时以 HTML 和视频两种形态进入提交体。
+ *
+ * `particleSizes`（clipId → 捕获尺寸，取自 plan）决定登记的 MOV 尺寸：素材 `video_size` 按各自的 MOV，
+ * 轨 `track_size` 取该轨第一颗；缺席的（如合成烘焙产物）按 `PARTICLE_CAPTURE_SIZE` 登记。
  */
 export function projectBeatTracksToVideoTracks(
 	gtrk: Record<string, unknown>,
 	particlePaths: Record<string, string>,
+	particleSizes: Record<string, { width: number; height: number }> = {},
 ): { videoTracks: Record<string, unknown>[]; materials: Record<string, unknown>[]; dropped: { beatClips: number; failedClips: string[] } } {
 	const existingTracks = Array.isArray(gtrk.video_track) ? (gtrk.video_track as Record<string, unknown>[]) : [];
 	const existingMaterials = Array.isArray(gtrk.materials) ? (gtrk.materials as Record<string, unknown>[]) : [];
@@ -558,6 +617,7 @@ export function projectBeatTracksToVideoTracks(
 		if (beatTrack.hidden === true) continue;
 		const timeline = Array.isArray(beatTrack.track_timeline) ? (beatTrack.track_timeline as Record<string, unknown>[]) : [];
 		const clips: Record<string, unknown>[] = [];
+		let trackSize: [number, number] | undefined;
 		for (let i = 0; i < timeline.length; i++) {
 			const source = timeline[i]!;
 			const clipId = typeof source.clip_id === "string" && source.clip_id ? source.clip_id : `beat-${nextTrack}-${i}`;
@@ -575,11 +635,13 @@ export function projectBeatTracksToVideoTracks(
 				continue;
 			}
 			const materialId = `p_${clipId}`;
+			const size = particleSizes[clipId] ?? PARTICLE_CAPTURE_SIZE;
+			trackSize ??= [size.width, size.height];
 			materials.push({
 				id: materialId,
 				path,
 				duration,
-				video_size: [PARTICLE_CAPTURE_SIZE.width, PARTICLE_CAPTURE_SIZE.height],
+				video_size: [size.width, size.height],
 				video_rate: rate,
 			});
 			clips.push({
@@ -596,7 +658,7 @@ export function projectBeatTracksToVideoTracks(
 		if (clips.length) {
 			videoTracks.push({
 				track_index: nextTrack++,
-				track_size: [PARTICLE_CAPTURE_SIZE.width, PARTICLE_CAPTURE_SIZE.height],
+				track_size: trackSize ?? [PARTICLE_CAPTURE_SIZE.width, PARTICLE_CAPTURE_SIZE.height],
 				muted: true,
 				track_timeline: clips,
 			});
