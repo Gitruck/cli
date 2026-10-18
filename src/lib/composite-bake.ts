@@ -493,7 +493,7 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 				}
 				let b: HeadlessBrowser | null = null;
 				try {
-					b = await HeadlessBrowser.launch(browser!.exe, launchMode);
+					b = await HeadlessBrowser.launch(browser!.exe, launchMode, todo[0]?.entry.stage ?? [1920, 1080]);
 					live.browsers.add(b);
 					// 起的过程中被取消：取消那一刻它还不在 live 里、没被收，别再去开出片台（满载时最多要等 20 秒）
 					if (cancelled) throw new CancelledError();
@@ -559,7 +559,7 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 		const stageEntries = todo.map(({ entry }, i) => {
 			const file = join(work.path, `composite-${i}.html`);
 			writeFileSync(file, withCsp(entry.html));
-			return { id: entry.id, window_f: entry.window_f, anchors_f: entry.anchors_f, texts: entry.texts, bindings: entry.bindings, url: pathToFileURL(file).href };
+			return { id: entry.id, window_f: entry.window_f, stage: entry.stage, anchors_f: entry.anchors_f, texts: entry.texts, bindings: entry.bindings, url: pathToFileURL(file).href };
 		});
 		const stageData = { fps: plan.rate, entries: stageEntries, materials, images, segs, tracks: plan.tracks };
 
@@ -648,6 +648,8 @@ async function bakeRun(opts: BakeOptions, emit: (ev: BakeEvent) => void): Promis
 			const closed = new Promise<number | null>((r) => enc.on("close", (code) => ((encExited = true), r(code))));
 			let counted = 0;
 			try {
+				// 视口 = 这颗的舞台（舞台随工程画布；截图 / beginFrame 出图即这个尺寸）
+				await b.setViewport(entry.stage ?? [1920, 1080]);
 				// 段首预滚：先渲染前一帧（不出图），段首帧的渲染历史与连续渲染一致
 				if (q.a > 0) await b.evaluate(`renderAt(${bakeFrameTime(entry, plan.rate, fps, q.a - 1)})`);
 				for (let k = q.a; k < q.b; k++) {

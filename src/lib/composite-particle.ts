@@ -33,6 +33,17 @@ export interface CompositeBlock {
 	[k: string]: unknown;
 }
 
+/**
+ * 颗粒的舞台 [宽, 高]（adjust-composite-stage-follows-canvas：舞台随工程画布，烘焙产物尺寸 = 舞台）。
+ * 元数据块没给出两个正整数时按 1920×1080（本能力之前的颗粒都是这个尺寸）。
+ */
+export function blockStage(block: Record<string, unknown>): [number, number] {
+	const s = block.stage as { width?: unknown; height?: unknown } | undefined;
+	const w = Number(s?.width),
+		h = Number(s?.height);
+	return Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 ? [w, h] : [1920, 1080];
+}
+
 export interface CompositeDetection {
 	kind: CompositeKind;
 	block?: CompositeBlock;

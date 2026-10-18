@@ -16,6 +16,8 @@
   const META = JSON.parse(document.querySelector("script[data-gtrk-composite]").textContent);
   const W = META.stage.width, H = META.stage.height;
   const stage = document.getElementById("stage");
+  // 舞台随工程画布（竖屏 / 方形同口径）：舞台根按元数据块定尺寸，满幅元素（.bed 等）按百分比随它
+  stage.style.width = W + "px"; stage.style.height = H + "px";
   let FPS = (META.resolved && META.resolved.video_rate) || 60;
   let ANCHORS = (META.resolved && META.resolved.anchors_f) || {};
   let LAYER = "all";

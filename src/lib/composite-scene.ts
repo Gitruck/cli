@@ -15,7 +15,7 @@
  */
 import { f2ms, sec2frame, sec2ms } from "./frame-domain";
 import { collectProjectionClips, normClip, type GtrkProject, type Transcript } from "./projection";
-import type { CompositeBlock } from "./composite-particle";
+import { blockStage, type CompositeBlock } from "./composite-particle";
 import {
 	buildSnapshot,
 	COMPOSITE_TICKS_PER_SECOND,
@@ -33,6 +33,24 @@ export const COMPOSITE_KIT_VERSION = "composite-kit@1";
 export const COMPOSITE_PRODUCER = "gtrk:composite@1";
 /** 颗粒 HTML 体积上限（与 mg lint `4-html-size` 同源：客户端颗粒运行时的加载上限）。 */
 export const COMPOSITE_HTML_MAX_CHARS = 2_000_000;
+/** 场景规格没写 `stage` 时的舞台（本能力之前的场景都按它写）。 */
+export const DEFAULT_STAGE: [number, number] = [1920, 1080];
+
+/**
+ * 工程画布（`.gtrk` 的 `video_size`）；缺席或不是两个正整数时返回 null（adjust-composite-stage-follows-canvas：
+ * 合成舞台随工程画布，竖屏 / 方形工程同口径）。
+ */
+export function projectCanvas(gtrk: { video_size?: unknown }): [number, number] | null {
+	const v = gtrk.video_size;
+	if (!Array.isArray(v) || v.length !== 2) return null;
+	const [w, h] = v.map(Number);
+	return Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 ? [w, h] : null;
+}
+
+/** 场景的舞台：规格里的 `stage`，没写按 1920×1080（旧场景）。 */
+export function sceneStage(spec: Pick<SceneSpec, "stage">): [number, number] {
+	return Array.isArray(spec.stage) && spec.stage.length === 2 ? [Number(spec.stage[0]), Number(spec.stage[1])] : [...DEFAULT_STAGE];
+}
 
 const SPEC_RE = /<script type="application\/x-cp-spec">([\s\S]*?)<\/script>/;
 const STYLE_RE = /<style>([\s\S]*?)<\/style>/g;
@@ -53,6 +71,8 @@ export interface ScenePin {
 
 export interface SceneSpec {
 	id: string;
+	/** 舞台 [宽, 高]（scaffold 按工程画布写；缺席 = 1920×1080）。build 校验它与工程画布一致。 */
+	stage?: [number, number];
 	window: [number, number];
 	takeover?: string[];
 	slots: Record<string, { bind: Record<string, unknown>; label?: string; pin?: ScenePin }>;
@@ -162,6 +182,13 @@ export function resolveScene(
 	const beat = { clip_id: id, track_st: st, track_ed: ed };
 	const win = windowFrames(beat, rate);
 	const span = win[1] - win[0];
+	// 舞台随工程画布：场景按哪块画布写的，就只能铺进那块画布（横版场景缩进竖屏只剩中间一条，比不做更糟）
+	const [sw, sh] = sceneStage(spec);
+	if (!(Number.isInteger(sw) && Number.isInteger(sh) && sw > 0 && sh > 0)) problems.push(`规格的 stage 应为两个正整数 [宽, 高]：${JSON.stringify(spec.stage)}`);
+	const canvas = projectCanvas(gtrk as { video_size?: unknown });
+	if (canvas && (canvas[0] !== sw || canvas[1] !== sh)) {
+		problems.push(`场景舞台 ${sw}×${sh}，工程画布 ${canvas[0]}×${canvas[1]}：请按新画布重写场景（gtrk composite scaffold --force 重起骨架）`);
+	}
 
 	const anchorsF: Record<string, number> = {};
 	for (const [name, a] of Object.entries(spec.anchors ?? {})) {
@@ -235,7 +262,7 @@ export function resolveScene(
 		profile: "gtrk-composite@1",
 		engine: { name: "html", version: 1 },
 		composition_id: id,
-		stage: { width: 1920, height: 1080 },
+		stage: { width: sw, height: sh },
 		slots,
 		anchors: Object.keys(anchorsF),
 		...(spec.takeover?.length ? { takeover: spec.takeover } : {}),
@@ -269,7 +296,7 @@ export function assembleParticle(scene: Scene, block: ResolvedScene["block"], ki
 		`<title>${block.composition_id}</title>\n` +
 		`<script type="application/json" data-gtrk-composite>\n${meta}\n</script>\n` +
 		`<style>\n${css}\n</style>\n</head>\n<body>\n` +
-		`<div id="stage" data-composition-id="${block.composition_id}" data-width="1920" data-height="1080">\n` +
+		`<div id="stage" data-composition-id="${block.composition_id}" data-width="${blockStage(block)[0]}" data-height="${blockStage(block)[1]}">\n` +
 		`${scene.markup}\n</div>\n` +
 		`<script>\n${kit.js}\n</script>\n<script>\n${scene.js}\n</script>\n</body>\n</html>\n`
 	);

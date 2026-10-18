@@ -4,7 +4,7 @@
  *       --accent 强调 / --accent2 / --accent3 辅助色 / --alert 警示 / --font 正文字体 / --font-serif 标题字体。 */
 html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
 #stage {
-  position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden;
+  position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden; /* 实际尺寸由 kit.js 按舞台写回 */
   --bg: #F4F4F2; --bg2: #E6E6E2; --ink: #1D1D1F; --muted: #6B6B70; --line: #CFCFCB;
   --accent: #2F6FDE; --accent2: #2E8B57; --accent3: #4A5568; --alert: #D14343;
   --font: "Noto Sans SC", "Source Han Sans CN", "Microsoft YaHei", "PingFang SC", sans-serif;
@@ -14,7 +14,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: transparent;
 #stage > *, #stage .abs { position: absolute; box-sizing: border-box; }
 [data-slot] { visibility: hidden !important; }
 .serif { font-family: var(--font-serif); }
-.bed { left: 0; top: 0; width: 1920px; height: 1080px; background: var(--bg); }
+.bed { left: 0; top: 0; width: 100%; height: 100%; background: var(--bg); }
 .bed.dark { background: radial-gradient(ellipse at 30% 35%, #2A2A2E 0%, #141416 70%); }
 /* 槽位装饰：阴影在下（back），描边在上（front）。描边只给最上层的画面——下层画面的 front 描边会压到上层画面上 */
 .shadow { border-radius: 18px; box-shadow: 0 18px 50px rgba(0, 0, 0, .22), 0 3px 10px rgba(0, 0, 0, .12); background: #000; }

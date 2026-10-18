@@ -29,10 +29,21 @@
  * 每个槽位一个 <video>（同源取帧不共用解码，见客户端 R15）；图片素材用 <img>。
  *
  * 用法：stageInit({ fps, entries, materials, images?, segs?, tracks }) → renderAt(时间线秒)。全部经 file:// 读本地文件。
+ * 舞台随工程画布（adjust-composite-stage-follows-canvas）：每颗 `entries[i].stage = [宽, 高]`（缺省 1920×1080），
+ * 挂载时页面、两层 iframe 与槽位画布都改成这个尺寸；调用方同时把浏览器视口设成它（截图即这个尺寸）。
  * `window.SETTLE`：画完后等多少毫秒（缺省 60，lint 静帧用）；烘焙置 -1（截帧由 beginFrame / 截图本身推进合成器）。 */
 let FPS = 60, entries = [], matUrl = new Map(), imageIds = new Set(), segsOf = new Map(), byClip = new Map();
 const back = document.getElementById("back"), front = document.getElementById("front");
 const canvas = document.getElementById("slots"), ctx = canvas.getContext("2d");
+let SW = 1920, SH = 1080;
+/** 页面、两层图形 iframe（颗粒按 iframe 宽度缩放舞台）与槽位画布改成舞台尺寸。 */
+function sizeStage(stage) {
+  const [w, h] = Array.isArray(stage) ? stage : [1920, 1080];
+  if (w === SW && h === SH) return;
+  SW = w; SH = h;
+  for (const el of [document.documentElement, document.body, back, canvas, front]) { el.style.width = w + "px"; el.style.height = h + "px"; }
+  canvas.width = w; canvas.height = h;
+}
 
 window.stageInit = (data) => {
   FPS = data.fps; entries = data.entries;
@@ -66,6 +77,7 @@ const waitFor = (key, ms = 15000) => new Promise((res, rej) => {
 const load = (frame, src) => new Promise((res) => { frame.onload = () => res(); frame.src = src; });
 async function mount(entry) {
   if (current && current.entry.id === entry.id) return current.ready;
+  sizeStage(entry.stage);
   const ready = (async () => {
     await Promise.all([load(back, entry.url), load(front, entry.url)]);
     for (const [frame, layer] of [[back, "back"], [front, "front"]]) {
@@ -170,7 +182,7 @@ function applySlotOverrides(g, b) {
   let out = g;
   if (b.box) {
     const s = b.box.scale_pm / 1000, w = g.w * s, h = g.h * s;
-    const cx = g.x + g.w / 2 + (b.box.dx_pm / 1000) * 1920, cy = g.y + g.h / 2 + (b.box.dy_pm / 1000) * 1080;
+    const cx = g.x + g.w / 2 + (b.box.dx_pm / 1000) * SW, cy = g.y + g.h / 2 + (b.box.dy_pm / 1000) * SH;
     out = { ...out, x: cx - w / 2, y: cy - h / 2, w, h, radius: (g.radius || 0) * s };
   }
   if (b.crop) out = { ...out, crop: [b.crop.t_pm / 1000, b.crop.r_pm / 1000, b.crop.b_pm / 1000, b.crop.l_pm / 1000] };
@@ -260,7 +272,7 @@ window.renderAt = async (T) => {
     return { g, b, v, k: ver.k, tag: at.tag };
   });
   const ready = (await Promise.all(jobs)).filter(Boolean);
-  ctx.clearRect(0, 0, 1920, 1080);
+  ctx.clearRect(0, 0, SW, SH);
   for (const { g: g0, b, v, k, tag, img } of ready) {
     const g = applySlotOverrides(g0, b);
     // 中间文件底部的帧号条不进画面：源高度按去掉条带算

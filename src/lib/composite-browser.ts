@@ -264,7 +264,7 @@ export class HeadlessBrowser {
 	private lastFrame: Buffer | null = null;
 	private beginFrameReady = false;
 
-	private constructor(exe: string, mode: LaunchMode) {
+	private constructor(exe: string, mode: LaunchMode, size: [number, number] = [1920, 1080]) {
 		this.mode = mode;
 		const name = basename(exe);
 		this.image = /\.exe$/i.test(name) ? name : `${name}.exe`;
@@ -284,7 +284,7 @@ export class HeadlessBrowser {
 				"--disable-background-timer-throttling",
 				"--disable-renderer-backgrounding",
 				"--disable-backgrounding-occluded-windows",
-				"--window-size=1920,1080",
+				`--window-size=${size[0]},${size[1]}`,
 				"about:blank",
 			],
 			{ stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] },
@@ -327,14 +327,24 @@ export class HeadlessBrowser {
 		this.proc.on("close", () => (this.pipesClosed = true));
 	}
 
+	/** 当前页面视口（= 截图尺寸）。合成舞台随工程画布，换到另一种舞台的颗粒前 `setViewport` 一次。 */
+	viewport: [number, number] = [1920, 1080];
+
+	/** 视口改成 w×h（与当前相同则不动）。截图、beginFrame 出图都是这个尺寸。 */
+	async setViewport([w, h]: [number, number]): Promise<void> {
+		if (this.viewport[0] === w && this.viewport[1] === h) return;
+		await this.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+		this.viewport = [w, h];
+	}
+
 	/**
-	 * 起浏览器并开一个 1920×1080 的页面。
+	 * 起浏览器并开一个 `size`（缺省 1920×1080，合成舞台随工程画布时传舞台尺寸）的页面。
 	 * - `default`：既有行为（lint / 静帧），新无头模式、截图；
 	 * - `beginframe`：chrome-headless-shell 确定性出帧（烘焙首选）；
 	 * - `screenshot-soft`：系统浏览器烘焙退路（截图，软件栅格、关局部重绘）。
 	 */
-	static async launch(exe: string, mode: LaunchMode = "default"): Promise<HeadlessBrowser> {
-		const b = new HeadlessBrowser(exe, mode);
+	static async launch(exe: string, mode: LaunchMode = "default", size: [number, number] = [1920, 1080]): Promise<HeadlessBrowser> {
+		const b = new HeadlessBrowser(exe, mode, size);
 		try {
 			const { targetId } = (await b.send(
 				"Target.createTarget",
@@ -345,7 +355,8 @@ export class HeadlessBrowser {
 			b.sessionId = sessionId;
 			await b.send("Page.enable");
 			await b.send("Runtime.enable");
-			await b.send("Emulation.setDeviceMetricsOverride", { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
+			await b.send("Emulation.setDeviceMetricsOverride", { width: size[0], height: size[1], deviceScaleFactor: 1, mobile: false });
+			b.viewport = [size[0], size[1]];
 			return b;
 		} catch (e) {
 			void b.closeAsync();

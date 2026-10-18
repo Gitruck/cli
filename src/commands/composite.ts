@@ -29,13 +29,14 @@ import { packageRoot } from "../lib/paths";
 import { transcriptCandidates } from "../lib/reproject";
 import { collectProjectionClips, projectTranscript, type GtrkProject, type Transcript } from "../lib/projection";
 import { evaluateComposite, OVERRIDE_SNAPSHOT_KEYS, type ResolveGtrk } from "../lib/composite-resolve";
-import { buildParticle, COMPOSITE_PRODUCER, CompositeSceneError, parseScene, type CompositeKit } from "../lib/composite-scene";
+import { buildParticle, COMPOSITE_PRODUCER, CompositeSceneError, DEFAULT_STAGE, parseScene, projectCanvas, type CompositeKit } from "../lib/composite-scene";
 import { findBrowser, HeadlessBrowser, layoutLintScript, purityLintScript } from "../lib/composite-browser";
 import { BAKE_ABI } from "../lib/composite-bake-plan";
 import { bakeComposites, BakeEnvError, type BakeEvent, type BakeResult } from "../lib/composite-bake";
 import { logBakeEvent } from "../lib/composite-export";
 import { installedHeadlessShell, PINNED_HEADLESS_SHELL } from "../lib/runtime-assets";
 import { JsonlOut } from "../lib/jsonl-out";
+import { blockStage } from "../lib/composite-particle";
 import { mergeFrameIssues, mergePurityIssues, sampleFrames, staticLint, type FrameIssue, type LintIssue, type PurityDiff } from "../lib/composite-lint";
 import { contactSheetArgs, cropDetectArgs, parseCropDetect, parseSceneCuts, sceneCutArgs, shotsRange } from "../lib/composite-shots";
 import {
@@ -144,12 +145,17 @@ export interface BuildManifestEntry {
 	html: string;
 	window: [number, number];
 	window_f: [number, number];
+	/** 舞台 [宽, 高]（随工程画布）；旧清单缺席 = 1920×1080。机检与静帧按它开页面。 */
+	stage?: [number, number];
 	anchors_f: Record<string, number>;
 	texts: Record<string, Array<{ text: string; f0: number; f1: number }>>;
 	bindings: Record<string, unknown>;
 	inputs_hash: string;
 	scene: string;
 }
+
+/** 清单条目的舞台（旧清单没记 = 1920×1080）。 */
+const entryStage = (e: Pick<BuildManifestEntry, "stage">): [number, number] => (Array.isArray(e.stage) && e.stage.length === 2 ? [e.stage[0], e.stage[1]] : [...DEFAULT_STAGE]);
 
 export interface BuildResult {
 	ok: boolean;
@@ -195,6 +201,7 @@ export function runCompositeBuild(opts: CompositeOpts): BuildResult {
 				html: rel,
 				window: [p.beat.track_st, p.beat.track_ed],
 				window_f: [res.window.track_st_f, res.window.track_ed_f],
+				stage: blockStage(p.block),
 				anchors_f: res.anchors_f,
 				texts: p.texts,
 				bindings: res.bindings,
@@ -361,11 +368,13 @@ export interface ScaffoldCmdOpts extends CompositeOpts {
 }
 
 
-function scaffoldScene(id: string, w: PlanWindow, presenterTrack: number | null): string {
+function scaffoldScene(id: string, w: PlanWindow, presenterTrack: number | null, stage: [number, number] = DEFAULT_STAGE): string {
 	const slots: Record<string, unknown> = {};
 	if (presenterTrack !== null) slots.presenter = { bind: { kind: "ref-lane", role: "a-roll" }, label: "讲者", pin: { track: presenterTrack } };
 	slots.subs = { bind: { kind: "text", source: "subtitles" }, label: "字幕" };
-	const spec = { id, window: [w.track_st, w.track_ed], takeover: ["subtitles", "overlay"], slots, anchors: {} };
+	const spec = { id, stage, window: [w.track_st, w.track_ed], takeover: ["subtitles", "overlay"], slots, anchors: {} };
+	// 讲者圆窗的起始框：舞台水平居中、约在上三成（1920×1080 时即 [840, 300, 240, 240]）
+	const pres = [Math.round(stage[0] / 2 - 120), Math.round((stage[1] * 300) / 1080), 240, 240];
 	const presenter =
 		presenterTrack === null
 			? ""
@@ -385,7 +394,7 @@ ${presenter}<div id="cap" class="cap" data-layer="front"></div>
 // 先读同名 .context.md（这段在说什么、窗口内有哪些片段与素材、编排规则），写好设计说明再改这里。
 const { A, prog, at, reveal, caption, ease } = CP;
 CP.render = (t) => {
-${presenterTrack === null ? "" : "  at(\"presenter\", [840, 300, 240, 240], prog(t, 0, 0.5, ease.back));\n"}  caption("cap", "subs", t, []);
+${presenterTrack === null ? "" : `  at("presenter", [${pres.join(", ")}], prog(t, 0, 0.5, ease.back));\n`}  caption("cap", "subs", t, []);
 };
 </script>
 `;
@@ -450,6 +459,8 @@ export function runCompositeScaffold(opts: ScaffoldCmdOpts) {
 	mkdirSync(dir, { recursive: true });
 	const main = collectProjectionClips(ctx.gtrk as unknown as GtrkProject, String(ctx.transcript?.material_id ?? ""));
 	const presenterTrack = main.source === "video" ? main.track_index : null;
+	// 舞台随工程画布（竖屏 / 方形工程同口径）
+	const stage = projectCanvas(ctx.gtrk as { video_size?: unknown }) ?? DEFAULT_STAGE;
 	const written: string[] = [];
 	const kept: string[] = [];
 	for (const w of targets) {
@@ -461,7 +472,7 @@ export function runCompositeScaffold(opts: ScaffoldCmdOpts) {
 			log.info(`${id}：场景已存在，保留（--force 覆盖）；上下文已刷新`);
 			continue;
 		}
-		writeFileSync(scene, scaffoldScene(id, w, presenterTrack), "utf8");
+		writeFileSync(scene, scaffoldScene(id, w, presenterTrack, stage), "utf8");
 		written.push(scene);
 		log.ok(`${id}：${scene}`);
 	}
@@ -501,7 +512,7 @@ function stageData(ctx: CompositeContext, entries: BuildManifestEntry[], extra: 
 			index: t.track_index,
 			clips: (t.track_timeline ?? []).map((c) => ({ clip_id: c.clip_id, material: c.material, clip_st: Number(c.clip_st ?? 0), track_st: Number(c.track_st), track_ed: Number(c.track_ed), speed: clipSpeed(c) })),
 		})),
-		entries: entries.map((e) => ({ ...e, url: pathToFileURL(resolve(ctx.gtrkDir, e.html)).href })),
+		entries: entries.map((e) => ({ ...e, stage: entryStage(e), url: pathToFileURL(resolve(ctx.gtrkDir, e.html)).href })),
 	};
 }
 
@@ -534,9 +545,11 @@ export async function runCompositeLint(opts: LintCmdOpts) {
 		log.warn(opts.browser === false ? "排版与帧纯度未机检（--no-browser）" : "排版与帧纯度未机检：本机找不到 Chrome / Edge（可设环境变量 GTRK_CHROME 指定浏览器路径）");
 	} else {
 		log.step(`② 逐帧排版与帧纯度机检（${basename(exe)}，每 10 帧一采样）`);
-		const b = await HeadlessBrowser.launch(exe);
+		const b = await HeadlessBrowser.launch(exe, "default", entryStage(entries[0]));
 		try {
 			for (const e of entries) {
+				// 视口 = 舞台（竖屏 / 方形颗粒按自己的舞台开，截图与排版采样都在舞台坐标里）
+				await b.setViewport(entryStage(e));
 				await b.open(pathToFileURL(resolve(ctx.gtrkDir, e.html)).href);
 				const span = e.window_f[1] - e.window_f[0];
 				const r = await b.evaluate<{ samples: Array<{ f: number; issues: FrameIssue[] }>; errors: string[] }>(
@@ -557,8 +570,11 @@ export async function runCompositeLint(opts: LintCmdOpts) {
 				mkdirSync(outDir, { recursive: true });
 				log.step(`③ 出静帧 ${stills.length} 张 → ${outDir}`);
 				await b.open(pathToFileURL(join(packageRoot(), "assets", "composite-kit", "stage.html")).href);
-				await b.evaluate(`stageInit(${JSON.stringify(stageData(ctx, readManifest(ctx), extra))})`);
+				const all = readManifest(ctx);
+				await b.evaluate(`stageInit(${JSON.stringify(stageData(ctx, all, extra))})`);
 				for (const t of stills) {
+					const hit = all.find((e) => t >= e.window[0] && t < e.window[1]);
+					if (hit) await b.setViewport(entryStage(hit));
 					const r = await b.evaluate<{ id: string; f: number }>(`renderAt(${t})`);
 					const file = join(outDir, `${r.id}-${t.toFixed(2)}.jpg`);
 					writeFileSync(file, await b.screenshot("jpeg"));
@@ -750,7 +766,7 @@ export async function runCompositeBake(opts: BakeCmdOpts): Promise<BakeResult | 
 		const pinned = installedHeadlessShell() !== null;
 		// overrides：本 CLI 认得并能烤出的槽位用户覆盖键（add-composite-slot-user-overrides）。客户端据此判断工程里的
 		// 覆盖能否烤出，不认就提示升级——不让老 CLI 烤出缺覆盖的画面
-		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL }, overrides: [...OVERRIDE_SNAPSHOT_KEYS] }));
+		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL }, overrides: [...OVERRIDE_SNAPSHOT_KEYS], stage: "canvas" }));
 		return null;
 	}
 	const jsonl = opts.progress === "jsonl";

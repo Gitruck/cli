@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { clipSpeed } from "./clip-speed";
-import { detectComposite, type CompositeBlock } from "./composite-particle";
+import { blockStage, detectComposite, type CompositeBlock } from "./composite-particle";
 import { buildSnapshot, canonicalBytes, type CompositeSnapshot, type ResolveGtrk } from "./composite-resolve";
 import { resolveParticleHtmlRef, type BeatLike, type MaterialLike } from "./particle-qtrle";
 
@@ -20,8 +20,7 @@ export const BAKE_ABI = 1;
 export const CLUSTER_GAP_SEC = 3;
 /** 每段帧数（工作池任务单元；只管负载均衡）。 */
 export const CHUNK_FRAMES = 90;
-/** 合成舞台尺寸（`gtrk-composite@1` 恒 1920×1080）。 */
-export const STAGE_SIZE: [number, number] = [1920, 1080];
+const DEFAULT_STAGE: [number, number] = [1920, 1080];
 
 export interface BakeClip {
 	clip_id: string;
@@ -47,6 +46,8 @@ export interface BakeEntry {
 	/** 窗口（工程帧网格），秒。 */
 	window: [number, number];
 	window_f: [number, number];
+	/** 舞台 [宽, 高]（= 产物视频尺寸、出片台页面与视口尺寸）。 */
+	stage: [number, number];
 	anchors_f: Record<string, number>;
 	texts: Record<string, unknown>;
 	bindings: Record<string, Record<string, unknown>>;
@@ -143,6 +144,7 @@ export function planBake(
 				html,
 				window: [f0 / rate, f1 / rate],
 				window_f: [f0, f1],
+				stage: blockStage(block),
 				anchors_f: (resolved.anchors_f as Record<string, number> | undefined) ?? {},
 				texts,
 				bindings: (resolved.bindings as Record<string, Record<string, unknown>> | undefined) ?? {},
@@ -313,7 +315,7 @@ export function bakeCacheKey(
 		clips,
 		materials: materials.map((m) => [m.id, String(m.size), String(Math.round(m.mtime_ms))]),
 		fps,
-		size: STAGE_SIZE.map(String),
+		size: (entry.stage ?? DEFAULT_STAGE).map(String),
 		browser: opts.browserBuild,
 		encode: opts.encodeSig,
 	};
