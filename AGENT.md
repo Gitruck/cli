@@ -420,6 +420,8 @@ gtrk composite bake --project <工程> [--only cp-w03] [--fps 30] [--workers 4] 
 - **出片**：`gtrk composite bake` 在本机把合成烤成不透明视频（缓存命中即复用，纯本地零计费）；`gtrk render` / `gtrk project export` 会自动先烤，成功的段以烘焙视频出画，整段落在合成窗口内的 MG / OV 不再预渲、不计费。
   - 浏览器优先用钉定版本 chrome-headless-shell，没有时退回本机 Chrome / Edge（更慢）。**MUST NOT 自作主张下载**：征得用户同意后 `gtrk deps install --browser`（约 110 MB）或 `bake --install-browser`。
   - 某颗烤失败（退出码 1，回执给原因）时，出片该段按粗剪出画——照实告诉用户。
+- **舞台随工程画布**：`scaffold` 按 `.gtrk` 的 `video_size` 写场景舞台，竖屏、方形与横屏同口径；场景舞台与工程画布不一致时 `build` 逐颗报错（按新画布重写，`scaffold --force` 重起骨架）。`bake --abi` 的 `stage: "canvas"` 表示能烤任意舞台尺寸。
+- **成片图纸里**：口播 / 解说 / 美食 / 配音 / 旅拍 / Vlog 的快速成片缺省带这一步（「精剪包装」，开工告知一句可关），直播切片与长剪短缺省不做、开工问一次——口径正本在《成片型图纸公约》§三⁵。
 
 ---
 

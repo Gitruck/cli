@@ -67,6 +67,8 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 
 ## 计费与跑前须知（每次都转述给用户）
 
+- **合成包装问一次**（公约 §三⁵）：「出来的切片要不要做合成包装？」**缺省不做**；答要则跑完后对每条 clip 做（见「产物」末条），并在这次一起问烘焙浏览器装不装（`gtrk composite bake --abi` 报没装时）。
+
 - 运行时 CLI 自动查询实时价格并在跑前打印——**把计费提示原样转述**；按**上传物音频时长**计费（≈原片时长），**长片先向用户确认再跑**。
 - **源片 > 2 小时跑不了**：CLI 在上传前就会拦下（零抽取、零上传、零扣费），不是跑到一半才失败。
   遇到超长源片（直播回放常见）**先分段再逐段跑**，建议 **40 分钟/段**——
@@ -85,6 +87,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 - 横屏源进竖屏画布（缺省 9:16）时工程上下是黑边；要模糊底：`gtrk project background --gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --blur`——给该 clip **主轨每个片段**写模糊底（片段级底板），客户端里可逐片段或多选批量改成黑底 / 纯色；从客户端导出的剪映草稿带模糊底、Pr 工程降级为纯黑、本地 `gtrk render` 带模糊底；云端随长剪短产出的剪映 / PR 工程生成在它之前、不带。零计费。只想要旧的整片画布设置：加 `--scope canvas`。
 - 用了 `--camera-move` 时：`clips.md` 每条时长后标「运镜 N 处」（0 处属正常）；若有 clip 未能加运镜，`clips.md` 会单列「未能加运镜的切片」；告诉用户运镜在客户端 / 剪映里看，本地渲染与 PR 看不到。之后用 `gtrk patch` 裁剪 / 切分带运镜的片段，关键帧会跟着调整。
 - 用了 `--speed-factor` 时：`clips.md` 的时长是**变速后**的时长并标注倍率；若有 clip 未能变速，`clips.md` 会单列「未能变速的切片」，如实告诉用户。
+- **合成包装**（跑前答了要才做）：对每条 clip 交棒 `/gtrk-composite` 做**精剪包装**（公约 §三⁵：快速成片 auto ≤ 25% → 逐窗口复核 → 构建机检 → 铺轨烘焙，不停；回执列「做了 / 建议了没做 / 烘焙结果」；逐步推进按合成 skill 两个检查点停；开工时用户说了不要就跳过）；参数同上面字幕那条：`--gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --transcript <产物根>/json/transcript.json`。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
 - 开了 `--split-screen` 时：**分屏素材落在毛片旁的 `split_screen/` 子目录**（工程素材路径指向那里，别移动/删除，移动了工程会缺素材）——这点要提前告知用户。
 - 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`。**判据**：草稿目录里必须是 `draft_content.json` + `draft_meta_info.json` 两个精确文件名（云端产物侧的 `clip{i}_` 前缀在拷进草稿根这一跳被剥掉，产物目录 `clip{i}/jianying/` 里保留带前缀的归档原名）。CLI 日志按实际齐全条数报「N/M 条两件套齐全」，不齐的记进 `result.json` 的 `errors`、该 clip 的 `jianyingDraftPath` 为 `null`。

@@ -62,6 +62,8 @@ gtrk tool video_highlight "<本地视频>" --out "<工程目录>/highlight/<素�
 
 **MUST NOT 执行任何网络下载**：素材从哪来归用户（版权责任边界）。
 
+> **精剪包装（公约 §三⁵）**：开工时告知一句「快速成片会在适合的段落做合成包装，最多全片四分之一，不要就说一声」——不是问题，用户说不要即零动作；`gtrk composite bake --abi` 报烘焙浏览器没装时，在这张问询表里多问一句装不装（不装用本机 Chrome / Edge）。
+
 ### 1.1 配比档位识别（本类型独有的第一决策）
 
 先听素材里有没有可用的同期声，再定档——**档位决定写多少稿、TTS 花多少钱、成片什么质感**：
@@ -91,6 +93,7 @@ gtrk tool video_highlight "<本地视频>" --out "<工程目录>/highlight/<素�
 ⑩ 字幕层      吐槽/观察/进度/梗卡进 MG 派单（§六）→ mg lint → mg --project
 ⑪ BGM         gtrk audio lay --volume 0.1 --beat-align（-20dB 口径）
 ⑫ 字幕        gtrk subtitle lay --style <拍板样式>
+⑫′ 精剪包装   交棒 /gtrk-composite（公约 §三⁵：auto ≤ 25% → 复核 → 构建机检 → 铺轨烘焙，不停）
 ⑬ 交付        客户端打开工程出片
 ```
 
@@ -282,7 +285,11 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 
 # ⑫ 字幕
 gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --json
+
+# ⑫′ 精剪包装：见下方引注
 ```
+
+> **⑫′ 精剪包装**：交棒 `/gtrk-composite` 做**精剪包装**（公约 §三⁵：快速成片 auto ≤ 25% → 逐窗口复核 → 构建机检 → 铺轨烘焙，不停；回执列「做了 / 建议了没做 / 烘焙结果」；逐步推进按合成 skill 两个检查点停；开工时用户说了不要就跳过）。现场段有真人出镜时按讲者口径编排，旁白段按「没有讲者」口径只用 B-roll 与排版。
 
 > **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
 
@@ -321,6 +328,7 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 | 字卡 | mg/*.html | 改颗粒 HTML | `gtrk mg --project --only <beatId>` |
 | BGM/旁白音 | audio_track | 换文件/音量/offset | `gtrk audio lay` 同源幂等替换 |
 | 字幕 | cve 字幕 lane | 换样式/颜色 | `gtrk subtitle lay` 重跑幂等 |
+| 精剪包装 | `composite/plan.md` + 合成颗粒 | 审窗口、看静帧（合成 skill 两个检查点） | `/gtrk-composite` `review` / `build --only` / `lay --only` |
 
 ## 八、交付与出片
 

@@ -45,6 +45,8 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 
 > **推荐面（公约 §三‴）**：问答收口时可问一句「要不要看看第三方 skill？」；题材命中场景触发词才定向推荐，读取 `gtrk skills recommend --scene <id> --json`；用户拒绝后不执行推荐动作。
 
+> **精剪包装（公约 §三⁵）**：开工时告知一句「快速成片会在适合的段落做合成包装，最多全片四分之一，不要就说一声」——不是问题，用户说不要即零动作；`gtrk composite bake --abi` 报烘焙浏览器没装时，在这张问询表里多问一句装不装（不装用本机 Chrome / Edge）。
+
 ## 一′、素材适配闸（写稿前必过）
 
 > 本闸判的是题材，与「有无自带时序」正交。剧情短片、摆拍表演和单一室内场景不能直接套用旅拍要素层。
@@ -88,6 +90,7 @@ description: 旅拍解说一站式成片图纸——输入一个旅拍素材文�
 ⑨ MG 字卡     按 §六 轻量规约产颗粒 → mg lint → gtrk mg --project
 ⑩ BGM        gtrk audio lay --volume 0.1 --beat-align（-20dB 口径）
 ⑪ 字幕        gtrk subtitle lay --style <检查点①拍板样式>（用户没选用 default）
+⑪′ 精剪包装   交棒 /gtrk-composite（公约 §三⁵：auto ≤ 25% → 复核 → 构建机检 → 铺轨烘焙，不停）
 ⑫ 交付        客户端打开工程出片（gtrk render 仅主轨快照预览，见 §八）
 ```
 
@@ -298,7 +301,11 @@ gtrk audio lay --project "<工程目录>" --file "<bgm>" --volume 0.1 --beat-ali
 
 # ⑪ 字幕（样式/颜色 = 检查点①拍板值；用户没选用 default/雅黑；零计费——拆行走云端 subtitle_line_split 0 积分留痕，离线可加 --offline 用本地拆窗、重跑幂等替换）
 gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --json
+
+# ⑪′ 精剪包装：见下方引注
 ```
+
+> **⑪′ 精剪包装**：交棒 `/gtrk-composite` 做**精剪包装**（公约 §三⁵：快速成片 auto ≤ 25% → 逐窗口复核 → 构建机检 → 铺轨烘焙，不停；回执列「做了 / 建议了没做 / 烘焙结果」；逐步推进按合成 skill 两个检查点停；开工时用户说了不要就跳过）。旅拍主画面多是素材本身，按「没有讲者」口径只用 B-roll 与排版。
 
 > **停顿太长时**：自训音色加 `--fragment-interval 0.2`（合成时就对）；云引擎音色**不支持**该参数（传了会报错，不会静默忽略），改在合成后跑 `gtrk audio tighten --project <工程>` 收紧句间停顿（纯本地零计费；只压跨句界的停顿，句内换气与原声引用段不动）。
 
@@ -352,6 +359,7 @@ gtrk subtitle lay --project "<工程目录>" --style default --color 雅黑 --js
 | 字卡 | mg/*.html | 改颗粒 HTML | `gtrk mg --project --only <beatId>` 单颗重铺 |
 | BGM | audio_track | 换歌/换音量 | `gtrk audio lay` 同文件幂等替换 |
 | 字幕 | cve 字幕 lane | 换样式/颜色 | `gtrk subtitle lay --style/--color` 重跑幂等替换（手加 text 不受影响）；逐条微调在客户端 |
+| 精剪包装 | `composite/plan.md` + 合成颗粒 | 不要某颗 / 补一段 | 客户端关合成轨可见或删那一颗；补做走 `/gtrk-composite` 指定区间（`plan --range`） |
 
 改口播轨后 matrix/mg 消费侧自带现场重投影，无需回跑 split。
 
