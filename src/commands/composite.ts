@@ -57,6 +57,10 @@ import {
 	type ReviewOps,
 } from "../lib/composite-plan";
 
+/** `lay` 成功后的出片口径：四个出口都先在本机烘焙合成（add-composite-bake；客户端 link-composite-export 随 1.2.13 发布）。 */
+export const LAY_EXPORT_NOTE =
+	"出片时合成在本机烘焙：客户端（1.2.13 起）原生导出与剪映 / Pr 导出、gtrk render、gtrk project export 都会先烤合成再出画；某颗烘焙失败（或本机没有可用浏览器）时该段按粗剪出画。想先看效果跑 gtrk composite bake";
+
 export interface CompositeOpts {
 	project?: string;
 	gtrk?: string;
@@ -414,7 +418,7 @@ function scaffoldContext(ctx: CompositeContext, inp: PlanInput, w: PlanWindow, i
 		"",
 		...U.map((u) => `- \`${u.id}\` ${u.st.toFixed(3)}–${u.ed.toFixed(3)}  ${u.text}`),
 		"",
-		"锚点写法：`\"anchors\": { \"名字\": [\"句 id\", \"关键词\", 第几处(0 起，可省)] }`，场景里用 `A(\"名字\")` 取局部秒。",
+		"锚点写法：`\"anchors\": { \"名字\": [\"句 id\", \"关键词\", 第几处(0 起，可省)] }`，场景里用 `A(\"名字\")` 取局部秒。关键词照上面原文抄，匹配时忽略空格、标点与大小写，英文按整词（`\"cold brew\"` 可以直接写）。",
 		"",
 		"## 窗口内各轨片段",
 		"",
@@ -658,7 +662,7 @@ export function runCompositeLay(opts: LayCmdOpts) {
 	if (!opts.dryRun) {
 		revision = writeGtrkAtomic(ctx.gtrkPath, r.next, ctx.revision, "composite lay");
 		if (plan && inp) writeFileSync(join(ctx.projectDir, "composite", "plan.md"), renderPlanMd(plan, inp), "utf8");
-		log.ok(`已写回 ${ctx.gtrkPath}；客户端外部重载后大纲 CP 行出现实色合成块。导出（原生 / 剪映 / Pr）暂按粗剪出画，合成颗粒出片在后续版本`);
+		log.ok(`已写回 ${ctx.gtrkPath}；客户端外部重载后大纲 CP 行出现实色合成块。${LAY_EXPORT_NOTE}`);
 	} else log.info("--dry-run：只算不写");
 	const result = { ok: true, dry_run: Boolean(opts.dryRun), laid: r.laid, kept: r.kept, removed: r.removed, skipped: r.skipped, track_index: r.trackIndex, materials_added: r.materialsAdded, materials_removed: r.materialsRemoved, foreign: r.foreign, revision };
 	if (opts.json) console.log(JSON.stringify(result));

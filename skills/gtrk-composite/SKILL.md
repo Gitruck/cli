@@ -155,10 +155,11 @@ CP.render = (t) => {
 ```
 
 - **槽位绑定**：`ref-lane {track}`（某条轨在该时刻的画面，讲者常用）；`ref {clip_id}`（某个片段，窗口外定格首末帧）；`own {material, src_in_ms, dur_t | dur_f, starts_at: 锚点名 | starts_at_t: 时间线秒}`（自选素材的一段；之前首帧、之后末帧定格）；`text`（字幕文本输入，无几何）。
-- **锚点**：`[句 id, 关键词, 第几处(0 起)]`，取关键词首字在时间线上的时刻；场景里 `A("名字")` 得局部秒。关键词所在的字被剪掉时取其后第一个保留的字。
+- **锚点**：`[句 id, 关键词, 第几处(0 起)]`，取关键词首字在时间线上的时刻；场景里 `A("名字")` 得局部秒。关键词所在的字被剪掉时取其后第一个保留的字。匹配时关键词与句子都忽略空格、标点与大小写，英文按整词（`["u0001", "cold brew"]` 直接写；`"tea"` 不会命中 `teas`）。
 - **槽位元素**：`data-slot` 一槽一个；`data-z` 叠放次序；`data-fit` cover / contain；`data-shape` rect / roundrect / circle；`data-crop` 上右下左比例；`data-filter` 只收白名单滤镜。
 - **装饰跟随**：`data-for="<槽位>"` 的元素与槽位同框（`data-pad` 外扩）；`.shadow` 在下（背景层），`.frame` / `.ring` 加 `data-layer="front"` 在上——**只给最上层的画面加前景描边**（规则 2）。
 - **分层**：缺省是背景层（画在视频之下）；`data-layer="front"` 的子树在视频之上（文字、标签、描边、线条）。
+- **定位**：工具箱只给**舞台的直接子元素**绝对定位（`#stage > *`）。放进容器里的子元素（如 `<div id="grid">` 下的一排徽章）不会自动定位，`left` / `top` 不生效、按文档流挤成一列，lint 也不报——容器内要摆位置的子元素自己写 `position:absolute`，或加工具箱的 `.abs` 类；坐标相对容器（容器自己要写宽高）。
 - **工具箱 `CP`**：`prog(t, 起, 时长, ease)` 进度；`span` 进出；`at(id, [x,y,w,h], 透明度)` 定框；`mix(矩形A, 矩形B, p)` 版式插值；`seq(t, 到点, 下一张到点)` 同一位置逐句换画面的透明度；`place(el, x, y, o)`；`reveal / look / wipe / draw / typeOn`；`caption(el, "subs", t, 高亮词[], 隐藏区间[])`；`cues("subs")` 取字幕条目（局部帧）；`fps()`。
 - **常用样式**：`.bed`（底色）/ `.bed.dark`；`.kicker` `.h1` `.h2` `.h3` `.body` `.tag` `.num`；`.ptag` / `.ptag.warm`（画面标签）；`.cap` / `.cap.dark`（字幕）；`.bubble`（对话气泡）；`.stamp`（印章）；`.card` `.pill` `.rule`。配色与字体都是变量：`--bg --bg2 --ink --muted --line --accent --accent2 --accent3 --alert --font --font-serif`。
 - **纯函数**：场景脚本 MUST NOT 用 `Date`、`Math.random`、`requestAnimationFrame`、`setInterval`、`setTimeout`（lint 会拦）——同一帧号永远画出同一画面，客户端是逐帧 seek 的。
@@ -181,7 +182,8 @@ CP.render = (t) => {
 | 现象 | 处理 |
 |---|---|
 | build 报「素材 X 未登记」 | 写进 `composite/materials.json`（`id` + `path`），或换工程里已登记的素材 |
-| build 报「锚点落在窗口外 / 找不到关键词」 | 关键词照句子原文抄（看 `context.md`），或换一个落在窗口内的词 |
+| build 报「锚点落在窗口外 / 找不到关键词」 | 关键词照句子原文抄（看 `context.md`；空格、标点、大小写不影响，英文按整词），或换一个落在窗口内的词 |
+| 容器里的徽章 / 卡片挤成一列、`left` / `top` 不生效（lint 不报） | 它们不是舞台的直接子元素：自己写 `position:absolute` 或加 `.abs`（见场景速查「定位」） |
 | build 报「轨 N 在窗口内没有片段」 | 那条轨这段是空的：换轨，或改用 `own` |
 | lint 报 `border-over-slot` | 两张画面重叠且下层有前景描边：错开时序（等前一张到位再换）或去掉下层的前景描边 |
 | lint 报 `stroke-through-slot` | 前景线条穿过画面：挪画面或改线条走向 |
