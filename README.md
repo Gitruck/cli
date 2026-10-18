@@ -194,6 +194,7 @@ gtrk ai-drama lay --project ./my-video --desk-project <project-id>
 | 抠像、降噪、人声分离、超分、补帧、图片运镜、视频译制 | [单点工具箱](https://hocassian.feishu.cn/wiki/Uh19wAphailtSqkt6jsclW0Rnie) · `gtrk tool list` |
 | 做一套多尺寸封面 | [封面工作流](https://hocassian.feishu.cn/wiki/AD5bwUAHris75vkWl4DcsvPJntb) |
 | 把一首歌做成频谱视频 | [音乐可视化 Skill](skills/gtrk-music-visualizer/SKILL.md) |
+| 拆解一条参考视频的包装与节奏 | [参考片精读 Skill](skills/gtrk-ref-reading/SKILL.md) · `gtrk media` |
 | 给自己的栏目建立视觉风格 | [风格体系 Skill](skills/gtrk-style-maker/SKILL.md) |
 | 接入第三方动画、排版或创作 Skills | [Skill 地图](https://hocassian.feishu.cn/wiki/SxRtwJ0G7inTbQkwckFcZmClnrd) |
 

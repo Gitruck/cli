@@ -12,6 +12,7 @@
  *   gtrk init             仅配置（API Key + 剪映草稿目录）
  *   gtrk oralcut <毛片>   智能口播剪辑最小闭环（云端剪辑 → 拉回三方工程文件 → 打开）
  *   gtrk transcript <视频> 本地视频转单个妙记式 Markdown（原视频不上传）
+ *   gtrk media <子命令>   本地看片：按时码 / 台词取帧、带台词标签网格、逐帧、视觉变化候选（参考片精读取证）
  *   gtrk split [拆分稿]   视觉拆分派单器（transcript × .gtrk 投影 → 校验落地 struct_meta.split + dispatch）
  *   gtrk patch <动作>  元素级编辑 .gtrk：move / trim / split / set
  *                     （恒等式同步 + 帧对齐；agent MUST NOT 裸手改 JSON）
@@ -54,6 +55,7 @@ import { registerAiDrama } from "./commands/ai-drama";
 import { registerPip } from "./commands/pip";
 import { registerPurify } from "./commands/purify";
 import { registerComposite } from "./commands/composite";
+import { registerMedia } from "./commands/media";
 
 // 兼容 node：bun 会自动加载 .env，node 用 loadEnvFile 补上（无 .env 就忽略）。
 // 配置主源是 ~/.gitruck/config.json（gtrk init 写），.env 仅作可选覆盖。
@@ -156,6 +158,7 @@ registerFeedback(program); // 用户摩擦上报：gtrk feedback <话> —— �
 registerAiDrama(program); // AI Drama Desk return-v1 导出包 → 独立 AI video_track（纯本地、零计费）
 registerPip(program); // 双源画中画：gtrk pip lay 把口播粗剪切点镜像到同步录的屏录 / 第二机位，铺满幅轨 + 人像画中画副本轨（纯本地、零计费）
 registerPurify(program); // Agent 去水印/去字幕：detect → 合并人工区域 → purify
+registerMedia(program); // 本地看片工具族：probe / lines / frames / tile / tiles / boundaries / cut——按时码或台词看片，参考片精读取证；纯本地零计费
 registerComposite(program); // 合成层：plan（候选写 struct_meta.composite，客户端 CP 行显示）→ review → scaffold → build → lint → lay；纯本地零计费
 
 // 顶层出口。⚠️ 三件事的**次序是契约**（change link-client-error-report-cli，design D2）：

@@ -194,6 +194,7 @@ gtrk ai-drama lay --project ./my-video --desk-project <project-id>
 | Matting, denoising, vocal separation, upscaling, interpolation, image motion or video dubbing | [Toolbox](https://hocassian.feishu.cn/wiki/Uh19wAphailtSqkt6jsclW0Rnie) · `gtrk tool list` |
 | Covers in multiple aspect ratios | [Cover workflow](https://hocassian.feishu.cn/wiki/AD5bwUAHris75vkWl4DcsvPJntb) |
 | A spectrum video for a song | [Music visualizer Skill](skills/gtrk-music-visualizer/SKILL.md) |
+| Break down a reference video's packaging and pacing | [Reference-reading Skill](skills/gtrk-ref-reading/SKILL.md) · `gtrk media` |
 | A visual style for your show | [Style-maker Skill](skills/gtrk-style-maker/SKILL.md) |
 | Third-party animation, typography or creative Skills | [Skill map](https://hocassian.feishu.cn/wiki/SxRtwJ0G7inTbQkwckFcZmClnrd) |
 

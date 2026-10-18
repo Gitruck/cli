@@ -312,6 +312,27 @@ gtrk transcript "D:/素材/采访视频.mp4" --json
 - 写回时只改 `## 总结` 到 `## 文字记录` 之间，保留后两段原样；建议 3–7 条要点，覆盖主题、关键论点/事实和结论，不补原文没有的信息。
 - `output` 就是最终 Markdown 的绝对路径；确认文件存在、三段标题齐全且待总结标记已消失后，才能回给用户。ASR 实时价格运行前从官网价格表查询，严禁引用记忆价格。
 
+### 2.3.1 参考片精读：`gtrk media`（看片取证 · 纯本地零计费）
+
+这一能力由 `gtrk-ref-reading` Skill 驱动。用户说「拆解这条视频 / 精读参考片 / 学一下这个博主的包装 / 把 XX 的风格蒸馏出来」时，按 Skill 的工序读片：
+先 `gtrk transcript <参考片> --json --out <精读目录>/transcript.md` 取字级时码（**这一步计费，先告知**），再用 `gtrk media` 按时码 / 台词看片（**纯本地、零计费、不联网**），
+结论落进精读目录的 `ANALYSIS.md`（整片模型）/ `TIMELINE.md`（时码细节）/ `PROGRESS.md`（接力）。
+
+```bash
+gtrk media lines  <精读目录>/transcript.json --find "买不动"          # 台词出现在哪、几处
+gtrk media tiles  <参考片> --around "买不动" --occurrence 1 --every 0.5 --transcript <精读目录>/transcript.json -o <精读目录>/evidence/stamp
+gtrk media tiles  <参考片> --around "买不动" --occurrence 1 --every-frame --cols 6 --rows 4 --transcript <稿> -o <精读目录>/evidence/motion/stamp
+gtrk media boundaries <参考片> --rate 4 --threshold 0.12 --transcript <稿> -o <精读目录>/evidence/boundaries.json
+```
+
+**agent 纪律：**
+
+- `-o` 必填，落精读目录（缺省 `<参考片同目录>/<参考片名>-精读/evidence/<描述名>`）；已存在不覆盖，`--force` 只覆盖本命令族旧产物。只读本地文件，不下载链接。
+- 网格是证据不是结论：每格下方标签 = 源片秒 · 时码（· 帧号）· 句号 / 正在读的字 / 所在整句。「此刻无字在读」不等于静音。判读结论由你写进 TIMELINE，并写上证据路径。
+- `boundaries` 是**视觉变化候选**，不是镜头判定。
+- 台词多处出现时命令会报错列出每处——用 `--occurrence` 拍板，别改用模糊的 `--start/--end` 绕过。
+- 读完要建栏目 → 交 `/gtrk-style-maker`：精读出的系统只作「作品逆向」的证据，经用户认领才成栏目维度；参考片的帧与片段不进栏目 skill 的 assets。
+
 ---
 
 ## 2.4 元素级编辑：`gtrk patch`（改工程唯一入口）
