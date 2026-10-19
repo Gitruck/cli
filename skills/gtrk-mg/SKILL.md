@@ -154,7 +154,7 @@ description: MG 动态图颗粒铺轨器——成片 SOP 第 ⑤ 步（**最后�
 2. **取块改写**：`gtrk mg fetch --pick <块名> --slot <beatId> --project <目录> --json`——从派单取 composition_id / 坑位包络 / category，产物直接落 `<产物目录>/mg/<composition_id>.html`。返回里的 `editable`（文案 / 数值数组 / 色值）就是你下一步要改的地方。
 3. **改内容与审美（你的活，MUST 做）**：按 beat 语义改文案与数据；色板与字体——有栏目 skill 按栏目的，没有按公约 §三「内容驱动的临场泛化」全片自洽一套；**MUST NOT 把块的示例文案 / 示例数据 / 默认色板原样铺进成片**。字体缺省已换成运行时镜像可证的 CJK 字体，要换用 `--font`。
 4. **lint → 铺**：`gtrk mg lint` 过致命项 → `gtrk mg --project <目录>`（与栏目产颗粒同门槛）。
-5. **竖屏工程**：registry 中性块只有 1920×1080 一种几何（块是手写 HTML、尺寸写死在块里，`--canvas` 给别的画幅会被拒），竖屏工程不适用；提示用户走栏目 skill 按工程画幅产颗粒，MUST NOT 拉伸。
+5. **竖屏 / 方形工程**：registry 中性块只有 1920×1080 一种几何（块是手写 HTML、尺寸写死在块里，`--canvas` 给别的画幅会被拒），不适用。派单模式下工程 `video_size` 比例不是 16:9（容差 7%：4K 横屏与 DCI 17:9 照取）命令会**在下载前拒**、不落盘；改走 `--source text`（文字模板按工程画幅编，见上节）或栏目 skill 按工程画幅产颗粒，MUST NOT 拉伸。
 
 独立模式（脱离派单补一颗）：`gtrk mg fetch --pick <块名> --as <composition_id> --duration <坑位秒> [--category overlay|fullscreen] [--out <目录>]`，随后同 `gtrk mg render` 的独立颗粒路。
 
@@ -194,7 +194,7 @@ gtrk mg lint "<产物目录>/mg/<composition_id>.html" --dispatch "<产物目录
 
 - 纯本地静态校验颗粒 HTML 的**铁律机器可判定子集**：`<template>` 包裹、`data-composition-id` + 根 `data-width` / `data-height`（正整数）、`gsap.timeline({ paused: true })`、`window.__timelines` 注册、无 `Math.random` / `Date.now`（可逐帧 seek 的确定性）、自包含无相对外链、`background` 声明与 `opaque` 自洽…；给 `--dispatch` 会额外校验 `composition_id` 命中派单。
 - **`1-cid-expect`（致命）——复制改名必查**：颗粒内部的 `data-composition-id` 必须等于期望 id（`--dispatch` 命中时 = 该条派单的 `composition_id`，否则 = 文件名）。**你从别的颗粒复制模板时最容易漏改内部 id**：那样铺出来的 clip 指向 A、文件注册的却是 `__timelines["B"]`，渲染必错，且两颗粒抢同一个 `[data-composition-id]` 样式作用域。改名的临时副本（`./tmp.html`）不比对，不会误伤。
-- **`1-canvas-match`（致命）——画幅比例对不上**：给了 `--dispatch` / `--project` 时按工程 `.gtrk` 的 `video_size` 比对颗粒根声明的比例（容差 1%），铺轨同一口径。横屏颗粒进竖屏工程就是这条。**回步骤 2 让生产 skill 按工程画幅重做**；文字模板在派单模式下重取即可（缺省就按工程画幅编）。工程缺 `.gtrk` 或 `video_size` 不合法时这条不跑，命令会明说「本次颗粒画幅未与工程比对」。
+- **`1-canvas-match`（致命）——画幅比例对不上**：给了 `--dispatch` / `--project` 时按工程 `.gtrk` 的 `video_size` 比对颗粒根声明的比例（容差 7%：DCI 4K 这类 17:9 工程里的 16:9 颗粒放行，接受 6.7% 横向拉伸），铺轨同一口径。横屏颗粒进竖屏工程就是这条。**回步骤 2 让生产 skill 按工程画幅重做**；文字模板在派单模式下重取即可（缺省就按工程画幅编）。工程缺 `.gtrk` 或 `video_size` 不合法时这条不跑，命令会明说「本次颗粒画幅未与工程比对」。
 - **铁律④⑤「体积上限」两项**（正本条款 = `contracts/gsap-emit-v1.md` 铁律 4⑤；上限**同源自客户端颗粒运行时**，不是 CLI 的取舍）：
   - `4-html-size`（**致命，命中即短路、其余项不跑**）：颗粒 HTML 超过 **2,000,000 字符**，客户端无法加载。文案会点名最大的一段 `data:` URI。处置：按实际显示尺寸裁剪缩放，不透明图改 JPEG/WebP；仍超就把大图放图片素材轨，颗粒只留透明叠加层。云渲成功不代表客户端可加载。
   - `4-html-size-heavy`（非致命）：500,000～2,000,000 字符——客户端每次 seek 都把颗粒根节点的 outerHTML 整份快照回传，体积直接决定预览帧率。能缩就缩；**不拦铺轨**。

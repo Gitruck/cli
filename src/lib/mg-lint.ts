@@ -97,11 +97,13 @@ export function parseDeclaredCanvas(html: string): [number, number] | undefined 
 }
 
 /**
- * `1-canvas-match` 按比例判时的容差（fix-mg-lay-lint-reads-project-canvas）：比例差 ≤ 1% 视为同比例。
- * 1% 的拉伸肉眼不可辨，且要吸收原片几何的零头——GoPro 2.7K 的 2704×1520、854×480 这类与 16:9 差不到 0.1%，
- * 按整数精确相等判会把它们当跨比例拦下；真跨比例（16:9 对 9:16 差 216%、对 1:1 差 78%、DCI 4K 17:9 差 6.7%）远在容差之外。
+ * `1-canvas-match` 按比例判时的容差（fix-mg-lay-lint-reads-project-canvas）：比例差 ≤ 7% 视为同比例。
+ * 下限要吸收原片几何的零头——GoPro 2.7K 的 2704×1520、854×480 这类与 16:9 差不到 0.1%，按整数精确相等判会误拦。
+ * 放到 7%（2026-10-18 主理人拍板，原为 1%）是为接住 DCI：17:9 的 4096×2160 / 2048×1080 与 16:9 差 6.7%、
+ * 1.85:1 的 3996×2160 差 4.1%——这几档工程里的 16:9 颗粒**接受**横向 ≤ 7% 的拉伸。
+ * 真跨比例（16:9 对 9:16 差 216%、对 1:1 差 78%、对 4:3 差 33%、对 16:10 差 11%）仍在容差之外。
  */
-export const CANVAS_ASPECT_TOLERANCE = 0.01;
+export const CANVAS_ASPECT_TOLERANCE = 0.07;
 
 /** 两个画幅的比例差（≥ 0，对称：横竖对调结果相同）。 */
 export function aspectSkew([aw, ah]: readonly [number, number], [bw, bh]: readonly [number, number]): number {

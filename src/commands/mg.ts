@@ -27,7 +27,7 @@ import { readGtrk, assertGtrkV1, writeGtrkAtomic } from "../lib/gtrk-writeback";
 // [adjust-lay-frame-domain D2] 顶层 video_rate 与 matrix lay / ai-drama lay 同一读法：缺席 / 非正 / 非整数 ⇒ 报错退出零副作用
 import { videoRateOf } from "../lib/gtrk-patch";
 import { r3 } from "../lib/frame-domain";
-import { lintParticle, parseCompositionId } from "../lib/mg-lint";
+import { CANVAS_ASPECT_TOLERANCE, aspectSkew, lintParticle, parseCompositionId } from "../lib/mg-lint";
 import { isInsideDir } from "../lib/outdir-guard";
 import { renderParticle, CID_SHAPE, assertNotJianyingDraftDir } from "../lib/mg-render";
 import { layMgTracks, type MgLayItem, type MgLayException, type StructMetaMg } from "../lib/mg-lay";
@@ -254,6 +254,27 @@ function lintCanvasOfProject(baseDir: string): [number, number] | undefined {
 		log.warn(`${e instanceof Error ? e.message : String(e)}${CANVAS_NOT_COMPARED}`);
 		return undefined;
 	}
+}
+
+/**
+ * registry 取块派单模式的工程画幅闸（fix-mg-fetch-registry-reads-project-canvas）。
+ * registry 中性块只有 PARTICLE_W×PARTICLE_H 一种几何（块是手写 HTML，改写不跟着缩），工程比例不同就没有一块能用——
+ * 在**下载之前**拒，别落一颗注定被 lint / 铺轨拦下的颗粒。口径同铺轨：按比例判（4K 横屏照取），
+ * 比对不了一律降级为不比对并明示（`lintCanvasOfProject`），「先取块、后建工程」的用法不断。
+ */
+function registryCanvasOfProject(baseDir: string): [number, number] | undefined {
+	const canvas = lintCanvasOfProject(baseDir);
+	if (!canvas) return undefined;
+	const skew = aspectSkew(canvas, [PARTICLE_W, PARTICLE_H]);
+	if (skew > CANVAS_ASPECT_TOLERANCE) {
+		throw new Error(
+			`工程画幅 ${canvas[0]}×${canvas[1]}（${locateProjectGtrk(baseDir)}）与 registry 中性块的 ${PARTICLE_W}×${PARTICLE_H}` +
+				`（16:9）比例差 ${(skew * 100).toFixed(1)}%，已拒绝（未下载、未落盘）——registry 中性块只有这一种几何，` +
+				"块是手写 HTML、尺寸写死在块里，取块改写不会跟着缩，铺进这个工程就是拉伸变形。" +
+				"竖屏 / 方形工程请走 `--source text`（文字模板按工程画幅编），或让栏目 skill 按工程画幅产颗粒",
+		);
+	}
+	return canvas;
 }
 
 /** 人读一行覆盖读数。覆盖充分或算不出时不出声（MUST NOT 刷屏）。 */
@@ -850,9 +871,11 @@ async function runFetch(args: string[], opts: MgOpts): Promise<MgResult> {
 	let slotSec: number;
 	let category: "overlay" | "fullscreen" | undefined = opts.category as "overlay" | "fullscreen" | undefined;
 	let outPath: string;
+	let canvas: [number, number] | undefined;
 	if (opts.slot) {
 		const { dispatchPath, baseDir } = resolveDispatch(opts);
 		const hit = matchSlot(await readMgQueue(dispatchPath), opts.slot);
+		canvas = registryCanvasOfProject(baseDir);
 		cid = hit.compositionId;
 		slotSec = hit.slotSec;
 		if (!category && hit.category) category = hit.category;
@@ -892,7 +915,12 @@ async function runFetch(args: string[], opts: MgOpts): Promise<MgResult> {
 	log.step("▶ 机械改写");
 	for (const l of adopted.log) log.info(l);
 
-	const lint = lintParticle(adopted.html, { compositionId: cid, slotDuration: slotSec, category: adopted.category });
+	const lint = lintParticle(adopted.html, {
+		compositionId: cid,
+		slotDuration: slotSec,
+		category: adopted.category,
+		...(canvas ? { canvas, canvasMatch: "aspect" as const } : {}),
+	});
 	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
 	const base = {
 		mode: "fetch" as const,
