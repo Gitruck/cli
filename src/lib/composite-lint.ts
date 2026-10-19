@@ -2,6 +2,7 @@
  * 合成颗粒机检（change add-composite-layer，design D5）——纯函数部分：静态校验与逐帧结果归并。
  *
  * 逐帧排版在浏览器里由工具箱的 `lint()` 判（下层画面的 front 描边压上层画面、front 线条穿过画面、画面越出舞台），
+ * 外加 lint 注入脚本就地判的「写了偏移却没定位」（unpositioned-offset，不进工具箱），
  * 驱动在 `composite-browser.ts`；这里只把每个采样帧的结果按「同一个问题」归并成帧区间，便于人读。
  */
 import { validateCompositeBlock } from "./composite-profile";
@@ -12,7 +13,7 @@ import { detectComposite } from "./composite-particle";
 export interface LintIssue {
 	/** static：静态问题；layout：逐帧排版问题。 */
 	kind: "static" | "layout";
-	/** 判据：profile / forbidden-api / unregistered-material / off-grid / stale / border-over-slot / stroke-through-slot / slot-out-of-stage / same-z-overlap / impure-frame */
+	/** 判据：profile / forbidden-api / unregistered-material / off-grid / stale / border-over-slot / stroke-through-slot / slot-out-of-stage / same-z-overlap / unpositioned-offset / impure-frame */
 	rule: string;
 	message: string;
 	/** 逐帧问题出现的帧区间与采样次数。 */
@@ -89,6 +90,9 @@ const RULE_TEXT: Record<string, (x: FrameIssue) => string> = {
 	"same-z-overlap": (x) => `画面 ${x.a} 与 ${x.b} 同层重叠且有前景描边（谁在上不确定）`,
 	"stroke-through-slot": (x) => `前景线条 ${x.stroke} 穿过画面 ${x.slot}`,
 	"slot-out-of-stage": (x) => `画面 ${x.slot} 越出舞台`,
+	"unpositioned-offset": (x) =>
+		`元素 ${x.el}（在${x.parent === "舞台" ? "舞台" : `容器 ${x.parent} `}里）写了 left / top 偏移，但 position 是 static，偏移不生效、按文档流排` +
+		"——容器里的元素要写 position:absolute 或加 .abs（不想定位就删掉偏移）",
 };
 
 /** 逐帧结果 → 按问题归并成帧区间（首帧、末帧、采样次数），保持首次出现的顺序。 */

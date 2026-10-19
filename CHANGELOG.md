@@ -22,6 +22,7 @@
   - `gtrk composite plan` 的「建议画面」识别英文的对照（unlike / but / instead of …）、列举（逗号列举，或转写不带标点时的一长串并列）、数字与分点；其他语种不做文字信号，审稿稿里写明。中文判定不变。
   - `gtrk composite lay` 的回执改为当前出片口径：客户端（1.2.13 起）原生导出与剪映 / Pr 导出、`gtrk render`、`gtrk project export` 都先在本机烤合成，失败段按粗剪出画。
   - `/gtrk-composite` 场景速查写明：工具箱只给舞台直接子元素定位，容器里的元素自己写 `position:absolute` 或加 `.abs`。
+- `gtrk composite lint` 新增 `unpositioned-offset`：容器里的元素写了 `left` / `top` 偏移、却没写 `position:absolute` 也没加 `.abs`（偏移不生效、挤成一列）时报出来，点名元素与容器。只在 lint 时检查，颗粒与烘焙缓存不变、已烤的颗粒不用重烤。
 
 ## 1.3.7（2026-10-18）
 

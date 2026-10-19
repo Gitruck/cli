@@ -554,7 +554,7 @@ gtrk composite bake --abi
 - `scaffold`：为已采纳窗口落场景骨架 `composite/scenes/cp-wNN.html` 与上下文 `cp-wNN.context.md`；已有场景不覆盖。
 - `shots`：给选片用——带源时间码的联系表、镜头切点、黑边实测（`data-crop` 取值）；不替你选、不改工程。
 - `build`：场景 → 自包含颗粒 `gtrk/assets/composite/<id>.html`。解析规则与 infra `composite-particle-profile` 逐字节一致（帧格窗口、轨身份、锚点、字幕输入、`inputs_hash`）；风格取 `composite/theme.css`。锚点关键词照句子原文写：匹配时关键词与句子都忽略空格、标点与大小写，英文按整词（`"cold brew"` 直接写，`tea` 不命中 `teas`）。
-- `lint`：静态校验 + 本机 Chrome / Edge 逐帧排版机检（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台）与**帧纯度**机检（同一帧号按「先渲前一帧」「先渲远处一帧」两种顺序各渲一次，元素与槽位几何必须一致——不一致的场景在烘焙段首、预览跳转后会画错），可出静帧。退出码 0 通过 / 1 有问题 / 3 排版未机检（找不到浏览器，可设 `GTRK_CHROME`）。
+- `lint`：静态校验 + 本机 Chrome / Edge 逐帧排版机检（下层画面的前景描边压上层画面、前景线条穿过画面、画面越出舞台、容器里的元素写了 `left` / `top` 偏移却没定位——`unpositioned-offset`，容器内要写 `position:absolute` 或加 `.abs`）与**帧纯度**机检（同一帧号按「先渲前一帧」「先渲远处一帧」两种顺序各渲一次，元素与槽位几何必须一致——不一致的场景在烘焙段首、预览跳转后会画错），可出静帧。退出码 0 通过 / 1 有问题 / 3 排版未机检（找不到浏览器，可设 `GTRK_CHROME`）。
 - `lay`：按自产身份幂等铺进 beat 轨最上层、补登记素材、窗口记为已做；过期颗粒拒铺；用户在客户端改过的同 id 颗粒不覆盖。
 - `bake`：把已铺的合成颗粒在本机**烘焙成不透明视频**，产物落 `gtrk/assets/composite-bake/<键>.mp4`；输入（槽位画面、字幕、锚点）按**当前时间线**现算。纯本地、零计费。
   - **浏览器**：优先钉定版本的 chrome-headless-shell（确定性出帧、最快）；没有时退回本机 Chrome / Edge（截图模式，更慢、并发降一档）。**不会静默下载**：`gtrk deps install --browser` 或本命令 `--install-browser` 显式授权才装（约 110 MB）。`GTRK_CHROME` 可指定浏览器。

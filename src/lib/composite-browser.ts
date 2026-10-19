@@ -606,11 +606,41 @@ export class HeadlessBrowser {
 
 /**
  * 页面里跑的排版自检脚本：颗粒作为顶层页面，自己发 init / apply / lint 给自己，按 seq 收 `lint-result`。
+ * 工具箱 `lint()` 查画面几何（描边压画面、线条穿画面、画面出舞台）；之后这里就地再查一项
+ * `unpositioned-offset`（change add-composite-lint-unpositioned）：计算样式 position 为 static、却写了非零
+ * left / top / right / bottom 的元素——偏移不生效、按文档流排（典型是容器里没写 position:absolute / .abs 的徽章）。
+ * 这项只在注入脚本里判、不进工具箱：工具箱字节内联进每颗颗粒、并进烘焙缓存身份，改它要全部重烤。
  * 返回 `{ f, issues }[]`（只含有问题的帧）。
  */
 export function layoutLintScript(init: { fps: number; anchors: Record<string, number>; texts: Record<string, unknown> }, frames: number[]): string {
 	return `(async () => {
   const msgs = [];
+  const stage = document.getElementById("stage");
+  // 元素定位符：有 id 用 #id、槽位用 [data-slot="…"]；否则从最近带 id 的祖先（或舞台）起逐级写「标签.首个类名:第几个」
+  const keyOf = (el) => {
+    if (el === stage) return "舞台";
+    const parts = [];
+    for (let e = el; e && e !== stage; e = e.parentElement) {
+      if (e.id) { parts.unshift("#" + e.id); break; }
+      if (e.dataset.slot) { parts.unshift('[data-slot="' + e.dataset.slot + '"]'); break; }
+      const cls = e.classList && e.classList[0] ? "." + e.classList[0] : "";
+      parts.unshift(e.tagName.toLowerCase() + cls + ":" + (Array.prototype.indexOf.call(e.parentElement.children, e) + 1));
+    }
+    return parts.join(" > ");
+  };
+  const offset = (v) => v !== "auto" && parseFloat(v) !== 0;
+  const unpositioned = () => {
+    const out = [];
+    if (!stage) return out;
+    for (const el of stage.querySelectorAll("*")) {
+      if (el.ownerSVGElement) continue; // SVG 内部元素不吃 CSS 偏移
+      const cs = getComputedStyle(el);
+      if (cs.position !== "static") continue;
+      if (![cs.left, cs.top, cs.right, cs.bottom].some(offset)) continue;
+      out.push({ kind: "unpositioned-offset", el: keyOf(el), parent: keyOf(el.parentElement) });
+    }
+    return out;
+  };
   const wait = (pred, ms = 8000) => new Promise((res, rej) => {
     const t = setTimeout(() => { removeEventListener("message", h); rej(new Error("颗粒无回应")); }, ms);
     const h = (ev) => { const m = ev.data; if (m && m.ch === "gtrk-composite" && pred(m)) { clearTimeout(t); removeEventListener("message", h); res(m); } };
@@ -628,7 +658,8 @@ export function layoutLintScript(init: { fps: number; anchors: Record<string, nu
     send({ type: "apply", seq: f + 1, frame: f });
     send({ type: "lint", seq: f + 1 });
     const r = await p;
-    if (r.issues && r.issues.length) out.push({ f, issues: r.issues });
+    const issues = (r.issues || []).concat(unpositioned());
+    if (issues.length) out.push({ f, issues });
   }
   return { samples: out, errors: errs };
 })()`;
