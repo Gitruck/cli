@@ -770,7 +770,7 @@ export async function runCompositeBake(opts: BakeCmdOpts): Promise<BakeResult | 
 		const pinned = installedHeadlessShell() !== null;
 		// overrides：本 CLI 认得并能烤出的槽位用户覆盖键（add-composite-slot-user-overrides）。客户端据此判断工程里的
 		// 覆盖能否烤出，不认就提示升级——不让老 CLI 烤出缺覆盖的画面
-		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL }, overrides: [...OVERRIDE_SNAPSHOT_KEYS], stage: "canvas" }));
+		console.log(JSON.stringify({ abi: BAKE_ABI, version, browser: { pinned, version: PINNED_HEADLESS_SHELL }, overrides: [...OVERRIDE_SNAPSHOT_KEYS, "box_px"], stage: "canvas" }));
 		return null;
 	}
 	const jsonl = opts.progress === "jsonl";

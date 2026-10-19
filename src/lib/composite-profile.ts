@@ -102,7 +102,13 @@ function checkDecl(block: Obj): string[] {
 	return errs;
 }
 
-function checkOverrides(b: Obj, path: string): string[] {
+/** 元数据块的舞台 [宽, 高]；不合法返回 null（窗口像素位移的范围按它判）。 */
+function stageOf(block: Obj): [number, number] | null {
+	const st = block.stage;
+	return isObj(st) && isPosInt(st.width) && isPosInt(st.height) ? [st.width, st.height] : null;
+}
+
+function checkOverrides(b: Obj, path: string, stage: [number, number] | null = null): string[] {
 	const errs: string[] = [];
 	if ("fit" in b && b.fit !== "cover" && b.fit !== "contain") errs.push(`${path}.fit：必须为 cover / contain`);
 	if ("framing" in b) {
@@ -125,13 +131,18 @@ function checkOverrides(b: Obj, path: string): string[] {
 		}
 	}
 	if ("box" in b) {
+		// 位移二选一（adjust-composite-slot-box-pixels，与 infra profile.py 同句）：像素形是写方唯一写法，千分比形只读兼容
 		const bx = b.box;
-		if (!(isObj(bx) && sameKeys(bx, ["scale_pm", "dx_pm", "dy_pm"]) && isInt(bx.scale_pm) && isInt(bx.dx_pm) && isInt(bx.dy_pm))) {
-			errs.push(`${path}.box：必须为 { scale_pm, dx_pm, dy_pm } 整数`);
+		const px = isObj(bx) && sameKeys(bx, ["scale_pm", "dx_px", "dy_px"]);
+		const pm = isObj(bx) && sameKeys(bx, ["scale_pm", "dx_pm", "dy_pm"]);
+		if (!(isObj(bx) && (px || pm) && Object.values(bx).every(isInt))) {
+			errs.push(`${path}.box：必须为 { scale_pm, dx_px, dy_px }（像素）或 { scale_pm, dx_pm, dy_pm }（千分比）整数，两种位移不得混用`);
 		} else if ((bx.scale_pm as number) < BOX_SCALE_PM[0] || (bx.scale_pm as number) > BOX_SCALE_PM[1]) {
 			errs.push(`${path}.box.scale_pm：须在 [${BOX_SCALE_PM[0]}, ${BOX_SCALE_PM[1]}] 内`);
-		} else if ([bx.dx_pm, bx.dy_pm].some((v) => (v as number) < -1000 || (v as number) > 1000)) {
+		} else if (pm && [bx.dx_pm, bx.dy_pm].some((v) => (v as number) < -1000 || (v as number) > 1000)) {
 			errs.push(`${path}.box：dx_pm / dy_pm 须在 [-1000, 1000] 内`);
+		} else if (px && stage && (Math.abs(bx.dx_px as number) > stage[0] || Math.abs(bx.dy_px as number) > stage[1])) {
+			errs.push(`${path}.box：dx_px / dy_px 须在舞台宽高（±${stage[0]} / ±${stage[1]}）内`);
 		}
 	}
 	if ("slip_ms" in b && !isInt(b.slip_ms)) errs.push(`${path}.slip_ms：必须为整数`);
@@ -168,7 +179,7 @@ function checkResolved(block: Obj): string[] {
 			errs.push(`${path}.kind：必须与声明的绑定种类 ${kind} 一致`);
 			continue;
 		}
-		errs.push(...unknown(b, RESOLVED_BIND_KEYS[kind], path), ...checkOverrides(b, path));
+		errs.push(...unknown(b, RESOLVED_BIND_KEYS[kind], path), ...checkOverrides(b, path, stageOf(block)));
 		if (kind === "ref" && !(typeof b.clip_id === "string" && b.clip_id)) errs.push(`${path}.clip_id：必须为非空字符串`);
 		if (kind === "ref-lane") {
 			if (!(typeof b.lane_clip_id === "string" && b.lane_clip_id)) errs.push(`${path}.lane_clip_id：必须为非空字符串（该轨在窗口内第一个片段的 clip_id）`);

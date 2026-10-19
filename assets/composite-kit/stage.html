@@ -175,14 +175,16 @@ function sourceFor(b, T, f) {
 }
 /**
  * 用户覆盖套到颗粒回报的几何上（add-composite-slot-user-overrides，与客户端 `applySlotOverrides` 逐值相同）：
- * box = 以槽位中心缩放 scale_pm/1000 倍、中心位移舞台宽高的 dx_pm / dy_pm 千分比，圆角同乘缩放；
+ * box = 以槽位中心缩放 scale_pm/1000 倍、中心位移 dx_px / dy_px 舞台像素（旧写法 dx_pm / dy_pm 为舞台宽高的千分比），圆角同乘缩放；
  * crop = 替换颗粒的 data-crop（[上, 右, 下, 左] 比例）。
  */
 function applySlotOverrides(g, b) {
   let out = g;
   if (b.box) {
     const s = b.box.scale_pm / 1000, w = g.w * s, h = g.h * s;
-    const cx = g.x + g.w / 2 + (b.box.dx_pm / 1000) * SW, cy = g.y + g.h / 2 + (b.box.dy_pm / 1000) * SH;
+    const px = "dx_px" in b.box;
+    const dx = px ? b.box.dx_px : (b.box.dx_pm / 1000) * SW, dy = px ? b.box.dy_px : (b.box.dy_pm / 1000) * SH;
+    const cx = g.x + g.w / 2 + dx, cy = g.y + g.h / 2 + dy;
     out = { ...out, x: cx - w / 2, y: cy - h / 2, w, h, radius: (g.radius || 0) * s };
   }
   if (b.crop) out = { ...out, crop: [b.crop.t_pm / 1000, b.crop.r_pm / 1000, b.crop.b_pm / 1000, b.crop.l_pm / 1000] };
