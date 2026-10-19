@@ -11,6 +11,11 @@
 
 ## 未发布
 
+## 1.3.8（2026-10-18）
+
+- 新增参考片精读：`gtrk media` 看片命令族（`probe` / `lines` / `frames` / `tile` / `tiles` / `boundaries` / `cut`，纯本地、不计费）。取帧网格下方标出源片秒、时码与正在念的字；`--around` 按台词定位；`boundaries` 给视觉变化候选（机械证据，不是镜头判定）。配套随包 skill `/gtrk-ref-reading`：按「改不改变讲者的位置、大小或可见区域」把参考片的每个视觉系统归到 MG 或合成风格；`/gtrk-style-maker` 的作品逆向可接视频参考。
+- 竖屏 / 方形工程也能做合成：合成舞台随工程画布。`gtrk composite scaffold` 按工程 `.gtrk` 的 `video_size` 写场景 `stage`（缺席按 1920×1080）；`build` 遇场景舞台与工程画布不一致逐颗报错，不缩放了事；机检、静帧与烘焙都按舞台尺寸出，烘焙产物尺寸与缓存身份随舞台；`--abi` 增 `stage:"canvas"`。客户端对竖屏合成的导出支持随下一版客户端发出。
+- 成片图纸缺省带精剪包装（合成层）：口播、解说、美食、配音、旅拍、Vlog 图纸的快速成片在字幕之后、出片之前做一轮合成（auto 选窗口不超过全片 25%，逐窗口复核、构建机检至多三轮，再铺轨烘焙），开工时告知一句；直播切片开工多问一句（缺省不做），长剪短跑前问一次。
 - 修：竖屏 / 方形工程的 MG 颗粒经 `gtrk render` / `gtrk project export` 预渲后被压扁（横胖竖扁、旋转被拉平）。颗粒预渲原先一律按 1280×720 开舞台，云端按「舞台 / 颗粒声明尺寸」非等比挂载；现在舞台按颗粒声明的 `data-width` / `data-height` 等比缩到短边 720（竖屏 1080×1920 → 720×1280，方形 → 720×720），`project export` 登记的颗粒 MOV 尺寸随之对齐。横屏 16:9 颗粒的舞台与缓存键不变，存量缓存照常命中；竖屏 / 方形颗粒升级后首次渲染会重烤一次（旧缓存是压扁的，不复用）。客户端导出剪映 / PR 的颗粒预渲需客户端同步跟进（fix-particle-capture-follows-declared-aspect）。
 - 修：`gtrk tool image_matting` 处理带 EXIF 方向标记的手机照片（如 Orientation=6），产物转了 90°。上传前先按显示方向摆正（原图不动，摆正件按原图指纹缓存在 `~/.gitruck/audio-cache/`）；无方向标记或非 JPEG 照旧原文件直传；缺 ffmpeg 等摆正失败时提示后按原像素上传（fix-image-matting-exif-orientation）。
 - `gtrk-mg` skill / 参考文档改准画幅口径：颗粒画幅须等于工程画布，竖屏可用；registry 中性块仍只有 1920×1080。
@@ -18,6 +23,10 @@
 - 修：画幅比例不对的 MG 颗粒（如竖屏工程里声明 1920×1080 的手写颗粒或旧颗粒）照样能铺进工程，渲染时被拉伸，全程不报错。`gtrk mg --project`（铺轨，含 `--lint-only`）与 `gtrk mg lint --dispatch / --project` 现在按工程 `.gtrk` 的 `video_size` 比对颗粒声明的比例：跨比例判 `1-canvas-match` 致命、不铺；同比例不同尺寸（如 4K 横屏工程里的 1920×1080 颗粒）照常放行，比例差 7% 以内视为同比例（DCI 4K 4096×2160 这类 17:9 工程里的 16:9 颗粒放行，接受 6.7% 横向拉伸）。工程缺 `.gtrk` 或 `video_size` 不合法时不比对并提示一句。裸 `gtrk mg lint <file>` 不变（fix-mg-lay-lint-reads-project-canvas）。
 - 修：竖屏 / 方形工程派单取 registry 中性块（`gtrk mg fetch --pick <块> --slot <beat> --project <dir>`）照样下载并落一颗 1920×1080 颗粒，要到 lint / 铺轨才被拦。现在按工程 `.gtrk` 的 `video_size` 比例判（同上，容差 7%）：比例不是 16:9 在下载前就拒、不落盘，报错指路 `--source text`（文字模板按工程画幅编）或栏目 skill。横屏 16:9 工程（含 4K）与 DCI 17:9 工程照取、产物不变；独立模式（`--as`）不读工程；找不到 `.gtrk` 或 `video_size` 不合法时不比对、照取并提示一句（fix-mg-fetch-registry-reads-project-canvas）。
 - 修：`gtrk composite bake --progress jsonl` 的取消恰好落在工作页打开出片台时，要约 24 秒才报 `cancelled` 并退出（浏览器已被结束，打开页面却仍按每轮 8 秒等到期限）；现在浏览器一退出即放弃，取消照常几秒内收尾。开烤前建工作目录那一段也有进度行了（原先这段可能超过 1 秒没有输出）；装渲染组件期间关闭 stdin，装完即按取消收尾（原先会漏掉、照常烤完）（add-composite-bake）。
+- 修：`gtrk matrix` 铺轨三处坑：
+  - `clip_id` 带来源层（`<beat>-<layer>-broll/bedfill/gapfill-…`），通用层与本地层同 beat 同序号不再撞名，`gtrk patch --clip` 可直接寻址；老工程重铺不受影响。
+  - 口播（fill 形态）工程里片段间 1–2 帧的缝、锚点前短于 1.2 秒的空档，在素材余量内并入相邻片段，不再闪黑；余量不够仍补黑，并逐段告警。
+  - `gtrk matrix --online` 收尾零候选时不再覆盖盘上已有的 plan（结果带 `plan_kept`）。
 - 合成层在英文口播片上更好用：
   - 场景锚点的关键词照句子原文写即可：匹配时关键词与句子都忽略空格、标点与大小写，英文按整词（`"cold brew"` 直接写，`tea` 不再先命中 `teas`）；找不到时报错打印句子原文。
   - `gtrk composite plan` 的「建议画面」识别英文的对照（unlike / but / instead of …）、列举（逗号列举，或转写不带标点时的一长串并列）、数字与分点；其他语种不做文字信号，审稿稿里写明。中文判定不变。
