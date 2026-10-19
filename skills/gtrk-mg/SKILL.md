@@ -183,7 +183,7 @@ gtrk mg status --project "<split产物目录>" --json
 - **产前先抽帧看底轨（`overlay` 槽位必做，别只凭派单盲产）**：颗粒最终要叠在真实画面上，构图必须因势象形。对该槽位挂点用本地 ffmpeg 抽 1-2 帧（`ffmpeg -ss <track_st秒> -i <底轨视频> -frames:v 1 "<系统temp>/<beat>.jpg"`，成本≈0；抽帧图是临时文件——落系统 temp、用完即删，**别落 cwd / agent 自有目录**）看清三件事——①真人主体/人脸的位置（颗粒 bbox 避开，呼应栏目「不盖说话人」铁律）；②该处是否已有烧入包装或 AI 画面（有 → 别铺这颗，报用户裁决——二次过毛片高发）；③画面明暗基调（深底/浅底影响衬底与配色取舍）。把这些**连同抽帧图一起附进产片订单**交给栏目生产 skill；`fullscreen` 槽位可免（满屏不透明无避让问题）。
 - **产片订单必须附带坑位硬约束（gsap-emit v1 铁律⑦）**：颗粒 GSAP 时间线总长 ≥ **坑位时长**（该槽位 `track_ed − track_st` 包络，**不是** `duration_hint`）+ 0.3s 余量；`duration_hint` 只是动画主叙事节奏参考。主叙事播完后颗粒必须定格保持或有限循环驻留到坑位末尾；禁止全局渐隐、整体退场或清空画面。
 - **`-aux<n>` 叠层颗粒同样处理**：`gtrk split` 若在某 beat 的 `aux_layers` 派了 `overlay`，会派生 `<beat>-aux<n>` 进 `dispatch.mg`（多为 B-roll 底轨之上叠透明概念图解）——照样产、照样存到对应 `composition_id.html`。
-- **画幅 = 工程画布（竖屏 / 方形工程同样适用）**：颗粒根 `data-width` / `data-height` MUST 等于 `.gtrk` 的 `video_size`（竖屏 1080×1920、方形 1080×1080……），写进产片订单。lint 只核「正整数」、**不比对工程画布**——对不上不报错，但跨比例的颗粒挂载时是非等比缩放（拉伸），所以由你在订单里钉死。`gtrk render` / `gtrk project export` 的颗粒预渲按颗粒声明比例捕获（竖屏 720×1280，横屏照旧 1280×720）；1.3.7 及更早的 CLI 一律按 1280×720 烤，竖屏颗粒会横胖竖扁，见到这种症状先 `gtrk upgrade`。客户端导出剪映 / PR 走客户端自己的颗粒预渲，客户端跟进前竖屏颗粒仍可能压扁，以 `gtrk project export` 的产物为准。
+- **画幅 = 工程画布（竖屏 / 方形工程同样适用）**：颗粒根 `data-width` / `data-height` MUST 等于 `.gtrk` 的 `video_size`（竖屏 1080×1920、方形 1080×1080……），写进产片订单。`gtrk mg lint --dispatch` 与铺轨会按工程 `video_size` 比对颗粒声明的**比例**，跨比例判 `1-canvas-match` 致命、不铺（挂载是非等比缩放，铺进去就是拉伸）；同比例不同尺寸（4K 工程里的 1920×1080 颗粒）放行。裸 `gtrk mg lint <file>` 不知道目标工程、只核正整数，所以仍要在订单里钉死。`gtrk render` / `gtrk project export` 的颗粒预渲按颗粒声明比例捕获（竖屏 720×1280，横屏照旧 1280×720）；1.3.7 及更早的 CLI 一律按 1280×720 烤，竖屏颗粒会横胖竖扁，见到这种症状先 `gtrk upgrade`。客户端导出剪映 / PR 走客户端自己的颗粒预渲，客户端跟进前竖屏颗粒仍可能压扁，以 `gtrk project export` 的产物为准。
 - **category 决定叠法**：`overlay` 颗粒背景透明、盖在 B-roll 上不挡主体；`fullscreen` 不透明满屏。最终透明度由颗粒 HTML 的 `background` 声明反推的 `opaque` 定，生产 skill 要让二者自洽（lint 会查）。**「实心底该写在哪个元素上」的正本条款是 `contracts/gsap-emit-v1.md` 铁律 4——本 skill 不复述元素位置，改了要以契约为准**；`fullscreen` 颗粒把实心底写错地方会吃非致命 `4-bg-on-root`（见下节）。
 
 ### 3. lint 门：铺之前先单测每颗（不过就退回生产 skill，别硬铺）
@@ -194,6 +194,7 @@ gtrk mg lint "<产物目录>/mg/<composition_id>.html" --dispatch "<产物目录
 
 - 纯本地静态校验颗粒 HTML 的**铁律机器可判定子集**：`<template>` 包裹、`data-composition-id` + 根 `data-width` / `data-height`（正整数）、`gsap.timeline({ paused: true })`、`window.__timelines` 注册、无 `Math.random` / `Date.now`（可逐帧 seek 的确定性）、自包含无相对外链、`background` 声明与 `opaque` 自洽…；给 `--dispatch` 会额外校验 `composition_id` 命中派单。
 - **`1-cid-expect`（致命）——复制改名必查**：颗粒内部的 `data-composition-id` 必须等于期望 id（`--dispatch` 命中时 = 该条派单的 `composition_id`，否则 = 文件名）。**你从别的颗粒复制模板时最容易漏改内部 id**：那样铺出来的 clip 指向 A、文件注册的却是 `__timelines["B"]`，渲染必错，且两颗粒抢同一个 `[data-composition-id]` 样式作用域。改名的临时副本（`./tmp.html`）不比对，不会误伤。
+- **`1-canvas-match`（致命）——画幅比例对不上**：给了 `--dispatch` / `--project` 时按工程 `.gtrk` 的 `video_size` 比对颗粒根声明的比例（容差 1%），铺轨同一口径。横屏颗粒进竖屏工程就是这条。**回步骤 2 让生产 skill 按工程画幅重做**；文字模板在派单模式下重取即可（缺省就按工程画幅编）。工程缺 `.gtrk` 或 `video_size` 不合法时这条不跑，命令会明说「本次颗粒画幅未与工程比对」。
 - **铁律④⑤「体积上限」两项**（正本条款 = `contracts/gsap-emit-v1.md` 铁律 4⑤；上限**同源自客户端颗粒运行时**，不是 CLI 的取舍）：
   - `4-html-size`（**致命，命中即短路、其余项不跑**）：颗粒 HTML 超过 **2,000,000 字符**，客户端无法加载。文案会点名最大的一段 `data:` URI。处置：按实际显示尺寸裁剪缩放，不透明图改 JPEG/WebP；仍超就把大图放图片素材轨，颗粒只留透明叠加层。云渲成功不代表客户端可加载。
   - `4-html-size-heavy`（非致命）：500,000～2,000,000 字符——客户端每次 seek 都把颗粒根节点的 outerHTML 整份快照回传，体积直接决定预览帧率。能缩就缩；**不拦铺轨**。

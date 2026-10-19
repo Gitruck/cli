@@ -41,6 +41,7 @@ import { adoptBlock, AdoptError, DEFAULT_FONT, PARTICLE_H, PARTICLE_W } from "..
 import { fetchBlockFile, findBlock, loadSnapshot, primaryFile, searchBlocks, type SnapshotItem } from "../lib/mg-registry";
 import { parseCanvasFlag, runCompile, runEdit, runFetchText } from "./mg-text";
 import { describeState, identifyParticle } from "../lib/particle-identity";
+import { projectCanvas } from "../lib/composite-scene";
 
 const MG_ASSET_DIR = "assets/mg"; // <gtrk-dir>/assets/mg/<composition_id>.html （工程自包含落地，写侧）
 // 源目录双探（读旧兼容）：写侧 mg/，读侧并集 mg/ ∪ rrv/（既有工程零迁移）
@@ -218,6 +219,43 @@ function filmDurationSec(gtrkPath: string | undefined): number {
 	}
 }
 
+/**
+ * 工程画幅（`.gtrk` 的 `video_size`，口径同合成链与文字模板取块的 `projectCanvas`）——
+ * 铺轨与 `lint --dispatch` 把它交给 lint 按比例判 `1-canvas-match`（fix-mg-lay-lint-reads-project-canvas）。
+ * 来源不论（文字模板 / registry / 手写 / 旧颗粒），跨比例的颗粒挂载就是非等比拉伸、渲染与铺轨都不报错，
+ * 闸只能设在「铺进这个工程」这一步。
+ * `video_size` 不是两个正整数 ⇒ 不比对并明示：工程在、闸却没跑，用户该知道。
+ */
+function projectLintCanvas(gtrk: Record<string, unknown>, gtrkPath: string): [number, number] | undefined {
+	const canvas = projectCanvas(gtrk as { video_size?: unknown });
+	if (!canvas) log.warn(`工程 ${gtrkPath} 的 video_size 不是两个正整数${CANVAS_NOT_COMPARED}`);
+	return canvas ?? undefined;
+}
+
+const CANVAS_NOT_COMPARED = "——本次颗粒画幅未与工程比对（只核正整数）";
+
+function warnNoProjectCanvas(baseDir: string): void {
+	log.warn(`${baseDir} 下找不到工程 .gtrk（gtrk/project.gtrk 或 project.gtrk）${CANVAS_NOT_COMPARED}`);
+}
+
+/**
+ * `lint --dispatch / --project` 的工程画幅：按工程根定位 `.gtrk` 再取 `video_size`。
+ * lint 不为工程文件失败（它此前根本不读工程）：找不到 / 读坏一律降级为不比对，但都说一声。
+ */
+function lintCanvasOfProject(baseDir: string): [number, number] | undefined {
+	const gtrkPath = locateProjectGtrk(baseDir);
+	if (!gtrkPath) {
+		warnNoProjectCanvas(baseDir);
+		return undefined;
+	}
+	try {
+		return projectLintCanvas(readGtrk(gtrkPath).gtrk, gtrkPath);
+	} catch (e) {
+		log.warn(`${e instanceof Error ? e.message : String(e)}${CANVAS_NOT_COMPARED}`);
+		return undefined;
+	}
+}
+
 /** 人读一行覆盖读数。覆盖充分或算不出时不出声（MUST NOT 刷屏）。 */
 function reportCoverage(c: ReturnType<typeof mgCoverage>): void {
 	const line = coverageLine(c);
@@ -296,6 +334,14 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 	//    （与 matrix lay / layMgTracks 同一读法与话术）——此刻零复制、零改动，MUST NOT 静默退回毫秒路。`--lint-only` 不铺不查。
 	if (!opts.lintOnly && project) videoRateOf(project.gtrk);
 	const laidBefore = laidCompositionIds(opts.lintOnly ? undefined : project?.gtrk);
+	// 工程画幅（fix-mg-lay-lint-reads-project-canvas）：逐颗粒 lint 的 `1-canvas-match` 目标，按比例判。
+	// 没读到工程 ⇒ 不比对，与本修复之前逐条一致。`--lint-only` 下说一声（铺轨路径缺工程时末尾自有「未找到工程文件」那句，
+	// 读坏则上面已原样抛出）。
+	const canvas = project && gtrkPath ? projectLintCanvas(project.gtrk, gtrkPath) : undefined;
+	if (opts.lintOnly && !project) {
+		if (gtrkPath) log.warn(`工程 ${gtrkPath} 读不了${CANVAS_NOT_COMPARED}`);
+		else warnNoProjectCanvas(baseDir);
+	}
 
 	// ── 现场重投影（add-consume-side-reprojection）：恒执行、在 lint 之前 ─────────────────
 	// 铁律⑦ 的槽位包络取自 track_ed − track_st，拿派单快照窗口 lint 等于**按错长度判颗粒**。
@@ -369,6 +415,7 @@ async function runLay(opts: MgOpts): Promise<MgResult> {
 			...(visualBrief ? { visualBrief } : {}),
 			...(allowTextBeats.has(q.beat) || allowTextBeats.has(q.composition_id) ? { allowTextForRelation: true } : {}),
 			...(slotDuration > 0 ? { slotDuration } : {}),
+			...(canvas ? { canvas, canvasMatch: "aspect" as const } : {}),
 		});
 		for (const vv of lint.violations) (vv.fatal ? log.warn : log.info)(`${q.beat} lint ${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);
 		if (!lint.ok) {
@@ -616,9 +663,10 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	// 工程根/派单定位：`--dispatch` 与 `--project` 都能解析出来（今日只认前者，于是给了
 	// `--project` 时既不比对派单、也无从谈工程内含闸——2026-09-07 正是这条路）。
 	let dispatchPath: string | undefined;
+	let baseDir: string | undefined;
 	if (opts.dispatch || opts.project) {
 		try {
-			dispatchPath = resolveDispatch(opts).dispatchPath;
+			({ dispatchPath, baseDir } = resolveDispatch(opts));
 		} catch {
 			/* 解析不出（两个参数都没给）⇒ 裸 lint，本闸天然不介入 */
 		}
@@ -676,11 +724,15 @@ async function runLint(args: string[], opts: MgOpts): Promise<MgResult> {
 	}
 	// 无派单命中时：文件名形如 composition_id 才拿它当期望 id（改过名的临时副本不比对，防误判致命）
 	if (compositionId === undefined && CID_SHAPE.test(nameId)) compositionId = nameId;
+	// 工程画幅（fix-mg-lay-lint-reads-project-canvas）：给了工程（`--dispatch` / `--project`）就按它的 `video_size`
+	// 判 `1-canvas-match`，与铺轨同一口径（按比例）。裸 lint 无从知道目标工程，照旧只核正整数。
+	const canvas = baseDir ? lintCanvasOfProject(baseDir) : undefined;
 	const lint = lintParticle(html, {
 		...(dispatchIds ? { dispatchIds } : {}),
 		...(compositionId ? { compositionId } : {}),
 		...(slotDuration ? { slotDuration } : {}),
 		...(slotCategory ? { category: slotCategory } : {}),
+		...(canvas ? { canvas, canvasMatch: "aspect" as const } : {}),
 		identity: particleState,
 	});
 	for (const vv of lint.violations) (vv.fatal ? log.err : log.warn)(`${vv.fatal ? "✗" : "·"} ${vv.law}: ${vv.msg}`);

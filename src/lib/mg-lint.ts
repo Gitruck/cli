@@ -96,6 +96,19 @@ export function parseDeclaredCanvas(html: string): [number, number] | undefined 
 	return Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 ? [w, h] : undefined;
 }
 
+/**
+ * `1-canvas-match` 按比例判时的容差（fix-mg-lay-lint-reads-project-canvas）：比例差 ≤ 1% 视为同比例。
+ * 1% 的拉伸肉眼不可辨，且要吸收原片几何的零头——GoPro 2.7K 的 2704×1520、854×480 这类与 16:9 差不到 0.1%，
+ * 按整数精确相等判会把它们当跨比例拦下；真跨比例（16:9 对 9:16 差 216%、对 1:1 差 78%、DCI 4K 17:9 差 6.7%）远在容差之外。
+ */
+export const CANVAS_ASPECT_TOLERANCE = 0.01;
+
+/** 两个画幅的比例差（≥ 0，对称：横竖对调结果相同）。 */
+export function aspectSkew([aw, ah]: readonly [number, number], [bw, bh]: readonly [number, number]): number {
+	const r = (aw * bh) / (ah * bw);
+	return Math.max(r, 1 / r) - 1;
+}
+
 /** 非渲染性子节点：找「第一个子**层**」时要跳过（它们不画像素，不可能是实心底）。 */
 const NON_RENDERING = ["style", "script", "meta", "link", "title"];
 
@@ -2025,6 +2038,14 @@ export function lintParticle(
 		 */
 		canvas?: [number, number];
 		/**
+		 * `canvas` 的比对口径（fix-mg-lay-lint-reads-project-canvas）。
+		 * - 缺省 `"exact"`：声明尺寸 MUST 等于目标画幅。文字模板取块 / 编译用它对拍「编出来的就是请求的那个画幅」。
+		 * - `"aspect"`：只判比例（容差 `CANVAS_ASPECT_TOLERANCE`）。铺轨 / `lint --dispatch` 用它——目标画幅取自工程
+		 *   `video_size`，那是原片真实几何（4K 口播就是 3840×2160），而手写颗粒与 registry 块按 1920×1080 写；
+		 *   同比例挂载是等比缩放、画面不走样，按尺寸判会把每个非 1920×1080 的横屏工程都拦下来。
+		 */
+		canvasMatch?: "exact" | "aspect";
+		/**
 		 * 该颗粒的槽位包络（秒）。给了才跑铁律⑦启发式；裸 lint / 未命中派单时不给 → 整项跳过。
 		 * 契约明令「逐帧与总长只有真渲染引擎能判」，故本项**恒非致命**、只做提醒。
 		 */
@@ -2135,6 +2156,7 @@ export function lintParticle(
 		// **「声明尺寸 MUST 等于目标画幅」**——不等就说明这颗没按工程画幅编，判红。
 		// 目标画幅由调用方给（`opts.canvas`）；不给则只判「是不是正整数」，
 		// 那是裸 lint 的场景（手上只有一个文件，无从知道它要放进什么工程）。
+		// 铺轨 / `lint --dispatch` 给的是工程 `video_size`、口径 `"aspect"`：只有比例不同才是拉伸（见 opts 注释）。
 		const dw = Number(attr(root, "data-width"));
 		const dh = Number(attr(root, "data-height"));
 		const posInt = (v: number) => Number.isInteger(v) && v > 0;
@@ -2142,7 +2164,19 @@ export function lintParticle(
 		if (!posInt(dh)) push("1-height", true, `根 data-height 须为正整数（实为 ${attr(root, "data-height") ?? "缺"}）`);
 		if (opts.canvas && posInt(dw) && posInt(dh)) {
 			const [cw, ch] = opts.canvas;
-			if (dw !== cw || dh !== ch) {
+			if (opts.canvasMatch === "aspect") {
+				const skew = aspectSkew([dw, dh], [cw, ch]);
+				if (skew > CANVAS_ASPECT_TOLERANCE) {
+					push(
+						"1-canvas-match",
+						true,
+						`颗粒声明 ${dw}×${dh}，工程画幅是 ${cw}×${ch}，比例差 ${(skew * 100).toFixed(1)}%——` +
+							`挂载走的是**非等比** scale(w/dw, h/dh)，跨比例会把颗粒拉伸变形（不是加黑边），而渲染与铺轨两边都不报错。` +
+							`文字模板按工程画幅重取（派单模式 \`gtrk mg fetch --source text\` 缺省就取工程画幅）；` +
+							`手写颗粒请按工程画幅重做（根 data-width / data-height = 工程 video_size，同比例不同尺寸也行）`,
+					);
+				}
+			} else if (dw !== cw || dh !== ch) {
 				push(
 					"1-canvas-match",
 					true,
