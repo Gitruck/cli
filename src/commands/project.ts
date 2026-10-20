@@ -802,7 +802,6 @@ export async function runProjectExport(
 	await writeFile(join(outDir, "result.json"), JSON.stringify(result, null, 2));
 	if (opts.open !== false) {
 		(depsOverride.openFolder ?? openFolder)(outDir);
-		log.info("已打开导出产物目录");
 	}
 	if (!opts.json) {
 		log.ok(`精修工程导出完成：${outDir}`);
@@ -999,7 +998,6 @@ export async function runProjectInit(opts: ProjectInitOpts, depsOverride: Projec
 	}
 	if (opts.open !== false) {
 		deps.openFolder(outDir);
-		log.info("已打开产物目录文件夹");
 	}
 	log.ok(`配音打底工程已就绪：${outDir}（可直接 gtrk split --project 投影拆分）`);
 	if (opts.json) console.log(JSON.stringify(result));

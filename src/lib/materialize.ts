@@ -400,7 +400,6 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 	}
 	if (opts.open) {
 		openFolder(outDir);
-		log.info("已打开产物目录文件夹");
 	}
 	if (opts.json && !opts.quiet) console.log(JSON.stringify(result));
 
