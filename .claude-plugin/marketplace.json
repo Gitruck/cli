@@ -1,0 +1,20 @@
+{
+	"name": "gitruck",
+	"owner": {
+		"name": "Gitruck (同合云)",
+		"url": "https://ai-mcn.tv/gtrk"
+	},
+	"metadata": {
+		"description": "gtrk video-creation Skills for Claude Code"
+	},
+	"plugins": [
+		{
+			"name": "gtrk",
+			"source": "./",
+			"description": "Agent-native video creation: turn your own footage into an editable multi-track project and export to Jianying/CapCut, Premiere XML, FCPXML or OTIO. Requires the gtrk CLI (npm @gitruck/cli).",
+			"category": "productivity",
+			"homepage": "https://ai-mcn.tv/gtrk",
+			"license": "MIT"
+		}
+	]
+}
