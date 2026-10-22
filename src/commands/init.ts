@@ -133,7 +133,7 @@ export async function runInit(opts: InitOpts): Promise<void> {
 	}
 	if (!jianyingDraftDir) {
 		log.info(
-			"没自动找到（或你选了手动）。已打开一张指引图：剪映 → 全局设置 → 草稿 →「草稿位置」，把那一行路径复制过来；留空则跳过（剪映只产 draft_content.json、缺 meta、需手动导入）。",
+			"没自动找到（或你选了手动）。接下来尝试打开指引图：剪映 → 全局设置 → 草稿 →「草稿位置」，把那一行路径复制过来；留空则跳过（剪映只产 draft_content.json、缺 meta、需手动导入）。",
 		);
 		openFile(GUIDE_IMAGE);
 		const manual = (await promptText("剪映草稿根目录（…\\com.lveditor.draft），留空跳过：")).trim();

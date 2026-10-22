@@ -544,7 +544,6 @@ export async function runLong2Short(
 	if (opts.json) console.log(JSON.stringify(rootResult));
 	if (opts.open) {
 		openFolder(outDir);
-		log.info("已打开产物根目录");
 	}
 	if (!ok) {
 		log.err("部分产物未落地（任务已完成、积分可能已扣）。task.json 已保留，可凭 task_id 恢复取回。");
