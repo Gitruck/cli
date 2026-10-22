@@ -2007,13 +2007,15 @@ function parseCountFlag(v: unknown, flag: string): number | undefined {
 
 /**
  * image_classic_template —— 智能拼图/封面（images 多文件首个成员）。
- * --main-title 必填（服务端 required）；数量类参数服务端钳制 ≤20（CLI 照传、如实转述不复刻）。
- * 产物三组（text/pic/render）各自可空，按组命名收敛。
+ * --main-title 仅 mode≠image 时必填（服务端 required_list 同口径，fix-cover-title-font-coverage）；
+ * 标题含封面字体画不出的字符（emoji 等）由服务端建单前拒（6046），CLI 不复刻字体覆盖判定；
+ * 数量类参数服务端钳制 ≤20（CLI 照传、如实转述不复刻）。产物三组（text/pic/render）各自可空，按组命名收敛。
  */
 const imageClassicTemplate: ToolDescriptor = {
 	name: "image_classic_template",
 	title: "智能拼图/封面",
-	description: "标题 + 多张图 → 成品封面/拼图；--main-title 必填，文件顺序即拼装顺序。",
+	description:
+		"标题 + 多张图 → 成品封面/拼图；--main-title 封面模式必填（--template-mode image 只要拼图时可省），文件顺序即拼装顺序。",
 	kind: "cloud",
 	input: { kind: "images" },
 	priceKey: "image_classic_template",
@@ -2021,9 +2023,12 @@ const imageClassicTemplate: ToolDescriptor = {
 	enabled: true,
 	taskType: "image_classic_template",
 	options: [
-		{ flag: "--main-title <text>", desc: "主标题（image_classic_template 必填）" },
+		{ flag: "--main-title <text>", desc: "主标题（封面模式必填；--template-mode image 只要拼图时可省）" },
 		{ flag: "--sub-title <text>", desc: "副标题（未传则服务端默认）" },
-		{ flag: "--template-mode <mode>", desc: "拼图模式（映射服务端 mode；未传则服务端默认）" },
+		{
+			flag: "--template-mode <mode>",
+			desc: "生成模式（映射服务端 mode：full 封面＝拼图+标题 / image 只要拼图 / text 只要标题层；未传则服务端默认）",
+		},
 		{ flag: "--aspect <ratio>", desc: "画幅比例（如 3:4；未传则服务端默认）" },
 		{ flag: "--quality <q>", desc: "输出质量（如 1080p；未传则服务端默认）" },
 		{ flag: "--output-pic-count <n>", desc: "图组产出数量（服务端钳制 ≤20；未传则服务端默认）" },
@@ -2033,8 +2038,14 @@ const imageClassicTemplate: ToolDescriptor = {
 	buildPayloadMulti(fileIds, ctx) {
 		const o = ctx.opts;
 		const mainTitle = typeof o.mainTitle === "string" && o.mainTitle.trim() ? o.mainTitle : undefined;
-		if (!mainTitle) throw new Error("image_classic_template 需要 --main-title <text>（主标题必填）");
-		const p: Record<string, unknown> = { file_ids: fileIds, main_title: mainTitle };
+		// 与服务端同判：mode 原样比对 "image"（不归一大小写），其余（含缺省）都要画标题
+		if (!mainTitle && o.templateMode !== "image") {
+			throw new Error(
+				"image_classic_template 需要 --main-title <text>（封面模式必填；--template-mode image 只要拼图时可省）",
+			);
+		}
+		const p: Record<string, unknown> = { file_ids: fileIds };
+		if (mainTitle) p.main_title = mainTitle;
 		if (typeof o.subTitle === "string") p.sub_title = o.subTitle;
 		if (typeof o.templateMode === "string") p.mode = o.templateMode;
 		if (typeof o.aspect === "string") p.aspect = o.aspect;

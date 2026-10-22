@@ -11,6 +11,8 @@
 
 ## 未发布
 
+- 修：`gtrk tool image_classic_template --template-mode image`（只要拼图、不画标题）不传 `--main-title` 也被当场拦下。现在与服务端同口径：`--main-title` 只在封面模式（缺省 / `full` / `text`）必填，`image` 时可省、payload 不带标题。标题含 emoji 等封面字体画不出的字符，服务端建单前即拒（错误码 6046，不扣费），CLI 原样转述（fix-cover-title-font-coverage）。
+
 ## 1.3.8（2026-10-18）
 
 - 新增参考片精读：`gtrk media` 看片命令族（`probe` / `lines` / `frames` / `tile` / `tiles` / `boundaries` / `cut`，纯本地、不计费）。取帧网格下方标出源片秒、时码与正在念的字；`--around` 按台词定位；`boundaries` 给视觉变化候选（机械证据，不是镜头判定）。配套随包 skill `/gtrk-ref-reading`：按「改不改变讲者的位置、大小或可见区域」把参考片的每个视觉系统归到 MG 或合成风格；`/gtrk-style-maker` 的作品逆向可接视频参考。

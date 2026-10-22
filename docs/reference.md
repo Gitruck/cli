@@ -677,7 +677,7 @@ gtrk project background --gtrk <工程文件> --clear
 | `piano_audio_enhance` | 单条音频 | 高质量 WAV + 配套 MIDI（双产物） | 运行前实时查询 | 已上线 |
 | `image_to_square` | 单张图片；可选 `--max-line <px>`（≤20000） | 方形图片 | 运行前实时查询 | 已上线 |
 | `image_to_live` | 单张图片 | 约 4 秒短视频 `.mp4`（无声）；或安卓动态照片 `.jpg` + 附带同一条 `.mp4` | 运行前实时查询 | 已上线 |
-| `image_classic_template` | **多张图片** + `--main-title` 必填；可选副标题/模式/比例/质量/数量/版式 | 封面/拼图成品（text/pic/render 三组、可多张） | 运行前实时查询 | 已上线 |
+| `image_classic_template` | **多张图片** + `--main-title`（封面模式必填；`--template-mode image` 只要拼图时可省）；可选副标题/模式/比例/质量/数量/版式 | 封面/拼图成品（text/pic/render 三组、可多张） | 运行前实时查询 | 已上线 |
 | `image_vertical_stitch` | **多张图片**（顺序=自上而下拼接顺序） | 一张垂直拼接长图 | 运行前实时查询 | 已上线 |
 | `video_split_screen` | **2~16 段视频**（多 positional）；精确档 `--clips-json`（条目 `{input:0 起序号, begin_time_ms, end_time_ms, crop}`，毫秒时基）；九个可选布局/画幅/音频参数 | 一条分屏成片（成片时长对齐最短段） | 运行前实时查询 | 已上线 |
 | `mad` | 一个素材文件夹（3~10 条视频）+ 可选 `--bgm` | AE 母合成成片工程 `.jsx`（仅支持 AE） | 仅 `--bgm` 触发实时查价 | 已上线 |
@@ -728,7 +728,7 @@ gtrk project background --gtrk <工程文件> --clear
 - `gtrk tool piano_audio_enhance ./piano.mp3` — 钢琴录音修复增强，产高质量 WAV 主产物 + 配套 MIDI 副产物。
 - `gtrk tool image_to_square ./long.jpg [--max-line 8000]` — 长图转方图；`--max-line` 默认 4000、上限 20000。
 - `gtrk tool image_to_live ./photo.jpg [--output-format motion_photo]` — 让静态照片动起来。缺省产出约 4 秒的 `.mp4` 短视频（无声）；`--output-format motion_photo` 改为直出**安卓动态照片**（单个 `.jpg`，静图末尾内嵌该视频，相册里长按即播），并附带同一条 `.mp4`，两种格式同价。兼容边界：支持该标准的安卓相册可识别并播放；**iOS 不识别**，表现为普通静态图片；少数安卓机型可能只显示静图。
-- `gtrk tool image_classic_template a.jpg b.jpg c.jpg --main-title "新品速览"` — 标题+多图出封面/拼图；`--output-pic-count`/`--output-text-count` 由服务端钳制 ≤20。
+- `gtrk tool image_classic_template a.jpg b.jpg c.jpg --main-title "新品速览"` — 标题+多图出封面/拼图；`--output-pic-count`/`--output-text-count` 由服务端钳制 ≤20。只要拼图不要标题时加 `--template-mode image`，可不传 `--main-title`。标题含 emoji 等封面字体画不出的字符时，服务端建单前即拒（错误码 6046，不扣费）。
 - `gtrk tool image_vertical_stitch top.png mid.png bottom.png` — 多图按传入顺序竖拼成一张长图。
 - `gtrk tool video_split_screen a.mp4 b.mp4 --output-ratio 16:9` — 简单档：整段视频自动布局分屏（reaction/对比同框）。
 - `gtrk tool video_split_screen a.mp4 b.mp4 --clips-json '[{"input":0,"begin_time_ms":0,"end_time_ms":5000},{"input":1,"crop":{"x":0.1,"y":0,"width":0.8,"height":1}}]'` — 精确档：按 0 起索引指定每段毫秒区间与归一化裁剪框；同一文件可多条目出多窗口。
