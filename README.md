@@ -84,6 +84,21 @@ gtrk upgrade
 
 </details>
 
+<details>
+<summary>从 Skills 目录或 Claude Code 插件市场安装</summary>
+
+```bash
+# 通用 skills CLI（skills.sh）
+npx skills add Gitruck/cli
+
+# Claude Code 插件市场
+/plugin install gtrk --marketplace Gitruck/cli
+```
+
+这两种方式只装 Skills。gtrk CLI 和 API Key 仍需用 `npx @gitruck/cli@latest install` 安装和配置。
+
+</details>
+
 ## 看看它能做什么
 
 下面选用与[产品专页](https://ai-mcn.tv/gtrk)一致的真实案例。点击封面观看成片，口播示例也可打开原片对比。

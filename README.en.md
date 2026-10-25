@@ -84,6 +84,21 @@ Media processing requires FFmpeg. Check with `gtrk deps status`; when missing, e
 
 </details>
 
+<details>
+<summary>Install from a Skills directory or the Claude Code plugin marketplace</summary>
+
+```bash
+# Generic skills CLI (skills.sh)
+npx skills add Gitruck/cli
+
+# Claude Code plugin marketplace
+/plugin install gtrk --marketplace Gitruck/cli
+```
+
+Both install the Skills only. You still need `npx @gitruck/cli@latest install` to install the gtrk CLI and set your API key.
+
+</details>
+
 ## See what it can make
 
 These are real examples from the [product page](https://ai-mcn.tv/en/gtrk). Click a cover to watch the result, or compare the talking-head edit with its original footage.
