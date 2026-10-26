@@ -3,7 +3,7 @@
  *
  *   gtrk mg fetch --source text <检索词>        候选态（离线可用）/ 取块态
  *   gtrk mg compile <ir.json> [--out <dir>]     改 IR 重编译（L0，本地跑、0 积分、零请求）
- *   gtrk mg edit <particle.html> --say "<要求>"  自然语言改写（2 积分/候选）
+ *   gtrk mg edit <particle.html> --say "<要求>"  自然语言改写（6 积分/候选，前 200 个之后 8）
  *
  * 与中性块 registry 那条路**刻意不同的一点**：文字模板 MUST NOT 走机械改写。
  * 中性块来自第三方、要替字体换色板才合规；文字模板是我方 clean-room 重写的，

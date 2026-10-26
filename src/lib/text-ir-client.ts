@@ -2,7 +2,7 @@
  * 文字模板两口的云端客户端（change add-text-template-source）。
  *
  * - `POST /task/cli/text_ir_compile`  —— 同步，0 积分。**已不是默认路径**，见下
- * - `POST /task/cli/text_particle_generate` + 轮询 —— 异步，2 积分/候选。自然语言改写
+ * - `POST /task/cli/text_particle_generate` + 轮询 —— 异步，6 积分/候选（前 200 个之后 8）。自然语言改写
  *
  * ## L0 编译默认走本地（change `move-text-ir-compiler-to-client`）
  *
