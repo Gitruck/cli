@@ -592,8 +592,8 @@ const videoCanvasAdapt: ToolDescriptor = {
 			flag: "--canvas-type <normal|rectangle|square>",
 			desc: "画布模式：normal、rectangle 或 square（未传则使用服务端默认）",
 		},
-		{ flag: "--clip-start <frame>", desc: "截取起始帧序号（未传则使用服务端默认）" },
-		{ flag: "--clip-end <frame>", desc: "截取结束帧序号（未传则使用服务端默认）" },
+		{ flag: "--clip-start <sec>", desc: "截取起始时间（秒，可带小数，须小于视频时长；未传则从头开始）" },
+		{ flag: "--clip-end <sec>", desc: "截取结束时间（秒，可带小数，须大于起始时间；未传则到结尾）" },
 		{ flag: "--without-audio", desc: "输出视频不保留音轨" },
 	],
 	buildPayload(fileId, ctx) {
@@ -615,10 +615,14 @@ const videoCanvasAdapt: ToolDescriptor = {
 		] as const) {
 			if (ctx.opts[optKey] == null) continue;
 			const value = Number(ctx.opts[optKey]);
-			if (!Number.isFinite(value) || !Number.isInteger(value)) {
-				throw new Error(`${flag} 必须是有限整数帧号`);
+			if (!Number.isFinite(value) || value < 0) {
+				throw new Error(`${flag} 必须是有限非负秒数`);
 			}
 			payload[payloadKey] = value;
+		}
+		// 服务端同样会拒（6016，不扣费）；本地先拦，免得白传一趟
+		if (typeof payload.end === "number" && payload.end !== 0 && payload.end <= ((payload.start as number | undefined) ?? 0)) {
+			throw new Error("--clip-end 必须大于 --clip-start");
 		}
 		if (ctx.opts.canvasType != null) {
 			const value = String(ctx.opts.canvasType);

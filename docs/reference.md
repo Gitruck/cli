@@ -695,7 +695,7 @@ gtrk project background --gtrk <工程文件> --clear
 - `gtrk tool image_purify ./photo.jpg [--json]` — 清理你有权处理的图片中的水印、Logo 或叠加元素。
 - `gtrk tool image_purify ./photo.jpg --purify-scope region --purify-region 0.02,0.02,0.15,0.08 [--json]` — 按框直接去除：不做识别，**框内全部内容都会被处理**；框越小、越贴近要去除的元素效果越好。
 - `gtrk tool video_blackborder_remove ./clip.mp4 [--json]` — 自动裁去单条视频四周黑边并保留原音轨。
-- `gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 12 --clip-end 60 --without-audio [--json]` — 视频比例转换；`--clip-start/--clip-end` 是起止帧序号，省略字段时沿用服务端默认，画布模式只接受 `normal`、`rectangle`、`square`。
+- `gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 1.5 --clip-end 4 --without-audio [--json]` — 视频比例转换；`--clip-start/--clip-end` 是起止时间（秒，可带小数；`--clip-start` 须小于视频时长，`--clip-end` 须大于 `--clip-start`，超过时长截到结尾），省略字段时沿用服务端默认，画布模式只接受 `normal`、`rectangle`、`square`。
 - `gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo [--json]` — 视频防抖；支持 `fast`、`exp`、`turbo`，其中 `exp` 为实验方式，产物观感需自行检查。
 - `gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" [--json]` — 使用精确预设名称添加蒸汽波滤镜；省略时显式使用 `愈漸升溫`。
 视频去水印必须先问用户选快速（ffmpeg：基础模糊，可能留痕）还是精细（raft：较慢的内容修复，通常更自然、可接近无痕，不保证无损还原）。没有默认模式；`<用户选定模式>` 必须替换为用户已选择的 ffmpeg 或 raft，失败后不得自行降档。只检测、编辑和空清单不要求选择。旧运行记录尚未建处理任务时，resume 也须补显式模式；已建单继续原任务。

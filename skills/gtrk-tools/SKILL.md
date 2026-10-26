@@ -158,7 +158,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 
 这七个公共视频工具（去黑边、比例转换、防抖、蒸汽波、净化、超分、插帧）都只接本地文件，允许扩展名为 `.mp4/.avi/.mpg/.mov/.flv/.mxf/.mpeg/.ogg/.3gp/.wmv/.h264/.m4v/.ts`；不要把 `.mkv`、`.webm` 或 URL 交给它们。
 
-- 视频比例转换：`gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 12 --clip-end 60 --without-audio --json`。`--clip-start/--clip-end` 传起止帧序号；省略选项就沿用服务端默认，需要保留音轨时不要传 `--without-audio`。
+- 视频比例转换：`gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 1.5 --clip-end 4 --without-audio --json`。`--clip-start/--clip-end` 传起止时间（秒，可带小数）；省略选项就沿用服务端默认，需要保留音轨时不要传 `--without-audio`。
 - 视频防抖：`gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo --json`。支持 `fast`、`exp`、`turbo`；未传时由服务端使用 `turbo`，`exp` 只按实验方式转述，不承诺观感。
 - 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
 - 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method <用户选定模式> --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
