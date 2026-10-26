@@ -1,6 +1,8 @@
 ---
 name: "source-command-opsx-propose"
 description: "Propose a new change - create it and generate all artifacts in one step"
+metadata:
+  internal: true
 ---
 
 # source-command-opsx-propose

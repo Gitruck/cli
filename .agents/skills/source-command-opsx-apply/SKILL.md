@@ -1,6 +1,8 @@
 ---
 name: "source-command-opsx-apply"
 description: "Implement tasks from an OpenSpec change (Experimental)"
+metadata:
+  internal: true
 ---
 
 # source-command-opsx-apply

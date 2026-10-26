@@ -1,6 +1,8 @@
 ---
 name: "source-command-opsx-archive"
 description: "Archive a completed change in the experimental workflow"
+metadata:
+  internal: true
 ---
 
 # source-command-opsx-archive

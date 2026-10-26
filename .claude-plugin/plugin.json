@@ -1,7 +1,7 @@
 {
 	"name": "gtrk",
 	"displayName": "gtrk",
-	"version": "1.3.8",
+	"version": "1.3.9",
 	"description": "Agent-native video creation: turn your own footage into an editable multi-track project (talking-head cuts, highlights, narration, B-roll, motion graphics, captions) and export to Jianying/CapCut, Premiere XML, FCPXML or OTIO. Requires the gtrk CLI (npm @gitruck/cli).",
 	"author": {
 		"name": "Gitruck (同合云)",
