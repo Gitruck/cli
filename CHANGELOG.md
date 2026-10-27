@@ -11,8 +11,11 @@
 
 ## 未发布
 
+## 1.3.10（2026-10-26）
+
 - **改**：`gtrk tool video_canvas_adapt` 的 `--clip-start` / `--clip-end` 改为**秒**（可带小数），原为帧序号。服务端同步改为按秒截取（此前文档站写秒、后端按帧号截，传 `5` 只截到 5 帧）；区间为空或起点不小于视频时长时，服务端建单前即拒（错误码 6016，不扣费），CLI 对 `--clip-end` 不大于 `--clip-start` 也当场拦下。旧版 CLI 传的帧号会被当成秒（link-video-canvas-adapt-start-end-unit）。
 - 修：`gtrk tool image_classic_template --template-mode image`（只要拼图、不画标题）不传 `--main-title` 也被当场拦下。现在与服务端同口径：`--main-title` 只在封面模式（缺省 / `full` / `text`）必填，`image` 时可省、payload 不带标题。标题含 emoji 等封面字体画不出的字符，服务端建单前即拒（错误码 6046，不扣费），CLI 原样转述（fix-cover-title-font-coverage）。
+- 文档：README 补两种装法——通用 skills CLI（`npx skills add Gitruck/cli`）与 Claude Code 插件市场；`gtrk mg edit` 的计价说明同步为 6 积分/候选、前 200 个之后 8。
 
 ## 1.3.8（2026-10-18）
 
