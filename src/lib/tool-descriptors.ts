@@ -67,6 +67,15 @@ const PURIFY_REGION_OPTION: ToolOption = {
 	repeatable: true,
 };
 
+/** 本次调用的价目表 key：有 priceKeyFor 按选项取，否则 priceKey。 */
+export function priceKeyOf(
+	d: ToolDescriptor,
+	opts: Record<string, unknown>,
+	extraParams: Record<string, unknown> = {},
+): string | undefined {
+	return d.priceKeyFor?.(opts, extraParams) ?? d.priceKey;
+}
+
 /** 输入声明：类别 + 扩展名白名单（缺省按类别取默认）+ 视频类可选硬时长上限（上传前 ffprobe 前置）。 */
 export interface ToolInputSpec {
 	kind: ToolInputKind;
@@ -152,6 +161,11 @@ export interface ToolDescriptor {
 	input: ToolInputSpec;
 	/** 官网实时价格表 key；cloud 型必填，不从 name/taskType 猜别名。 */
 	priceKey?: string;
+	/**
+	 * 同一接口按参数分档计价时，按本次选项换价目表 key（如 image_purify 的 --redraw 落 image_purify_redraw）；
+	 * 缺省用 priceKey。MUST 是纯函数、不抛错——非法取值由 buildPayload 的前置干跑先拒。取用一律经 {@link priceKeyOf}。
+	 */
+	priceKeyFor?: (opts: Record<string, unknown>, extraParams: Record<string, unknown>) => string;
 	/** 稳定的计费条件说明（不得含价格数字），如 MAD「仅 --bgm 卡点时」。 */
 	pricingContext?: string;
 	/** 人读产物形态（list 的「产物形态」列，如「运镜视频」「透明 png」）。 */
@@ -523,6 +537,16 @@ const imageCanvasAdapt: ToolDescriptor = {
 	},
 };
 
+/**
+ * 图片净化的涂抹模式（link-add-image-purify-redraw-mode-cli）：params-json.purify_method 优先（同 video_purify 的
+ * purify_func_type），否则 --redraw ⇒ redraw；都没给 = 修复（不传，服务端缺省 inpaint）。
+ * ⚠️ 不复用 --purify-method：那个长选项已被 video_purify 占作 ffmpeg|raft，同名选项全族只能注册一次。
+ */
+function imagePurifyMethod(opts: Record<string, unknown>, extraParams: Record<string, unknown>): unknown {
+	if (Object.prototype.hasOwnProperty.call(extraParams, "purify_method")) return extraParams.purify_method;
+	return opts.redraw === true ? "redraw" : undefined;
+}
+
 /** image_purify —— 清理用户有权处理素材中的水印、Logo 或叠加元素。 */
 const imagePurify: ToolDescriptor = {
 	name: "image_purify",
@@ -531,12 +555,27 @@ const imagePurify: ToolDescriptor = {
 	kind: "cloud",
 	input: { kind: "image" },
 	priceKey: "image_purify",
+	// 重绘模式与修复同一接口、按参数分档计价（价格表里挂在 image_purify 的 tiers 下）
+	priceKeyFor: (opts, extraParams) =>
+		imagePurifyMethod(opts, extraParams) === "redraw" ? "image_purify_redraw" : "image_purify",
 	outputHint: "净化图片",
 	enabled: true,
 	taskType: "image_purify",
-	options: [PURIFY_SCOPE_OPTION, PURIFY_REGION_OPTION],
+	options: [
+		PURIFY_SCOPE_OPTION,
+		PURIFY_REGION_OPTION,
+		{
+			flag: "--redraw",
+			desc: "重绘模式：整张图交给图片编辑模型重新生成，铺满全图的半透明、网格水印也能去掉（与 --purify-scope region 同用时只替换框内）；单独计价，图片会发送给中国大陆以外的第三方模型服务处理，细节可能与原图略有不同",
+		},
+	],
 	buildPayload(fileId, ctx) {
 		const payload: Record<string, unknown> = { file_id: fileId };
+		const method = imagePurifyMethod(ctx.opts, ctx.extraParams);
+		if (method != null && method !== "inpaint" && method !== "redraw") {
+			throw new Error("image_purify 的 purify_method 只支持 inpaint 或 redraw（重绘用 --redraw）");
+		}
+		if (method === "redraw") payload.purify_method = "redraw";
 		const scopeRaw = ctx.opts.purifyScope;
 		const scope = scopeRaw == null ? undefined : String(scopeRaw);
 		if (scope != null && scope !== "full_screen" && scope !== "region") {

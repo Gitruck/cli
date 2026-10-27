@@ -35,25 +35,42 @@ function validNumber(v: unknown): v is number {
 	return typeof v === "number" && Number.isFinite(v);
 }
 
-/** 严格解析官网直接数组响应；畸形项忽略，非数组视为接口失败。 */
+/** 价格表一项；畸形项返回 undefined。 */
+function parsePriceItem(raw: unknown): ToolPriceItem | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const item = raw as Record<string, unknown>;
+	const key = typeof item.key === "string" ? item.key.trim() : "";
+	const measure = typeof item.measure === "string" ? item.measure.trim() : "";
+	if (!key || !measure || !validNumber(item.price) || !validNumber(item.exPrice)) return undefined;
+	return {
+		...(validNumber(item.taskTypeId) ? { taskTypeId: item.taskTypeId } : {}),
+		...(typeof item.name === "string" ? { name: item.name } : {}),
+		key,
+		price: item.price,
+		exPrice: item.exPrice,
+		measure,
+		...(typeof item.note === "string" ? { note: item.note } : {}),
+	};
+}
+
+/**
+ * 严格解析官网直接数组响应；畸形项忽略，非数组视为接口失败。
+ * 家族分档（如 image_purify 下的 image_purify_redraw）挂在父项的 `tiers` 里、各有自己的 key，一并摊平进索引；
+ * 与顶层同 key 时以顶层为准。
+ */
 export function parseToolPriceList(value: unknown): ToolPriceMap {
 	if (!Array.isArray(value)) throw new Error("价格表响应不是数组");
 	const prices: ToolPriceMap = new Map();
+	const tiers: unknown[] = [];
 	for (const raw of value) {
-		if (!raw || typeof raw !== "object") continue;
-		const item = raw as Record<string, unknown>;
-		const key = typeof item.key === "string" ? item.key.trim() : "";
-		const measure = typeof item.measure === "string" ? item.measure.trim() : "";
-		if (!key || !measure || !validNumber(item.price) || !validNumber(item.exPrice)) continue;
-		prices.set(key, {
-			...(validNumber(item.taskTypeId) ? { taskTypeId: item.taskTypeId } : {}),
-			...(typeof item.name === "string" ? { name: item.name } : {}),
-			key,
-			price: item.price,
-			exPrice: item.exPrice,
-			measure,
-			...(typeof item.note === "string" ? { note: item.note } : {}),
-		});
+		const tierList = raw && typeof raw === "object" ? (raw as Record<string, unknown>).tiers : undefined;
+		if (Array.isArray(tierList)) tiers.push(...tierList);
+		const item = parsePriceItem(raw);
+		if (item) prices.set(item.key, item);
+	}
+	for (const raw of tiers) {
+		const item = parsePriceItem(raw);
+		if (item && !prices.has(item.key)) prices.set(item.key, item);
 	}
 	return prices;
 }

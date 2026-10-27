@@ -648,7 +648,7 @@ gtrk project background --gtrk <工程文件> --clear
 | `image_matting` | 单张图片（带 EXIF 方向的手机照片先按显示方向摆正再上传，原图不动） | 透明背景 png（可 `--param` 请求背景底板） | 运行前实时查询 | 已上线 |
 | `image_blackborder_remove` | 单张本地图片 | 去黑边图片 | 运行前实时查询 | 已上线 |
 | `image_canvas_adapt` | 单张本地图片；可选目标宽高与 `normal` / `rectangle` / `square` | 比例适配图片 | 运行前实时查询 | 已上线 |
-| `image_purify` | 单张本地图片；可选 `full_screen` / `region` 与区域框（仅处理你有权处理的素材） | 清理水印、Logo 或叠加元素后的净化图片 | 运行前实时查询 | 已上线 |
+| `image_purify` | 单张本地图片；可选 `full_screen` / `region` 与区域框，可选 `--redraw` 重绘模式（仅处理你有权处理的素材） | 清理水印、Logo 或叠加元素后的净化图片 | 运行前实时查询 | 已上线 |
 | `video_matting` | 单条视频（**≤10 分钟**，原片直传不压代理） | 透明背景 webm | 运行前实时查询 | 已上线 |
 | `video_blackborder_remove` | 单条本地视频 | 去黑边视频 | 运行前实时查询 | 已上线 |
 | `video_canvas_adapt` | 单条本地视频；可选目标宽高、片段、画布模式和无音轨输出 | 比例适配视频 | 运行前实时查询 | 已上线 |
@@ -694,6 +694,7 @@ gtrk project background --gtrk <工程文件> --clear
 仅接受 `normal`、`rectangle`、`square`
 - `gtrk tool image_purify ./photo.jpg [--json]` — 清理你有权处理的图片中的水印、Logo 或叠加元素。
 - `gtrk tool image_purify ./photo.jpg --purify-scope region --purify-region 0.02,0.02,0.15,0.08 [--json]` — 按框直接去除：不做识别，**框内全部内容都会被处理**；框越小、越贴近要去除的元素效果越好。
+- `gtrk tool image_purify ./photo.jpg --redraw [--json]` — 重绘模式：整张图交给图片编辑模型重新生成，铺满全图的半透明、网格水印也能去掉；与 `--purify-scope region` 同用时只替换框内、框外与原图一致。**单独计价**（运行前报价按重绘档），不设免费次数；图片会发送给中国大陆以外的第三方模型服务处理，细节可能与原图略有不同；内容审核拒绝时任务失败（错误码 6054）、积分退回。也可 `--params-json '{"purify_method":"redraw"}'`。
 - `gtrk tool video_blackborder_remove ./clip.mp4 [--json]` — 自动裁去单条视频四周黑边并保留原音轨。
 - `gtrk tool video_canvas_adapt ./clip.mp4 --canvas-width 1080 --canvas-height 1920 --canvas-type rectangle --clip-start 1.5 --clip-end 4 --without-audio [--json]` — 视频比例转换；`--clip-start/--clip-end` 是起止时间（秒，可带小数；`--clip-start` 须小于视频时长，`--clip-end` 须大于 `--clip-start`，超过时长截到结尾），省略字段时沿用服务端默认，画布模式只接受 `normal`、`rectangle`、`square`。
 - `gtrk tool video_stabilizer ./clip.mp4 --stabilizer-method turbo [--json]` — 视频防抖；支持 `fast`、`exp`、`turbo`，其中 `exp` 为实验方式，产物观感需自行检查。

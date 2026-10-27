@@ -11,6 +11,8 @@
 
 ## 未发布
 
+- 新增：`gtrk tool image_purify --redraw` 图片去水印「重绘模式」——整张图交给图片编辑模型重新生成，铺满全图的半透明、网格水印也能去掉；与 `--purify-scope region` 同用时只替换框内。单独计价，运行前报价按重绘档；也可 `--params-json '{"purify_method":"redraw"}'`。不加 `--redraw` 时请求与之前逐字节相同。价格表里挂在父项下的分档（`tiers`，如重绘、区分说话人、云配音各音色档）现在也能按自己的 key 查到实时价格（link-add-image-purify-redraw-mode-cli）。
+
 ## 1.3.10（2026-10-26）
 
 - **改**：`gtrk tool video_canvas_adapt` 的 `--clip-start` / `--clip-end` 改为**秒**（可带小数），原为帧序号。服务端同步改为按秒截取（此前文档站写秒、后端按帧号截，传 `5` 只截到 5 帧）；区间为空或起点不小于视频时长时，服务端建单前即拒（错误码 6016，不扣费），CLI 对 `--clip-end` 不大于 `--clip-start` 也当场拦下。旧版 CLI 传的帧号会被当成秒（link-video-canvas-adapt-start-end-unit）。

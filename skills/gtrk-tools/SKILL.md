@@ -19,7 +19,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 | `image_matting` | 「给图片抠像 / 抠出主体 / 去背景 / 出透明 png」 | 单张图片（带 EXIF 方向的手机照片自动摆正后上传） | 透明背景 png | 运行前实时查询 | 已上线 |
 | `image_blackborder_remove` | 「图片去黑边 / 裁掉四周黑边 / 保留有效画面」 | 单张本地图片 | 去黑边图片 | 运行前实时查询 | 已上线 |
 | `image_canvas_adapt` | 「图片比例转换 / 调整画布尺寸 / 转成矩形或方形裁剪」 | 单张本地图片；模式只支持 `normal` / `rectangle` / `square` | 比例适配图片 | 运行前实时查询 | 已上线 |
-| `image_purify` | 「清理我有权处理的图片水印 / 去掉 Logo 或叠加元素 / 图片净化 / 按我圈的框去掉台标」 | 单张本地图片（仅处理你有权处理的素材）；可选按框直接去除 | 净化图片 | 运行前实时查询 | 已上线 |
+| `image_purify` | 「清理我有权处理的图片水印 / 去掉 Logo 或叠加元素 / 图片净化 / 按我圈的框去掉台标 / 铺满全图的网格水印」 | 单张本地图片（仅处理你有权处理的素材）；可选按框直接去除；可选 `--redraw` 重绘模式（单独计价） | 净化图片 | 运行前实时查询 | 已上线 |
 | `video_matting` | 「视频抠像 / 视频去背景 / 出透明背景视频」 | 单条视频（≤10 分钟） | 透明背景 webm | 运行前实时查询 | 已上线 |
 | `video_blackborder_remove` | 「视频去黑边 / 裁掉视频四周黑边 / 保留有效画面」 | 单条本地视频 | 去黑边视频 | 运行前实时查询 | 已上线 |
 | `video_canvas_adapt` | 「视频比例转换 / 横竖屏适配 / 截取片段并转换画布」 | 单条本地视频；模式只支持 `normal` / `rectangle` / `square` | 比例适配视频 | 运行前实时查询 | 已上线 |
@@ -163,6 +163,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - 蒸汽波滤镜：`gtrk tool video_vaporwave ./clip.mp4 --vaporwave-filter "灼熱苦夏" --json`。滤镜名原样精确传递，不翻译、不猜别名；未传时 CLI 明确使用 `愈漸升溫`。
 - 视频净化：`gtrk tool video_purify ./clip.mp4 --purify-scope custom --purify-method <用户选定模式> --purify-roi 0,0.78,1,0.2 --json`。ROI 是 `x,y,w,h` 归一化坐标，只能和 `custom` 同用；`raft` 仅支持 20 分钟以内视频，`ffmpeg` 不套用这个上限。只处理用户有权修改的素材，不宣称能还原被遮挡的原始内容。
 - 按框直接去除：`gtrk tool video_purify ./clip.mp4 --purify-scope region --purify-region 0.8,0.02,0.18,0.08,0,5 --json`（图片把工具换成 `image_purify`、框只写 `x,y,w,h`）。`--purify-region` 可重复，图片最多 16 个框、视频按服务资源限制，视频框后可带 `start,end` 秒。`custom` 只去除框内识别到的文字；`region` 不做识别、**框内全部内容都会被处理（包括画面主体）**——用户要去的是图形台标、半透明图案或只在某段时间出现的角标时选 `region`，并提醒框越小越贴边效果越好。
+- 图片重绘模式：`gtrk tool image_purify ./photo.jpg --redraw --json`。整张图交给图片编辑模型重新生成，适合铺满全图的半透明、网格水印和压在主体上的水印（缺省的修复模式只修补识别到的水印区域，这类去不干净）；与 `--purify-scope region` 同用时只替换框内。**单独计价**、不设免费次数，运行前的报价按重绘档；图片会发送给中国大陆以外的第三方模型服务处理，细节可能与原图略有不同——用户没说要重绘就用缺省修复，换重绘前先说清这两点。内容审核拒绝时任务失败（错误码 6054）、积分退回，换图或改回修复，不要反复重试同一张。
 - 视频超分：`gtrk tool video_upscale ./clip.mp4 --upscale-times 3 --upscale-type Anime --json`。输入最多 60 秒，放大后任一边超过 4000 px 会由服务端拒绝；这是实验性增强，不能承诺主观画质一定提升。
 - 视频插帧：`gtrk tool video_interpolate ./clip.mp4 --interpolate-multiplier 3 --json`。支持 `2`、`3`、`4`，不套用旧总览里的 1 分钟限制；原视频任一边超过 4000 px 时由服务端拒绝。
 

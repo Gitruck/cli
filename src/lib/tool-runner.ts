@@ -31,6 +31,7 @@ import {
 	type ExtraInputSpec,
 	type OutputResult,
 	defaultExtsFor,
+	priceKeyOf,
 } from "./tool-descriptors";
 
 const DEFAULT_POLL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -619,7 +620,7 @@ export async function runCloudTool(
 	// ③ 提交前匿名查询实时价格并提示 → 上传（失败仅提示 unavailable，不阻断能力）
 	let billingHint: string;
 	try {
-		billingHint = (await (deps.resolvePricing ?? resolveToolPricing)(descriptor.priceKey!, descriptor.pricingContext)).billingHint;
+		billingHint = (await (deps.resolvePricing ?? resolveToolPricing)(priceKeyOf(descriptor, ctx.opts, extraParams)!, descriptor.pricingContext)).billingHint;
 	} catch {
 		billingHint = "实时价格暂不可用，以服务端结算为准";
 	}

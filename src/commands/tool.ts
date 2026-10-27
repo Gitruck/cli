@@ -22,10 +22,11 @@ import {
 	MULTI_INPUT_KINDS,
 	defaultExtsFor,
 	findTool,
+	priceKeyOf,
 	validateRegistry,
 	type ToolDescriptor,
 } from "../lib/tool-descriptors";
-import { runCloudTool, downloadStream, resolveOutDir, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
+import { runCloudTool, downloadStream, parseExtraParams, resolveOutDir, type RunToolResult, type CloudToolDeps } from "../lib/tool-runner";
 import {
 	DEFAULT_JOBS_CLOUD,
 	DEFAULT_JOBS_LOCAL,
@@ -378,7 +379,15 @@ export async function runToolBatch(
 	let estimate: BatchEstimate = { status: "unavailable", reason: "实时价格不可用" };
 	if (descriptor.kind !== "local" && descriptor.priceKey) {
 		try {
-			const resolved = await (deps?.resolvePricing ?? resolveToolPricing)(descriptor.priceKey, descriptor.pricingContext);
+			// 按参数分档的工具（如 image_purify --redraw）按本批选项取价目表 key；--param 写错的格式交给单条执行时报
+			let extraParams: Record<string, unknown> = {};
+			try {
+				extraParams = parseExtraParams(opts.param ?? [], opts.paramsJson);
+			} catch {
+				extraParams = {};
+			}
+			const priceKey = priceKeyOf(descriptor, opts as Record<string, unknown>, extraParams)!;
+			const resolved = await (deps?.resolvePricing ?? resolveToolPricing)(priceKey, descriptor.pricingContext);
 			unitHint = resolved.billingHint;
 			const { pricing } = resolved;
 			const pending = items.filter((i) => i.status === "pending");
