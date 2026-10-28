@@ -64,7 +64,7 @@ description: gtrk 单点工具与媒体转换能力的调用向导，覆盖 `gtr
 - **克隆声音须本人同意**：`--speaker clone`（或 `--ref` 给的是别人的录音）会克隆说话人的声音。克隆别人的声音 MUST 先取得那个人的同意，发起任务即视为已取得；不确定就先问用户，别替他默认。
 - **只换音轨，画面保持原样**：不做口型同步，镜头也不动。缺省拟合策略下，个别译句过长时画面可能短暂定格来让出时间；用户要成片与原片严格等长，传 `--fit-policy strict`（超出部分截尾）。
 - **时长与耗时**：单条最长 120 分钟，超了 CLI 在上传前直接拒并提示分段；长片耗时十几分钟起，CLI 最多等 4 小时。中途断开别直接重跑（会重新计费），凭产物目录里 `task.json` 的任务号取回。
-- **工程文件怎么打开**：CLI 提交时自动带上原片与产物目录的本机路径，各格式工程里的素材都指向本机的原片与产物目录里的 `dub.wav` / `bgm.wav` / `base.mp4`，打开即用。要剪映草稿加 `--project-formats gtrk,jianying`：草稿自动放进剪映草稿目录，打开剪映就在列表里；CLI 提示「没找到剪映草稿目录」或「草稿缺 draft_meta_info.json」时，让用户给出剪映草稿目录再用 `--jianying-draft-dir` 重跑，或先用客户端工程。CapCut 草稿留在产物目录 `capcut/`，需要时手动放进 CapCut 草稿目录。
+- **工程文件怎么打开**：CLI 提交时自动带上原片与产物目录的本机路径，各格式工程里的素材都指向本机的原片与产物目录里的 `dub.wav` / `bgm.wav` / `base.mp4`，打开即用。要剪映草稿加 `--project-formats gtrk,jianying`：草稿自动放进剪映草稿目录，打开剪映就在列表里（同一毛片重跑覆盖上一次的草稿；别的目录下的同名毛片撞上时改落 `…-2` 并提示，原草稿不动）；CLI 提示「没找到剪映草稿目录」或「草稿缺 draft_meta_info.json」时，让用户给出剪映草稿目录再用 `--jianying-draft-dir` 重跑，或先用客户端工程。CapCut 草稿留在产物目录 `capcut/`，需要时手动放进 CapCut 草稿目录。
 - **附带产物偶尔缺项不算失败**：字幕、逐句对齐记录、工程文件某一项没生成时，成片与配音轨照出、`ok=true`，终端打一行「部分附带产物未生成」，原因在 `result-output.json` 的 `errors`。照实告诉用户少了哪样。
 - 常用形态：`gtrk tool video_translate_dub ./talk.mp4 --language zh-CN --translate-language en-US --speaker clone --json`；用自己另录的干净人声做参考加 `--ref ./me.m4a`；要剪映草稿加 `--project-formats gtrk,jianying`，要 PR 工程加 `--project-formats gtrk,xml`。
   打开 PR 工程时的重链提醒照 `gtrk-oralcut`「回给用户（三端打开方式）」PR/FCP 条，引用不复制。

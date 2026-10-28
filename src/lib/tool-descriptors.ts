@@ -8,13 +8,14 @@
  * cloud 型直调公共域 API，local 型可复用同一注册表与发现入口；infra 零改动。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve as resolvePath } from "node:path";
 import { resolveFfmpeg } from "./ffmpeg";
 import { assFontNames, burnSubtitle, extractAudio, fontUsableForBurn, jpegOrientationOf, probeGeometry, uprightJpeg } from "./media";
 import { renderProReport } from "./clip-brief";
 import { assertEnum, catalogEnumSync } from "./enum-catalog";
-import { copyJianyingDraft, resolveJianyingDraftDir } from "./jianying";
+import { claimRecordedDraft, copyJianyingDraft, resolveJianyingDraftDir, samePath } from "./jianying";
+import { createOutDir } from "./tool-runner";
 import { readJson } from "./read-json";
 import { sec2ms } from "./frame-domain";
 import { PURIFY_METHOD_HELP, requirePurifyMethod } from "./purify-method";
@@ -110,6 +111,11 @@ export interface ToolContext {
 	 * 无输入文件且没给 --out 的工具建目录时可能防撞改名，runner 建目录后回填。单测手搓的上下文可不给。
 	 */
 	outDir?: string;
+	/**
+	 * 本次提交前定下的剪映草稿文件夹（fix-long2short-dub-export-draft-collision D5）：descriptor 在 preprocess 里写入，
+	 * runner 有值时写进 task.json 的 `jianyingDraftDir`（下一次重跑据此认领）；没有则 task.json 逐字节不变。
+	 */
+	jianyingDraftDir?: string;
 	/** 人读提示输出口（一律走 stderr，不污染 --json 的 stdout）。 */
 	warn: (msg: string) => void;
 }
@@ -183,6 +189,12 @@ export interface ToolDescriptor {
 	taskType?: string;
 	/** 本地预处理钩子：返回实际上传物路径；缺省=原文件直传（预留低带宽工具）。 */
 	preprocess?: (ctx: ToolContext) => Promise<string> | string;
+	/**
+	 * 提交前失败的回滚钩子（fix-long2short-dub-export-draft-collision D4）：preprocess 之后的上传或提交抛错时（云端还没有这单），
+	 * runner 调它撤掉 descriptor 在提交前占下的东西（译制配音的剪映草稿占位），钩子自身的错误吞掉、原错误照抛。
+	 * 提交成功后不再调用（任务已在云端）。未声明的工具行为逐字节不变。
+	 */
+	abortBeforeSubmit?: (ctx: ToolContext) => Promise<void> | void;
 	/** 拼云端 payload；--param/--params-json 由 runner 在其结果上逐字段合并覆盖。 */
 	buildPayload?: (fileId: string, ctx: ToolContext) => Record<string, unknown>;
 	/**
@@ -2407,9 +2419,53 @@ function dubWantsDraft(formats: string[] | undefined): boolean {
  */
 export function dubDraftFolder(ctx: ToolContext): string | undefined {
 	if (!ctx.outDir) return undefined;
-	const opt = ctx.opts.jianyingDraftDir == null ? undefined : String(ctx.opts.jianyingDraftDir);
-	const root = resolveJianyingDraftDir(opt);
+	if (ctx.jianyingDraftDir) return ctx.jianyingDraftDir; // preprocess 已定下（认领或仲裁）；之前只有必填干跑会走到下面的候选名
+	const root = dubDraftRoot(ctx);
 	return root ? join(root, basename(ctx.outDir)) : undefined;
+}
+
+function dubDraftRoot(ctx: ToolContext): string | undefined {
+	const opt = ctx.opts.jianyingDraftDir == null ? undefined : String(ctx.opts.jianyingDraftDir);
+	return resolveJianyingDraftDir(opt);
+}
+
+/** 本次新占（而非认领沿用）的译制配音草稿文件夹：提交前失败、或最终没拷进草稿时只删这种。 */
+const dubDraftCreated = new WeakSet<ToolContext>();
+
+/**
+ * 定下译制配音的剪映草稿文件夹（fix-long2short-dub-export-draft-collision D1/D3，导出供离线测试）。
+ *
+ * 产物目录 `<毛片名>-video_translate_dub` 按名字复用，草稿文件夹 `<草稿根>/<产物目录名>` 也随之复用；草稿根却是所有毛片共用的一层，
+ * 不同目录的同名毛片先后跑就会撞、后者整份覆盖前者。同一毛片重跑覆盖是幂等设计，要保留：
+ * 产物目录上一次的 task.json 的 `source` 就是本毛片、`jianyingDraftDir` 在本次草稿根下 ⇒ 认领沿用；
+ * 否则在草稿根里原子仲裁（createOutDir，撞名 -2… 并 WARN）。结果写进 `ctx.jianyingDraftDir`，提交体与落地都用它。
+ */
+export async function settleDubDraftFolder(ctx: ToolContext): Promise<string | undefined> {
+	if (!ctx.outDir || !ctx.inputAbs) return undefined;
+	const root = dubDraftRoot(ctx);
+	if (!root) return undefined;
+	const inputAbs = ctx.inputAbs;
+	await mkdir(root, { recursive: true }); // 显式 --jianying-draft-dir 可指向尚不存在的目录，非递归仲裁前先补上
+	const claimed = await claimRecordedDraft({
+		outDir: ctx.outDir,
+		draftRoot: root,
+		key: "jianyingDraftDir",
+		match: (crumb) => typeof crumb.source === "string" && samePath(crumb.source, inputAbs),
+	});
+	if (claimed) {
+		if (claimed.created) dubDraftCreated.add(ctx);
+		ctx.jianyingDraftDir = claimed.path;
+	} else {
+		ctx.jianyingDraftDir = await createOutDir(join(root, basename(ctx.outDir)), true, "剪映草稿文件夹");
+		dubDraftCreated.add(ctx);
+	}
+	return ctx.jianyingDraftDir;
+}
+
+/** 删掉本次新占、仍为空的草稿文件夹（非递归，里面有东西就删不掉、原样留着）；认领沿用的不碰。 */
+async function releaseDubDraftFolder(ctx: ToolContext): Promise<void> {
+	if (!ctx.jianyingDraftDir || !dubDraftCreated.has(ctx)) return;
+	await rmdir(ctx.jianyingDraftDir).catch(() => undefined);
 }
 
 /** 视频输入才带本机路径（音频不产工程文件）；需要产物目录。 */
@@ -2491,17 +2547,23 @@ const videoTranslateDub: ToolDescriptor = {
 			},
 		},
 	],
-	preprocess(ctx) {
+	async preprocess(ctx) {
 		ctx.warn(
 			"译制配音耗时较长，长片十几分钟起。提交成功后产物目录里会先写 task.json（含任务号）；" +
 				"中途断开可凭任务号在云端查询取回，别直接重跑（重跑会重新计费）",
 		);
-		// 要剪映草稿却找不到草稿目录：上传前说一次（buildPayload 会跑两遍，提示放这里不重复）
-		if (dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats)) && !dubDraftFolder(ctx)) {
-			ctx.warn("没找到剪映草稿目录 → 剪映 / CapCut 草稿将缺 draft_meta_info.json、列表里看不到。可加 --jianying-draft-dir <你的草稿目录> 重跑");
+		if (dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats))) {
+			// 要剪映草稿却找不到草稿目录：上传前说一次（buildPayload 会跑两遍，提示放这里不重复）
+			if (!dubDraftFolder(ctx)) {
+				ctx.warn("没找到剪映草稿目录 → 剪映 / CapCut 草稿将缺 draft_meta_info.json、列表里看不到。可加 --jianying-draft-dir <你的草稿目录> 重跑");
+			} else {
+				// 提交前定下草稿文件夹：它就是 nle_draft_dir，服务端据此写草稿 meta；之后到提交成功前失败，由 runner 调 abortBeforeSubmit 删空占位
+				await settleDubDraftFolder(ctx);
+			}
 		}
 		return ctx.inputAbs!; // 整片上传（见头注释）
 	},
+	abortBeforeSubmit: (ctx) => releaseDubDraftFolder(ctx),
 	buildPayload(fileId, ctx) {
 		const o = ctx.opts;
 		const str = (v: unknown): string => (v == null ? "" : String(v).trim());
@@ -2610,15 +2672,19 @@ const videoTranslateDub: ToolDescriptor = {
 		// 剪映两件套齐全且提交时带了草稿文件夹 ⇒ 落进剪映草稿目录（同 gtrk oralcut / long2short）；CapCut v1 留在产物目录
 		const wantsDraft = dubSendsLocalPaths(ctx) && dubWantsDraft(parseDubProjectFormats(ctx.opts.projectFormats));
 		const folder = wantsDraft ? dubDraftFolder(ctx) : undefined;
+		let draftLanded = false;
 		if (folder && draftDirs.get("jianying") === true && ctx.outDir) {
 			try {
 				const landing = await copyJianyingDraft(join(ctx.outDir, "jianying"), folder);
+				draftLanded = landing.complete;
 				if (landing.complete) ctx.warn(`剪映草稿已落到：${folder}（打开剪映即可在草稿列表里看到）`);
 				else ctx.warn(`剪映草稿两件套不全（缺 ${landing.missing.join("、")}），没有放进剪映草稿目录`);
 			} catch (e) {
 				ctx.warn(`剪映草稿放进草稿目录失败（产物目录 jianying/ 里仍有两件套）：${e instanceof Error ? e.message : String(e)}`);
 			}
 		}
+		// 本次新占的草稿文件夹最终没落成草稿 ⇒ 仍为空就删掉，不在草稿根留空壳（非递归，有东西就删不掉）
+		if (!draftLanded) await releaseDubDraftFolder(ctx);
 		if (draftDirs.get("capcut") === true) {
 			ctx.warn("CapCut 草稿两件套在产物目录 capcut/ 下，暂不自动放进 CapCut 草稿目录，需要时整个文件夹手动复制过去");
 		}

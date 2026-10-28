@@ -23,7 +23,7 @@
  */
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { CloudConfig } from "../lib/config";
 import { loadConfig } from "../lib/config";
@@ -662,103 +662,123 @@ export async function runProjectExport(
 	let particleRendered = 0;
 	let particleSkipped: { clipId: string; reason: string }[] = [];
 	let takeover: CompositeTakeover | undefined;
-	if (wantsNle && hasBeats && !noParticles) {
-		const fps = Math.round(Number.isFinite(Number(gtrk.video_rate)) ? Number(gtrk.video_rate) : 30);
-		// [add-composite-bake] 合成颗粒先烘焙（本地、零计费）：成功的以产物视频放在原层位，被它整段盖住的颗粒不进计划；
-		// 失败的按设计跳过（不算预检失败、不拒导），该段按粗剪出画
-		takeover = await takeOverComposites(
-			gtrk,
-			gtrkDir,
-			visibleBeats(gtrk as { beat_track?: { track_index?: number; track_timeline?: any[]; hidden?: unknown }[] }),
-			depsOverride.composite,
-		);
-		plan = await buildParticlePlan(
-			takeover.beats,
-			(Array.isArray(gtrk.materials) ? gtrk.materials : []) as { id?: unknown; path?: unknown }[],
-			gtrkDir,
-			fps,
-			depsOverride.particle,
-		);
-		// preflight 失败必须发生在首个 submit 前，避免前半批已计费后才发现坏路径。
-		// [link-composite-particle-profile] 合成颗粒是**按设计跳过**（本版本不渲染），不算预检失败：
-		// 照常导出，该颗粒不进 video_track（与未能预渲的颗粒同一落法），并点名。
-		const failedPreflight = plan.skipped.filter((s) => !s.composite);
-		if (failedPreflight.length) {
-			const detail = failedPreflight.map((s) => `${s.clipId}：${s.reason}`).join("；");
-			throw new Error(`颗粒预检失败，尚未提交任何云任务：${detail}`);
-		}
-		for (const s of plan.skipped) if (s.composite) log.warn(`颗粒 ${s.clipId} 跳过：${s.reason}`);
+	// 剪映草稿文件夹占位（fix-long2short-dub-export-draft-collision D3）：Gate A 之后、合成烘焙与颗粒预渲（会计费）之前。
+	// 提交 nle_draft_dir = 草稿根时，服务端写的草稿 meta 每份都自称「JianyingPro Drafts」；名字必须在提交前定下，
+	// 撞名改 -2… 时 meta 才能跟着对。落地时作为 draftTarget 交给 materializeResult，不再仲裁第二次。
+	// 显式 --jianying-draft-dir 可以指向尚不存在的目录，非递归仲裁前先补上。
+	let draftTarget: string | undefined;
+	if (draftDir) {
+		await mkdir(draftDir, { recursive: true });
+		draftTarget = await createOutDir(join(draftDir, basename(outDir)), true, "剪映草稿文件夹");
 	}
-
-	if (formats.includes("gtrk")) {
-		log.warn("导出的 gtrk 是有损的结构副本，工程编辑元数据和镜像原声轨不会完整保留；不要用它覆盖源工程");
-		if (wantsNle && hasBeats) {
-			log.warn(noParticles
-				? "混选 NLE 格式且跳过预渲，本次 gtrk 副本也不含 MG 颗粒"
-				: "混选 NLE 格式，成功预渲的 MG 颗粒会固化为视频，无法继续编辑原 HTML 颗粒");
-		}
-	}
-	const pricing = depsOverride.resolvePricing ?? resolveToolPricing;
-	const structPrice = await pricing("video_project_struct", "精修工程结构导出");
-	log.warn(`计费提示（按次）：${structPrice.billingHint}`);
-	if (plan) {
-		const particlePrice = await pricing(PARTICLE_TASK_TYPE, "MG 颗粒预渲（按分钟）");
-		log.warn(`计费提示（按分钟）：${particlePrice.billingHint}`);
-		log.warn(
-			`颗粒 ${plan.total} 颗 / 唯一 ${plan.unique} 颗 / 命中缓存 ${plan.cached} 颗 / 待备齐 ${plan.miss} 颗（优先恢复已有任务，不重复计费；缓存 ABI ${PARTICLE_RENDER_ABI}，qtrle 配方 ${QTRLE_DELIVERY_RECIPE}）`,
-		);
-	}
-
-	if (plan) {
-		const cfg = depsOverride.cfg ?? (depsOverride.loadCfg ?? loadConfig)();
-		const particleDeps: ParticleDeps = {
-			...(depsOverride.particle ?? {}),
-			submitTask: depsOverride.particle?.submitTask ?? depsOverride.submitTask,
-			pollTask: depsOverride.particle?.pollTask ?? depsOverride.pollTask,
-			download: depsOverride.particle?.download ?? depsOverride.download,
-		};
-		const rendered = await ensureParticleQtrle(
-			plan,
-			cfg,
-			{ concurrency: parseParticleConcurrency(opts.particleConcurrency), onTick: (done, total, id) => log.tick(`颗粒 ${done}/${total}（${id}）`), delivery: { json: opts.json, landingWait: depsOverride.landingWait } },
-			particleDeps,
-		);
-		particlePaths = { ...takeover?.paths, ...rendered.paths };
-		for (const g of plan.groups) for (const id of g.members) particleSizes[id] = { width: g.leader.width, height: g.leader.height };
-		particleRendered = rendered.rendered;
-		particleSkipped = rendered.failed;
-		log.tickEnd();
-	}
-
-	// [link-clip-background-fill] 工程带片段底板时，产物目录兼作纯色底图落点（所有格式共用、按绝对路径引用）
-	const assetDir = hasClipFill(gtrk) ? outDir : undefined;
-	const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, particleSizes, draftDir, assetDir });
-	const droppedByContract = inspectContractDrops(gtrk, gtrkDir, particleSkipped.map((s) => s.clipId));
-	// link-client-only-notice：人话说清哪些东西进不了这次导出的工程文件（原告警直出字段名、且按车道计数）
-	const clientOnlyMsg = clientOnlyNotice(
-		droppedByContract.clientOnly,
-		"export",
-		(gtrk.struct_meta as Record<string, unknown> | undefined)?.client_background,
-	);
-	if (clientOnlyMsg) log.warn(clientOnlyMsg);
-	if (droppedByContract.noPathMaterialIds.length) {
-		log.warn(`契约告警：${droppedByContract.noPathMaterialIds.length} 条素材没有本机 path，将交服务端校验：${droppedByContract.noPathMaterialIds.join(", ")}`);
-	}
-	if (droppedByContract.missingMaterialPaths.length) {
-		log.warn(`素材路径不存在（只告警、不拦结构导出）：${droppedByContract.missingMaterialPaths.join("、")}`);
-	}
-	if (wantsNle && hasBeats && noParticles) {
-		log.warn(`已跳过 ${droppedByContract.beatClips} 颗 MG 颗粒预渲；本次 NLE 导出不含这些颗粒，如需带上颗粒请去掉 --no-particles`);
-	}
-	if (particleSkipped.length) {
-		log.warn(`颗粒有 ${particleSkipped.length} 条未能预渲，结构导出继续；对应颗粒不会进入 video_track`);
-	}
-
-	const cfg = depsOverride.cfg ?? (depsOverride.loadCfg ?? loadConfig)();
 	const submit = depsOverride.submitTask ?? realSubmitTask;
 	const poll = depsOverride.pollTask ?? realPollTask;
-	log.step(`▶ 精修工程导出：${basename(gtrkPath)} → ${formats.join("/")}`);
-	const taskId = await submit(cfg, "video_project_struct", payload);
+	let assetDir: string | undefined;
+	let droppedByContract: ReturnType<typeof inspectContractDrops>;
+	let cfg: CloudConfig;
+	let taskId: string;
+	// 从占位到提交返回的整段（合成烘焙、颗粒计划与预检、颗粒预渲、提交）：任何一步失败都删掉空占位（非递归）再上抛；
+	// 提交成功之后不删（任务已在云端、meta 已写定这个名字），走到落地却没落成草稿时由 materializeResult 删。
+	try {
+		if (wantsNle && hasBeats && !noParticles) {
+			const fps = Math.round(Number.isFinite(Number(gtrk.video_rate)) ? Number(gtrk.video_rate) : 30);
+			// [add-composite-bake] 合成颗粒先烘焙（本地、零计费）：成功的以产物视频放在原层位，被它整段盖住的颗粒不进计划；
+			// 失败的按设计跳过（不算预检失败、不拒导），该段按粗剪出画
+			takeover = await takeOverComposites(
+				gtrk,
+				gtrkDir,
+				visibleBeats(gtrk as { beat_track?: { track_index?: number; track_timeline?: any[]; hidden?: unknown }[] }),
+				depsOverride.composite,
+			);
+			plan = await buildParticlePlan(
+				takeover.beats,
+				(Array.isArray(gtrk.materials) ? gtrk.materials : []) as { id?: unknown; path?: unknown }[],
+				gtrkDir,
+				fps,
+				depsOverride.particle,
+			);
+			// preflight 失败必须发生在首个 submit 前，避免前半批已计费后才发现坏路径。
+			// [link-composite-particle-profile] 合成颗粒是**按设计跳过**（本版本不渲染），不算预检失败：
+			// 照常导出，该颗粒不进 video_track（与未能预渲的颗粒同一落法），并点名。
+			const failedPreflight = plan.skipped.filter((s) => !s.composite);
+			if (failedPreflight.length) {
+				const detail = failedPreflight.map((s) => `${s.clipId}：${s.reason}`).join("；");
+				throw new Error(`颗粒预检失败，尚未提交任何云任务：${detail}`);
+			}
+			for (const s of plan.skipped) if (s.composite) log.warn(`颗粒 ${s.clipId} 跳过：${s.reason}`);
+		}
+
+		if (formats.includes("gtrk")) {
+			log.warn("导出的 gtrk 是有损的结构副本，工程编辑元数据和镜像原声轨不会完整保留；不要用它覆盖源工程");
+			if (wantsNle && hasBeats) {
+				log.warn(noParticles
+					? "混选 NLE 格式且跳过预渲，本次 gtrk 副本也不含 MG 颗粒"
+					: "混选 NLE 格式，成功预渲的 MG 颗粒会固化为视频，无法继续编辑原 HTML 颗粒");
+			}
+		}
+		const pricing = depsOverride.resolvePricing ?? resolveToolPricing;
+		const structPrice = await pricing("video_project_struct", "精修工程结构导出");
+		log.warn(`计费提示（按次）：${structPrice.billingHint}`);
+		if (plan) {
+			const particlePrice = await pricing(PARTICLE_TASK_TYPE, "MG 颗粒预渲（按分钟）");
+			log.warn(`计费提示（按分钟）：${particlePrice.billingHint}`);
+			log.warn(
+				`颗粒 ${plan.total} 颗 / 唯一 ${plan.unique} 颗 / 命中缓存 ${plan.cached} 颗 / 待备齐 ${plan.miss} 颗（优先恢复已有任务，不重复计费；缓存 ABI ${PARTICLE_RENDER_ABI}，qtrle 配方 ${QTRLE_DELIVERY_RECIPE}）`,
+			);
+		}
+
+		if (plan) {
+			const cfg = depsOverride.cfg ?? (depsOverride.loadCfg ?? loadConfig)();
+			const particleDeps: ParticleDeps = {
+				...(depsOverride.particle ?? {}),
+				submitTask: depsOverride.particle?.submitTask ?? depsOverride.submitTask,
+				pollTask: depsOverride.particle?.pollTask ?? depsOverride.pollTask,
+				download: depsOverride.particle?.download ?? depsOverride.download,
+			};
+			const rendered = await ensureParticleQtrle(
+				plan,
+				cfg,
+				{ concurrency: parseParticleConcurrency(opts.particleConcurrency), onTick: (done, total, id) => log.tick(`颗粒 ${done}/${total}（${id}）`), delivery: { json: opts.json, landingWait: depsOverride.landingWait } },
+				particleDeps,
+			);
+			particlePaths = { ...takeover?.paths, ...rendered.paths };
+			for (const g of plan.groups) for (const id of g.members) particleSizes[id] = { width: g.leader.width, height: g.leader.height };
+			particleRendered = rendered.rendered;
+			particleSkipped = rendered.failed;
+			log.tickEnd();
+		}
+
+		// [link-clip-background-fill] 工程带片段底板时，产物目录兼作纯色底图落点（所有格式共用、按绝对路径引用）
+		assetDir = hasClipFill(gtrk) ? outDir : undefined;
+		const payload = buildExportPayload(gtrk, { gtrkPath, formats, particlePaths, particleSizes, draftDir: draftTarget, assetDir });
+		droppedByContract = inspectContractDrops(gtrk, gtrkDir, particleSkipped.map((s) => s.clipId));
+		// link-client-only-notice：人话说清哪些东西进不了这次导出的工程文件（原告警直出字段名、且按车道计数）
+		const clientOnlyMsg = clientOnlyNotice(
+			droppedByContract.clientOnly,
+			"export",
+			(gtrk.struct_meta as Record<string, unknown> | undefined)?.client_background,
+		);
+		if (clientOnlyMsg) log.warn(clientOnlyMsg);
+		if (droppedByContract.noPathMaterialIds.length) {
+			log.warn(`契约告警：${droppedByContract.noPathMaterialIds.length} 条素材没有本机 path，将交服务端校验：${droppedByContract.noPathMaterialIds.join(", ")}`);
+		}
+		if (droppedByContract.missingMaterialPaths.length) {
+			log.warn(`素材路径不存在（只告警、不拦结构导出）：${droppedByContract.missingMaterialPaths.join("、")}`);
+		}
+		if (wantsNle && hasBeats && noParticles) {
+			log.warn(`已跳过 ${droppedByContract.beatClips} 颗 MG 颗粒预渲；本次 NLE 导出不含这些颗粒，如需带上颗粒请去掉 --no-particles`);
+		}
+		if (particleSkipped.length) {
+			log.warn(`颗粒有 ${particleSkipped.length} 条未能预渲，结构导出继续；对应颗粒不会进入 video_track`);
+		}
+
+		cfg = depsOverride.cfg ?? (depsOverride.loadCfg ?? loadConfig)();
+		log.step(`▶ 精修工程导出：${basename(gtrkPath)} → ${formats.join("/")}`);
+		taskId = await submit(cfg, "video_project_struct", payload);
+	} catch (e) {
+		if (draftTarget) await rmdir(draftTarget).catch(() => undefined);
+		throw e;
+	}
 	const output = await poll(cfg, "video_project_struct", taskId);
 	// 纯色底图先于工程文件落地：草稿 / XML 引用它，宁可「图在、草稿还没写」也不留「草稿引用了、盘上没有」
 	const solids = assetDir ? acceptMaterializeFiles(output.materialize_files, assetDir) : { files: [], rejected: 0 };
@@ -780,6 +800,7 @@ export async function runProjectExport(
 		output,
 		taskId,
 		draftDir,
+		draftTarget,
 		render: false,
 		json: false,
 		quiet: true,

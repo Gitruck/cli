@@ -62,7 +62,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 | `--camera-move` | 运镜：云端按与精剪同一套调度给主轨片段写推 / 拉镜头关键帧（概率抽取、推拉交替、幅度克制），零渲染、不加价。客户端与剪映可见可改；本地 `gtrk render` 与 PR 工程不呈现。**缺省不加**，直播切片图纸开工会问；细项走 `--params-json` |
 | `--output-size <s>` | 画布 `9:16|16:9|1:1` 或 `WxH`（缺省 9:16 竖版） |
 | `-f, --formats <list>` | 三方格式，缺省 `gtrk,jianying,xml`（云端逐 clip 直产；gtrk 恒有） |
-| `--jianying-draft-dir <dir>` | 剪映草稿根（或 `auto`）；各 clip 草稿落 `<草稿根>/<产物根名>_clip{i}` |
+| `--jianying-draft-dir <dir>` | 剪映草稿根（或 `auto`）；各 clip 草稿落 `<草稿根>/<产物根名>_clip{i}`。同一毛片重跑照旧覆盖这一组；别的目录下的同名毛片撞上时整组改落 `<产物根名>-2_clip{i}` 并提示，原草稿不动 |
 | `-o/--out`、`--no-open`、`--json`、`--reupload`、`--param/--params-json` | 与 oralcut 同口径 |
 
 ## 计费与跑前须知（每次都转述给用户）
@@ -90,7 +90,7 @@ gtrk long2short "D:/毛片/对谈.mp4" --language zh-CN --split-screen --split-o
 - **合成包装**（跑前答了要才做）：对每条 clip 交棒 `/gtrk-composite` 做**精剪包装**（公约 §三⁵：快速成片 auto ≤ 25% → 逐窗口复核 → 构建机检 → 铺轨烘焙，不停；回执列「做了 / 建议了没做 / 烘焙结果」；逐步推进按合成 skill 两个检查点停；开工时用户说了不要就跳过）；参数同上面字幕那条：`--gtrk <产物根>/clip{i}/gtrk/clip{i}_project.gtrk --transcript <产物根>/json/transcript.json`。
 - **先看 `clips.md`**（产物根，人读总览）：一张表列全部切片的标题/时长/评分/一句话简介 —— 用它给用户复述「出了哪几条、各讲什么、建议先精修哪条」，别让用户自己开工程猜。逐条的入选理由、跳剪说明、高光词在 `clip{i}/clip.md`。
 - 开了 `--split-screen` 时：**分屏素材落在毛片旁的 `split_screen/` 子目录**（工程素材路径指向那里，别移动/删除，移动了工程会缺素材）——这点要提前告知用户。
-- 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`。**判据**：草稿目录里必须是 `draft_content.json` + `draft_meta_info.json` 两个精确文件名（云端产物侧的 `clip{i}_` 前缀在拷进草稿根这一跳被剥掉，产物目录 `clip{i}/jianying/` 里保留带前缀的归档原名）。CLI 日志按实际齐全条数报「N/M 条两件套齐全」，不齐的记进 `result.json` 的 `errors`、该 clip 的 `jianyingDraftPath` 为 `null`。
+- 剪映草稿已拷入草稿根（给了 `--jianying-draft-dir` 时），剪映里直接可见 `<产物根名>_clip{i}`；CLI 提示「剪映草稿组……已被占用，本次改落……-2」时，告诉用户这一组叫 `<产物根名>-2_clip{i}`（另一条同名毛片的草稿原样保留），以 `result.json` 里各 clip 的 `jianyingDraftPath` 为准。**判据**：草稿目录里必须是 `draft_content.json` + `draft_meta_info.json` 两个精确文件名（云端产物侧的 `clip{i}_` 前缀在拷进草稿根这一跳被剥掉，产物目录 `clip{i}/jianying/` 里保留带前缀的归档原名）。CLI 日志按实际齐全条数报「N/M 条两件套齐全」，不齐的记进 `result.json` 的 `errors`、该 clip 的 `jianyingDraftPath` 为 `null`。
 
 ## 排错
 

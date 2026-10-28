@@ -12,7 +12,7 @@
  *     不复用 cloud.ts 全内存 download（cloud.ts 保持零改动）。
  */
 import { resolve, join, dirname, basename, extname } from "node:path";
-import { mkdir, writeFile, stat } from "node:fs/promises";
+import { mkdir, rmdir, writeFile, stat } from "node:fs/promises";
 import { createWriteStream, existsSync } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -470,26 +470,51 @@ function fsErrCode(e: unknown): string | undefined {
  *
  * `label` 只换告警与报错里的称谓（fix-oralcut-jianying-draft-collision D1）：剪映草稿根里的仲裁传「剪映草稿文件夹」，
  * 缺省「产物目录」使既有调用方的措辞逐字节不变。仲裁本身仍只有这一份实现。
+ *
+ * `group`（fix-long2short-dub-export-draft-collision D2）：仲裁对象是**一组**同基名的文件夹时用——
+ * long2short 的剪映草稿是 `<基名>_clip{i}` 一组，服务端只认基名、自己拼 `_clip{i}`。
+ * 序号插在后缀之前（第 n 次建 `<候选>-<n><suffix>`），建成的是整组的锚点；`accept(基名)` 返回 false
+ * 就非递归删掉刚建的锚点、换下一个序号（long2short 用它跳过还有残留成员的基名）。返回值仍是建成的目录（含后缀）。
  */
-export async function createOutDir(candidate: string, antiCollision: boolean, label = "产物目录"): Promise<string> {
+export async function createOutDir(
+	candidate: string,
+	antiCollision: boolean,
+	label = "产物目录",
+	group?: { suffix: string; shown: string; accept?: (base: string) => Promise<boolean> },
+): Promise<string> {
 	if (!antiCollision) {
 		await mkdir(candidate, { recursive: true });
 		return candidate;
 	}
+	const suffix = group?.suffix ?? "";
+	const shown = group?.shown ?? "";
 	for (let n = 1; n <= MAX_OUTDIR_CANDIDATES; n++) {
-		const dir = n === 1 ? candidate : `${candidate}-${n}`;
+		const base = n === 1 ? candidate : `${candidate}-${n}`;
+		const dir = `${base}${suffix}`;
 		try {
 			await mkdir(dir); // 非 recursive：已存在即 EEXIST（唯一仲裁点）
-			if (n > 1) {
-				emitWarn(`${label}「${basename(candidate)}」已被占用，本次改落「${basename(dir)}」（既有目录原样保留）`);
-			}
-			return dir;
 		} catch (e) {
 			if (fsErrCode(e) !== "EEXIST") throw e; // 权限/父目录缺失等真错误照抛，不吞
+			continue;
 		}
+		let accepted = true;
+		try {
+			if (group?.accept) accepted = await group.accept(base);
+		} catch (e) {
+			await rmdir(dir).catch(() => undefined);
+			throw e;
+		}
+		if (!accepted) {
+			await rmdir(dir).catch(() => undefined); // 非递归：只放掉自己刚建的空锚点
+			continue;
+		}
+		if (n > 1) {
+			emitWarn(`${label}「${basename(candidate)}${shown}」已被占用，本次改落「${basename(base)}${shown}」（既有目录原样保留）`);
+		}
+		return dir;
 	}
 	throw new Error(
-		`${label}「${candidate}」及其 -2…-${MAX_OUTDIR_CANDIDATES} 序号变体均已被占用，无法确定落点。` +
+		`${label}「${candidate}${shown}」及其 -2…-${MAX_OUTDIR_CANDIDATES} 序号变体均已被占用，无法确定落点。` +
 			`请清理旧产物或用 --out 显式指定目录。`,
 	);
 }
@@ -691,6 +716,8 @@ export async function runCloudTool(
 					source: inputList ?? inputAbs,
 					fingerprint,
 					...(extraInputs.length ? { extraInputs: extraCrumb } : {}),
+					// 本次提交前定下的剪映草稿文件夹（译制配音）：下一次重跑据此认领；没有则 task.json 逐字节不变
+					...(ctx.jianyingDraftDir ? { jianyingDraftDir: ctx.jianyingDraftDir } : {}),
 					createdAt: new Date().toISOString(),
 				},
 				null,
@@ -706,70 +733,77 @@ export async function runCloudTool(
 		now: deps.now,
 	};
 	let output: OralCutOutput;
-	if (isNoneDirect) {
-		const p = descriptor.buildPayloadNone!(ctx);
-		mergeParams(p, extraParams);
-		taskId = await deps.submitTask(deps.cfg, taskType, p);
-		await writeBreadcrumb();
-		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
-	} else if (isMulti) {
-		// 附加输入追加在主输入之后一起上传（顺序即上传顺序）；无附加输入时 paths / fileIds 与从前逐项相同
-		const n = inputList!.length;
-		const buildMulti = (fids: string[]): unknown => {
-			const p = descriptor.buildPayloadMulti!(fids.slice(0, n), ctx);
-			applyExtraFileIds(p, extraInputs, fids.slice(n));
-			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
+	// 上传或提交抛错时（taskId 仍为空 = 云端还没有这单）交 descriptor 回滚它在提交前占下的东西（fix-long2short-dub-export-draft-collision D4）；
+	// 提交成功之后的失败（轮询超时等）不回滚：任务已在云端。
+	try {
+		if (isNoneDirect) {
+			const p = descriptor.buildPayloadNone!(ctx);
 			mergeParams(p, extraParams);
-			return p;
-		};
-		const paths = [...inputList!, ...extraInputs.map((x) => x.abs)];
-		const submitted = await uploadManyAndSubmit(deps, paths, taskType, buildMulti, !!opts.reupload);
-		taskId = submitted.taskId;
-		fileIds = submitted.fileIds.slice(0, n);
-		fileId = submitted.fileIds[0]!;
-		await writeBreadcrumb();
-		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
-	} else if (extraInputs.length) {
-		// 单输入 + 附加输入（link-video-translate-dub-cli D3）：主输入先传、附加输入后传，走与多文件同一套
-		// 「逐个缓存上传 → 一次提交 → 6004 时全部缓存条目失效强制重传」编排——附加输入的缓存 file_id 过期
-		// 同样能自愈（只收编主输入的 uploadAndSubmitTask 做不到这一点）。无附加输入的工具不进这支，行为逐字节不变。
-		const buildWithExtras = (fids: string[]): Record<string, unknown> => {
-			const p = descriptor.buildPayload ? descriptor.buildPayload(fids[0]!, ctx) : { file_id: fids[0] };
-			applyExtraFileIds(p, extraInputs, fids.slice(1));
-			mergeParams(p, extraParams);
-			return p;
-		};
-		const paths = [uploadPath!, ...extraInputs.map((x) => x.abs)];
-		const submitted = await uploadManyAndSubmit(deps, paths, taskType, buildWithExtras, opts.reupload === true);
-		taskId = submitted.taskId;
-		fileId = submitted.fileIds[0]!;
-		await writeBreadcrumb();
-		output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
-	} else {
-		// 单文件分支委托共享执行核（add-matrix-local-image-broll 3.1 抽取；行为逐步等价：
-		// 上传/6004 恢复 → onSubmitted 落面包屑 → 轮询，poll 选项与旧实现逐字段一致）
-		const buildPayload = (fid: string): Record<string, unknown> => {
-			const p = descriptor.buildPayload ? descriptor.buildPayload(fid, ctx) : { file_id: fid };
-			// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
-			mergeParams(p, extraParams);
-			return p;
-		};
-		const run = await runCloudFileTask({
-			deps,
-			uploadPath: uploadPath!, // 非 isNoneDirect 分支：上方守卫已保证有上传物
-			taskType,
-			buildPayload,
-			forceReupload: opts.reupload === true,
-			pollTimeoutMs: descriptor.pollTimeoutMs,
-			onSubmitted: async (s) => {
-				taskId = s.taskId;
-				fileId = s.fileId;
-				await writeBreadcrumb();
-			},
-		});
-		taskId = run.taskId;
-		fileId = run.fileId;
-		output = run.output;
+			taskId = await deps.submitTask(deps.cfg, taskType, p);
+			await writeBreadcrumb();
+			output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
+		} else if (isMulti) {
+			// 附加输入追加在主输入之后一起上传（顺序即上传顺序）；无附加输入时 paths / fileIds 与从前逐项相同
+			const n = inputList!.length;
+			const buildMulti = (fids: string[]): unknown => {
+				const p = descriptor.buildPayloadMulti!(fids.slice(0, n), ctx);
+				applyExtraFileIds(p, extraInputs, fids.slice(n));
+				// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
+				mergeParams(p, extraParams);
+				return p;
+			};
+			const paths = [...inputList!, ...extraInputs.map((x) => x.abs)];
+			const submitted = await uploadManyAndSubmit(deps, paths, taskType, buildMulti, !!opts.reupload);
+			taskId = submitted.taskId;
+			fileIds = submitted.fileIds.slice(0, n);
+			fileId = submitted.fileIds[0]!;
+			await writeBreadcrumb();
+			output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
+		} else if (extraInputs.length) {
+			// 单输入 + 附加输入（link-video-translate-dub-cli D3）：主输入先传、附加输入后传，走与多文件同一套
+			// 「逐个缓存上传 → 一次提交 → 6004 时全部缓存条目失效强制重传」编排——附加输入的缓存 file_id 过期
+			// 同样能自愈（只收编主输入的 uploadAndSubmitTask 做不到这一点）。无附加输入的工具不进这支，行为逐字节不变。
+			const buildWithExtras = (fids: string[]): Record<string, unknown> => {
+				const p = descriptor.buildPayload ? descriptor.buildPayload(fids[0]!, ctx) : { file_id: fids[0] };
+				applyExtraFileIds(p, extraInputs, fids.slice(1));
+				mergeParams(p, extraParams);
+				return p;
+			};
+			const paths = [uploadPath!, ...extraInputs.map((x) => x.abs)];
+			const submitted = await uploadManyAndSubmit(deps, paths, taskType, buildWithExtras, opts.reupload === true);
+			taskId = submitted.taskId;
+			fileId = submitted.fileIds[0]!;
+			await writeBreadcrumb();
+			output = await pollToolTask(deps.cfg, taskType, taskId, pollOpts);
+		} else {
+			// 单文件分支委托共享执行核（add-matrix-local-image-broll 3.1 抽取；行为逐步等价：
+			// 上传/6004 恢复 → onSubmitted 落面包屑 → 轮询，poll 选项与旧实现逐字段一致）
+			const buildPayload = (fid: string): Record<string, unknown> => {
+				const p = descriptor.buildPayload ? descriptor.buildPayload(fid, ctx) : { file_id: fid };
+				// 通用透传优先级最高：agent 永远能强制覆盖 descriptor 拼装的任意字段
+				mergeParams(p, extraParams);
+				return p;
+			};
+			const run = await runCloudFileTask({
+				deps,
+				uploadPath: uploadPath!, // 非 isNoneDirect 分支：上方守卫已保证有上传物
+				taskType,
+				buildPayload,
+				forceReupload: opts.reupload === true,
+				pollTimeoutMs: descriptor.pollTimeoutMs,
+				onSubmitted: async (s) => {
+					taskId = s.taskId;
+					fileId = s.fileId;
+					await writeBreadcrumb();
+				},
+			});
+			taskId = run.taskId;
+			fileId = run.fileId;
+			output = run.output;
+		}
+	} catch (e) {
+		if (!taskId && descriptor.abortBeforeSubmit) await Promise.resolve(descriptor.abortBeforeSubmit(ctx)).catch(() => undefined);
+		throw e;
 	}
 
 	// ⑦ 产物落地（两条独立路径，均由 descriptor 声明驱动）+ result.json 恒落盘（不受 --json 约束）

@@ -9,12 +9,10 @@
  * 仍会打印/落盘报告。取结果需用「提交该任务的同一账号」的 API Key；异账号/已删任务报 TASK_NOT_FOUND。
  */
 import { Command } from "commander";
-import { resolve, join, dirname } from "node:path";
-import { mkdir, readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadConfig } from "../lib/config";
 import { getTaskResult, CloudError, type OralCutOutput } from "../lib/cloud";
-import { resolveJianyingDraftDir } from "../lib/jianying";
+import { claimRecordedDraft, resolveJianyingDraftDir } from "../lib/jianying";
 import { materializeResult } from "../lib/materialize";
 import { ensureLandingWritable } from "../lib/landing-wait";
 import type { LandingWaitDeps } from "../lib/landing-wait";
@@ -61,23 +59,14 @@ interface OralCutResultOpts {
  * task.json 缺失 / 读坏 / task_id 不符 / 草稿根换了 ⇒ 不认领、不报错，交 materialize 在草稿根里兜底仲裁（撞名 -2…）。
  */
 export async function claimDraftTarget(outDir: string, taskId: string, draftDir: string): Promise<string | undefined> {
-	let crumb: { taskId?: unknown; jianyingDraftDir?: unknown } | null;
-	try {
-		crumb = JSON.parse(await readFile(join(outDir, "task.json"), "utf8"));
-	} catch {
-		return undefined;
-	}
-	const dir = crumb?.jianyingDraftDir;
-	if (String(crumb?.taskId) !== taskId || typeof dir !== "string" || !dir) return undefined;
-	const norm = (p: string) => (process.platform === "win32" ? resolve(p).toLowerCase() : resolve(p));
-	if (norm(dirname(dir)) !== norm(draftDir)) return undefined;
-	if (existsSync(dir)) return dir;
-	try {
-		await mkdir(dir); // 非递归：只重建这一级
-		return dir;
-	} catch {
-		return undefined;
-	}
+	// 判据与 long2short / 译制配音共用一份（fix-long2short-dub-export-draft-collision D1），这里只按 task_id 匹配
+	const claimed = await claimRecordedDraft({
+		outDir,
+		draftRoot: draftDir,
+		key: "jianyingDraftDir",
+		match: (crumb) => String(crumb.taskId) === taskId,
+	});
+	return claimed?.path;
 }
 
 /** 注册顶层命令 `gtrk oralcut-result <taskId>`。 */

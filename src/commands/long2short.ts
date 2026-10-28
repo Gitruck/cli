@@ -10,13 +10,13 @@
  */
 import { Command } from "commander";
 import { resolve, join, dirname, basename, extname } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rmdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../lib/config";
 import { download, type OralCutOutput } from "../lib/cloud";
 import { uploadAndSubmitTask } from "../lib/upload-submit";
 import { uploadCached } from "../lib/upload-cache";
-import { copyJianyingDraft, resolveJianyingDraftDir } from "../lib/jianying";
+import { claimRecordedDraft, copyJianyingDraft, resolveJianyingDraftDir, samePath } from "../lib/jianying";
 import {
 	probeGeometry,
 	extractAudio,
@@ -29,7 +29,7 @@ import {
 } from "../lib/media";
 import { materializeResult, type LandingCheck, type MaterializeResult } from "../lib/materialize";
 import { renderClipBrief, renderClipsOverview } from "../lib/clip-brief";
-import { pollToolTask, parseExtraParams, mergeParams } from "../lib/tool-runner";
+import { pollToolTask, parseExtraParams, mergeParams, createOutDir } from "../lib/tool-runner";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
 
@@ -102,6 +102,9 @@ export interface Long2ShortDeps {
 	extract: typeof extractAudio;
 	compress: typeof compress720p;
 	uploadSubtitle: typeof uploadCached;
+	/** 上传提交与轮询（fix-long2short-dub-export-draft-collision 2.1）：离线测试据此走过提交，验草稿占位与面包屑。 */
+	uploadAndSubmit: typeof uploadAndSubmitTask;
+	poll: typeof pollToolTask;
 }
 
 function buildDeps(o: Partial<Long2ShortDeps> = {}): Long2ShortDeps {
@@ -111,7 +114,57 @@ function buildDeps(o: Partial<Long2ShortDeps> = {}): Long2ShortDeps {
 		extract: o.extract ?? extractAudio,
 		compress: o.compress ?? compress720p,
 		uploadSubtitle: o.uploadSubtitle ?? uploadCached,
+		uploadAndSubmit: o.uploadAndSubmit ?? uploadAndSubmitTask,
+		poll: o.poll ?? pollToolTask,
 	};
+}
+
+/** 草稿组锚点：服务端给基名逐 clip 拼 `_clip{i}`，`_clip0` 是每次运行一定有的那一条（clips 为空直接报错）。 */
+const CLIP_ANCHOR = "_clip0";
+
+/**
+ * 定下本次的剪映草稿组基名（fix-long2short-dub-export-draft-collision D1/D2，导出供离线测试）。
+ *
+ * 草稿根是所有毛片共用的一层目录，`<产物根名>` 不带毛片所在目录、也没有时间戳——不同目录的同名毛片先后跑就会撞，
+ * 后跑的整组覆盖先跑的，两次条数不同时还会剩下一组两条毛片混在一起的 `_clip{i}`。但同一毛片重跑覆盖是幂等设计，要保留：
+ * - 认领：产物根上一次的 task.json 的 `source` 就是本毛片、`jianyingDraftBase` 在本次草稿根下 ⇒ 沿用，照旧覆盖；
+ * - 否则以 `<基名>_clip0` 为整组锚点原子仲裁（createOutDir 非递归 mkdir，撞名 `<产物根名>-2`…），
+ *   锚点建成后草稿根里还有同基名的 `_clip{k≥1}` 残留就放掉、换下一个（并发对手要先拿到同一锚点才可能写这一组，故扫描不需要原子）。
+ * 名字必须在提交前定下：它就是 `nle_draft_dir`，服务端据此写各 clip 草稿 meta。
+ * `created` = 锚点是本次新建的（提交前失败、或 clip0 最终没落成草稿时只删这种）。
+ */
+export async function settleClipDraftBase(
+	draftRoot: string,
+	outDir: string,
+	inputAbs: string,
+): Promise<{ base: string; created: boolean }> {
+	// 显式 --jianying-draft-dir 可以指向尚不存在的目录（原先由落地时的 recursive mkdir 顺手建出），非递归仲裁前先补上
+	await mkdir(draftRoot, { recursive: true });
+	const claimed = await claimRecordedDraft({
+		outDir,
+		draftRoot,
+		key: "jianyingDraftBase",
+		match: (crumb) => typeof crumb.source === "string" && samePath(crumb.source, inputAbs),
+		suffix: CLIP_ANCHOR,
+	});
+	if (claimed) return { base: claimed.path, created: claimed.created };
+	const anchor = await createOutDir(join(draftRoot, basename(outDir)), true, "剪映草稿组", {
+		suffix: CLIP_ANCHOR,
+		shown: "_clip*",
+		accept: async (base) => !(await hasStrayClipDrafts(draftRoot, basename(base))),
+	});
+	return { base: anchor.slice(0, -CLIP_ANCHOR.length), created: true };
+}
+
+/** 草稿根里是否还有 `<基名>_clip{k}`（k ≥ 1）残留——锚点空着而组员还在（如用户在剪映里只删了第一条）。 */
+async function hasStrayClipDrafts(draftRoot: string, baseName: string): Promise<boolean> {
+	const fold = (s: string) => (process.platform === "win32" ? s.toLowerCase() : s);
+	const want = fold(baseName);
+	for (const name of await readdir(draftRoot)) {
+		const m = /^(.*)_clip(\d+)$/.exec(name);
+		if (m && fold(m[1]!) === want && Number(m[2]) !== 0) return true;
+	}
+	return false;
 }
 
 /** 调速倍率取值范围：与 infra `video_long2short/polish.py` 的 `SPEED_FACTOR_RANGE`、精剪 `speed.factor` 同值。 */
@@ -301,14 +354,15 @@ export async function runLong2Short(
 	const outName = basename(outDir);
 
 	// 剪映草稿根 + 逐 clip 草稿目标：服务端按 struct_meta.nle_draft_dir 逐 clip 加 _clip{i} 后缀，
-	// 故传「草稿根/<产物根同名>」为 base → 各 clip 草稿落 <草稿根>/<outName>_clip{i}（可读且不撞）
+	// 故传「草稿根/<基名>」→ 各 clip 草稿落 <草稿根>/<基名>_clip{i}。基名缺省 = 产物根名，
+	// 在 ①b 定下（同一毛片重跑认领上次的、别的毛片撞名改 -2…）；此处的候选值只供 ①a 必填干跑。
 	let draftRoot: string | undefined;
 	if (wantJianying) {
 		draftRoot = resolveJianyingDraftDir(opts.jianyingDraftDir);
 		if (draftRoot) log.info(`剪映草稿根：${draftRoot}`);
 		else log.warn("没找到剪映草稿目录 → 将只产 draft_content.json、缺 meta。可加 --jianying-draft-dir <你的草稿目录> 重跑。");
 	}
-	const draftTarget = draftRoot ? join(draftRoot, outName) : undefined;
+	let draftTarget = draftRoot ? join(draftRoot, outName) : undefined;
 
 	log.step(
 		`▶ 长剪短：${basename(inputAbs)}（${opts.splitScreen ? "720p 代理 · 智能分屏" : "纯选段 · 音频上传"}，格式 ${formats.join("/")}）`,
@@ -345,43 +399,69 @@ export async function runLong2Short(
 	//      subtitle_file_id 此刻尚未上传得到，传 undefined 不影响这两项校验。
 	void buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget, undefined);
 
-	const artifact = opts.splitScreen
-		? await deps.compress(inputAbs, opts.ffmpegPath)
-		: await deps.extract(inputAbs, opts.ffmpegPath);
-	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
-	log.info(opts.splitScreen ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`);
-
-	// ②a 可选：现成字幕作转写来源（先于主上传独立上传；存在性/扩展名已在 ①a 拦过，此处只上传）
-	let subtitleFileId: string | undefined;
-	if (subAbs) {
-		const up = await deps.uploadSubtitle(cfg, subAbs, { force: opts.reupload });
-		subtitleFileId = up.fileId;
-		log.info(`${up.cached ? "命中上传缓存，复用" : "已上传"}字幕文件（转写来源，跳过云端 ASR）：${basename(subAbs)}`);
+	// ①b 定下剪映草稿组基名（fix-long2short-dub-export-draft-collision）——零成本前置区的最后一步、任何抽取之前：
+	//   它就是 nle_draft_dir，服务端据此写各 clip 草稿 meta，名字必须在提交前定下；建目录失败（权限等）也在花时间抽取前暴露。
+	let anchorCreated = false; // 锚点 <基名>_clip0 是本次新建的：提交前失败、或 clip0 最终没落成草稿时只删这种
+	if (draftRoot) {
+		const settled = await settleClipDraftBase(draftRoot, outDir, inputAbs);
+		draftTarget = settled.base;
+		anchorCreated = settled.created;
 	}
+	const anchor = draftTarget ? `${draftTarget}${CLIP_ANCHOR}` : undefined;
 
-	// ② 上传抽出物 → 提交（必填/数值校验已在 ①a 前置完成，缺失零抽取零上传零提交）
-	log.step("② 上传抽出物到云端…");
-	const submitted = await uploadAndSubmitTask(
-		cfg,
-		artifact,
-		TASK_TYPE,
-		(fid) => buildLong2ShortPayload(fid, opts, geo, inputAbs, formats, draftTarget, subtitleFileId),
-		{
-			force: opts.reupload,
-			onUploaded: (uploaded) => {
-				log.info(uploaded.cached ? `命中上传缓存，复用 file_id = ${uploaded.fileId}` : `file_id = ${uploaded.fileId}`);
-				log.step("③ 提交长剪短任务…");
+	// 从定名到提交返回的整段：任何一步失败都删掉本次新建的空锚点（非递归，宁留勿误删）再上抛；认领沿用的一律不删
+	let submitted: Awaited<ReturnType<typeof uploadAndSubmitTask>>;
+	try {
+		const artifact = opts.splitScreen
+			? await deps.compress(inputAbs, opts.ffmpegPath)
+			: await deps.extract(inputAbs, opts.ffmpegPath);
+		assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
+		log.info(opts.splitScreen ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`);
+
+		// ②a 可选：现成字幕作转写来源（先于主上传独立上传；存在性/扩展名已在 ①a 拦过，此处只上传）
+		let subtitleFileId: string | undefined;
+		if (subAbs) {
+			const up = await deps.uploadSubtitle(cfg, subAbs, { force: opts.reupload });
+			subtitleFileId = up.fileId;
+			log.info(`${up.cached ? "命中上传缓存，复用" : "已上传"}字幕文件（转写来源，跳过云端 ASR）：${basename(subAbs)}`);
+		}
+
+		// ② 上传抽出物 → 提交（必填/数值校验已在 ①a 前置完成，缺失零抽取零上传零提交）
+		log.step("② 上传抽出物到云端…");
+		submitted = await deps.uploadAndSubmit(
+			cfg,
+			artifact,
+			TASK_TYPE,
+			(fid) => buildLong2ShortPayload(fid, opts, geo, inputAbs, formats, draftTarget, subtitleFileId),
+			{
+				force: opts.reupload,
+				onUploaded: (uploaded) => {
+					log.info(uploaded.cached ? `命中上传缓存，复用 file_id = ${uploaded.fileId}` : `file_id = ${uploaded.fileId}`);
+					log.step("③ 提交长剪短任务…");
+				},
+				onCacheInvalid: () => log.warn("缓存的 file_id 在云端已失效，重新上传后重试…"),
 			},
-			onCacheInvalid: () => log.warn("缓存的 file_id 在云端已失效，重新上传后重试…"),
-		},
-	);
+		);
+	} catch (e) {
+		if (anchorCreated && anchor) await rmdir(anchor).catch(() => undefined);
+		throw e;
+	}
 	const { taskId, fileId } = { taskId: submitted.taskId, fileId: submitted.fileId };
 	log.info(`task_id = ${taskId}`);
 	await mkdir(outDir, { recursive: true });
 	await writeFile(
 		join(outDir, "task.json"),
 		JSON.stringify(
-			{ taskId, taskType: TASK_TYPE, fileId, source: inputAbs, formats, createdAt: new Date().toISOString() },
+			{
+				taskId,
+				taskType: TASK_TYPE,
+				fileId,
+				source: inputAbs,
+				formats,
+				// 本次的剪映草稿组基名：同一毛片下次重跑据此认领、照旧覆盖（别的毛片撞名则改 -2…）
+				...(draftTarget ? { jianyingDraftBase: draftTarget } : {}),
+				createdAt: new Date().toISOString(),
+			},
 			null,
 			2,
 		),
@@ -389,7 +469,7 @@ export async function runLong2Short(
 
 	// ④ 轮询到完成（60min 墙钟；超时凭 task.json 的 task_id 恢复）
 	log.step("④ 云端处理中（选段/跳剪" + (opts.splitScreen ? "/分屏" : "") + "，每 5s 轮询）…");
-	const output = (await pollToolTask(cfg, TASK_TYPE, taskId, {
+	const output = (await deps.poll(cfg, TASK_TYPE, taskId, {
 		timeoutMs: POLL_TIMEOUT_MS,
 		onTick: (status, progress) => log.tick(`${status}${progress != null ? ` ${Math.round(progress)}%` : ""}`),
 	})) as OralCutOutput & {
@@ -481,13 +561,16 @@ export async function runLong2Short(
 			clipResults[i].jianyingDraftPath = p;
 		});
 		const { complete, attempted } = landing;
+		const draftName = basename(draftTarget);
 		if (!attempted) log.warn("没有任何 clip 产出剪映草稿，草稿根未落地");
 		else if (complete === attempted)
-			log.info(`剪映草稿：<草稿根>/${outName}_clip{i} —— ${complete}/${attempted} 条两件套齐全（剪映里直接可见）`);
+			log.info(`剪映草稿：<草稿根>/${draftName}_clip{i} —— ${complete}/${attempted} 条两件套齐全（剪映里直接可见）`);
 		else if (complete) {
-			log.info(`剪映草稿：<草稿根>/${outName}_clip{i} —— ${complete}/${attempted} 条两件套齐全（剪映里可见）`);
+			log.info(`剪映草稿：<草稿根>/${draftName}_clip{i} —— ${complete}/${attempted} 条两件套齐全（剪映里可见）`);
 			log.warn(`另有 ${attempted - complete} 条草稿两件套不全，剪映里不会显示（详见 result.json errors）`);
 		} else log.warn(`${attempted} 条草稿两件套均不全，剪映里不会显示（详见 result.json errors）`);
+		// 本次新建的锚点 _clip0 最终没落成草稿（clip0 没有剪映产物）⇒ 仍为空就删掉，不在草稿根留空壳（非递归，有东西就删不掉）
+		if (anchorCreated && anchor && !landing.paths[0]) await rmdir(anchor).catch(() => undefined);
 	}
 
 	// ⑧ 人读简报（纯增文件：clip{i}/clip.md + 根 clips.md；机读契约不动）。失败只记 errors 不阻断

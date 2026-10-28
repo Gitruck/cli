@@ -594,7 +594,7 @@ gtrk project export --gtrk <工程文件> --formats jianying,xml --out <产物�
 |---|---|
 | `--project <dir>` / `--gtrk <path>` | 自动定位标准布局的 `gtrk/project.gtrk`，或显式指定工程文件，二选一 |
 | `-f, --formats <list>` | `xml`、`fcpxml`、`otio`、`jianying`、`capcut`、`gtrk`；缺省 `jianying,xml`，也兼容旧细粒度格式名 |
-| `--jianying-draft-dir <dir>` | 剪映/CapCut 草稿根；省略时按用户配置与标准位置探测 |
+| `--jianying-draft-dir <dir>` | 剪映/CapCut 草稿根；省略时按用户配置与标准位置探测。草稿落 `<草稿根>/<产物目录名>`，撞名时追加 `-2`… 并提示，原草稿不动 |
 | `--no-particles` | 不预渲 MG 颗粒；结构导出仍继续，结果会记录被跳过的颗粒 |
 | `--particle-concurrency <n>` | 颗粒 qtrle 预渲并发数，1–8，默认 6 |
 
@@ -666,7 +666,7 @@ gtrk project background --gtrk <工程文件> --clear
 | `audio_tts_clone` | **无文件**：`--text`/`--text-file` 二选一（≤5000 字）+ `--speaker` 必填；可选语言/格式/语速/切分法/字幕/**句间停顿**（`--fragment-interval <秒>`，**仅自训音色**；云引擎音色传了会**报错**而非静默忽略，合法区间由服务端校验并在报错里给出） | 配音音频 wav/mp3（+ 可选字幕）；按文本字符数计费，计量单位与单价以 `gtrk tool list` 实时显示为准 | 运行前实时查询 | 已上线 |
 | `video_ai_subtitle` | 单条视频或音频；`--language <码>` 必填；可选 `--translate-language`、`--need-render`、`--need-pure`、`--subtitle-type`、`--subtitle-color`。默认只传本地抽出的音频（毛片不上传） | `.ass` 字幕 + 可选烧录/去字幕 `.mp4` + `result-output.json`（摘要 + 字级时间轴） | 运行前实时查询 | 已上线 |
 | `subtitle_translate` | 单个**字幕文件** `.ass` / `.srt`；`--language <码>` 与 `--translate-language <码>` **双必填**；可选 `--output-format`、`--line-mode`、`--bilingual`、`--subtitle-type`、`--subtitle-color`、`--canvas <WxH>`。不含语音识别 | 译文字幕 `.ass` 或 `.srt` + `result-output.json`（条数统计 + 降级标记） | 运行前实时查询 | 已上线 |
-| `video_translate_dub` | 单条视频或音频（**≤120 分钟**，整片上传）；`--language <源语种>`、`--translate-language <目标语种>`、`--speaker <clone 或音色代号>` **三项必填**；可选 `--ref <参考音频或视频>`（仅 `clone`；克隆别人的声音须先取得本人同意）、`--ref-lang`、`--no-keep-bgm`、`--fit-policy`、`--speed-band <最小,最大>`、`--subtitle-mode`、`--subtitle-type`、`--project-formats <逗号分隔>`（缺省只出 `.gtrk`；要剪映草稿写 `gtrk,jianying`，草稿自动放进剪映草稿目录）、`--jianying-draft-dir`；取值以服务端为准。只换音轨、画面保持原样（不做口型同步），长片耗时十几分钟起 | 配音成片 `<输入名>-dub.mp4`（音频输入为 `.mp3`）+ `dub.wav` / `bgm.wav` + 字幕 `.srt` + `transcript.json` + 工程文件按格式分目录（`gtrk/`、`jianying/` …）+ `result-output.json`（配音对齐报告；附带产物缺项时含 `errors`，不判失败） | 运行前实时查询 | 已上线 |
+| `video_translate_dub` | 单条视频或音频（**≤120 分钟**，整片上传）；`--language <源语种>`、`--translate-language <目标语种>`、`--speaker <clone 或音色代号>` **三项必填**；可选 `--ref <参考音频或视频>`（仅 `clone`；克隆别人的声音须先取得本人同意）、`--ref-lang`、`--no-keep-bgm`、`--fit-policy`、`--speed-band <最小,最大>`、`--subtitle-mode`、`--subtitle-type`、`--project-formats <逗号分隔>`（缺省只出 `.gtrk`；要剪映草稿写 `gtrk,jianying`，草稿自动放进剪映草稿目录：同一毛片重跑覆盖上一次的，别的目录下的同名毛片撞上时改落 `…-2`）、`--jianying-draft-dir`；取值以服务端为准。只换音轨、画面保持原样（不做口型同步），长片耗时十几分钟起 | 配音成片 `<输入名>-dub.mp4`（音频输入为 `.mp3`）+ `dub.wav` / `bgm.wav` + 字幕 `.srt` + `transcript.json` + 工程文件按格式分目录（`gtrk/`、`jianying/` …）+ `result-output.json`（配音对齐报告；附带产物缺项时含 `errors`，不判失败） | 运行前实时查询 | 已上线 |
 | `video_long2short_pro` | 单条长视频（整片上传）；`--language <码>` 必填；可选 `--output-language`、`--main-topic`、`--output-size`、`--no-jump-cut`、`--duration-pref`、`--max-clip-sec`、`--split-screen`、`--split-orientation`、`--speed-factor`、`--no-camera-move`、`--no-subtitle`、`--subtitle-translate-language` | 逐条成片 `clip{i}.mp4` + 人读报告 `clips.md`（含润色降级明细） + `result-output.json` | 运行前实时查询 | 已上线 |
 | `audio_separation` | 单条音频；可选 `--mode fast\|turbo` | 人声与伴奏音频（按实际返回可为一项或两项） | 运行前实时查询 | 已上线 |
 | `audio_speaker_split` | 单条音频；可选 `--only-struct` | 各说话人 `.wav` 分轨 + `spoken_list` 时间线（`result-output.json`） | 运行前实时查询 | 已上线 |

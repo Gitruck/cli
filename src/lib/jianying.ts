@@ -1,7 +1,7 @@
 /** 剪映/CapCut 草稿目录解析与草稿落地。oralcut / long2short / init 共用。 */
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readdir } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile } from "node:fs/promises";
 import { readUserConfig } from "./user-config";
 
 /** 探测剪映/CapCut 草稿根目录（Windows 标准位置）。探到返回路径，否则 undefined。 */
@@ -21,6 +21,50 @@ export function resolveJianyingDraftDir(opt: string | undefined): string | undef
 	const saved = readUserConfig().jianyingDraftDir;
 	if (saved && existsSync(saved)) return saved;
 	return probeJianyingDraftDir();
+}
+
+/** 两个本机路径是否指同一处（Windows 下不分大小写）。 */
+export function samePath(a: string, b: string): boolean {
+	const norm = (p: string) => (process.platform === "win32" ? resolve(p).toLowerCase() : resolve(p));
+	return norm(a) === norm(b);
+}
+
+/**
+ * 认领产物目录面包屑里记录的草稿落点（fix-long2short-dub-export-draft-collision D1；oralcut-result 也用它）。
+ *
+ * 剪映草稿根是所有毛片共用的一层目录，只靠名字分不清「同一毛片重跑」与「别的毛片撞名」；
+ * 能分清的只有 CLI 自己写的面包屑：`<outDir>/task.json` 满足调用方的 `match`（oralcut-result 比 task_id、
+ * long2short / 译制配音比 `source`），且 `key` 记的落点就在本次解析出的草稿根下 ⇒ 这个落点属于本产物目录。
+ * 落点（`suffix` 给了就看 `<落点><suffix>`，long2short 的锚点 `_clip0`）还在就沿用；被删了就非递归重建，
+ * 重建失败（已被别的运行占走 / 写不进）⇒ 不认领。task.json 缺失、读坏、不匹配、换了草稿根 ⇒ 不认领、不报错，交调用方去仲裁。
+ * `created` 为 true 表示锚点是这一次重建的（提交前失败时可以删）。
+ */
+export async function claimRecordedDraft(opts: {
+	outDir: string;
+	draftRoot: string;
+	key: "jianyingDraftDir" | "jianyingDraftBase";
+	match: (crumb: Record<string, unknown>) => boolean;
+	suffix?: string;
+}): Promise<{ path: string; created: boolean } | undefined> {
+	let crumb: unknown;
+	try {
+		crumb = JSON.parse(await readFile(join(opts.outDir, "task.json"), "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (!crumb || typeof crumb !== "object" || Array.isArray(crumb)) return undefined;
+	const rec = crumb as Record<string, unknown>;
+	const path = rec[opts.key];
+	if (typeof path !== "string" || !path || !opts.match(rec)) return undefined;
+	if (!samePath(dirname(path), opts.draftRoot)) return undefined;
+	const probe = `${path}${opts.suffix ?? ""}`;
+	if (existsSync(probe)) return { path, created: false };
+	try {
+		await mkdir(probe); // 非递归：只重建这一级
+		return { path, created: true };
+	} catch {
+		return undefined;
+	}
 }
 
 /**
