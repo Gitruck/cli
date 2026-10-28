@@ -14,6 +14,7 @@ import { copyJianyingDraft } from "./jianying";
 import { renderGtrk, readGtrkFile, type GtrkV1 } from "./render";
 import { prepareParticlesForRender } from "./particle-qtrle";
 import type { SourceRateInfo } from "./media";
+import type { DurationPricingSnapshot } from "./tool-pricing";
 import { openFolder } from "./open";
 import { log } from "./log";
 import { ensureLandingWritable, type LandingWaitDeps } from "./landing-wait";
@@ -84,6 +85,11 @@ export interface MaterializeOpts {
 	 * 与 result.json（`vfr` 三态；VFR 的人读 WARN 已在上传前打过，这里只是机读对应物）。跑批路给；恢复命令无原片几何 ⇒ 缺席。
 	 */
 	source?: SourceRateInfo;
+	/**
+	 * 跑前查到的实时价格与预估（fix-oralcut-long2short-price-line D4）：原样进 `--json pricing` 与 result.json。
+	 * 跑批路给；恢复命令（`oralcut-result`）不查价 ⇒ 缺席，重写 result.json 时首跑的 `pricing` 随之不在（同 `source`）。
+	 */
+	pricing?: DurationPricingSnapshot;
 }
 
 /** 落地复核之墙：`sourcePath` = 上传前的毛片绝对路径（云端把它原样写进 `materials[].path`），`durationSec` = 本地 ffprobe 实测。 */
@@ -117,6 +123,8 @@ export interface MaterializeResult {
 	landing_check?: LandingCheck;
 	/** 仅跑批路（给了 `source`）出现：源片 `fps / avg_fps / vfr`。 */
 	source?: SourceRateInfo;
+	/** 仅跑批路（给了 `pricing`）出现：跑前实时价格与预估。 */
+	pricing?: DurationPricingSnapshot;
 	/**
 	 * 存在**未消解的本地写入失败**时为 true（机读位，供调用方置非零退出码）。
 	 * 与 `ok` 正交且不改 `ok` 的语义（`errors` 非空即 false，逐字不动）：
@@ -203,6 +211,7 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			taskId,
 			fileId: opts.fileId ?? null,
 			...(opts.source ? { source: opts.source } : {}),
+			...(opts.pricing ? { pricing: opts.pricing } : {}),
 			...extra,
 		};
 		await writeFile(resultPath, JSON.stringify(r, null, 2));

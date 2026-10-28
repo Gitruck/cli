@@ -32,9 +32,15 @@ import { renderClipBrief, renderClipsOverview } from "../lib/clip-brief";
 import { pollToolTask, parseExtraParams, mergeParams, createOutDir } from "../lib/tool-runner";
 import { openFolder } from "../lib/open";
 import { log, routeLogsToStderr } from "../lib/log";
+import { emitBillingHint, resolveDurationPricing, resolveToolPricing, type PriceResolver } from "../lib/tool-pricing";
 
 // cli 域特例：cloud.ts 的 /task/${taskType} 模板天然拼出 /task/cli/video_long2short_for_cli
 const TASK_TYPE = "cli/video_long2short_for_cli";
+// 价格表 key 取产品主条（fix-oralcut-long2short-price-line D1）：CLI 渠道分账条 video_long2short_for_cli
+// （gc_task_type id 47）show_in_price_list=0、不在公开价格表里；扣费按渠道条自身那一行，
+// 二者同价靠 infra「同产品同计费」的约定维持，没有机制保证——价格行恒带「以服务端结算为准」。
+const PRICE_KEY = "video_long2short";
+const PRICING_CONTEXT = "长剪短（按上传物时长）";
 // 长片 ASR+LLM 选段耗时随片长涨：墙钟放宽到 60min（先例 video_matting）；面包屑保证超时可恢复
 const POLL_TIMEOUT_MS = 60 * 60 * 1000;
 
@@ -66,6 +72,7 @@ export interface Long2ShortOpts {
 	reupload?: boolean;
 	open?: boolean;
 	json?: boolean;
+	dryRun?: boolean;
 }
 
 /** 云端逐 clip 出参（选段元信息 + files[] 工程组）。 */
@@ -105,6 +112,8 @@ export interface Long2ShortDeps {
 	/** 上传提交与轮询（fix-long2short-dub-export-draft-collision 2.1）：离线测试据此走过提交，验草稿占位与面包屑。 */
 	uploadAndSubmit: typeof uploadAndSubmitTask;
 	poll: typeof pollToolTask;
+	/** 实时价格解析（缺省真 `resolveToolPricing`，匿名查公开价格表）。离线测试注入它，单测才不会真打线上接口。 */
+	resolvePricing: PriceResolver;
 }
 
 function buildDeps(o: Partial<Long2ShortDeps> = {}): Long2ShortDeps {
@@ -116,6 +125,7 @@ function buildDeps(o: Partial<Long2ShortDeps> = {}): Long2ShortDeps {
 		uploadSubtitle: o.uploadSubtitle ?? uploadCached,
 		uploadAndSubmit: o.uploadAndSubmit ?? uploadAndSubmitTask,
 		poll: o.poll ?? pollToolTask,
+		resolvePricing: o.resolvePricing ?? resolveToolPricing,
 	};
 }
 
@@ -330,6 +340,7 @@ export function registerLong2Short(program: Command): void {
 		.option("--reupload", "强制重新上传，忽略本地上传缓存")
 		.option("--no-open", "完成后不自动打开产物根目录（默认会自动打开一次）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出根级结果 JSON")
+		.option("--dry-run", "只探测并报价（实时价格 + 本次预估）：零抽取、零上传、零计费，不建任何目录")
 		.action(async (input: string, opts: Long2ShortOpts) => {
 			await runLong2Short(input, opts);
 		});
@@ -399,6 +410,18 @@ export async function runLong2Short(
 	//      subtitle_file_id 此刻尚未上传得到，传 undefined 不影响这两项校验。
 	void buildLong2ShortPayload("__dry_run__", opts, geo, inputAbs, formats, draftTarget, undefined);
 
+	// ①a′ 零计费报价（fix-oralcut-long2short-price-line D5）：校验类的闸跑完就分叉，查价打一行后返回。
+	//   不进 ①b（草稿组定名会建锚点目录）、不抽取、不传字幕、不建产物目录——dry-run 的定义就是什么都不写。
+	if (opts.dryRun) {
+		const quote = await resolveDurationPricing(PRICE_KEY, geo.duration, PRICING_CONTEXT, deps.resolvePricing);
+		emitBillingHint(quote.billingHint);
+		log.ok("[dry-run] 只探测与报价：零抽取、零上传、零提交、零计费，未建任何目录。");
+		if (opts.json) {
+			console.log(JSON.stringify({ ok: true, dry_run: true, source: sourceRateInfo(inputAbs, geo), duration: geo.duration, pricing: quote.pricing }));
+		}
+		return;
+	}
+
 	// ①b 定下剪映草稿组基名（fix-long2short-dub-export-draft-collision）——零成本前置区的最后一步、任何抽取之前：
 	//   它就是 nle_draft_dir，服务端据此写各 clip 草稿 meta，名字必须在提交前定下；建目录失败（权限等）也在花时间抽取前暴露。
 	let anchorCreated = false; // 锚点 <基名>_clip0 是本次新建的：提交前失败、或 clip0 最终没落成草稿时只删这种
@@ -408,6 +431,12 @@ export async function runLong2Short(
 		anchorCreated = settled.created;
 	}
 	const anchor = draftTarget ? `${draftTarget}${CLIP_ANCHOR}` : undefined;
+
+	// ①c 实时价格行（fix-oralcut-long2short-price-line D2）——零成本前置区真正的最后一步、任何抽取与字幕上传之前：
+	//   排在所有会拒单的闸之后（被拒的运行不发请求），排在抽取之前（看到价格还来得及 Ctrl-C，零上传零计费）。
+	//   查不到 / 超时只降级为「实时价格暂不可用」、永不抛错，不会让 ①b 刚建的锚点成孤儿。
+	const quote = await resolveDurationPricing(PRICE_KEY, geo.duration, PRICING_CONTEXT, deps.resolvePricing);
+	emitBillingHint(quote.billingHint);
 
 	// 从定名到提交返回的整段：任何一步失败都删掉本次新建的空锚点（非递归，宁留勿误删）再上抛；认领沿用的一律不删
 	let submitted: Awaited<ReturnType<typeof uploadAndSubmitTask>>;
@@ -615,6 +644,8 @@ export async function runLong2Short(
 		...(transcriptFile ? { transcriptFile } : {}),
 		// 源片帧率账面（add-frame-rate-table-vfr-detect D4）：上传前探得的 r / avg / vfr，机读对应上传前那条 VFR WARN
 		source: sourceRateInfo(inputAbs, geo),
+		// 跑前查到的实时价格与预估（fix-oralcut-long2short-price-line D4）：agent 不读 stderr 也能转述
+		pricing: quote.pricing,
 		// 落地复核汇总（D5）：逐 clip 明细在 clips[i].landing_check，这里只给一眼能看的总数（不改退出码）
 		landing_check: {
 			clips_checked: clipResults.filter((c) => c.landing_check && !c.landing_check.error).length,

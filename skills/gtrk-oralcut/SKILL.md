@@ -121,7 +121,9 @@ gtrk oralcut "<毛片绝对路径>" [--script "<txt路径>"] [--preset steady|co
 ```
 
 - `--json`：人读日志走 stderr，**成功时 stdout 只有一行结果 JSON**：
-  `{ ok, outDir, files:{gtrk:[],jianying:[],xml:[]}, jianyingDraftPath, rendered, report, errors, taskId, fileId }`（`rendered`=本地渲染成片路径，未开 `--render` 时为 `null`）
+  `{ ok, outDir, files:{gtrk:[],jianying:[],xml:[]}, jianyingDraftPath, rendered, report, errors, taskId, fileId, pricing }`（`rendered`=本地渲染成片路径，未开 `--render` 时为 `null`）
+- **计费**：按上传物音频时长（≈毛片时长）计。CLI 在抽音频之前查一次实时价格，往 stderr 打一行「计费提示」（单价 + 本次预估积分），`--json` 结果的 `pricing` 里也有；给用户交代时**原样转述**，别自己报数字、别引用旧价。查不到时这一行是「实时价格暂不可用，以服务端结算为准」，照实说即可。
+- **想先报价再开跑**（用户问「要花多少」、长片要先确认）：同一条命令加 `--dry-run`，只探测并报价，零抽取、零上传、零计费、不建任何目录，`--json` 时 stdout 一行 `{ok, dry_run:true, source, duration, pricing}`。
 - **命令失败**（毛片路径错 / 鉴权失败 / 参数越界 6016 等）→ **进程非 0 退出、报错打到 stderr、stdout 无 JSON**。先看退出码，非 0 就把 stderr 的报错如实回给用户、别当成功。
 - 默认会自动打开产物目录（用户能直接看到文件）；纯脚本/无头环境才加 `--no-open`。
 - 云端处理是分钟级，耐心等命令返回。

@@ -222,7 +222,7 @@ DO_NOT_TRACK=1 gtrk …   # 业界通用的「不追踪」约定，同样生效
 
 ### `gtrk long2short` / `gtrk pip` / `gtrk qc` — 常用补充
 
-- `gtrk long2short <input>`：按话题选段并跳剪，逐 clip 输出 gtrk / 剪映 / XML 工程；`--split-screen` 使用 720p 代理做智能分屏；`--output-size` 选择画幅；`--subtitle-out` 另产逐 clip 字幕；`--speed-factor 0.5–2.0` 把整体调速（保音高）写进逐 clip 工程（云端不渲染、不加价）；`--camera-move` 让云端把推 / 拉镜头写成主轨片段的缩放关键帧（客户端与剪映可见可改，本地 `gtrk render` 与 PR 工程不呈现；`clips.md` 标「运镜 N 处」），之后 `gtrk patch` 裁剪 / 切分会同步维护关键帧。产物根另落整片转写 `json/transcript.json`，可对任一 clip 上客户端字幕轨：`gtrk subtitle lay --gtrk <clip 目录>/gtrk/<工程>.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`（`--language` 为云端拆行语种，缺省 zh-CN）。每次只选一种画幅，横竖屏分别运行；成片条数由内容决定。完整参数见 `gtrk long2short --help`。
+- `gtrk long2short <input>`：按话题选段并跳剪，逐 clip 输出 gtrk / 剪映 / XML 工程；`--split-screen` 使用 720p 代理做智能分屏；`--output-size` 选择画幅；`--subtitle-out` 另产逐 clip 字幕；`--speed-factor 0.5–2.0` 把整体调速（保音高）写进逐 clip 工程（云端不渲染、不加价）；`--camera-move` 让云端把推 / 拉镜头写成主轨片段的缩放关键帧（客户端与剪映可见可改，本地 `gtrk render` 与 PR 工程不呈现；`clips.md` 标「运镜 N 处」），之后 `gtrk patch` 裁剪 / 切分会同步维护关键帧。产物根另落整片转写 `json/transcript.json`，可对任一 clip 上客户端字幕轨：`gtrk subtitle lay --gtrk <clip 目录>/gtrk/<工程>.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`（`--language` 为云端拆行语种，缺省 zh-CN）。每次只选一种画幅，横竖屏分别运行；成片条数由内容决定。抽音频之前打一行实时价格与本次预估（stderr；`--json` 根结果的 `pricing`），长片想先报价就加 `--dry-run`（零抽取、零上传、零计费、不建目录）。完整参数见 `gtrk long2short --help`。
 - `gtrk pip lay`：把同步录制的屏录或第二机位按口播剪点铺成画中画。两源需有可对齐的公共声音；低置信时先在客户端校准，再按提示恢复。运行 `gtrk pip lay --help` 查看输入、形状、位置和偏移参数。
 - `gtrk qc <成片>`：检查闪帧、黑帧、冻结、音量和同步问题；用 `--gtrk` 提供工程上下文，`--fail-on` 控制管线门槛。检查结论供定位问题，不自动替你修片。
 
@@ -294,8 +294,11 @@ gtrk media boundaries "参考片.mp4" --rate 4 --threshold 0.12 --transcript "�
 | `--reupload` | 强制重传，忽略上传缓存 | 关 |
 | `--no-open` | 完成后不自动打开产物目录 | **默认自动打开** |
 | `--json` | 机读：stdout 只输出结果 JSON（给 agent / 脚本） | 关 |
+| `--dry-run` | 只探测并报价（实时价格 + 本次预估），零抽取、零上传、零计费、不建任何目录；`--json` 时 stdout 单行 `{ ok, dry_run:true, source, duration, pricing }` | 关 |
 
-`--json` 输出（成功时 stdout 单行）：`{ ok, outDir, files:{gtrk,jianying,xml}, jianyingDraftPath, rendered, report, errors, taskId, fileId }`；命令失败则进程非 0 退出、报错走 stderr、stdout 无 JSON。
+`--json` 输出（成功时 stdout 单行）：`{ ok, outDir, files:{gtrk,jianying,xml}, jianyingDraftPath, rendered, report, errors, taskId, fileId, pricing }`；命令失败则进程非 0 退出、报错走 stderr、stdout 无 JSON。
+
+> **计费提示**：抽音频之前，CLI 匿名查一次官网实时价格，往 stderr 打一行「计费提示」（单价 + 按原片时长算的本次预估积分，以服务端结算为准）；`--json` 结果的 `pricing` 是同一份数据。查不到时打「实时价格暂不可用，以服务端结算为准」，不阻断。`long2short` 同口径。
 
 > 每次跑批都会把这份结果**恒写一份 `result.json` 到产物目录**（不受 `--json` 约束）；提交成功后还会落一份 `task.json` 面包屑。即便 stdout 丢了、或中途崩了，报告与 `taskId` 都在盘上，可用下面的 `oralcut-result` 秒级取回、无需重跑云端。
 

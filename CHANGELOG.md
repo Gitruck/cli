@@ -17,6 +17,7 @@
 - `gtrk-talking-head` 快速成片开剪前先停一次：有没有文稿、B-roll 从哪来、有没有屏录或第二机位（多条毛片时再加一问是不是同一期），一张表问完才跑粗剪——粗剪是这条链第一个计费的命令。请求里已经说清的不再问；目录里没看到文稿或屏录只作提示，不再当成答案；检查点①也不再补问这几项（fix-talking-head-kickoff-gate）。
 - 修：`gtrk oralcut` 两条不同目录下的同名毛片（如换卡后重复的 `C0001.MP4`）同一秒开剪时，后落的剪映草稿会整份覆盖先落的那份，且没有任何提示。现在开剪前就在剪映草稿根里占好草稿文件夹，撞名时后到的那份改叫 `…-2` 并提示，原草稿逐字节不动；同一目录下同名毛片同秒并行时，产物目录同样追加 `-2`。显式 `--out` 重跑同一目录时，产物目录照旧复用，剪映草稿另起 `-2`，不再覆盖可能已在剪映里改过的旧草稿。顺带修正草稿信息里的名称与位置：此前每份 oralcut 草稿都写成草稿根本身（名称为「JianyingPro Drafts」），现在是草稿自己的文件夹。`gtrk oralcut-result` 取回时落回原跑批占好的文件夹；`gtrk project export` 落草稿时也不再覆盖同名草稿（fix-oralcut-jianying-draft-collision）。
 - 修：`gtrk long2short` 与 `gtrk tool video_translate_dub` 的剪映草稿名不带时间戳，不同目录下的同名毛片哪怕先后跑，后跑的也会把先跑的草稿整份覆盖（long2short 两次条数不同时，一组草稿里还会混着两条毛片的片段），且没有提示。现在提交前就定下草稿名：同一条毛片在同一产物目录重跑，照旧覆盖上一次的草稿；撞上别的毛片的草稿时改落 `…-2`（long2short 整组改名，如 `talk-long2short-2_clip0`）并提示，原草稿逐字节不动。升级前跑过的产物目录第一次重跑会多出一份 `-2`。`gtrk project export` 的剪映草稿信息里的名称与位置也改正为草稿自己的文件夹（此前写成草稿根本身，名称为「JianyingPro Drafts」）（fix-long2short-dub-export-draft-collision）。
+- 修：`gtrk oralcut` 与 `gtrk long2short` 跑之前不打印价格——skill 一直写着「跑前 CLI 自动查实时价并打印」，实际这两条命令从来没接价格查询。现在抽音频之前查一次官网实时价格，往 stderr 打一行「计费提示」：单价，加上按原片时长算的本次预估积分（以服务端结算为准）；`--json` 结果与 `result.json` 增加 `pricing`。查不到时打「实时价格暂不可用，以服务端结算为准」，照常往下跑。两条命令新增 `--dry-run`：只探测并报价，不抽取、不上传、不计费、不建任何目录，适合长片或开工问询时先报价。`gtrk-oralcut`、`gtrk-long2short`、`gtrk-talking-head`、`gtrk-live-slicing`、`gtrk-narration` 的计费说明同步改写，`gtrk-live-slicing` 里写死的单价已删（fix-oralcut-long2short-price-line）。
 
 ## 1.3.10（2026-10-26）
 

@@ -30,9 +30,15 @@ import { createOutDir } from "../lib/tool-runner";
 import { assertEnum, assertEnumIn, assertSourceLanguage } from "../lib/enum-catalog";
 import { log, routeLogsToStderr } from "../lib/log";
 import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
+import { emitBillingHint, resolveDurationPricing, resolveToolPricing, type PriceResolver } from "../lib/tool-pricing";
 
 // cli 域特例：taskType 含 /cli 前缀，cloud.ts 的 /task/${taskType} 模板天然拼出 /task/cli/video_oral_cut_for_cli
 const TASK_TYPE = "cli/video_oral_cut_for_cli";
+// 价格表 key 取产品主条（fix-oralcut-long2short-price-line D1）：CLI 渠道分账条 video_oral_cut_for_cli
+// （gc_task_type id 43）show_in_price_list=0、不在公开价格表里；扣费按渠道条自身那一行，
+// 二者同价靠 infra「同产品同计费」的约定维持，没有机制保证——价格行恒带「以服务端结算为准」。
+const PRICE_KEY = "video_oral_cut";
+const PRICING_CONTEXT = "智能口播剪辑（按上传物时长）";
 
 /** 本地时间戳 YYMMDD-HHMMSS（如 260629-191530），用于产物目录名区分每一次剪辑。 */
 function timestamp(): string {
@@ -59,6 +65,7 @@ interface OralCutOpts {
 	open?: boolean;
 	reupload?: boolean;
 	json?: boolean;
+	dryRun?: boolean;
 }
 
 /** --param 收集器（重复出现即累积）。 */
@@ -92,6 +99,8 @@ export interface OralCutDeps {
 	uploadAndSubmit: typeof uploadAndSubmitTask;
 	/** 轮询（缺省真 `pollTask`）。离线测试注入它，才能在不联网的前提下走过「提交成功 → 写 task.json」这一段。 */
 	poll: typeof pollTask;
+	/** 实时价格解析（缺省真 `resolveToolPricing`，匿名查公开价格表）。离线测试注入它，单测才不会真打线上接口。 */
+	resolvePricing: PriceResolver;
 }
 
 function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
@@ -103,6 +112,7 @@ function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
 		landingWait: o.landingWait ?? {},
 		uploadAndSubmit: o.uploadAndSubmit ?? uploadAndSubmitTask,
 		poll: o.poll ?? pollTask,
+		resolvePricing: o.resolvePricing ?? resolveToolPricing,
 	};
 }
 
@@ -164,6 +174,7 @@ export function registerOralCut(program: Command): void {
 		.option("--reupload", "强制重新上传，忽略本地上传缓存")
 		.option("--no-open", "完成后不自动打开产物目录（默认会自动打开）")
 		.option("--json", "机读模式：人读日志转 stderr，stdout 只输出结果 JSON（给 agent/脚本解析）")
+		.option("--dry-run", "只探测并报价（实时价格 + 本次预估）：零抽取、零上传、零计费，不建任何目录")
 		.action(async (input: string, opts: OralCutOpts) => {
 			await runOralCut(input, opts);
 		});
@@ -252,6 +263,18 @@ export async function runOralCut(
 	// 并集校验：服务端**同时接受** aliases 里的旧细粒度值（jianying_draft 等），只按 public 判会误拒。
 	for (const f of formats) assertEnumIn(["project_formats.public", "project_formats.aliases"], "--formats", f);
 
+	// ①b′ 零计费报价（fix-oralcut-long2short-price-line D5）：校验类的闸跑完就分叉，查价打一行后返回。
+	//   不进落点闸（它会交互等待）、不占位草稿、不建任何目录——dry-run 的定义就是什么都不写。
+	if (opts.dryRun) {
+		const quote = await resolveDurationPricing(PRICE_KEY, geo.duration, PRICING_CONTEXT, deps.resolvePricing);
+		emitBillingHint(quote.billingHint);
+		log.ok("[dry-run] 只探测与报价：零抽取、零上传、零提交、零计费，未建任何目录。");
+		if (opts.json) {
+			console.log(JSON.stringify({ ok: true, dry_run: true, source: sourceRateInfo(inputAbs, geo), duration: geo.duration, pricing: quote.pricing }));
+		}
+		return;
+	}
+
 	// ①c 落点可写性闸 Gate A（add-artifact-landing-gate · 裁决 D5）——MUST 排在抽取/上传/提交之前：
 	//   此刻 outDir 与 draftDir 都已解析，且零抽取、零上传、零提交、零计费。
 	//   排在时长硬闸**之后**，是为了不让一个注定被 2h 上限拒掉的跑批先去打扰用户等待。
@@ -276,6 +299,13 @@ export async function runOralCut(
 		await mkdir(draftDir, { recursive: true });
 		draftTarget = await createOutDir(join(draftDir, basename(outDir)), true, "剪映草稿文件夹");
 	}
+
+	// ①e 实时价格行（fix-oralcut-long2short-price-line D2）——零成本前置区真正的最后一步、任何抽取之前：
+	//   排在所有会拒单的闸之后（被拒的运行不发请求），排在抽取之前（看到价格还来得及 Ctrl-C，零上传零计费）。
+	//   查不到 / 超时只降级为「实时价格暂不可用」、永不抛错，所以不在失败路径上（上方「失败路径不依赖网络」照旧成立），
+	//   也不会让刚占下的草稿文件夹成孤儿。
+	const quote = await resolveDurationPricing(PRICE_KEY, geo.duration, PRICING_CONTEXT, deps.resolvePricing);
+	emitBillingHint(quote.billingHint);
 
 	// 用当前 file_id 拼提交体（缓存失效/延迟可见时要重拼，故抽成函数）
 	const buildPayload = (fid: string): Record<string, unknown> => {
@@ -388,6 +418,8 @@ export async function runOralCut(
 		landingWall: { sourcePath: inputAbs, durationSec: geo.duration },
 		// 源片帧率账面（add-frame-rate-table-vfr-detect D4）：r / avg / vfr 三值进 --json source 与 result.json
 		source: sourceRateInfo(inputAbs, geo),
+		// 跑前查到的实时价格与预估（fix-oralcut-long2short-price-line D4）：进 --json 与 result.json，agent 不读 stderr 也能转述
+		pricing: quote.pricing,
 		landingWait: overrides.landingWait,
 	});
 
