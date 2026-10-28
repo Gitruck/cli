@@ -7,7 +7,7 @@
  * 下载遇 404（产物过期被 GC）不整体中止：记入 errors、仍完成报告落盘与输出。
  */
 import { join, basename, dirname } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rmdir, writeFile } from "node:fs/promises";
 import { collectWriteViolations, type WriteViolation } from "./gtrk-invariants";
 import { download as realDownload, type OralCutOutput } from "./cloud";
 import { copyJianyingDraft } from "./jianying";
@@ -18,6 +18,7 @@ import { openFolder } from "./open";
 import { log } from "./log";
 import { ensureLandingWritable, type LandingWaitDeps } from "./landing-wait";
 import { readJson } from "./read-json";
+import { createOutDir } from "./tool-runner";
 
 /** 把云端返回的细分格式名归一化到基础格式（jianying_draft/jianying_meta → jianying）。 */
 export function baseFormat(fmt: string): string {
@@ -45,6 +46,12 @@ export interface MaterializeOpts {
 	fileId?: string | null;
 	/** 剪映草稿根目录（有则把草稿拷进去）。 */
 	draftDir?: string;
+	/**
+	 * 本任务**已拥有**的具体草稿文件夹（fix-oralcut-jianying-draft-collision D4）：oralcut 提交前占下的、或
+	 * oralcut-result 从 task.json 认领的。给了就直接落、不再仲裁（它就是提交时写进草稿 meta 的那个文件夹）；
+	 * 缺省时在草稿根里对 `<草稿根>/<产物目录名>` 原子仲裁，撞名改落 `-2…`，MUST NOT 落进别人的已存在草稿。
+	 */
+	draftTarget?: string;
 	/**
 	 * Gate B（落点闸的兜底面，add-artifact-landing-gate §4.4a）。
 	 * `materializeResult` 是 `gtrk oralcut` 与 `gtrk oralcut-result` **共用的**唯一落地入口，
@@ -274,10 +281,27 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 	// 剪映：把草稿拷进 <草稿目录>/<产物目录同名>/（尽力而为，失败记错不中止）。
 	// 文件名走命名律落地器：云端 oralcut 今日产的就是固定两件套名，此处逐字节 no-op——
 	// 换的是防线，「带前缀名剪映扫不到」那枚 bug 不该有第二条实现路径（见 long2short ⑦）。
+	//
+	// 落点（fix-oralcut-jianying-draft-collision）：草稿根是所有毛片共用的一层目录，`basename(outDir)` 只带「毛片名+秒」，
+	// 不同目录下的同名毛片同秒就会撞（2026-10-27 两条 clip0.mp4 实证，先落的那份被整份覆盖）。
+	// 故调用方没给已拥有的 `draftTarget` 时，在这里用 createOutDir 原子仲裁（非递归 mkdir，EEXIST 换 -2…）。
+	// `claim` 只成功仲裁一次：Gate B 重试时沿用已建好的文件夹，免得在自己的空目录旁边再占一个 -2。
 	let jianyingDraftPath: string | null = null;
 	if (byFormat.jianying && opts.draftDir) {
-		const dest = join(opts.draftDir, basename(outDir));
+		const draftRoot = opts.draftDir;
+		const candidate = join(draftRoot, basename(outDir));
+		let claimed: string | undefined = opts.draftTarget;
+		const claim = async (): Promise<string> => {
+			if (!claimed) {
+				// 显式 --jianying-draft-dir 可以指向尚不存在的目录（原先由拷贝的 recursive mkdir 顺手建出），非递归仲裁前先补上
+				await mkdir(draftRoot, { recursive: true });
+				claimed = await createOutDir(candidate, true, "剪映草稿文件夹");
+			}
+			return claimed;
+		};
+		let dest = claimed ?? candidate;
 		try {
+			dest = await claim();
 			const landing = await copyJianyingDraft(join(outDir, "jianying"), dest);
 			if (landing.complete) {
 				jianyingDraftPath = dest;
@@ -294,6 +318,7 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 				log.warn(`本地写入失败：剪映草稿写不进 ${dest} —— ${msg}`);
 				if (await gateB(opts.draftDir, "剪映草稿根")) {
 					try {
+						dest = await claim();
 						const again = await copyJianyingDraft(join(outDir, "jianying"), dest);
 						if (again.complete) {
 							jianyingDraftPath = dest;
@@ -321,6 +346,9 @@ export async function materializeResult(opts: MaterializeOpts): Promise<Material
 			}
 		}
 	}
+	// 本任务占好的草稿文件夹最终没落成草稿（云端没产剪映 / 产物过期 / 落地失败）⇒ 仍为空就删掉，不在草稿根留空壳。
+	// 非递归 rmdir：里面已有东西（如两件套落了一件）就删不掉、原样留着，宁留勿误删。
+	if (opts.draftTarget && !jianyingDraftPath) await rmdir(opts.draftTarget).catch(() => undefined);
 
 	// 本地渲染成片（--render）：需 gtrk 已成功下载；gtrk 缺失（未选/已过期）则告警跳过、不阻断报告
 	let rendered: string | null = null;

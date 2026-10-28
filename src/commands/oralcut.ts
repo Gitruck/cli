@@ -9,7 +9,7 @@
  */
 import { Command } from "commander";
 import { resolve, join, dirname, basename, extname } from "node:path";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, rmdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { loadConfig } from "../lib/config";
 import { pollTask } from "../lib/cloud";
@@ -26,6 +26,7 @@ import {
 	sourceRateInfo,
 } from "../lib/media";
 import { materializeResult } from "../lib/materialize";
+import { createOutDir } from "../lib/tool-runner";
 import { assertEnum, assertEnumIn, assertSourceLanguage } from "../lib/enum-catalog";
 import { log, routeLogsToStderr } from "../lib/log";
 import { ensureLandingWritable, type LandingWaitDeps } from "../lib/landing-wait";
@@ -89,6 +90,8 @@ export interface OralCutDeps {
 	 * 现补上注入点，让 §2.9 的四个数字都能被**字面**断言。
 	 */
 	uploadAndSubmit: typeof uploadAndSubmitTask;
+	/** 轮询（缺省真 `pollTask`）。离线测试注入它，才能在不联网的前提下走过「提交成功 → 写 task.json」这一段。 */
+	poll: typeof pollTask;
 }
 
 function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
@@ -99,6 +102,7 @@ function buildDeps(o: Partial<OralCutDeps> = {}): OralCutDeps {
 		compress: o.compress ?? compress720p,
 		landingWait: o.landingWait ?? {},
 		uploadAndSubmit: o.uploadAndSubmit ?? uploadAndSubmitTask,
+		poll: o.poll ?? pollTask,
 	};
 }
 
@@ -183,8 +187,9 @@ export async function runOralCut(
 	if (opts.render && !formats.includes("gtrk")) formats.push("gtrk");
 	const wantJianying = formats.some((f) => f === "jianying" || f === "capcut");
 	// 缺省产物目录与毛片同目录，名为 <毛片名>-video-project-<时间戳>
-	// 目录延后到首次真正写入（task.json / 产物 / result.json）才建，提交前失败不留空壳
-	const outDir = resolve(opts.out ?? join(dirname(inputAbs), `${projName}-video-project-${timestamp()}`));
+	// 目录延后到首次真正写入（task.json / 产物 / result.json）才建，提交前失败不留空壳。
+	// 此处只是候选名：缺省支在首写时原子防撞（同目录同名同秒 ⇒ -2…），回填后下游一律读 outDir。
+	let outDir = resolve(opts.out ?? join(dirname(inputAbs), `${projName}-video-project-${timestamp()}`));
 
 	// 文稿：显式 --script 优先；没给则探毛片同目录同名 .txt
 	let scriptPath = opts.script ? resolve(opts.script) : undefined;
@@ -260,16 +265,17 @@ export async function runOralCut(
 		await ensureLandingWritable(draftDir, "剪映草稿根", { json: opts.json, deps: overrides.landingWait });
 	}
 
-	const artifact = opts.visualAssist
-		? await deps.compress(inputAbs, opts.ffmpegPath)
-		: await deps.extract(inputAbs, opts.ffmpegPath);
-	assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
-	log.info(
-		opts.visualAssist ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`,
-	);
-
-	// ② 上传抽出物 → file_id（毛片不出本地；指纹缓存复用免二次上传）
-	log.step("② 上传抽出物到云端…");
+	// ①d 占位剪映草稿文件夹（fix-oralcut-jianying-draft-collision D2）——零成本前置区的最后一步：
+	//   草稿根是所有毛片共用的一层目录，<产物目录名> 只带「毛片名+秒」，不同目录的同名毛片同秒必撞
+	//   （2026-10-27 两条 clip0.mp4 实证，先落的那份被整份覆盖）。故提交前就原子占下具体文件夹（撞名 -2…），
+	//   并把它作为 nle_draft_dir 提交——服务端据此写草稿 meta 的 draft_name / draft_fold_path，名字必须此刻定下。
+	//   占位是空目录，两件套没落之前剪映列表里不显示。
+	//   显式 --jianying-draft-dir 可以指向尚不存在的目录（原先由落地时的 recursive mkdir 顺手建出），非递归仲裁前先补上。
+	let draftTarget: string | undefined;
+	if (wantJianying && draftDir) {
+		await mkdir(draftDir, { recursive: true });
+		draftTarget = await createOutDir(join(draftDir, basename(outDir)), true, "剪映草稿文件夹");
+	}
 
 	// 用当前 file_id 拼提交体（缓存失效/延迟可见时要重拼，故抽成函数）
 	const buildPayload = (fid: string): Record<string, unknown> => {
@@ -284,7 +290,8 @@ export async function runOralCut(
 			rhythm_preset: opts.preset,
 		};
 		if (script) p.script = script;
-		if (draftDir) p.struct_meta = { nle_draft_dir: draftDir };
+		// 传**具体草稿文件夹**而非草稿根：传草稿根会让每份草稿的 meta 都自称「JianyingPro Drafts」（D3）
+		if (draftTarget) p.struct_meta = { nle_draft_dir: draftTarget };
 		if (opts.visualAssist) p.visual_assist = true; // 720p 输入下云端做说话检测
 		if (opts.adaptiveRhythm === false) p.adaptive_rhythm = false;
 		// 通用透传优先级最高：agent 永远能强制覆盖上面任何字段（对象字段做逐字段合并，免整体覆盖丢字段）
@@ -299,28 +306,57 @@ export async function runOralCut(
 		return p;
 	};
 
-	// ③ 提交 cli/video_oral_cut_for_cli；共享恢复边界收编新 ID 可见性与缓存失效
-	const submitted = await deps.uploadAndSubmit(cfg, artifact, TASK_TYPE, buildPayload, {
-		force: opts.reupload,
-		onUploaded: (uploaded) => {
-			log.info(
-				uploaded.cached
-					? `命中上传缓存，复用 file_id = ${uploaded.fileId}（免二次上传）`
-					: `file_id = ${uploaded.fileId}`,
-			);
-			log.step("③ 提交智能口播剪辑任务…");
-		},
-		onCacheInvalid: () => log.warn("缓存的 file_id 在云端已失效，重新上传后重试…"),
-	});
+	// 占位之后、提交成功之前任何一步失败（抽取 / 时长自检 / 上传 / 提交）⇒ 删掉空占位再上抛，不在草稿根留空壳。
+	// 非递归 rmdir：删不掉（已有东西）就留着，宁留勿误删。提交成功后不再清理——占位是 oralcut-result 认领的锚点。
+	let submitted: Awaited<ReturnType<OralCutDeps["uploadAndSubmit"]>>;
+	try {
+		const artifact = opts.visualAssist
+			? await deps.compress(inputAbs, opts.ffmpegPath)
+			: await deps.extract(inputAbs, opts.ffmpegPath);
+		assertDurationConsistent(geo.duration, artifact, opts.ffmpegPath);
+		log.info(
+			opts.visualAssist ? `已压 720p 代理（上传物）：${basename(artifact)}` : `已抽 16k 单声道 mp3（上传物）：${basename(artifact)}`,
+		);
+
+		// ② 上传抽出物 → file_id（毛片不出本地；指纹缓存复用免二次上传）
+		log.step("② 上传抽出物到云端…");
+
+		// ③ 提交 cli/video_oral_cut_for_cli；共享恢复边界收编新 ID 可见性与缓存失效
+		submitted = await deps.uploadAndSubmit(cfg, artifact, TASK_TYPE, buildPayload, {
+			force: opts.reupload,
+			onUploaded: (uploaded) => {
+				log.info(
+					uploaded.cached
+						? `命中上传缓存，复用 file_id = ${uploaded.fileId}（免二次上传）`
+						: `file_id = ${uploaded.fileId}`,
+				);
+				log.step("③ 提交智能口播剪辑任务…");
+			},
+			onCacheInvalid: () => log.warn("缓存的 file_id 在云端已失效，重新上传后重试…"),
+		});
+	} catch (e) {
+		if (draftTarget) await rmdir(draftTarget).catch(() => undefined);
+		throw e;
+	}
 	const { taskId } = submitted;
 	const up = { fileId: submitted.fileId, cached: submitted.cached };
 	log.info(`task_id = ${taskId}`);
-	// 面包屑：submit 一成功就落盘 task.json（按需建 outDir），任何后续崩溃都能据此按 task_id 恢复
-	await mkdir(outDir, { recursive: true });
+	// 面包屑：submit 一成功就落盘 task.json（按需建 outDir），任何后续崩溃都能据此按 task_id 恢复。
+	// 建目录走原子防撞（D7）：缺省支同目录同名同秒 ⇒ -2…；显式 --out 是用户明示落点，照旧复用。
+	outDir = await createOutDir(outDir, opts.out === undefined);
 	await writeFile(
 		join(outDir, "task.json"),
 		JSON.stringify(
-			{ taskId, taskType: TASK_TYPE, fileId: up.fileId, source: inputAbs, formats, createdAt: new Date().toISOString() },
+			{
+				taskId,
+				taskType: TASK_TYPE,
+				fileId: up.fileId,
+				source: inputAbs,
+				formats,
+				// 本任务占下的草稿文件夹：oralcut-result 据此认领，落回提交时写进草稿 meta 的那个文件夹
+				...(draftTarget ? { jianyingDraftDir: draftTarget } : {}),
+				createdAt: new Date().toISOString(),
+			},
 			null,
 			2,
 		),
@@ -328,7 +364,7 @@ export async function runOralCut(
 
 	// ④ 轮询到完成
 	log.step("④ 云端处理中（每 5s 轮询）…");
-	const result = await pollTask(cfg, TASK_TYPE, taskId, (status, progress) => {
+	const result = await deps.poll(cfg, TASK_TYPE, taskId, (status, progress) => {
 		log.tick(`${status}${progress != null ? ` ${Math.round(progress)}%` : ""}`);
 	});
 	log.tickEnd();
@@ -340,6 +376,7 @@ export async function runOralCut(
 		taskId,
 		fileId: up.fileId,
 		draftDir,
+		draftTarget,
 		render: opts.render,
 		crf: opts.crf,
 		codec: opts.codec,

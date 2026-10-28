@@ -467,8 +467,11 @@ function fsErrCode(e: unknown): string | undefined {
  * `antiCollision=false` 保持 `mkdir(recursive:true)`，两支行为逐字节不变：
  * `<输入名>-<tool>/` 重跑同一输入本就该落回同一目录（幂等重跑是设计如此）；
  * `--out` 是用户明示的落点，替他改名反而是惊吓（skill 里「落进工程目录」的用法全靠这条）。
+ *
+ * `label` 只换告警与报错里的称谓（fix-oralcut-jianying-draft-collision D1）：剪映草稿根里的仲裁传「剪映草稿文件夹」，
+ * 缺省「产物目录」使既有调用方的措辞逐字节不变。仲裁本身仍只有这一份实现。
  */
-export async function createOutDir(candidate: string, antiCollision: boolean): Promise<string> {
+export async function createOutDir(candidate: string, antiCollision: boolean, label = "产物目录"): Promise<string> {
 	if (!antiCollision) {
 		await mkdir(candidate, { recursive: true });
 		return candidate;
@@ -478,7 +481,7 @@ export async function createOutDir(candidate: string, antiCollision: boolean): P
 		try {
 			await mkdir(dir); // 非 recursive：已存在即 EEXIST（唯一仲裁点）
 			if (n > 1) {
-				emitWarn(`产物目录「${basename(candidate)}」已被占用，本次改落「${basename(dir)}」（既有目录原样保留）`);
+				emitWarn(`${label}「${basename(candidate)}」已被占用，本次改落「${basename(dir)}」（既有目录原样保留）`);
 			}
 			return dir;
 		} catch (e) {
@@ -486,7 +489,7 @@ export async function createOutDir(candidate: string, antiCollision: boolean): P
 		}
 	}
 	throw new Error(
-		`产物目录「${candidate}」及其 -2…-${MAX_OUTDIR_CANDIDATES} 序号变体均已被占用，无法确定落点。` +
+		`${label}「${candidate}」及其 -2…-${MAX_OUTDIR_CANDIDATES} 序号变体均已被占用，无法确定落点。` +
 			`请清理旧产物或用 --out 显式指定目录。`,
 	);
 }

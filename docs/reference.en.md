@@ -285,7 +285,7 @@ gtrk media boundaries "reference.mp4" --rate 4 --threshold 0.12 --transcript "re
 |---|---|---|
 | `-s, --script <file>` | Script txt (cutting against a script is more accurate) | Looks for a `.txt` next to the raw file; otherwise reconstructs the script automatically |
 | `-p, --preset <p>` | Pacing `steady`\|`concise`\|`compact` (loose → tight) | `concise` |
-| `-o, --out <dir>` | Custom output folder | `<raw-name>-video-project-<timestamp>` |
+| `-o, --out <dir>` | Custom output folder | `<raw-name>-video-project-<timestamp>` (`-2`… is appended when the same name is taken within the same second; the Jianying draft folder follows the same rule) |
 | `-f, --formats <list>` | Comma-separated list of the three formats | `gtrk,jianying,xml` |
 | `--jianying-draft-dir <dir>` | Jianying draft root (or `auto`) | Reads the init config / auto-detects |
 | `--reupload` | Force re-upload, ignoring the upload cache | off |

@@ -288,7 +288,7 @@ gtrk media boundaries "参考片.mp4" --rate 4 --threshold 0.12 --transcript "�
 |---|---|---|
 | `-s, --script <file>` | 文字稿 txt（有稿按稿剪、更准） | 探毛片同名 `.txt`；无则无稿智能重建 |
 | `-p, --preset <p>` | 节奏 `steady`\|`concise`\|`compact`（松→紧） | `concise` |
-| `-o, --out <dir>` | 自定义产物目录 | `<毛片名>-video-project-<时间戳>` |
+| `-o, --out <dir>` | 自定义产物目录 | `<毛片名>-video-project-<时间戳>`（同目录同名同秒撞名时追加 `-2`…；剪映草稿文件夹同理） |
 | `-f, --formats <list>` | 三方格式逗号分隔 | `gtrk,jianying,xml` |
 | `--jianying-draft-dir <dir>` | 剪映草稿根目录（或 `auto`） | 读 init 配置 / 自动探测 |
 | `--reupload` | 强制重传，忽略上传缓存 | 关 |
