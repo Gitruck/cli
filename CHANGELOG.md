@@ -12,7 +12,8 @@
 ## 未发布
 
 - 新增：`gtrk tool image_purify --redraw` 图片去水印「重绘模式」——整张图交给图片编辑模型重新生成，铺满全图的半透明、网格水印也能去掉；与 `--purify-scope region` 同用时只替换框内。单独计价，运行前报价按重绘档；也可 `--params-json '{"purify_method":"redraw"}'`。不加 `--redraw` 时请求与之前逐字节相同。价格表里挂在父项下的分档（`tiers`，如重绘、区分说话人、云配音各音色档）现在也能按自己的 key 查到实时价格（link-add-image-purify-redraw-mode-cli）。
-- Skill 措辞订正（ClawHub 安全扫描指出的自相矛盾与告知缺口）：`gtrk-matrix` 的描述把「素材本体不上云」改准为视频本体不上云、选中上轨的图片会上云转运镜（正文早已写明）；`gtrk-narration` / `gtrk-food-recap` / `gtrk-vlog-docu` 的「不执行任何网络下载」收窄为不下载二创源片与主体素材，素材矩阵的 BGM / 空镜可按签名直链落地（与旅拍图纸同口径，此前与各自的 BGM 伴奏下载步骤字面冲突）；`gtrk-narration` 开工问询补一句内容离机告知（转写上传音轨、建索引上传抽帧图）；`gtrk-style-maker` 安装用户 skill 前先问装到哪些 Agent（缺省只装当前这个），适配器钉在 `skills@1.7.4`。
+- Skill 措辞订正（ClawHub 安全扫描指出的自相矛盾与告知缺口）：`gtrk-matrix` 的描述把「素材本体不上云」改准为视频本体不上云、选中上轨的图片会上云转运镜（正文早已写明）；`gtrk-narration` / `gtrk-food-recap` / `gtrk-vlog-docu` 的「不执行任何网络下载」收窄为不下载二创源片与主体素材，素材矩阵的 BGM / 空镜可按签名直链落地（与旅拍图纸同口径，此前与各自的 BGM 伴奏下载步骤字面冲突）；`gtrk-narration` 开工问询补一句内容离机告知（转写上传音轨、建索引上传抽帧图）；`gtrk-style-maker` 安装用户 skill 前先问装到哪些 Agent（缺省只装当前这个），适配器钉在 `skills@1.7.4`。下载禁令的射程同步写进解说链规格（fix-narration-download-ban-scope）。
+- `gtrk-oralcut` 剪完不再一律往下接力：只要剪辑工程、草稿或去停顿时，剪完停在交工，一句话交代下一步，说一声就接着做；看不出要不要成片时也先停。要成片、完整包装，或点名 B-roll、字卡、BGM、字幕之一时，照旧接着拆分镜派单。按 `/gtrk-talking-head` 跑粗剪时交回图纸，停在检查点①（adjust-oralcut-relay-by-request-scope）。
 
 ## 1.3.10（2026-10-26）
 
