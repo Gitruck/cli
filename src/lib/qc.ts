@@ -493,9 +493,12 @@ export interface CandidateRef {
 	score: number;
 	/** 去重后帧间分 p50（越低越稳）；索引无信号时 undefined。 */
 	motionP50?: number;
-	/** 段内已知切点数（越少越好）。 */
+	/** 段内已知切点数（排序按它除以段长的密度）；该素材未扫过切点（plan 段无 `cuts`）时 undefined。 */
 	cutCount?: number;
 }
+
+/** 已上轨的源窗（`SlotRef` 的子集）：判某候选段「用没用过」的依据。 */
+export type UsedWindow = Pick<SlotRef, "clipId" | "clipSt" | "clipEd">;
 
 /** 从工程 struct_meta.broll 抽出全部落成槽位（按 track_st 升序）。 */
 export function slotsFromGtrk(gtrk: unknown): SlotRef[] {
@@ -536,17 +539,129 @@ export function toSourceTime(slots: SlotRef[], t: number, windowSec: number = QC
 	return { slot, src: r3(slot.clipSt + (t - slot.trackSt)) };
 }
 
-/** 同 beat 未被采用的候选段，按「稳」排序：运动量升序 → 段内切点数升序 → score 降序。
- * 索引无运动信号时退回单维（切点数）排序，调用方据 `ranked_by` 标注口径受限。 */
-export function rankAlternatives(candidates: CandidateRef[], usedClipIds: Set<string>): CandidateRef[] {
+/** 段内切点密度（切点/秒）；未扫过切点时 undefined。 */
+function cutDensity(c: CandidateRef): number | undefined {
+	if (c.cutCount === undefined) return undefined;
+	const len = c.end - c.start;
+	return len > 0 ? c.cutCount / len : c.cutCount > 0 ? Number.POSITIVE_INFINITY : 0;
+}
+
+/** 同 beat 未被采用的候选段，按「稳」排序：运动量升序 → 段内切点密度升序 → score 降序。
+ * 「未被采用」按**段**判：同 clip 已上轨的源窗与该段有交叠即算用过。按 clip_id 判会把同一 clip 下没用的段
+ * 一并剔掉——手组 plan 一个 beat 常是一个 clip_id 带好几段，2026-10-28 真机两份工程因此全片零备选。
+ * 运动量 / 切点缺席 = 不可判，排在有信号者之后（MUST NOT 当「平稳」「零切点」）；口径由 {@link alternativesEvidence} 标注。 */
+export function rankAlternatives(candidates: CandidateRef[], used: UsedWindow[]): CandidateRef[] {
+	const inUse = (c: CandidateRef): boolean => used.some((u) => u.clipId === c.clipId && u.clipSt < c.end && u.clipEd > c.start);
+	const unknown = Number.POSITIVE_INFINITY;
 	return candidates
-		.filter((c) => !usedClipIds.has(c.clipId))
+		.filter((c) => !inUse(c))
 		.sort(
 			(a, b) =>
-				(a.motionP50 ?? Number.POSITIVE_INFINITY) - (b.motionP50 ?? Number.POSITIVE_INFINITY) ||
-				(a.cutCount ?? 0) - (b.cutCount ?? 0) ||
+				(a.motionP50 ?? unknown) - (b.motionP50 ?? unknown) ||
+				(cutDensity(a) ?? unknown) - (cutDensity(b) ?? unknown) ||
 				b.score - a.score,
 		);
+}
+
+/** plan 里某 beat 的全部候选段（`queries[].results[].segments[]` 摊平，与 `matrix lay` 的 mergedCandidates 同一来源；
+ * 多个 query 命中同一段只算一次）。plan 里没有该 beat 时 null——调用方据此说明，不与「有 beat 但没段」混同。 */
+export function candidatesFromPlan(plan: unknown, beat: string): CandidateRef[] | null {
+	type Seg = { start?: unknown; end?: unknown; score?: unknown; cuts?: unknown; motion?: { p50?: unknown } };
+	type Entry = { beat?: unknown; queries?: { results?: { clip_id?: unknown; score?: unknown; segments?: Seg[] }[] }[] };
+	const beats = (plan as { beats?: unknown } | null | undefined)?.beats;
+	if (!Array.isArray(beats)) return null;
+	const entry = (beats as Entry[]).find((b) => b?.beat === beat);
+	if (!entry) return null;
+	const out: CandidateRef[] = [];
+	const seen = new Set<string>();
+	for (const q of Array.isArray(entry.queries) ? entry.queries : []) {
+		for (const r of Array.isArray(q?.results) ? q.results : []) {
+			for (const s of Array.isArray(r?.segments) ? r.segments : []) {
+				const start = Number(s?.start);
+				const end = Number(s?.end);
+				if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+				const clipId = String(r.clip_id ?? "");
+				const key = `${clipId}@${start}-${end}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				const p50 = s.motion?.p50;
+				out.push({
+					clipId,
+					start,
+					end,
+					score: typeof s.score === "number" ? s.score : Number(r.score) || 0,
+					...(typeof p50 === "number" && Number.isFinite(p50) ? { motionP50: p50 } : {}),
+					...(Array.isArray(s.cuts) ? { cutCount: s.cuts.length } : {}),
+				});
+			}
+		}
+	}
+	return out;
+}
+
+/** 每条缺陷附几条备选：够 agent 列清单给用户挑，又不至于让同一槽位的多处跳切把报告撑爆（总数另报）。 */
+const ALTERNATIVES_SHOWN = 3;
+
+/**
+ * 排序备选 → 证据键（add-material-motion-signal · qc-command「缺陷带工程坐标与排序备选」）。
+ *
+ * 三种「没有」分开说：没读到 plan（不给 `alternatives`，只给 note）/ plan 里没有该 beat（同）/
+ * 该 beat 的段都已上轨（`alternatives: []` + note）。前两种若给空数组，会被读成「这处换不动」。
+ * `alternatives_ranked_by` 只列实际有信号的维度；有候选缺运动或切点信号即在 note 里标口径受限。
+ */
+export function alternativesEvidence(beat: string, used: UsedWindow[], plan: unknown): Record<string, unknown> {
+	if (plan === undefined || plan === null) {
+		return { alternatives_note: "未读到 broll-plan（split/broll-plan.json），给不出备选" };
+	}
+	const pool = candidatesFromPlan(plan, beat);
+	if (pool === null) return { alternatives_note: `broll-plan 里没有 ${beat}，给不出备选` };
+	const ranked = rankAlternatives(pool, used);
+	if (!ranked.length) return { alternatives: [], alternatives_note: `${beat} 的候选段都已上轨，没有可换的段` };
+	const withMotion = ranked.filter((c) => c.motionP50 !== undefined).length;
+	const withCuts = ranked.filter((c) => c.cutCount !== undefined).length;
+	const gaps: string[] = [];
+	if (withMotion < ranked.length) {
+		gaps.push(withMotion ? `${ranked.length - withMotion} 段无运动信号，排在有信号者之后` : "候选段都没有运动信号");
+	}
+	if (withCuts < ranked.length) {
+		gaps.push(withCuts ? `${ranked.length - withCuts} 段未扫过切点，排在扫过者之后` : "候选段都没扫过切点");
+	}
+	return {
+		alternatives: ranked.slice(0, ALTERNATIVES_SHOWN).map((c) => {
+			const density = cutDensity(c);
+			return {
+				clip_id: c.clipId,
+				segment: [c.start, c.end],
+				score: c.score,
+				motion_p50: c.motionP50 ?? null,
+				cut_count: c.cutCount ?? null,
+				cut_density: density === undefined ? null : Number.isFinite(density) ? r3(density) : "inf",
+			};
+		}),
+		...(ranked.length > ALTERNATIVES_SHOWN ? { alternatives_total: ranked.length } : {}),
+		alternatives_ranked_by: [...(withMotion ? ["motion_p50"] : []), ...(withCuts ? ["cut_density"] : []), "score"],
+		...(gaps.length ? { alternatives_note: `口径受限：${gaps.join("；")}——别把第一名当定论` } : {}),
+	};
+}
+
+/** 成片时码 → 证据里的工程坐标与排序备选。映射不唯一时只给 `coord_note`：
+ * 槽位都定不下，备选无从谈起，MUST NOT 猜一个。 */
+function slotEvidence(
+	slots: SlotRef[],
+	t: number,
+	plan: unknown,
+	opts: { sourceTime: boolean; unmappedNote: string; windowSec?: number },
+): Record<string, unknown> {
+	const mapped = toSourceTime(slots, t, opts.windowSec);
+	if (!mapped) return { coord_note: opts.unmappedNote };
+	return {
+		beat: mapped.slot.beat,
+		slot_index: mapped.slot.slotIndex,
+		clip_id: mapped.slot.clipId,
+		source_window: [mapped.slot.clipSt, mapped.slot.clipEd],
+		...(opts.sourceTime ? { source_time: mapped.src } : {}),
+		...alternativesEvidence(mapped.slot.beat, slots, plan),
+	};
 }
 
 /** gtrk 工程 → 主视频轨 clip 拼接边界（秒，升序；首 clip 起点不算切点）。
@@ -641,6 +756,9 @@ export interface QcScanOptions {
 	ffmpegPath?: string;
 	/** 工程感知模式：已解析的 gtrk 对象（命令层读文件/render 直接透传）。 */
 	gtrk?: unknown;
+	/** 排序备选的候选池：已解析的 `split/broll-plan.json`（命令层按工程登记的 plan_path 找）。
+	 * 缺省时可换段的条目只带 `alternatives_note` 说明没读到，不带备选。 */
+	plan?: unknown;
 	onProgress?: (line: string) => void;
 }
 
@@ -704,10 +822,15 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 	// 闪现判定放在**工程对表之后**（tune-shot-rhythm-thresholds D1）：严重级要按端点来源裁定，
 	// 而来源只有对表才知道。无工程时退回不分级的纯阈值报告。
 	let spliceCuts: SpliceIndex | null = null;
+	// 工程坐标（add-material-motion-signal）：把成片时码映射回 (beat, 槽位, clip, 源窗)
+	const slots = opts.gtrk ? slotsFromGtrk(opts.gtrk) : [];
+	// 拼接切点 → 对表测得的漂移（成片时基 − 工程时基），过短镜头归槽时扣用
+	const spliceDrift = new Map<number, number>();
 
 	if (opts.gtrk) {
 		const bounds = boundariesFromGtrk(opts.gtrk);
 		const { matched, intra } = matchCutsToBoundaries(cuts, bounds);
+		for (const m of matched) spliceDrift.set(m.cut, m.drift);
 		const drifts = matched.map((m) => m.drift);
 		// 拼接集合在构建处按顶层 video_rate 帧化（fix-matrix-lay-frame-grid 2.9）；老工程无合法帧率 ⇒ 毫秒口径
 		const rate = gtrkRate;
@@ -715,14 +838,11 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 			rate !== null
 				? { kind: "frames", rate, frames: new Set(matched.map((m) => sec2frame(m.cut, rate))) }
 				: { kind: "ms", ms: new Set(matched.map((m) => m.cut)) };
-		// 工程坐标（add-material-motion-signal）：把成片时码映射回 (beat, 槽位, clip, 源窗)
-		const slots = slotsFromGtrk(opts.gtrk);
 		for (const t of intra) {
 			// 定位到「跳变发生在哪一颗粒内部」：取该跳变之前最后一个已对齐的拼接切点（成片时基，
 			// 已含漂移），人跳时码复核时对得上画面；片头颗粒无前序切点则给 null
 			const prior = matched.filter((m) => m.cut <= t);
 			const clipStart = prior.length ? prior[prior.length - 1]!.cut : null;
-			const mapped = toSourceTime(slots, t);
 			items.push({
 				type: "intra_cut",
 				severity: "warn",
@@ -732,16 +852,11 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 					note: "跳变不落在任何 clip 拼接边界上：颗粒窗口内部越过了源素材的镜头切点",
 					clip_started_at: clipStart,
 					...(clipStart !== null ? { into_clip_sec: r3(t - clipStart) } : {}),
-					// 工程坐标：定位到 beat / 槽位 / 素材 / 源窗，供直接改 plan 换段
-					...(mapped
-						? {
-								beat: mapped.slot.beat,
-								slot_index: mapped.slot.slotIndex,
-								clip_id: mapped.slot.clipId,
-								source_window: [mapped.slot.clipSt, mapped.slot.clipEd],
-								source_time: mapped.src,
-							}
-						: { coord_note: "跳变落在槽位边界容差内或工程无槽位登记，无法唯一定位" }),
+					// 工程坐标 + 排序备选：定位到 beat / 槽位 / 素材 / 源窗，并给出同 beat 可换的段，供直接改 plan 换段
+					...slotEvidence(slots, t, opts.plan, {
+						sourceTime: true,
+						unmappedNote: "跳变落在槽位边界容差内或工程无槽位登记，无法唯一定位",
+					}),
 				},
 			});
 		}
@@ -752,7 +867,26 @@ export async function scanFinalCut(input: string, opts: QcScanOptions = {}): Pro
 		}
 	}
 
-	items.push(...shortShotItems(cuts, spliceCuts));
+	const shots = shortShotItems(cuts, spliceCuts);
+	if (opts.gtrk) {
+		// 判 error 的过短镜头同样可换段修复（窗口跨过源切点）：按镜头中点归槽，带坐标与备选；
+		// 不带 source_time——它不是一个切点，`--feedback-cuts` 也只收段内跳切。
+		// 归槽先扣拼接端的漂移、再用零窗：error 必有一端是拼接切，其漂移对表时已测得；镜头离拼接处不过半拍，
+		// 照段内跳切用 3 帧反查窗会同时罩住前后两槽（真机 0.067s / 0.167s 两处闪帧即如此，最短的反而无坐标）
+		for (const s of shots) {
+			if (s.severity !== "error") continue;
+			const drift = spliceDrift.get(s.st) ?? spliceDrift.get(s.ed) ?? 0;
+			Object.assign(
+				s.evidence,
+				slotEvidence(slots, (s.st + s.ed) / 2 - drift, opts.plan, {
+					sourceTime: false,
+					unmappedNote: "镜头中点落在槽位之外或工程无槽位登记，无法唯一定位",
+					windowSec: 0,
+				}),
+			);
+		}
+	}
+	items.push(...shots);
 
 	// 用 import 进来的那个绑定（`parseBlackDetect` 只是它的导出别名，本模块内无同名局部绑定）
 	for (const b of parseBlackSpans(vErr)) {

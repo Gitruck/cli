@@ -11,6 +11,8 @@
 
 ## 未发布
 
+- 修：`gtrk qc --gtrk` 与 `gtrk render` 渲后质检的报告里从来没有换段备选——`gtrk-mg` 出片后 QC 闭环第 2 步「读它给的排序备选」无从读起，只能手找候选段。现在段内跳切与判为严重的过短镜头条目带 `alternatives`：同一 beat 里还没上轨的候选段（从工程登记的 `split/broll-plan.json` 取），每条给 `clip_id`、段区间与排序依据，按运动量 → 切点密度 → 分数排序，列前 3 段（多于 3 段另报总数）；候选缺运动或切点信号时 `alternatives_note` 注明口径受限。「未上轨」按段判：此前按 `clip_id` 判，一个 beat 只有一条素材、底下好几段的工程会被判成零备选。该 beat 的段都已上轨时给空列表并说明；没读到 plan 时不给列表、只给说明。判为严重的过短镜头此前不带 beat / 槽位坐标，现在带上，紧贴拼接处的极短镜头（一两帧）也能归到槽位（add-material-motion-signal 4.2）。
+
 - 新增：`gtrk tool image_purify --redraw` 图片去水印「重绘模式」——整张图交给图片编辑模型重新生成，铺满全图的半透明、网格水印也能去掉；与 `--purify-scope region` 同用时只替换框内。单独计价，运行前报价按重绘档；也可 `--params-json '{"purify_method":"redraw"}'`。不加 `--redraw` 时请求与之前逐字节相同。价格表里挂在父项下的分档（`tiers`，如重绘、区分说话人、云配音各音色档）现在也能按自己的 key 查到实时价格（link-add-image-purify-redraw-mode-cli）。
 - Skill 措辞订正（ClawHub 安全扫描指出的自相矛盾与告知缺口）：`gtrk-matrix` 的描述把「素材本体不上云」改准为视频本体不上云、选中上轨的图片会上云转运镜（正文早已写明）；`gtrk-narration` / `gtrk-food-recap` / `gtrk-vlog-docu` 的「不执行任何网络下载」收窄为不下载二创源片与主体素材，素材矩阵的 BGM / 空镜可按签名直链落地（与旅拍图纸同口径，此前与各自的 BGM 伴奏下载步骤字面冲突）；`gtrk-narration` 开工问询补一句内容离机告知（转写上传音轨、建索引上传抽帧图）；`gtrk-style-maker` 安装用户 skill 前先问装到哪些 Agent（缺省只装当前这个），适配器钉在 `skills@1.7.4`。下载禁令的射程同步写进解说链规格（fix-narration-download-ban-scope）。
 - `gtrk-oralcut` 剪完不再一律往下接力：只要剪辑工程、草稿或去停顿时，剪完停在交工，一句话交代下一步，说一声就接着做；看不出要不要成片时也先停。要成片、完整包装，或点名 B-roll、字卡、BGM、字幕之一时，照旧接着拆分镜派单。按 `/gtrk-talking-head` 跑粗剪时交回图纸，停在检查点①（adjust-oralcut-relay-by-request-scope）。

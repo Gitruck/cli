@@ -224,7 +224,7 @@ DO_NOT_TRACK=1 gtrk …   # 业界通用的「不追踪」约定，同样生效
 
 - `gtrk long2short <input>`：按话题选段并跳剪，逐 clip 输出 gtrk / 剪映 / XML 工程；`--split-screen` 使用 720p 代理做智能分屏；`--output-size` 选择画幅；`--subtitle-out` 另产逐 clip 字幕；`--speed-factor 0.5–2.0` 把整体调速（保音高）写进逐 clip 工程（云端不渲染、不加价）；`--camera-move` 让云端把推 / 拉镜头写成主轨片段的缩放关键帧（客户端与剪映可见可改，本地 `gtrk render` 与 PR 工程不呈现；`clips.md` 标「运镜 N 处」），之后 `gtrk patch` 裁剪 / 切分会同步维护关键帧。产物根另落整片转写 `json/transcript.json`，可对任一 clip 上客户端字幕轨：`gtrk subtitle lay --gtrk <clip 目录>/gtrk/<工程>.gtrk --transcript <产物根>/json/transcript.json --language <源语种>`（`--language` 为云端拆行语种，缺省 zh-CN）。每次只选一种画幅，横竖屏分别运行；成片条数由内容决定。抽音频之前打一行实时价格与本次预估（stderr；`--json` 根结果的 `pricing`），长片想先报价就加 `--dry-run`（零抽取、零上传、零计费、不建目录）。完整参数见 `gtrk long2short --help`。
 - `gtrk pip lay`：把同步录制的屏录或第二机位按口播剪点铺成画中画。两源需有可对齐的公共声音；低置信时先在客户端校准，再按提示恢复。运行 `gtrk pip lay --help` 查看输入、形状、位置和偏移参数。
-- `gtrk qc <成片>`：检查闪帧、黑帧、冻结、音量和同步问题；用 `--gtrk` 提供工程上下文，`--fail-on` 控制管线门槛。检查结论供定位问题，不自动替你修片。
+- `gtrk qc <成片>`：检查闪帧、黑帧、冻结、音量和同步问题；用 `--gtrk` 提供工程上下文，`--fail-on` 控制管线门槛。带 `--gtrk` 时，段内跳切和判为严重的过短镜头会标出所在 beat 与槽位，并列出同一 beat 里还没用上的候选段（取自工程的 `split/broll-plan.json`，按画面稳定程度排序）。检查结论供定位问题，不自动替你修片。
 
 ### `gtrk matrix --online` — 当前源码的外部平台检索入口
 

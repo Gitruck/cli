@@ -122,7 +122,8 @@ export function registerRender(program: Command): void {
 
 			// 渲后质检（local-ffmpeg-render delta）：同进程复用扫描零件、透传已解析工程做工程感知；
 			// 结果只呈现不改变渲染退出语义（硬门控走独立 gtrk qc --fail-on）
-			const qc = opts.qc === false ? null : await runPostRenderQc(outMp4, project, { ffmpegPath: opts.ffmpegPath });
+			const qc =
+				opts.qc === false ? null : await runPostRenderQc(outMp4, project, { ffmpegPath: opts.ffmpegPath, gtrkPath: gtrkAbs });
 
 			if (opts.open) openFolder(dirname(outMp4));
 			if (opts.json) {

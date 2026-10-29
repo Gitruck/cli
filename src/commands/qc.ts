@@ -61,6 +61,37 @@ export function defaultReportPath(input: string): string {
 	return join(dirname(input), `${basename(input, extname(input))}.qc.json`);
 }
 
+/**
+ * 排序备选的候选池（add-material-motion-signal）：工程登记的 `struct_meta.broll.plan_path`，相对工程目录
+ * （`matrix lay` 恒写 `split/broll-plan.json`）。工程目录与 `matrix lay --project` 认的两种布局一一对应：
+ * `.gtrk` 在 `gtrk/` 子目录里时取其上一级，否则就是 `.gtrk` 所在目录。
+ * 工程没铺过 B-roll（无 `struct_meta.broll`）时 null——没有槽位，也就没有备选要给。
+ */
+export function locateBrollPlan(gtrkAbs: string, gtrk: unknown): string | null {
+	const broll = (gtrk as { struct_meta?: { broll?: { plan_path?: unknown } } } | null)?.struct_meta?.broll;
+	if (!broll) return null;
+	const rel = typeof broll.plan_path === "string" && broll.plan_path ? broll.plan_path : "split/broll-plan.json";
+	const dir = dirname(gtrkAbs);
+	return resolve(basename(dir).toLowerCase() === "gtrk" ? dirname(dir) : dir, rel);
+}
+
+/** 读候选池 plan；找不到 / 读不了只告警、返回 undefined（QC 是只读诊断，缺 plan 不该让扫描失败——
+ * 报告里可换段的条目会带 `alternatives_note` 说明没读到）。 */
+export async function loadBrollPlan(gtrkAbs: string, gtrk: unknown): Promise<unknown> {
+	const planPath = locateBrollPlan(gtrkAbs, gtrk);
+	if (!planPath) return undefined;
+	if (!existsSync(planPath)) {
+		log.warn(`未找到 ${planPath}，本次质检不给换段备选`);
+		return undefined;
+	}
+	try {
+		return await readJson(planPath, "broll-plan");
+	} catch (e) {
+		log.warn(`读不了 ${planPath}（${e instanceof Error ? e.message : String(e)}），本次质检不给换段备选`);
+		return undefined;
+	}
+}
+
 /** 人读报告（按严重级分组，每条带时码/时长/证据）。 */
 export function formatReport(report: QcReport): string[] {
 	const lines: string[] = [];
@@ -78,11 +109,29 @@ export function formatReport(report: QcReport): string[] {
 function formatItem(it: QcItem): string {
 	const span = it.ed > it.st ? `${fmtTime(it.st)} – ${fmtTime(it.ed)}（${(it.ed - it.st).toFixed(3)}s）` : fmtTime(it.st);
 	const ev = Object.entries(it.evidence)
-		.filter(([k]) => k !== "note")
+		.filter(([k]) => k !== "note" && !k.startsWith("alternatives"))
 		.map(([k, v]) => `${k}=${typeof v === "number" ? v : JSON.stringify(v)}`)
 		.join(" ");
 	const note = typeof it.evidence.note === "string" ? `　${it.evidence.note}` : "";
-	return `${TYPE_LABEL[it.type] ?? it.type}　${span}${ev ? `　${ev}` : ""}${note}`;
+	return `${TYPE_LABEL[it.type] ?? it.type}　${span}${ev ? `　${ev}` : ""}${note}${formatAlternatives(it.evidence)}`;
+}
+
+/** 排序备选的人读形态：`　备选：① clip 段区间（运动 · 切点 · 分）…　口径说明`；条目没有备选键时空串。 */
+function formatAlternatives(ev: Record<string, unknown>): string {
+	const alts = ev.alternatives;
+	const note = typeof ev.alternatives_note === "string" ? ev.alternatives_note : "";
+	if (!Array.isArray(alts)) return note ? `　备选：${note}` : "";
+	const marks = "①②③④⑤⑥⑦⑧⑨";
+	const list = (alts as { clip_id?: unknown; segment?: unknown; score?: unknown; motion_p50?: unknown; cut_count?: unknown }[])
+		.map((a, i) => {
+			const [st, ed] = Array.isArray(a.segment) ? a.segment : [];
+			const motion = typeof a.motion_p50 === "number" ? `运动 ${a.motion_p50}` : "运动 —";
+			const cuts = typeof a.cut_count === "number" ? `切点 ${a.cut_count}` : "切点 —";
+			return `${marks[i] ?? `${i + 1}.`} ${String(a.clip_id)} ${st}–${ed}s（${motion} · ${cuts} · 分 ${a.score}）`;
+		})
+		.join(" ");
+	const total = typeof ev.alternatives_total === "number" ? `（共 ${ev.alternatives_total} 段，列前 ${alts.length}）` : "";
+	return `　备选：${list || "无"}${total}${note ? `　${note}` : ""}`;
 }
 
 export function registerQc(program: Command): void {
@@ -126,15 +175,18 @@ export function registerQc(program: Command): void {
 			if (!existsSync(inputAbs)) throw new Error(`成片不存在：${inputAbs}`);
 
 			let gtrk: unknown;
+			let plan: unknown;
 			if (opts.gtrk) {
 				const gtrkAbs = resolve(opts.gtrk);
 				if (!existsSync(gtrkAbs)) throw new Error(`gtrk 工程不存在：${gtrkAbs}`);
 				gtrk = await readJson(gtrkAbs, ".gtrk 工程");
+				plan = await loadBrollPlan(gtrkAbs, gtrk);
 			}
 
 			log.step(`▶ 成片质检：${basename(inputAbs)}${gtrk ? "（工程感知）" : ""}`);
 			const report = await scanFinalCut(inputAbs, {
 				gtrk,
+				plan,
 				ffmpegPath: opts.ffmpegPath,
 				onProgress: (l) => log.info(l),
 			});
@@ -237,14 +289,16 @@ async function runAlignmentMode(input: string | undefined, opts: QcOpts): Promis
 	}
 }
 
-/** 渲染尾随质检（add-qc-scan · local-ffmpeg-render delta）：同进程复用，异常降级不阻断出片。 */
+/** 渲染尾随质检（add-qc-scan · local-ffmpeg-render delta）：同进程复用，异常降级不阻断出片。
+ * `gtrkPath` 给了才找得到候选池 plan、报告才带换段备选（与 `gtrk qc --gtrk` 同一份报告形态）。 */
 export async function runPostRenderQc(
 	outputPath: string,
 	gtrk: unknown,
-	opts: { ffmpegPath?: string } = {},
+	opts: { ffmpegPath?: string; gtrkPath?: string } = {},
 ): Promise<QcReport | null> {
 	try {
-		const report = await scanFinalCut(outputPath, { gtrk, ffmpegPath: opts.ffmpegPath });
+		const plan = opts.gtrkPath ? await loadBrollPlan(opts.gtrkPath, gtrk) : undefined;
+		const report = await scanFinalCut(outputPath, { gtrk, plan, ffmpegPath: opts.ffmpegPath });
 		const reportPath = defaultReportPath(outputPath);
 		await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
 		const { error, warn, info } = report.summary;
