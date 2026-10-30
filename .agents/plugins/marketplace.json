@@ -1,0 +1,20 @@
+{
+	"name": "gitruck",
+	"interface": {
+		"displayName": "Gitruck"
+	},
+	"plugins": [
+		{
+			"name": "gtrk",
+			"source": {
+				"source": "url",
+				"url": "https://github.com/Gitruck/cli.git"
+			},
+			"policy": {
+				"installation": "AVAILABLE",
+				"authentication": "ON_INSTALL"
+			},
+			"category": "Creativity"
+		}
+	]
+}

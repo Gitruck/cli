@@ -85,7 +85,7 @@ gtrk upgrade
 </details>
 
 <details>
-<summary>从 Skills 目录或 Claude Code 插件市场安装</summary>
+<summary>从 Skills 目录或插件市场安装（Claude Code / Codex）</summary>
 
 ```bash
 # 通用 skills CLI（skills.sh）
@@ -93,9 +93,13 @@ npx skills add Gitruck/cli
 
 # Claude Code 插件市场
 /plugin install gtrk --marketplace Gitruck/cli
+
+# Codex 插件市场
+codex plugin marketplace add Gitruck/cli
+codex plugin add gtrk@gitruck
 ```
 
-这两种方式只装 Skills。gtrk CLI 和 API Key 仍需用 `npx @gitruck/cli@latest install` 安装和配置。
+以上几种方式都只装 Skills。gtrk CLI 和 API Key 仍需用 `npx @gitruck/cli@latest install` 安装和配置。
 
 </details>
 

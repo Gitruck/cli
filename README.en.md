@@ -85,7 +85,7 @@ Media processing requires FFmpeg. Check with `gtrk deps status`; when missing, e
 </details>
 
 <details>
-<summary>Install from a Skills directory or the Claude Code plugin marketplace</summary>
+<summary>Install from a Skills directory or a plugin marketplace (Claude Code / Codex)</summary>
 
 ```bash
 # Generic skills CLI (skills.sh)
@@ -93,9 +93,13 @@ npx skills add Gitruck/cli
 
 # Claude Code plugin marketplace
 /plugin install gtrk --marketplace Gitruck/cli
+
+# Codex plugin marketplace
+codex plugin marketplace add Gitruck/cli
+codex plugin add gtrk@gitruck
 ```
 
-Both install the Skills only. You still need `npx @gitruck/cli@latest install` to install the gtrk CLI and set your API key.
+Each of these installs the Skills only. You still need `npx @gitruck/cli@latest install` to install the gtrk CLI and set your API key.
 
 </details>
 

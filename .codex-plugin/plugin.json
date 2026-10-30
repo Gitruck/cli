@@ -1,0 +1,41 @@
+{
+	"name": "gtrk",
+	"version": "1.3.10",
+	"description": "Agent-native video creation: turn your own footage into an editable multi-track project (talking-head cuts, highlights, narration, B-roll, motion graphics, captions) and export to Jianying/CapCut, Premiere XML, FCPXML or OTIO. Requires the gtrk CLI (npm @gitruck/cli).",
+	"author": {
+		"name": "Gitruck (同合云)",
+		"email": "business@gitruck.com",
+		"url": "https://ai-mcn.tv/gtrk"
+	},
+	"homepage": "https://ai-mcn.tv/gtrk",
+	"repository": "https://github.com/Gitruck/cli",
+	"license": "MIT",
+	"keywords": [
+		"video",
+		"video-editing",
+		"talking-head",
+		"narration",
+		"captions",
+		"timeline",
+		"jianying",
+		"capcut",
+		"premiere"
+	],
+	"skills": "./skills/",
+	"interface": {
+		"displayName": "gtrk",
+		"shortDescription": "Agent-native video creation",
+		"longDescription": "Turn your own footage into an editable multi-track project (talking-head cuts, highlights, narration, B-roll, motion graphics, captions) and export to Jianying/CapCut, Premiere XML, FCPXML or OTIO. The plugin ships the Skills only: install the gtrk CLI and set an API key with `npx -y @gitruck/cli@latest install`. Cloud steps run on Gitruck Cloud and are billed in credits. Skill instructions are written in Chinese.",
+		"developerName": "Gitruck",
+		"category": "Creativity",
+		"capabilities": ["Interactive", "Write"],
+		"websiteURL": "https://ai-mcn.tv/en/gtrk",
+		"defaultPrompt": [
+			"Turn “talk.mp4” into a video. The script is in the same folder. Show me the production plan first.",
+			"Cut this talking-head recording, remove retakes and long pauses, and give me a project I can keep editing.",
+			"Transcribe “interview.mp4” into a timestamped transcript with a summary."
+		],
+		"composerIcon": "./.claude-plugin/icon.png",
+		"logo": "./.claude-plugin/icon.png"
+	}
+}
